@@ -222,6 +222,7 @@ pub struct BearingDistanceEvidence {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResolvedItem15 {
     pub route: route::ConvertedRoute,
+    pub report: route::RouteReport,
     pub initial_level_ft: Option<i32>,
     /// Parsed level changes keyed by original element index and spelling, preserved alongside
     /// the expanded geometry for a caller that maintains the filed profile.
@@ -1300,6 +1301,7 @@ pub fn resolve_icao_item15(
     match report.failure {
         route::RouteFailure::None => Ok(ResolvedItem15 {
             route: converted,
+            report,
             initial_level_ft: level_ft,
             level_changes,
             bearing_distance: evidence,

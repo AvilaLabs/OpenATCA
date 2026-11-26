@@ -72,6 +72,10 @@ pub enum FlightOperation {
         plan_id: [u8; 12],
         status: u8,
     },
+    CancelPlanByKey {
+        key: FlightKey,
+        plan_id: [u8; 12],
+    },
     AssignAltitude {
         altitude_ft: i32,
     },

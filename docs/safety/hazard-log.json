@@ -34,6 +34,7 @@
     "OA-ADAPT-001",
     "OA-ADAPT-002",
     "OA-ADAPT-003",
+    "OA-ADAPT-004",
     "OA-ADSB-001",
     "OA-ADSB-002",
     "OA-ADSB-003",
@@ -155,6 +156,8 @@
     "OA-CA-032",
     "OA-CA-033",
     "OA-CA-034",
+    "OA-CA-035",
+    "OA-CA-036",
     "OA-CORE-006",
     "OA-CORE-007",
     "OA-CSV-001",
@@ -247,9 +250,16 @@
     "OA-DSP-076",
     "OA-DSP-077",
     "OA-DSP-078",
+    "OA-DSP-079",
+    "OA-DSP-080",
+    "OA-DSP-081",
+    "OA-DSP-082",
+    "OA-DSP-083",
     "OA-E1-001",
     "OA-E1-002",
     "OA-E1-003",
+    "OA-ENC-022",
+    "OA-ENC-023",
     "OA-FEED-001",
     "OA-FEED-002",
     "OA-FEED-003",
@@ -407,6 +417,8 @@
     "OA-IWXXM-002",
     "OA-IWXXM-003",
     "OA-IWXXM-004",
+    "OA-IWXXM-005",
+    "OA-IWXXM-006",
     "OA-J2K-001",
     "OA-J2K-002",
     "OA-J2K-003",
@@ -433,6 +445,11 @@
     "OA-JSON-008",
     "OA-JSON-009",
     "OA-JSON-010",
+    "OA-L23-001",
+    "OA-L23-002",
+    "OA-L23-003",
+    "OA-L23-004",
+    "OA-L23-005",
     "OA-MATH-001",
     "OA-MATH-002",
     "OA-MATH-003",
@@ -628,6 +645,10 @@
     "OA-NAM-033",
     "OA-NAM-034",
     "OA-NAM-035",
+    "OA-NAM-036",
+    "OA-NAM-037",
+    "OA-NAM-038",
+    "OA-NAM-039",
     "OA-NASR-001",
     "OA-NASR-002",
     "OA-NASR-003",
@@ -692,6 +713,14 @@
     "OA-RTE-005",
     "OA-RTE-010",
     "OA-RTE-011",
+    "OA-RWY-014",
+    "OA-RWY-015",
+    "OA-RWY-016",
+    "OA-RWY-017",
+    "OA-RWY-018",
+    "OA-RWY-019",
+    "OA-RWY-020",
+    "OA-RWY-021",
     "OA-SAF-001",
     "OA-SAF-002",
     "OA-SAF-003",
@@ -712,6 +741,9 @@
     "OA-SAF-018",
     "OA-SAF-019",
     "OA-SAF-020",
+    "OA-SAF-021",
+    "OA-SAF-022",
+    "OA-SAF-023",
     "OA-STD-001",
     "OA-STD-002",
     "OA-STD-003",
@@ -774,6 +806,7 @@
     "OA-TBFM-023",
     "OA-TBFM-024",
     "OA-TBFM-025",
+    "OA-TECHOPS-006",
     "OA-TFMS-001",
     "OA-TFMS-002",
     "OA-TFMS-003",
@@ -903,7 +936,6 @@
     "OA-TRK-053",
     "OA-TRK-054",
     "OA-TRK-066",
-    "OA-TECHOPS-006",
     "OA-TRK-067",
     "OA-TRK-068",
     "OA-TRK-069",
@@ -1082,38 +1114,7 @@
     "OA-ZIP-010",
     "OA-ZIP-011",
     "OA-ZIP-061",
-    "OA-ZIP-062",
-    "OA-ADAPT-004",
-    "OA-CA-035",
-    "OA-CA-036",
-    "OA-SAF-021",
-    "OA-SAF-022",
-    "OA-SAF-023",
-    "OA-NAM-037",
-    "OA-NAM-036",
-    "OA-DSP-081",
-    "OA-DSP-080",
-    "OA-DSP-079",
-    "OA-DSP-082",
-    "OA-DSP-083",
-    "OA-IWXXM-005",
-    "OA-RWY-018",
-    "OA-RWY-015",
-    "OA-RWY-016",
-    "OA-RWY-019",
-    "OA-RWY-014",
-    "OA-RWY-017",
-    "OA-ENC-022",
-    "OA-L23-001",
-    "OA-L23-002",
-    "OA-L23-003",
-    "OA-L23-004",
-    "OA-L23-005",
-    "OA-RWY-020",
-    "OA-RWY-021",
-    "OA-ENC-023",
-    "OA-NAM-038",
-    "OA-IWXXM-006"
+    "OA-ZIP-062"
   ],
   "non_safety_requirement_assessments": [
     {
@@ -11864,7 +11865,8 @@
         "OA-TFMS-027",
         "OA-TFMS-028",
         "OA-TFMS-029",
-        "OA-TFMS-030"
+        "OA-TFMS-030",
+        "OA-NAM-039"
       ],
       "source_refs": [
         {
@@ -11886,6 +11888,10 @@
         {
           "document": "REQUIREMENTS.md",
           "locator": "OA-FIXM-028"
+        },
+        {
+          "document": "REQUIREMENTS.md",
+          "locator": "OA-NAM-039"
         }
       ],
       "verification_refs": [
@@ -12528,6 +12534,26 @@
           "requirement_id": "OA-FIXM-028",
           "file": "crates/oa-fixm/tests/decode.rs",
           "test_name": "transferring_unit_without_event_roundtrips"
+        },
+        {
+          "requirement_id": "OA-NAM-039",
+          "file": "tools/oa-regional-session/src/nam_flight.rs",
+          "test_name": "admitted_fpl_chg_dla_cnl_apply_to_the_full_key_and_preserve_route_on_delay"
+        },
+        {
+          "requirement_id": "OA-NAM-039",
+          "file": "tools/oa-regional-session/src/nam_flight.rs",
+          "test_name": "duplicate_gap_unknown_route_and_catalogue_refusals_do_not_apply"
+        },
+        {
+          "requirement_id": "OA-NAM-039",
+          "file": "tools/oa-regional-session/src/nam_flight.rs",
+          "test_name": "positive_key_context_is_required_without_identity_synthesis"
+        },
+        {
+          "requirement_id": "OA-NAM-039",
+          "file": "tools/oa-regional-session/src/runtime.rs",
+          "test_name": "composed_runtime_receives_session_admitted_nam_fpl"
         }
       ],
       "proof_refs": []
@@ -22985,13 +23011,19 @@
       "id": "OA-NAM-038",
       "function": "flight_plan_and_coordination_message_ingestion",
       "hazard_id": "HZ-FLIGHTDATA-001",
-      "rationale": "Engineering safety candidate: incorrect Field 15 resolution, airway/procedure expansion, or altitude constraint handling could present an incomplete or wrong route. The resolver accepts only exact current-model identities and returns explicit refusals for unsupported or ambiguous cases. This does not claim runtime intake of FPL/CHG/DLA/CNL, authoritative or current navigation data, or operational route approval."
+      "rationale": "Engineering safety candidate: incorrect Field 15 resolution, airway/procedure expansion, or altitude constraint handling could present an incomplete or wrong route. The resolver accepts only exact current-model identities and returns explicit refusals for unsupported or ambiguous cases. The separate OA-NAM-039 runtime adapter stages the resulting revision through the session-admitted path; this does not establish authoritative/current navigation or restriction data, operational network delivery, facility qualification, or route approval."
     },
     {
       "id": "OA-IWXXM-006",
       "function": "weather_and_pressure_altitude_inputs",
       "hazard_id": "HZ-WEATHER-001",
       "rationale": "Engineering safety candidate: an encoder that changes or misorders represented observations could produce misleading downstream weather context. The bounded encoder refuses model states it cannot represent, checks a finite emitted structure against pinned WMO/AIXM/GML schema bytes, and round-trips represented values. Product-level measurement domain checks are distinct from XSD facets. This is not full imported-type or Schematron validation, operational weather truth, or evidence of an operational consumer."
+    },
+    {
+      "id": "OA-NAM-039",
+      "function": "flight_plan_and_coordination_message_ingestion",
+      "hazard_id": "HZ-FLIGHTDATA-001",
+      "rationale": "Engineering safety candidate: an invalid or out-of-order NAM application could bind a route or departure update to the wrong flight. The runtime requires opaque session-admitted deliveries, a supplied full positive key, and exact source context; route conversion and plan updates stage before commit and explicit refusals return catalogued LRMs. Tests are synthetic; this does not establish live transport, authoritative adaptation/restrictions, facility qualification, or operational approval."
     }
   ],
   "unresolved_requirement_assessments": []

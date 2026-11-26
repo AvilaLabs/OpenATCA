@@ -5,9 +5,9 @@
 use oa_flight::{
     flight_get, flights_apply, flights_claiming_address, flights_len, flights_new, key_gufi,
     op_new, Alt, Flight, FlightConfig, FlightTable, Outcome, Stamp, ALT_NIL, ALT_NONE, ALT_SIMPLE,
-    C_COUNT, HO_NONE, MAX_VIEWS, OP_ADDRESS, OP_ASSIGN, OP_COUNT, OP_HO_ACCEPT, OP_HO_FAIL,
-    OP_HO_INITIATE, OP_HO_RETRACT, OP_HO_TAKE, OP_HO_UPDATE, OP_IDENTITY, OP_INTERIM, OP_OWNER,
-    OP_SET_PLAN, R_COUNT, ST_ACTIVE, ST_PROPOSED,
+    C_COUNT, HO_NONE, MAX_VIEWS, OP_ADDRESS, OP_ASSIGN, OP_CANCEL, OP_COUNT, OP_HO_ACCEPT,
+    OP_HO_FAIL, OP_HO_INITIATE, OP_HO_RETRACT, OP_HO_TAKE, OP_HO_UPDATE, OP_IDENTITY, OP_INTERIM,
+    OP_OWNER, OP_SET_PLAN, R_COUNT, ST_ACTIVE, ST_PROPOSED,
 };
 
 use crate::input::{EventKind, FlightOperation, HandoffOperation, NormalizedEvent, SourceKind};
@@ -171,6 +171,7 @@ pub fn flight_stage_adapter_refusal(
     };
     let key = match operation {
         FlightOperation::SetPlanByKey { key, .. }
+        | FlightOperation::CancelPlanByKey { key, .. }
         | FlightOperation::SetOwnerByKey { key, .. }
         | FlightOperation::HandoffByKey { key, .. } => key,
         _ => key_gufi(event.identity.flight_gufi),
@@ -561,6 +562,7 @@ fn flight_apply_validated_event(
     let receipt_ms = event.receipt_ns / 1_000_000;
     let key = match operation {
         FlightOperation::SetPlanByKey { key, .. }
+        | FlightOperation::CancelPlanByKey { key, .. }
         | FlightOperation::SetOwnerByKey { key, .. }
         | FlightOperation::HandoffByKey { key, .. } => key,
         _ => key_gufi(event.identity.flight_gufi),
@@ -602,6 +604,9 @@ fn flight_apply_validated_event(
                 None,
                 None,
             )
+        }
+        FlightOperation::CancelPlanByKey { plan_id, .. } => {
+            (OP_CANCEL, 0, plan_id, None, [0; 8], [0; 8], None, None)
         }
         FlightOperation::AssignAltitude { altitude_ft } => (
             OP_ASSIGN,

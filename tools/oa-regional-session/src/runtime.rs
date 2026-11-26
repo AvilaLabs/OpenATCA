@@ -6,6 +6,7 @@ use crate::flight::{
     self, FlightApplyOutcome, FlightDriver, FlightDriverConfig, FlightDriverReport,
     FlightViewStatus, SharedFlightView, MAX_DRIVER_FLIGHTS, MAX_DRIVER_LOG_ENTRIES,
 };
+use crate::nam_flight::{self, NamFlightContext, NamFlightResult, NamFlightRuntime};
 use crate::route::{self, RouteStore};
 use crate::session::{summarize_input_batch, FrameEvidence, ReceiptBatch, MAX_EVENTS_PER_RECEIPT};
 use crate::surveillance::{self, Surveillance, SurveillanceConfig, SurveillanceFrame};
@@ -31,6 +32,7 @@ pub struct RegionalRuntime {
     flights: FlightDriver,
     surveillance: Surveillance,
     routes: RouteStore,
+    nam_flights: NamFlightRuntime,
     centre: [u8; 4],
     frame_sequence: u64,
     failed: bool,
@@ -410,6 +412,38 @@ pub fn regional_profile_limits(runtime: &RegionalRuntime) -> RegionalRunProfile 
     runtime.profile
 }
 
+/// Apply one framed NAM FPL/CHG/DLA/CNL through the admitted peer session and the composed
+/// runtime's authoritative flight table and route store. The caller supplies the exact positive
+/// flight identity and capture time context; this boundary does not join from callsign or header ID.
+pub fn regional_receive_nam_flight(
+    runtime: &mut RegionalRuntime,
+    ingress: &mut crate::nam_handoff::NamSessionIngress,
+    framed_bytes: &[u8],
+    now_ms: u64,
+    context: NamFlightContext,
+    variations: &[oa_airspace::shell::route_parse::MagneticVariationSource],
+    profile: oa_nam::Profile,
+) -> Result<
+    (
+        crate::nam_handoff::NamIngressResult,
+        Option<NamFlightResult>,
+    ),
+    crate::nam_handoff::NamHandoffError,
+> {
+    nam_flight::nam_flight_receive(
+        &mut runtime.nam_flights,
+        &mut runtime.flights,
+        &mut runtime.routes,
+        ingress,
+        framed_bytes,
+        now_ms,
+        context,
+        &runtime.model,
+        variations,
+        profile,
+    )
+}
+
 fn regional_new_with_profile_and_namespace(
     model: Model,
     snapshot_sha256: [u8; 32],
@@ -435,6 +469,8 @@ fn regional_new_with_profile_and_namespace(
     {
         return Err("regional profile exceeds fixed runtime bounds".into());
     }
+    let nam_flights = nam_flight::nam_flight_runtime_new(profile.max_flights)
+        .ok_or("NAM flight-plan runtime capacity is invalid")?;
     Ok(RegionalRuntime {
         surveillance: surveillance::surveillance_new_with_profile(
             model.clone(),
@@ -452,6 +488,7 @@ fn regional_new_with_profile_and_namespace(
         )
         .map_err(|e| format!("flight startup: {e:?}"))?,
         routes: route::route_store_new(snapshot_sha256),
+        nam_flights,
         centre,
         frame_sequence: 0,
         failed: false,
@@ -1267,5 +1304,118 @@ mod transaction_tests {
         assert!(result
             .err()
             .is_some_and(|error| error.contains("bounded capacity contract")));
+    }
+
+    // REQ: OA-NAM-039
+    #[test]
+    fn composed_runtime_receives_session_admitted_nam_fpl() {
+        use crate::nam_flight::NamFlightContext;
+        use crate::nam_handoff::{
+            nam_session_ingress_local_event, nam_session_ingress_new, nam_session_ingress_receive,
+        };
+        use oa_nam::frame::frame;
+        use oa_nam::{
+            encode, model as nam_model, parse, session, Aerodrome, Field13, Field16, Hhmm,
+        };
+
+        let model = synthetic_model().expect("synthetic model");
+        let mut engine = runtime_with_model(model);
+        let local = oa_nam::Facility(*b"CZWG");
+        let peer = oa_nam::Facility(*b"KZMP");
+        let mut ingress = nam_session_ingress_new(session::default_config(local, peer));
+        let actions = nam_session_ingress_local_event(&mut ingress, session::Event::Activate, 0)
+            .expect("activate NAM session");
+        let number = actions
+            .as_slice()
+            .first()
+            .and_then(|action| match action {
+                session::Action::SendIrq { number } => Some(*number),
+                _ => None,
+            })
+            .expect("session activation requests IRQ");
+        assert_eq!(actions.as_slice().len(), 1);
+        let irs = nam_model::bare(nam_model::Header {
+            kind: oa_nam::Kind::Irs,
+            id: nam_model::MsgId {
+                sender: peer,
+                receiver: local,
+                number: 0,
+            },
+            reference: Some(nam_model::MsgId {
+                sender: local,
+                receiver: peer,
+                number,
+            }),
+        });
+        let irs_frame = frame(&encode(&irs).expect("IRS encodes")).expect("IRS frames");
+        let admitted_irs =
+            nam_session_ingress_receive(&mut ingress, &irs_frame, 1).expect("IRS admitted");
+        assert!(admitted_irs.accepted.is_none());
+
+        let mut fpl = parse(b"(FPLCZUL/KZBW043-N12345-IG-C172/L-SD/C-CYST2055-N0120F350 CYSC DCT KMPV-KMPV0053-EET/KZBW0003)")
+            .expect("FPL parses");
+        fpl.header.id.sender = peer;
+        fpl.header.id.receiver = local;
+        fpl.header.id.number = 1;
+        fpl.f13 = Some(Field13 {
+            aerodrome: Aerodrome(*b"KAAA"),
+            time: Some(Hhmm {
+                hour: 12,
+                minute: 0,
+            }),
+        });
+        fpl.f16 = Some(Field16 {
+            aerodrome: Aerodrome(*b"KBBB"),
+            eet: Some(Hhmm {
+                hour: 0,
+                minute: 53,
+            }),
+            alternates: Vec::new(),
+        });
+        fpl.f15.as_mut().expect("FPL Item 15").route = vec!["FIXA".into(), "FIXB".into()];
+        let bytes = frame(&encode(&fpl).expect("FPL encodes")).expect("FPL frames");
+        let gufi = 0x1020_3040_5060_7080_90a0_b0c0_d0e0_f001;
+        let context = NamFlightContext {
+            key: oa_flight::key_gufi(gufi),
+            route_key: oa_legacy_traj::core::trajectory::FlightKey {
+                gufi: gufi.to_be_bytes(),
+                aircraft_address: 0x123456,
+                centre: *b"KZMP",
+                plan_id: *b"PLAN00000001",
+            },
+            plan_id: *b"PLAN00000001",
+            centre: *b"KZMP",
+            plan_status: oa_flight::ST_PROPOSED,
+            source_ns: 1_000_000,
+            receipt_ns: 1_000_000,
+            response_number: 101,
+        };
+        let (session, result) = regional_receive_nam_flight(
+            &mut engine,
+            &mut ingress,
+            &bytes,
+            2,
+            context,
+            &[],
+            oa_nam::Profile::Core,
+        )
+        .expect("composed runtime NAM receive");
+        assert!(session.accepted.is_some());
+        let result = result.expect("admitted FPL reaches application");
+        assert!(result.applied);
+        assert_eq!(result.reply.header.kind, oa_nam::Kind::Lam);
+        assert_eq!(crate::flight::flight_driver_len(&engine.flights), 1);
+        assert_eq!(engine.routes.revisions.len(), 1);
+        assert_eq!(
+            engine
+                .routes
+                .revisions
+                .first()
+                .expect("FPL route revision")
+                .evidence
+                .key
+                .gufi,
+            gufi.to_be_bytes()
+        );
     }
 }

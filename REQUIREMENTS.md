@@ -5097,6 +5097,19 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   active NAM profile. Intake of NAM FPL/CHG/DLA/CNL messages into the regional runtime is a
   separate caller integration.
 
+- **OA-NAM-039** The regional shell applies FPL/CHG/DLA/CNL only from opaque `SessionAcceptedMessage`
+  deliveries returned by the active NAM session ingress. A positive full flight key, plan ID,
+  facility centre, and capture clock are supplied by verified source context; callsign, header
+  number, or route text never creates or joins identity. FPL creates the authoritative `oa-flight`
+  plan and an immutable resolved route revision in the existing regional `RouteStore`; CHG replaces
+  only the route when Field 15 is present; DLA updates the revised departure time only; CNL cancels
+  the plan. Duplicate, gapped, stale, missing-context, malformed semantic, over-capacity, and
+  catalogue failures return correlated LRM responses and do not apply flight or route state.
+  Accepted deliveries produce a correlated LAM value. Synthetic coverage exercises the ordinary
+  framed-session ingress through the regional runtime flight and route stores. This does not
+  establish a preferred-route or restriction database, operational network delivery, FAA approval,
+  facility qualification, or a source-backed live full-day result.
+
 ## ACC-to-ACC framed-byte peer fixture (A7)
 - **OA-A7-001** Two active facility sessions exchange Rev G RTI, RLA, RTA and LAM messages through
   the canonical encoder, four-digit transport frame, unframe and parser. Message numbers,

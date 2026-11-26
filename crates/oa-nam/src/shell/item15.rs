@@ -131,10 +131,22 @@ pub fn lrm_reply(
     response_number: u16,
     refusal: Item15Reject,
 ) -> Result<Message, Item15Reject> {
+    let (code, field) = refusal.lrm(profile, received.header.kind);
+    catalogue_lrm_reply(received, response_number, code, field).map_err(|_| Item15Reject::Model)
+}
+
+/// Construct a correlated LRM from the stable catalogue for a caller-owned refusal category.
+/// The caller supplies a code only after selecting it from the published LRM table; unknown
+/// codes are refused instead of being emitted as made-up rejection text.
+pub fn catalogue_lrm_reply(
+    received: &Message,
+    response_number: u16,
+    code: u8,
+    field: u8,
+) -> Result<Message, Item15Reject> {
     if response_number > 999 {
         return Err(Item15Reject::MalformedGroup);
     }
-    let (code, field) = refusal.lrm(profile, received.header.kind);
     let entry = lrm::lrm_entry(code).ok_or(Item15Reject::Model)?;
     let header = Header {
         kind: Kind::Lrm,
