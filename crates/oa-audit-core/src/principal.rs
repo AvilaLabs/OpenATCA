@@ -394,7 +394,7 @@ mod tests {
 
     // REQ: OA-AUDIT-007
     #[test]
-    fn local_registry_rejects_noncanonical_ids_roles_statuses_and_duplicates() {
+    fn local_registry_rejects_noncanonical_ids_roles_statuses_and_row_order() {
         for (invalid, expected) in [
             (
                 b"OACERT-LOCAL-PRINCIPALS-V2\n0\tmonitor\tenabled\n".as_slice(),
