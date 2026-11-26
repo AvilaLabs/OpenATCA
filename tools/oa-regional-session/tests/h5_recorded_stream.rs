@@ -190,16 +190,22 @@ fn recorded_stream_runs_100_paired_m2_flip_rollback_bins_and_consumer_applies_ea
     )
     .expect("paired synthetic recorded stream completes");
 
+    let m2_refusals = report
+        .cycles
+        .iter()
+        .filter_map(|cycle| {
+            cycle
+                .m2_ingest_refusal
+                .as_deref()
+                .map(|refusal| (cycle.index, refusal))
+        })
+        .collect::<Vec<_>>();
     assert_eq!(report.cycles.len(), 100);
     assert_eq!(report.m2_attempt_count, 200);
     assert_eq!(
         report.m2_refusal_count,
         0,
-        "first-cycle M2 result: {:?}",
-        report
-            .cycles
-            .first()
-            .map(|cycle| cycle.m2_ingest_refusal.as_deref())
+        "M2 refusal details: {m2_refusals:?}"
     );
     assert_eq!(report.flip_rollback_attempt_count, 100);
     assert_eq!(report.flip_rollback_complete_count, 100);
