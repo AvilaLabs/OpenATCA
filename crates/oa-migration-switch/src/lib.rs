@@ -814,7 +814,9 @@ pub fn capacity_storage_budget_bytes(profile: CapacityProfile) -> Result<usize, 
         })
         .and_then(|n| {
             n.checked_add(
-                profile.coordination_records.checked_mul(COORDINATION_RECORD_BYTES)?,
+                profile
+                    .coordination_records
+                    .checked_mul(COORDINATION_RECORD_BYTES)?,
             )
         })
         .ok_or(Refusal::InvalidUnit)
