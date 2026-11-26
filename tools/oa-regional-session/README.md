@@ -9,6 +9,7 @@ windowed controller workstation are separate integration work.
 ```text
 oa-regional-session run --input examples/synthetic-session.tsv --synthetic-model --out NEW_DIR
 oa-regional-session run --input FILE --snapshot ADAPTATION --out NEW_DIR
+oa-regional-session run --input FILE --issued-package-root PACKAGE --expected-manifest-sha256 SHA256 --out NEW_DIR
 oa-regional-session run --input FILE --snapshot ADAPTATION --profile recorded-peak-rendered --out NEW_DIR
 oa-regional-session run --input examples/synthetic-msaw.tsv --synthetic-model --synthetic-msaw --out NEW_DIR
 oa-regional-session run --input FILE --snapshot ADAPTATION --msaw-inputs MSAW_MANIFEST --out NEW_DIR
@@ -88,6 +89,18 @@ The profile is retained in `settings.tsv`, which the run manifest hashes. It is 
 short, recorded ADS-B replay and portability evidence; it is not an operational capacity or
 facility-performance claim. J2 cold replay reads this versioned profile from the bound settings
 and invokes the same explicit CLI option. Unknown or altered profile capacity tuples are refused.
+
+`--issued-package-root` uses one separately pinned `oa-adapt` package for both the runtime model
+and its optional `surveillance-mode.oasm` component. The package verifier hashes the same component
+bytes that the shared `oa-track::surveillance_mode::parse_mode_adaptation` codec parses; no second
+mode-profile pin is accepted. A package without that component leaves mode policy unconfigured.
+The manifest digest binds content only: issuer/approver labels are caller claims, and preferred
+radar coordinates remain facility adaptation claims without independent physical-site or
+calibration validation. The ordinary normalized ADS-B adapter supplies source-class metadata, not
+reliability, ISR, flight level or FLAT evidence. The normal CLI therefore leaves those fields
+unknown, which prevents the mode policy from asserting a three-NM minimum from ADS-B quality
+fields. Coast remains ineligible for separation, and mode display policy does not alter the
+separate conservative conflict-alert thresholds.
 
 Each frame retains completed CA alert episodes and altitude-loss events as well as currently
 open alerts. The core logs are drained only after that evidence is copied. Their payload budget

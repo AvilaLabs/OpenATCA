@@ -189,6 +189,114 @@ fn explicit_synthetic_msaw_evaluates_warning_and_closes_evidence() {
     fs::remove_dir_all(root).expect("cleanup");
 }
 
+// REQ: OA-REG-023
+#[test]
+fn normal_run_uses_the_mode_component_from_the_same_pinned_issued_package() {
+    let _serial = CLI_PROCESS_LOCK.lock().expect("CLI fixture process lock");
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock follows the Unix epoch")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "oa-regional-mode-package-{}-{nonce}",
+        std::process::id()
+    ));
+    fs::create_dir(&root).expect("create test root");
+    let previous_root = root.join("previous-package");
+    let package_root = root.join("issued-package");
+    let input = root.join("input.tsv");
+    let output = root.join("output");
+    let executable = root.join("oa-regional-session");
+
+    let snapshot =
+        oa_airspace::snapshot::encode(&oa_airspace::model::empty_model(oa_airspace::model::Meta {
+            nasr_effective: 20261101,
+            cifp_cycle: 2611,
+            artcc: "ZAU".to_owned(),
+            buffer_m: 0,
+            nasr_sha256: [0x11; 32],
+            cifp_sha256: [0x22; 32],
+        }))
+        .expect("encode test model");
+    let previous_pin = oa_adapt::manifest::write_new_package(
+        &previous_root,
+        &snapshot,
+        "base-1",
+        "ZAU",
+        "TEST-BASE",
+    )
+    .expect("write previous package");
+    let mode = oa_track::surveillance_mode::encode_mode_adaptation(
+        oa_track::surveillance_mode::ModeAdaptation {
+            mode: oa_track::surveillance_mode::SurveillanceMode::TerminalFusion,
+            radar_class: oa_track::surveillance_mode::RadarClass::AsrOrDtas,
+            preferred_radar_lat_e7: 0,
+            preferred_radar_lon_e7: 0,
+            has_preferred_radar: 0,
+            track_based_display: 0,
+            area_3nm_adapted: 0,
+            map_3nm_visible: 0,
+        },
+    )
+    .expect("encode test mode");
+    let (version, manifest_pin) = oa_adapt::manifest::issue_new_package_with_components(
+        &package_root,
+        &snapshot,
+        None,
+        None,
+        Some(&mode),
+        "issued-1",
+        "ZAU",
+        "OA-REG-023-TEST",
+        &previous_root,
+        previous_pin,
+        oa_adapt::manifest::ChangeClass::Initial,
+        "test-issuer-claim",
+        "test-approver-claim",
+        "synthetic integration fixture",
+    )
+    .expect("issue component-bound package");
+    assert_eq!(version, 1);
+
+    let mut input_bytes = String::from("OA-RS\t1\n");
+    for sequence in 1..=5i64 {
+        let receipt_ns = sequence * 1_000_000_000;
+        let source_ns = receipt_ns - 100_000_000;
+        input_bytes.push_str(&format!(
+            "v1\t{source_ns}\t{receipt_ns}\t{sequence}\tSURVEILLANCE\t00000000000000000000000000000001\tABC123\tZAU1\tPOS\t410000000\t-870000000\t35000\t0\t0\t0\n"
+        ));
+    }
+    fs::write(&input, input_bytes).expect("write synthetic normalized reports");
+    fs::copy(env!("CARGO_BIN_EXE_oa-regional-session"), &executable)
+        .expect("install standalone test executable");
+    let result = Command::new(&executable)
+        .args(["run", "--input"])
+        .arg(&input)
+        .arg("--issued-package-root")
+        .arg(&package_root)
+        .arg("--expected-manifest-sha256")
+        .arg(oa_sha256::to_hex(&manifest_pin))
+        .arg("--out")
+        .arg(&output)
+        .output()
+        .expect("run package-backed normal CLI");
+    assert!(
+        result.status.success(),
+        "CLI failed: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let settings = fs::read_to_string(output.join("settings.tsv")).expect("settings");
+    assert!(settings.contains("surveillance_mode_component_status\tLOADED\n"));
+    assert!(settings.contains("surveillance_mode\tTERMINAL_FUSION\n"));
+    assert!(settings.contains("surveillance_mode_authority\tCONTENT_PINNED_CALLER_SUPPLIED_ISSUER_CLAIMS_UNAUTHENTICATED\n"));
+    assert!(settings.contains("preferred_radar_location_status\tFACILITY_CLAIM_NOT_INDEPENDENTLY_VALIDATED_AS_PHYSICAL_SITE\n"));
+    let frame = fs::read_to_string(output.join("frame-0005.txt")).expect("final frame");
+    assert!(frame.contains("minimum_nm: 5"));
+    assert!(frame.contains("fusion_solid_circle: 0"));
+    assert!(output.join("COMPLETE").is_file());
+    fs::remove_dir_all(root).expect("remove isolated test root");
+}
+
 // REQ: OA-REG-004, OA-REG-005, OA-REG-008
 #[test]
 fn full_synthetic_session_has_closed_identical_evidence_and_valid_images() {

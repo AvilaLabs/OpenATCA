@@ -12,6 +12,7 @@ use crate::runtime::{
 use crate::surveillance::{SurveillanceConfig, FRAME_HEIGHT, FRAME_WIDTH, MAX_FRAMES};
 use crate::{flush_receipt_group, parse_event_line, push_event, session_cursor_new_with_limit};
 use oa_airspace::core::model::{self, Model};
+use oa_track::surveillance_mode::{ModeAdaptation, RadarClass, SurveillanceMode};
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -24,6 +25,12 @@ const MAX_FRAME_REPORT_BYTES: usize = 512 * 1024;
 pub enum ModelSource {
     Snapshot(PathBuf),
     Synthetic,
+    /// A single caller-pinned issued facility package supplies both the model and any optional
+    /// manifest-bound mode component. The manifest digest remains a caller claim, not auth.
+    IssuedPackage {
+        root: PathBuf,
+        manifest_sha256: [u8; 32],
+    },
 }
 
 pub enum MsawSource {
@@ -74,6 +81,23 @@ pub const fn regional_cli_runtime_profile(profile: RegionalCliProfile) -> Region
     }
 }
 
+fn surveillance_mode_name(mode: SurveillanceMode) -> &'static str {
+    match mode {
+        SurveillanceMode::TerminalSingleSensor => "TERMINAL_SINGLE_SENSOR",
+        SurveillanceMode::TerminalFusion => "TERMINAL_FUSION",
+        SurveillanceMode::StarsMultiSensor => "STARS_MULTI_SENSOR",
+        SurveillanceMode::Eram => "ERAM",
+        SurveillanceMode::EramMosaic => "ERAM_MOSAIC",
+    }
+}
+
+fn radar_class_name(class: RadarClass) -> &'static str {
+    match class {
+        RadarClass::AsrOrDtas => "ASR_OR_DTAS",
+        RadarClass::MonopulseSecondary => "MONOPULSE_SECONDARY",
+    }
+}
+
 pub fn read_guarded(path: &Path, max: usize) -> Result<Vec<u8>, String> {
     let (file, len) = oa_sealed::open_regular(path).map_err(|e| format!("guarded input: {e}"))?;
     let cap = u64::try_from(max).map_err(|_| "byte limit width")?;
@@ -88,6 +112,20 @@ pub fn read_guarded(path: &Path, max: usize) -> Result<Vec<u8>, String> {
         return Err("input grew beyond byte limit".into());
     }
     Ok(bytes)
+}
+
+fn append_mode_settings(settings: &mut String, mode: ModeAdaptation) {
+    settings.push_str(&format!(
+        "surveillance_mode\t{}\nsurveillance_mode_radar_class\t{}\nsurveillance_mode_has_preferred_radar\t{}\nsurveillance_mode_preferred_radar_lat_e7\t{}\nsurveillance_mode_preferred_radar_lon_e7\t{}\nsurveillance_mode_track_based_display\t{}\nsurveillance_mode_area_3nm_adapted\t{}\nsurveillance_mode_map_3nm_visible\t{}\n",
+        surveillance_mode_name(mode.mode),
+        radar_class_name(mode.radar_class),
+        mode.has_preferred_radar,
+        mode.preferred_radar_lat_e7,
+        mode.preferred_radar_lon_e7,
+        mode.track_based_display,
+        mode.area_3nm_adapted,
+        mode.map_3nm_visible,
+    ));
 }
 
 /// Public fixed synthetic fixture, containing no operational adaptation/data. The two fixes
@@ -260,14 +298,53 @@ pub fn run_session_with_profile_options_and_runway_aids(
         return Err("normalized input exceeds byte limit".into());
     }
     oa_sealed::refuse(output)?;
-    let model_bytes = match source {
-        ModelSource::Snapshot(path) => read_guarded(path, MAX_SNAPSHOT_BYTES)?,
-        ModelSource::Synthetic => oa_airspace::core::snapshot::encode(&synthetic_model()?)
-            .map_err(|e| format!("synthetic snapshot: {e:?}"))?,
+    let verified_package = match source {
+        ModelSource::IssuedPackage {
+            root,
+            manifest_sha256,
+        } => Some(
+            oa_adapt::manifest::verify_current(root, *manifest_sha256)
+                .map_err(|error| format!("issued facility package refused: {error}"))?,
+        ),
+        ModelSource::Snapshot(_) | ModelSource::Synthetic => None,
     };
-    let model = oa_airspace::core::snapshot::decode(&model_bytes)
-        .map_err(|e| format!("snapshot: {e:?}"))?;
-    let snapshot_sha = oa_sha256::sha256(&model_bytes);
+    if let (
+        ModelSource::IssuedPackage {
+            root,
+            manifest_sha256,
+        },
+        Some(options),
+    ) = (source, runway_aids)
+    {
+        if &options.root != root || options.manifest_sha256 != *manifest_sha256 {
+            return Err("mode and runway aids must use the same issued package pin".into());
+        }
+    }
+    let (model, snapshot_sha, model_label) = match verified_package.as_ref() {
+        Some(package) => (
+            package.model().clone(),
+            package.identity().snapshot_sha256,
+            "ISSUED_FACILITY_PACKAGE",
+        ),
+        None => {
+            let model_bytes = match source {
+                ModelSource::Snapshot(path) => read_guarded(path, MAX_SNAPSHOT_BYTES)?,
+                ModelSource::Synthetic => oa_airspace::core::snapshot::encode(&synthetic_model()?)
+                    .map_err(|e| format!("synthetic snapshot: {e:?}"))?,
+                ModelSource::IssuedPackage { .. } => {
+                    return Err("issued package verification did not produce a package".into())
+                }
+            };
+            let model = oa_airspace::core::snapshot::decode(&model_bytes)
+                .map_err(|e| format!("snapshot: {e:?}"))?;
+            let label = match source {
+                ModelSource::Synthetic => "SYNTHETIC",
+                ModelSource::Snapshot(_) => "SUPPLIED_SNAPSHOT",
+                ModelSource::IssuedPackage { .. } => "ISSUED_FACILITY_PACKAGE",
+            };
+            (model, oa_sha256::sha256(&model_bytes), label)
+        }
+    };
     let executable = std::env::current_exe().map_err(|e| e.to_string())?;
     let executable_sha = oa_sha256::sha256(&read_guarded(&executable, MAX_EXECUTABLE_BYTES)?);
     // Explicit synthetic-development settings, not FAA separation minima or facility sizing.
@@ -290,6 +367,18 @@ pub fn run_session_with_profile_options_and_runway_aids(
             regional_new(model, snapshot_sha, *b"ZAU1", cfg)?
         }
         None => regional_new_with_profile(model, snapshot_sha, *b"ZAU1", cfg, profile)?,
+    };
+    let loaded_mode_adaptation = if let Some(package) = verified_package.as_ref() {
+        if package.surveillance_mode_bytes().is_some() {
+            Some(crate::runtime::regional_install_verified_surveillance_mode(
+                &mut runtime,
+                package,
+            )?)
+        } else {
+            None
+        }
+    } else {
+        None
     };
     if let Some(options) = runway_aids {
         let package = oa_adapt::manifest::verify_current(&options.root, options.manifest_sha256)
@@ -372,8 +461,8 @@ pub fn run_session_with_profile_options_and_runway_aids(
     fs::create_dir(output).map_err(|e| format!("create new output: {e}"))?;
     let mut settings = match selected_profile {
         // Preserve the prior default settings bytes and behavior exactly.
-        RegionalCliProfile::Default => format!("OA_REGIONAL_SETTINGS\t1\ncentre\tZAU1\nconfiguration\t{cfg:?}\ntracks\t32\nframes\t512\nframe_gap_max_ns\t60000000000\nCA_h_m\t1300\nCA_v_ft\t300\nCA_lookahead_ns\t120000000000\ntrajectory_track_age_max_ms\t5000\nnormalization\tpositive-address airborne positions\nmodel\t{}\n", match source { ModelSource::Synthetic => "SYNTHETIC", ModelSource::Snapshot(_) => "SUPPLIED_SNAPSHOT" }),
-        RegionalCliProfile::RecordedPeakRendered => format!("OA_REGIONAL_SETTINGS\t1\ncentre\tZAU1\nprofile\t{}\nconfiguration\t{cfg:?}\ntracks\t{}\nflights\t{}\nframes\t512\nsurveillance_max_frames\t{}\nmax_total_events\t{}\nmax_drain_rows\t{}\nmax_baro_evidence\t{}\nmax_open_alerts\t{}\nmax_candidate_pairs\t{}\nmax_ca_work_per_frame\t{}\nmax_flight_log_entries\t{}\nmax_presentation_updates\t{}\nrender_scope\t{}\nframe_gap_max_ns\t60000000000\nCA_h_m\t1300\nCA_v_ft\t300\nCA_lookahead_ns\t120000000000\ntrajectory_track_age_max_ms\t5000\nnormalization\tpositive-address airborne positions\nmodel\t{}\n", regional_cli_profile_id(selected_profile), profile.surveillance.max_tracks, profile.max_flights, profile.surveillance.max_frames, profile.max_total_events, profile.surveillance.max_drain_rows, profile.surveillance.max_baro_evidence, profile.surveillance.max_open_alerts, profile.surveillance.max_candidate_pairs, profile.surveillance.max_ca_work_per_frame, profile.max_flight_log_entries, profile.surveillance.max_presentation_updates, profile.surveillance.render_scope, match source { ModelSource::Synthetic => "SYNTHETIC", ModelSource::Snapshot(_) => "SUPPLIED_SNAPSHOT" }),
+        RegionalCliProfile::Default => format!("OA_REGIONAL_SETTINGS\t1\ncentre\tZAU1\nconfiguration\t{cfg:?}\ntracks\t32\nframes\t512\nframe_gap_max_ns\t60000000000\nCA_h_m\t1300\nCA_v_ft\t300\nCA_lookahead_ns\t120000000000\ntrajectory_track_age_max_ms\t5000\nnormalization\tpositive-address airborne positions\nmodel\t{model_label}\n"),
+        RegionalCliProfile::RecordedPeakRendered => format!("OA_REGIONAL_SETTINGS\t1\ncentre\tZAU1\nprofile\t{}\nconfiguration\t{cfg:?}\ntracks\t{}\nflights\t{}\nframes\t512\nsurveillance_max_frames\t{}\nmax_total_events\t{}\nmax_drain_rows\t{}\nmax_baro_evidence\t{}\nmax_open_alerts\t{}\nmax_candidate_pairs\t{}\nmax_ca_work_per_frame\t{}\nmax_flight_log_entries\t{}\nmax_presentation_updates\t{}\nrender_scope\t{}\nframe_gap_max_ns\t60000000000\nCA_h_m\t1300\nCA_v_ft\t300\nCA_lookahead_ns\t120000000000\ntrajectory_track_age_max_ms\t5000\nnormalization\tpositive-address airborne positions\nmodel\t{model_label}\n", regional_cli_profile_id(selected_profile), profile.surveillance.max_tracks, profile.max_flights, profile.surveillance.max_frames, profile.max_total_events, profile.surveillance.max_drain_rows, profile.surveillance.max_baro_evidence, profile.surveillance.max_open_alerts, profile.max_candidate_pairs, profile.max_ca_work_per_frame, profile.max_flight_log_entries, profile.surveillance.max_presentation_updates, profile.surveillance.render_scope),
     };
     settings.push_str(match safety {
         MsawSource::Disabled => "msaw\tUNAVAILABLE_NOT_CONFIGURED\n",
@@ -386,6 +475,22 @@ pub fn run_session_with_profile_options_and_runway_aids(
             oa_sha256::to_hex(&sha)
         ));
     }
+    if let Some(package) = verified_package.as_ref() {
+        let identity = package.identity();
+        settings.push_str(&format!(
+            "facility_manifest_sha256\t{}\nfacility_snapshot_sha256\t{}\nfacility_adaptation_version\t{}\nsurveillance_mode_component_status\t{}\nsurveillance_mode_component_sha256\t{}\nsurveillance_mode_authority\tCONTENT_PINNED_CALLER_SUPPLIED_ISSUER_CLAIMS_UNAUTHENTICATED\npreferred_radar_location_status\tFACILITY_CLAIM_NOT_INDEPENDENTLY_VALIDATED_AS_PHYSICAL_SITE\n",
+            oa_sha256::to_hex(&identity.manifest_sha256),
+            oa_sha256::to_hex(&identity.snapshot_sha256),
+            identity.adaptation_version.map_or_else(|| "UNAVAILABLE".to_owned(), |version| version.to_string()),
+            if identity.surveillance_mode_sha256.is_some() { "LOADED" } else { "NOT_CONFIGURED" },
+            identity.surveillance_mode_sha256.map_or_else(|| "UNAVAILABLE".to_owned(), |digest| oa_sha256::to_hex(&digest)),
+        ));
+        if let Some(mode) = loaded_mode_adaptation {
+            append_mode_settings(&mut settings, mode);
+        }
+    } else {
+        settings.push_str("surveillance_mode_component_status\tNOT_CONFIGURED\n");
+    }
     if let Some(data) = &performance_data {
         settings.push_str(&format!(
             "vertical_profile\tEXPLICIT_PERFORMANCE\nperformance_sha256\t{}\n",
@@ -396,6 +501,17 @@ pub fn run_session_with_profile_options_and_runway_aids(
     }
     write_new(&output.join("settings.tsv"), settings.as_bytes())?;
     let mut manifest = format!("OA_REGIONAL_MANIFEST\t1\ninput_sha256\t{}\nsnapshot_sha256\t{}\nexecutable_sha256\t{}\nsettings_sha256\t{}\n", oa_sha256::to_hex(&oa_sha256::sha256(bytes)), oa_sha256::to_hex(&snapshot_sha), oa_sha256::to_hex(&executable_sha), oa_sha256::to_hex(&oa_sha256::sha256(settings.as_bytes())));
+    if let Some(package) = verified_package.as_ref() {
+        let identity = package.identity();
+        manifest.push_str(&format!(
+            "facility_manifest_sha256\t{}\nfacility_adaptation_version\t{}\nsurveillance_mode_component_sha256\t{}\n",
+            oa_sha256::to_hex(&identity.manifest_sha256),
+            identity.adaptation_version.map_or_else(|| "UNAVAILABLE".to_owned(), |version| version.to_string()),
+            identity.surveillance_mode_sha256.map_or_else(|| "UNAVAILABLE".to_owned(), |digest| oa_sha256::to_hex(&digest)),
+        ));
+    } else {
+        manifest.push_str("surveillance_mode_component_status\tNOT_CONFIGURED\n");
+    }
     if let Some(data) = safety_data {
         write_new(&output.join("msaw-data.txt"), data.as_bytes())?;
         manifest.push_str(&format!(

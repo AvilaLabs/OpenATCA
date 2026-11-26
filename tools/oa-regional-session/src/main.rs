@@ -83,10 +83,12 @@ fn arguments() -> Result<Arguments, CliError> {
     let mut audit_time_ns = None;
     let mut runway_aid_package_root = None;
     let mut runway_aid_manifest_sha256 = None;
+    let mut issued_package_root = None;
+    let mut issued_package_pin = None;
     let mut count = 0;
     while let Some(arg) = args.next() {
         count += 1;
-        if count > 44 {
+        if count > 48 {
             return Err(CliError::Usage);
         }
         match arg.to_str() {
@@ -229,11 +231,32 @@ fn arguments() -> Result<Arguments, CliError> {
                         .ok_or(CliError::Usage)?,
                 );
             }
+            Some("--issued-package-root") if execute && issued_package_root.is_none() => {
+                issued_package_root = args.next().map(PathBuf::from);
+            }
+            Some("--expected-manifest-sha256") if execute && issued_package_pin.is_none() => {
+                let text = args
+                    .next()
+                    .and_then(|value| value.into_string().ok())
+                    .ok_or(CliError::Usage)?;
+                issued_package_pin =
+                    Some(oa_adapt::manifest::parse_pin(&text).map_err(|_| CliError::Usage)?);
+            }
             _ => return Err(CliError::Usage),
         }
     }
     let input = input.ok_or(CliError::Usage)?;
     let output = output.ok_or(CliError::Usage)?;
+    match (issued_package_root, issued_package_pin) {
+        (Some(root), Some(manifest_sha256)) if model.is_none() => {
+            model = Some(oa_regional_session::cli::ModelSource::IssuedPackage {
+                root,
+                manifest_sha256,
+            });
+        }
+        (None, None) => {}
+        _ => return Err(CliError::Usage),
+    }
     if execute && model.is_none() {
         return Err(CliError::Usage);
     }
@@ -542,8 +565,14 @@ fn run() -> Result<(), CliError> {
     } = arguments()?;
     oa_sealed::refuse_io(&input).map_err(CliError::Io)?;
     oa_sealed::refuse_io(&output).map_err(CliError::Io)?;
-    if let Some(oa_regional_session::cli::ModelSource::Snapshot(path)) = &model {
-        oa_sealed::refuse_io(path).map_err(CliError::Io)?;
+    match &model {
+        Some(oa_regional_session::cli::ModelSource::Snapshot(path)) => {
+            oa_sealed::refuse_io(path).map_err(CliError::Io)?;
+        }
+        Some(oa_regional_session::cli::ModelSource::IssuedPackage { root, .. }) => {
+            oa_sealed::refuse_io(root).map_err(CliError::Io)?;
+        }
+        Some(oa_regional_session::cli::ModelSource::Synthetic) | None => {}
     }
     if let Some(path) = &performance {
         oa_sealed::refuse_io(path).map_err(CliError::Io)?;
@@ -581,7 +610,7 @@ fn run() -> Result<(), CliError> {
 fn main() {
     if let Err(error) = run() {
         let message = match error {
-            CliError::Usage => "usage: oa-regional-session run --input FILE --out NEW_DIR (--snapshot FILE | --synthetic-model) [--msaw-inputs MANIFEST | --synthetic-msaw] [--performance MANIFEST] [--profile recorded-peak-rendered] [--runway-aid-package-root DIR --runway-aid-manifest-sha256 SHA256] [--quarantine-release-source flight-data|surveillance --quarantine-release-instance N --quarantine-release-item N --manual-handoff-ref TEXT --audit-log FILE --audit-count N --audit-tail SHA256 --audit-principal N --audit-role monitor|operate|configure --audit-time-ns N]; stage --input FILE --out NEW_DIR".to_owned(),
+            CliError::Usage => "usage: oa-regional-session run --input FILE --out NEW_DIR (--snapshot FILE | --synthetic-model | --issued-package-root DIR --expected-manifest-sha256 SHA256) [--msaw-inputs MANIFEST | --synthetic-msaw] [--performance MANIFEST] [--profile recorded-peak-rendered] [--runway-aid-package-root DIR --runway-aid-manifest-sha256 SHA256] [--quarantine-release-source flight-data|surveillance --quarantine-release-instance N --quarantine-release-item N --manual-handoff-ref TEXT --audit-log FILE --audit-count N --audit-tail SHA256 --audit-principal N --audit-role monitor|operate|configure --audit-time-ns N]; stage --input FILE --out NEW_DIR".to_owned(),
             CliError::Io(error) => format!("I/O error: {error}"),
             CliError::InputTooLarge => "input exceeds the 16 MiB limit".to_owned(),
             CliError::InvalidUtf8 => "input is not UTF-8".to_owned(),

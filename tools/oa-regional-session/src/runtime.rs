@@ -52,6 +52,9 @@ pub struct RegionalRuntime {
     runway_aids_manifest_sha256: Option<[u8; 32]>,
     runway_aids_profile_sha256: Option<[u8; 32]>,
     atpa_scratch: AtpaScratch,
+    /// Facility-selected policy, installed only from a verified issued package before frame one.
+    /// `None` preserves the historical default and never invents a mode.
+    mode_adaptation: Option<ModeAdaptation>,
 }
 
 #[derive(Clone, Copy)]
@@ -1515,6 +1518,7 @@ fn regional_new_with_profile_and_namespace_and_audit_checkpoint(
         runway_aids_manifest_sha256: None,
         runway_aids_profile_sha256: None,
         atpa_scratch: AtpaScratch::new(profile.max_flights)?,
+        mode_adaptation: None,
     })
 }
 
@@ -1565,6 +1569,28 @@ pub fn regional_quarantine_stats(
     runtime: &RegionalRuntime,
 ) -> Result<[SourceStats; oa_quarantine::INPUT_SOURCE_COUNT], String> {
     quarantine_stats(&runtime.quarantine_queue)
+}
+
+/// Install the mode component from the exact issued package that supplies this runtime's model.
+/// The component pin establishes byte identity only; it does not authenticate issuer claims or
+/// independently validate any radar/site coordinates.
+pub fn regional_install_verified_surveillance_mode(
+    runtime: &mut RegionalRuntime,
+    package: &oa_adapt::manifest::VerifiedPackage,
+) -> Result<ModeAdaptation, String> {
+    if runtime.failed || runtime.frame_sequence != 0 || runtime.mode_adaptation.is_some() {
+        return Err("surveillance mode can only be installed once before the first frame".into());
+    }
+    if package.model() != &runtime.model {
+        return Err("surveillance-mode package model does not match runtime adaptation".into());
+    }
+    let bytes = package
+        .surveillance_mode_bytes()
+        .ok_or_else(|| "verified package has no surveillance-mode component".to_owned())?;
+    let adaptation = oa_track::surveillance_mode::parse_mode_adaptation(bytes)
+        .map_err(|error| format!("surveillance-mode component refused: {error:?}"))?;
+    runtime.mode_adaptation = Some(adaptation);
+    Ok(adaptation)
 }
 
 fn execute(
@@ -1932,7 +1958,8 @@ pub fn regional_step(
     runtime: &mut RegionalRuntime,
     batch: &ReceiptBatch,
 ) -> Result<RegionalFrame, String> {
-    regional_step_inner(runtime, batch, None, None)
+    let adaptation = runtime.mode_adaptation;
+    regional_step_inner(runtime, batch, None, adaptation.map(|mode| (mode, &[])))
 }
 
 /// Apply one explicit facility mode adaptation to this receipt. Per-target source, reliability,
@@ -1946,6 +1973,12 @@ pub fn regional_step_with_surveillance_mode(
     adaptation: ModeAdaptation,
     target_evidence: &[TargetModeEvidence],
 ) -> Result<RegionalFrame, String> {
+    if runtime
+        .mode_adaptation
+        .is_some_and(|configured| configured != adaptation)
+    {
+        return Err("caller mode differs from the installed issued adaptation".into());
+    }
     regional_step_inner(runtime, batch, None, Some((adaptation, target_evidence)))
 }
 
@@ -1966,7 +1999,13 @@ pub fn regional_step_with_performance(
             MAX_PERFORMANCE_ENVELOPES
         ));
     }
-    regional_step_inner(runtime, batch, Some(performance), None)
+    let adaptation = runtime.mode_adaptation;
+    regional_step_inner(
+        runtime,
+        batch,
+        Some(performance),
+        adaptation.map(|mode| (mode, &[])),
+    )
 }
 
 fn regional_step_inner(

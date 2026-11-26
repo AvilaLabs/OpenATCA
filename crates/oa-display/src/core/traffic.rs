@@ -310,13 +310,19 @@ pub fn targets_apply_mode_flags(
     const MODE_FLAGS: u8 = T_FUSION | T_ISR;
     if modes.len() > s.capacity
         || modes.iter().any(|(_, flags)| flags & !MODE_FLAGS != 0)
-        || modes.windows(2).any(|pair| pair[0].0 >= pair[1].0)
+        || modes.windows(2).any(|pair| match pair {
+            [first, second] => first.0 >= second.0,
+            _ => true,
+        })
     {
         return Err(TrafficError::Malformed {
             what: "surveillance mode overlay is invalid or outside the target bound",
         });
     }
-    if s.addr.windows(2).any(|pair| pair[0] >= pair[1]) {
+    if s.addr.windows(2).any(|pair| match pair {
+        [first, second] => first >= second,
+        _ => true,
+    }) {
         return Err(TrafficError::Malformed {
             what: "converted target addresses are not strictly ordered",
         });
@@ -325,8 +331,16 @@ pub fn targets_apply_mode_flags(
     let mut mode_index = 0usize;
     let mut applied = 0u32;
     while target_index < s.addr.len() && mode_index < modes.len() {
-        let address = s.addr[target_index];
-        let (mode_address, mode_flags) = modes[mode_index];
+        let address = *s.addr.get(target_index).ok_or(TrafficError::Malformed {
+            what: "target address column is inconsistent",
+        })?;
+        let (mode_address, mode_flags) =
+            modes
+                .get(mode_index)
+                .copied()
+                .ok_or(TrafficError::Malformed {
+                    what: "mode overlay changed while applying",
+                })?;
         if address < mode_address {
             target_index += 1;
         } else if address > mode_address {
