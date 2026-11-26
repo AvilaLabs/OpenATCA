@@ -49,6 +49,7 @@ pub struct NamSessionIngress {
 pub enum NamAdmission {
     Deliver(session::Seq),
     CorrelatedRtiResponse,
+    CorrelatedPointOutResponse,
 }
 
 /// Opaque token proving a complete frame was parsed and admitted by `oa-nam::session::step`.
@@ -69,8 +70,13 @@ pub const fn accepted_message(accepted: &SessionAcceptedMessage) -> &Message {
 pub const fn accepted_delivery_seq(accepted: &SessionAcceptedMessage) -> Option<session::Seq> {
     match accepted.admission {
         NamAdmission::Deliver(seq) => Some(seq),
-        NamAdmission::CorrelatedRtiResponse => None,
+        NamAdmission::CorrelatedRtiResponse | NamAdmission::CorrelatedPointOutResponse => None,
     }
+}
+
+/// Whether session correlation admitted a PLA/LRM as the response to this peer's POI.
+pub const fn accepted_pointout_response(accepted: &SessionAcceptedMessage) -> bool {
+    matches!(accepted.admission, NamAdmission::CorrelatedPointOutResponse)
 }
 
 #[derive(Clone, Debug)]
@@ -167,6 +173,18 @@ pub fn nam_session_ingress_receive(
         }) && matches!(message.header.kind, Kind::Rla | Kind::Lrm) =>
         {
             Some(NamAdmission::CorrelatedRtiResponse)
+        }
+        [] if actions.as_slice().iter().any(|action| {
+            matches!(
+                action,
+                session::Action::Response {
+                    header,
+                    answers: Kind::Poi
+                } if *header == message.header
+            )
+        }) && matches!(message.header.kind, Kind::Pla | Kind::Lrm) =>
+        {
+            Some(NamAdmission::CorrelatedPointOutResponse)
         }
         _ => None,
     };
@@ -309,7 +327,9 @@ pub fn receive_rti(
         NamAdmission::Deliver(session::Seq::Duplicate) => {
             return Err(NamHandoffError::SessionNotAdmitted)
         }
-        NamAdmission::CorrelatedRtiResponse => return Err(NamHandoffError::SessionNotAdmitted),
+        NamAdmission::CorrelatedRtiResponse | NamAdmission::CorrelatedPointOutResponse => {
+            return Err(NamHandoffError::SessionNotAdmitted)
+        }
     }
     if message.header.kind != Kind::Rti {
         return Err(NamHandoffError::UnexpectedKind);

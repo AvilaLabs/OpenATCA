@@ -6,8 +6,9 @@
 
 use crate::flight::{self, FlightDriver, FlightViewStatus, SharedFlightView};
 use crate::nam_handoff::{
-    accepted_delivery_seq, accepted_message, nam_session_ingress_local_event,
-    nam_session_ingress_receive, NamIngressResult, NamSessionIngress,
+    accepted_delivery_seq, accepted_message, accepted_pointout_response,
+    nam_session_ingress_local_event, nam_session_ingress_receive, NamIngressResult,
+    NamSessionIngress,
 };
 use crate::route;
 use crate::surveillance::ObservedTrack;
@@ -37,11 +38,15 @@ pub enum PointOutStatus {
     AwaitingControllerDecision,
     Approved,
     Denied,
+    /// The computer refused the locally sent POI; this is a protocol refusal, not an operational decision.
+    ComputerRejected,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BeaconComparison {
     Unknown,
+    Stale,
+    Future,
     Match,
     Mismatch,
     Conflict,
@@ -60,6 +65,8 @@ pub struct PointOutContext {
     pub source_ns: i64,
     pub receipt_ns: i64,
     pub sequence: u64,
+    /// Configured local sector required in the logical PLA response to a received POI.
+    pub response_sector: Option<[u8; 2]>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -110,6 +117,8 @@ pub struct PointOutResult {
     pub ingress: NamIngressResult,
     /// Logical computer response actions, when POI needs a PLA. They do not represent approval.
     pub response_actions: Option<session::Actions>,
+    /// Exact encoded PLA when the caller supplied its configured response sector.
+    pub response_framed: Option<Vec<u8>>,
     pub view: Option<PointOutView>,
 }
 
@@ -221,7 +230,12 @@ pub fn nam_pointout_send_offer(
     let address = bound.map(|view| view.address);
     let observed_track =
         address.and_then(|address| observed.iter().find(|track| track.address == address));
-    let observed_comparison = compare_observed(established_mode_a, observed_track);
+    let observed_comparison = compare_observed(
+        established_mode_a,
+        observed_track,
+        context.source_ns,
+        context.receipt_ns,
+    );
     // Validate the caller's message before consuming a session message number.
     message.header.id.number = 0;
     encode(&message).map_err(|_| PointOutError::MissingFields)?;
@@ -424,11 +438,14 @@ pub fn nam_pointout_receive(
         .accepted
         .as_ref()
         .ok_or(PointOutError::NotAdmitted)?;
+    let delivered = matches!(
+        accepted_delivery_seq(accepted),
+        Some(session::Seq::First | session::Seq::InOrder | session::Seq::Gap(_))
+    );
+    let correlated_pointout_response = accepted_pointout_response(accepted)
+        && matches!(message.header.kind, Kind::Pla | Kind::Lrm);
     if accepted_message(accepted).header != message.header
-        || !matches!(
-            accepted_delivery_seq(accepted),
-            Some(session::Seq::First | session::Seq::InOrder | session::Seq::Gap(_))
-        )
+        || (!delivered && !correlated_pointout_response)
     {
         return Err(PointOutError::NotAdmitted);
     }
@@ -454,7 +471,9 @@ pub fn nam_pointout_receive(
             context_view,
             local_facility,
         ),
-        Kind::Pla => receive_logical_ack(runtime, &admission, message, context, context_view),
+        Kind::Pla | Kind::Lrm => {
+            receive_logical_ack(runtime, &admission, message, context, context_view)
+        }
         _ => Err(PointOutError::WrongKind),
     }
 }
@@ -493,7 +512,12 @@ fn receive_poi(
     let address = view.map(|view| view.address);
     let observed_track =
         address.and_then(|address| observed.iter().find(|track| track.address == address));
-    let observed_comparison = compare_observed(established_mode_a, observed_track);
+    let observed_comparison = compare_observed(
+        established_mode_a,
+        observed_track,
+        context.source_ns,
+        context.receipt_ns,
+    );
     let status = match runtime.mode {
         PointOutMode::Basic => PointOutStatus::AwaitingManualCoordination,
         PointOutMode::Enhanced => PointOutStatus::AwaitingControllerDecision,
@@ -513,6 +537,24 @@ fn receive_poi(
         source_ns: context.source_ns,
         receipt_ns: context.receipt_ns,
     };
+    let sector = context
+        .response_sector
+        .ok_or(PointOutError::MissingFields)?;
+    let mut response = bare(Header {
+        kind: Kind::Pla,
+        id: MsgId {
+            sender: oa_nam::Facility(local_facility),
+            receiver: message.header.id.sender,
+            number: 0,
+        },
+        reference: Some(message.header.id),
+    });
+    response.f31 = Some(Field31 {
+        facility: oa_nam::Facility(local_facility),
+        sector: Some(sector),
+        text: None,
+    });
+    encode(&response).map_err(|_| PointOutError::MissingFields)?;
     let response_actions = nam_session_ingress_local_event(
         ingress,
         session::Event::SendResponse {
@@ -522,6 +564,21 @@ fn receive_poi(
         now_ms,
     )
     .map_err(|_| PointOutError::SessionResponse)?;
+    let number = response_actions
+        .as_slice()
+        .iter()
+        .find_map(|action| match action {
+            session::Action::SendResponse {
+                kind: Kind::Pla,
+                number,
+                reference,
+            } if *reference == message.header.id => Some(*number),
+            _ => None,
+        })
+        .ok_or(PointOutError::SessionResponse)?;
+    response.header.id.number = number;
+    let response_framed = frame(&encode(&response).map_err(|_| PointOutError::MissingFields)?)
+        .map_err(|_| PointOutError::MissingFields)?;
     runtime.records.push(Record {
         view,
         source: message.clone(),
@@ -530,6 +587,7 @@ fn receive_poi(
     Ok(PointOutResult {
         ingress: ingress_result.clone(),
         response_actions: Some(response_actions),
+        response_framed: Some(response_framed),
         view: Some(view),
     })
 }
@@ -562,6 +620,9 @@ fn receive_decision(
         return Err(PointOutError::InvalidTransition);
     }
     let current = &mut record.view;
+    if current.status != PointOutStatus::AwaitingControllerDecision {
+        return Err(PointOutError::InvalidTransition);
+    }
     if message.header.id.sender.0 != current.to
         || message.header.id.receiver.0 != current.from
         || local_facility != current.from
@@ -590,6 +651,7 @@ fn receive_decision(
     Ok(PointOutResult {
         ingress: ingress.clone(),
         response_actions: None,
+        response_framed: None,
         view: Some(*current),
     })
 }
@@ -613,7 +675,8 @@ fn receive_logical_ack(
     if !record.outbound || record.view.status != PointOutStatus::AwaitingComputerResponse {
         return Err(PointOutError::InvalidTransition);
     }
-    if message.header.id.sender.0 != record.view.to
+    if !matches!(message.header.kind, Kind::Pla | Kind::Lrm)
+        || message.header.id.sender.0 != record.view.to
         || message.header.id.receiver.0 != record.view.from
         || !same_context(&record.view, context)
         || binding_view.is_some_and(|view| Some(view.address) != record.view.address)
@@ -627,13 +690,18 @@ fn receive_logical_ack(
         .iter_mut()
         .find(|record| record.view.point_out_id == reference)
         .ok_or(PointOutError::ReferenceMismatch)?;
-    record.view.status = match runtime.mode {
-        PointOutMode::Basic => PointOutStatus::AwaitingManualCoordination,
-        PointOutMode::Enhanced => PointOutStatus::AwaitingControllerDecision,
+    record.view.status = match message.header.kind {
+        Kind::Lrm => PointOutStatus::ComputerRejected,
+        Kind::Pla => match runtime.mode {
+            PointOutMode::Basic => PointOutStatus::AwaitingManualCoordination,
+            PointOutMode::Enhanced => PointOutStatus::AwaitingControllerDecision,
+        },
+        _ => return Err(PointOutError::WrongKind),
     };
     Ok(PointOutResult {
         ingress: ingress.clone(),
         response_actions: None,
+        response_framed: None,
         view: Some(record.view),
     })
 }
@@ -714,7 +782,12 @@ fn optional_field_code(field: Option<&Field07>) -> Result<Option<u16>, PointOutE
     Ok(Some(code))
 }
 
-fn compare_observed(code: Option<u16>, track: Option<&ObservedTrack>) -> BeaconComparison {
+fn compare_observed(
+    code: Option<u16>,
+    track: Option<&ObservedTrack>,
+    source_ns: i64,
+    receipt_ns: i64,
+) -> BeaconComparison {
     let Some(track) = track else {
         return BeaconComparison::Unknown;
     };
@@ -723,6 +796,14 @@ fn compare_observed(code: Option<u16>, track: Option<&ObservedTrack>) -> BeaconC
     }
     if track.ident == oa_track::NO_IDENT || track.ident_ns == oa_track::NO_IDENT_NS {
         return BeaconComparison::Unknown;
+    }
+    // No facility freshness threshold is inferred. The code is stale only when its recorded
+    // source time precedes this point-out's source time, and future when it exceeds receipt time.
+    if track.ident_ns < source_ns {
+        return BeaconComparison::Stale;
+    }
+    if track.ident_ns > receipt_ns {
+        return BeaconComparison::Future;
     }
     compare_codes(code, Some(track.ident))
 }
@@ -743,4 +824,306 @@ fn parse_exact(bytes: &[u8]) -> Result<Message, PointOutError> {
         return Err(PointOutError::NotAdmitted);
     }
     parse(message).map_err(|_| PointOutError::NotAdmitted)
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::expect_used, clippy::panic)]
+
+    use super::*;
+    use oa_nam::{Aerodrome, Facility, Field13, Field16};
+
+    const LOCAL: Facility = Facility(*b"KZMP");
+    const PEER: Facility = Facility(*b"CZWG");
+
+    fn header(
+        kind: Kind,
+        sender: Facility,
+        receiver: Facility,
+        number: u16,
+        reference: Option<MsgId>,
+    ) -> Header {
+        Header {
+            kind,
+            id: MsgId {
+                sender,
+                receiver,
+                number,
+            },
+            reference,
+        }
+    }
+
+    fn active_ingress(local: Facility, peer: Facility) -> NamSessionIngress {
+        let mut ingress =
+            crate::nam_handoff::nam_session_ingress_new(session::default_config(local, peer));
+        let actions = nam_session_ingress_local_event(&mut ingress, session::Event::Activate, 0)
+            .expect("activation");
+        let [session::Action::SendIrq { number }] = actions.as_slice() else {
+            panic!("activation sends IRQ")
+        };
+        let irs = bare(header(
+            Kind::Irs,
+            peer,
+            local,
+            0,
+            Some(MsgId {
+                sender: local,
+                receiver: peer,
+                number: *number,
+            }),
+        ));
+        let bytes = frame(&encode(&irs).expect("IRS encodes")).expect("IRS frames");
+        nam_session_ingress_receive(&mut ingress, &bytes, 1).expect("IRS admission");
+        assert_eq!(
+            nam_session_ingress_state(&ingress).state,
+            session::State::Active
+        );
+        ingress
+    }
+
+    fn poi(sender: Facility, receiver: Facility, number: u16) -> Message {
+        let mut message = bare(header(Kind::Poi, sender, receiver, number, None));
+        message.f07 = Some(Field07 {
+            ident: Ident::Acid("ABC123".to_owned()),
+            ssr: Some(Ssr {
+                mode: b'A',
+                code: *b"1234",
+            }),
+        });
+        message.f13 = Some(Field13 {
+            aerodrome: Aerodrome(*b"KAAA"),
+            time: None,
+        });
+        message.f16 = Some(Field16 {
+            aerodrome: Aerodrome(*b"KBBB"),
+            eet: None,
+            alternates: Vec::new(),
+        });
+        message.f31 = Some(Field31 {
+            facility: receiver,
+            sector: Some(*b"1A"),
+            text: None,
+        });
+        message
+    }
+
+    fn context(receipt_ns: i64) -> PointOutContext {
+        PointOutContext {
+            binding: None,
+            source_ns: receipt_ns,
+            receipt_ns,
+            sequence: 1,
+            response_sector: Some(*b"2A"),
+        }
+    }
+
+    fn framed(message: &Message) -> Vec<u8> {
+        frame(&encode(message).expect("NAM message encodes")).expect("NAM message frames")
+    }
+
+    fn empty_flights() -> FlightDriver {
+        flight::flight_driver_new(crate::flight::FlightDriverConfig {
+            flight_capacity: 2,
+            refusal_log_capacity: 2,
+            conflict_log_capacity: 2,
+        })
+        .expect("bounded flight driver")
+    }
+
+    #[test]
+    fn incoming_poi_is_displayed_and_only_explicit_enhanced_decision_generates_poa() {
+        let mut runtime =
+            nam_pointout_runtime_new(4, PointOutMode::Enhanced).expect("bounded runtime");
+        let mut flights = empty_flights();
+        let mut ingress = active_ingress(LOCAL, PEER);
+        let request = poi(PEER, LOCAL, 21);
+        let received = nam_pointout_receive(
+            &mut runtime,
+            &mut flights,
+            &mut ingress,
+            &framed(&request),
+            2,
+            LOCAL.0,
+            context(2_000_000_000),
+            &[],
+        )
+        .expect("encoded POI is admitted and displayed");
+        let view = received.view.expect("point-out view");
+        assert_eq!(view.status, PointOutStatus::AwaitingControllerDecision);
+        assert_eq!(view.address, None);
+        assert_eq!(view.established_mode_a, Some(0o1234));
+        assert!(
+            received.response_actions.is_some(),
+            "PLA is only the logical computer response"
+        );
+        assert_eq!(
+            parse_exact(received.response_framed.as_deref().expect("encoded PLA"))
+                .expect("PLA parses")
+                .header
+                .kind,
+            Kind::Pla,
+        );
+
+        let response = nam_pointout_decide(
+            &mut runtime,
+            &mut ingress,
+            view.point_out_id,
+            PointOutDecision::Approve {
+                assigned_mode_a: Some(0o4321),
+            },
+            Field31 {
+                facility: LOCAL,
+                sector: Some(*b"2A"),
+                text: None,
+            },
+            3,
+            LOCAL.0,
+        )
+        .expect("explicit operator decision creates POA");
+        assert_eq!(response.message.header.kind, Kind::Poa);
+        assert_eq!(response.message.header.reference, Some(view.point_out_id));
+        assert_eq!(
+            optional_field_code(response.message.f07.as_ref()).expect("Mode A parses"),
+            Some(0o4321)
+        );
+        assert_eq!(response.view.status, PointOutStatus::Approved);
+        assert_eq!(
+            response.view.assigned_comparison,
+            BeaconComparison::Mismatch
+        );
+        assert!(parse_exact(&response.framed_bytes).is_ok());
+    }
+
+    #[test]
+    fn outbound_poi_requires_correlated_pla_before_enhanced_poa_and_duplicate_is_refused() {
+        let mut runtime =
+            nam_pointout_runtime_new(4, PointOutMode::Enhanced).expect("bounded runtime");
+        let mut flights = empty_flights();
+        let mut ingress = active_ingress(LOCAL, PEER);
+        let sent = nam_pointout_send_offer(
+            &mut runtime,
+            &mut flights,
+            &mut ingress,
+            poi(LOCAL, PEER, 0),
+            context(1_000_000_000),
+            2,
+            LOCAL.0,
+            &[],
+        )
+        .expect("outgoing POI uses active session");
+        assert_eq!(sent.view.status, PointOutStatus::AwaitingComputerResponse);
+
+        let mut pla = bare(header(
+            Kind::Pla,
+            PEER,
+            LOCAL,
+            8,
+            Some(sent.view.point_out_id),
+        ));
+        pla.f31 = Some(Field31 {
+            facility: PEER,
+            sector: Some(*b"1A"),
+            text: None,
+        });
+        let accepted = nam_pointout_receive(
+            &mut runtime,
+            &mut flights,
+            &mut ingress,
+            &framed(&pla),
+            3,
+            LOCAL.0,
+            context(2_000_000_000),
+            &[],
+        )
+        .expect("PLA is correlated to the outstanding POI");
+        assert_eq!(
+            accepted.view.expect("view").status,
+            PointOutStatus::AwaitingControllerDecision
+        );
+
+        let mut poa = poi(PEER, LOCAL, 9);
+        poa.header.kind = Kind::Poa;
+        poa.header.reference = Some(sent.view.point_out_id);
+        let accepted = nam_pointout_receive(
+            &mut runtime,
+            &mut flights,
+            &mut ingress,
+            &framed(&poa),
+            4,
+            LOCAL.0,
+            context(3_000_000_000),
+            &[],
+        )
+        .expect("encoded POA is admitted on the real delivery path");
+        let view = accepted.view.expect("view");
+        assert_eq!(view.status, PointOutStatus::Approved);
+        assert_eq!(view.assigned_mode_a, Some(0o1234));
+        assert_eq!(view.assigned_comparison, BeaconComparison::Match);
+        assert_eq!(
+            accepted
+                .ingress
+                .actions
+                .as_slice()
+                .iter()
+                .filter(|action| matches!(action, session::Action::SendLam { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            nam_pointout_receive(
+                &mut runtime,
+                &mut flights,
+                &mut ingress,
+                &framed(&poa),
+                5,
+                LOCAL.0,
+                context(4_000_000_000),
+                &[],
+            )
+            .expect_err("duplicate delivery must not repeat state transition"),
+            PointOutError::NotAdmitted,
+        );
+    }
+
+    #[test]
+    fn beacon_comparison_preserves_unknown_conflict_stale_and_future() {
+        let track = ObservedTrack {
+            state_ns: 10,
+            newest_source_ns: 10,
+            address: 0xabc123,
+            ident: 0o1234,
+            ident_ns: 10,
+            ident_conflict: 0,
+            lat_e7: 0,
+            lon_e7: 0,
+            altitude_ft: 0,
+            vertical_rate_fpm: 0,
+            east_mmps: 0,
+            north_mmps: 0,
+            r95_mm: 0,
+        };
+        assert_eq!(
+            compare_observed(Some(0o1234), Some(&track), 10, 10),
+            BeaconComparison::Match
+        );
+        assert_eq!(
+            compare_observed(Some(0o1234), Some(&track), 11, 11),
+            BeaconComparison::Stale
+        );
+        assert_eq!(
+            compare_observed(Some(0o1234), Some(&track), 9, 9),
+            BeaconComparison::Future
+        );
+        let mut conflict = track;
+        conflict.ident_conflict = 1;
+        assert_eq!(
+            compare_observed(Some(0o1234), Some(&conflict), 10, 10),
+            BeaconComparison::Conflict
+        );
+        assert_eq!(
+            compare_observed(Some(0o1234), None, 10, 10),
+            BeaconComparison::Unknown
+        );
+    }
 }
