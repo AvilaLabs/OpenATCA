@@ -1088,7 +1088,7 @@ mod transaction_tests {
         .unwrap()
     }
 
-    // REQ: OA-DSP-084
+    // REQ: OA-REG-023
     #[test]
     fn regional_mode_call_uses_unknown_sensor_fallback_and_emits_fusion_symbol_choice() {
         let mut engine = runtime();
@@ -1147,7 +1147,7 @@ mod transaction_tests {
         assert_eq!(decision.refusal, 0);
         assert_eq!(decision.result.minimum_nm, 5);
         assert_eq!(decision.result.three_nm_symbol, 0);
-        assert_eq!(decision.result.fusion_solid_circle, 1);
+        assert_eq!(decision.result.fusion_solid_circle, 0);
         assert_eq!(decision.result.separation_eligible, 1);
 
         let receipt_ns = 6 * surveillance::SECOND_NS;
@@ -1156,11 +1156,6 @@ mod transaction_tests {
             receipt_ns - 100_000_000
         ))
         .expect("bounded synthetic position");
-        let mut single_sensor = adaptation;
-        single_sensor.mode = oa_track::surveillance_mode::SurveillanceMode::TerminalSingleSensor;
-        single_sensor.has_preferred_radar = 1;
-        single_sensor.preferred_radar_lat_e7 = 410_000_000;
-        single_sensor.preferred_radar_lon_e7 = -870_000_000;
         let evidence = [TargetModeEvidence {
             address: 0x00ab_c123,
             state_ns: receipt_ns,
@@ -1169,7 +1164,6 @@ mod transaction_tests {
             reliability: oa_track::surveillance_mode::ReliabilityEvidence::Reliable,
             isr: oa_track::surveillance_mode::IsrEvidence::Clear,
             controller_initiated_coast: 0,
-            flight_plan_aided: 0,
         }];
         let selected = regional_step_with_surveillance_mode(
             &mut engine,
@@ -1178,7 +1172,7 @@ mod transaction_tests {
                 source_clock_regressions: 0,
                 events: vec![event],
             },
-            single_sensor,
+            adaptation,
             &evidence,
         )
         .expect("explicit caller evidence");
@@ -1191,7 +1185,10 @@ mod transaction_tests {
         assert_eq!(decision.evidence_present, 1);
         assert_eq!(decision.refusal, 0);
         assert_eq!(decision.result.minimum_nm, 3);
+        assert_eq!(decision.result.fusion_solid_circle, 1);
         assert_eq!(decision.result.three_nm_symbol, 1);
+        assert_eq!(decision.result.flat_aided, 0);
+        assert_eq!(decision.flight_plan_aided, 0);
     }
 
     // REQ: OA-REG-018

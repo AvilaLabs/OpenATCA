@@ -108,7 +108,6 @@ pub struct TargetModeEvidence {
     pub reliability: ReliabilityEvidence,
     pub isr: IsrEvidence,
     pub controller_initiated_coast: u8,
-    pub flight_plan_aided: u8,
 }
 const _: () = assert!(core::mem::size_of::<TargetModeEvidence>() == 24);
 
@@ -136,7 +135,7 @@ pub struct ModeResult {
     pub three_nm_symbol: u8,
     pub separation_eligible: u8,
     pub flat_aided: u8,
-    /// `1` when the selected terminal FUSION mode uses the solid-circle symbol per N JO 7110.676.
+    /// `1` when an eligible 3 NM terminal-FUSION target uses the solid-circle cue per N JO 7110.676.
     pub fusion_solid_circle: u8,
     pub reserved: [u8; 2],
     /// Metres; `u32::MAX` when no preferred-radar distance was required/available.
@@ -260,12 +259,15 @@ pub fn surveillance_mode_result(
     let flat_aided = target.flight_plan_aided;
     let separation_eligible =
         target.coasting == 0 && (target.controller_initiated_coast == 0 || flat_aided == 1);
+    let three_nm_symbol = u8::from(minimum_nm == 3 && separation_eligible);
     Ok(ModeResult {
         minimum_nm,
-        three_nm_symbol: u8::from(minimum_nm == 3),
+        three_nm_symbol,
         separation_eligible: u8::from(separation_eligible),
         flat_aided,
-        fusion_solid_circle: u8::from(adaptation.mode == SurveillanceMode::TerminalFusion),
+        fusion_solid_circle: u8::from(
+            adaptation.mode == SurveillanceMode::TerminalFusion && three_nm_symbol != 0,
+        ),
         reserved: [0; 2],
         preferred_radar_distance_m: distance_m,
     })
@@ -312,7 +314,7 @@ mod tests {
         let r = surveillance_mode_result(adaptation(SurveillanceMode::TerminalFusion), t).unwrap();
         assert_eq!(r.minimum_nm, 5);
         assert_eq!(r.three_nm_symbol, 0);
-        assert_eq!(r.fusion_solid_circle, 1);
+        assert_eq!(r.fusion_solid_circle, 0);
     }
 
     #[test]
@@ -321,10 +323,31 @@ mod tests {
         t.reliability = ReliabilityEvidence::Unknown;
         let r = surveillance_mode_result(adaptation(SurveillanceMode::TerminalFusion), t).unwrap();
         assert_eq!(r.minimum_nm, 5);
+        assert_eq!(r.three_nm_symbol, 0);
+        assert_eq!(r.fusion_solid_circle, 0);
         t.reliability = ReliabilityEvidence::Reliable;
         t.isr = IsrEvidence::Unknown;
         let r = surveillance_mode_result(adaptation(SurveillanceMode::TerminalFusion), t).unwrap();
         assert_eq!(r.minimum_nm, 5);
+        assert_eq!(r.three_nm_symbol, 0);
+        assert_eq!(r.fusion_solid_circle, 0);
+    }
+
+    // REQ: OA-REG-023
+    #[test]
+    fn eligible_fusion_three_nm_uses_the_cue_but_coast_does_not() {
+        let a = adaptation(SurveillanceMode::TerminalFusion);
+        let mut t = target();
+        let r = surveillance_mode_result(a, t).unwrap();
+        assert_eq!(r.minimum_nm, 3);
+        assert_eq!(r.three_nm_symbol, 1);
+        assert_eq!(r.fusion_solid_circle, 1);
+        t.coasting = 1;
+        let r = surveillance_mode_result(a, t).unwrap();
+        assert_eq!(r.minimum_nm, 3);
+        assert_eq!(r.separation_eligible, 0);
+        assert_eq!(r.three_nm_symbol, 0);
+        assert_eq!(r.fusion_solid_circle, 0);
     }
 
     #[test]

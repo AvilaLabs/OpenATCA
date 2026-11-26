@@ -704,6 +704,7 @@
     "OA-REG-018",
     "OA-REG-019",
     "OA-REG-020",
+    "OA-REG-023",
     "OA-RPL-027",
     "OA-RPL-028",
     "OA-RPL-029",
@@ -10762,11 +10763,6 @@
           "test_name": "mode_overlay_matches_sorted_visible_addresses_and_refuses_ambiguous_inputs"
         },
         {
-          "requirement_id": "OA-DSP-084",
-          "file": "tools/oa-regional-session/src/runtime.rs",
-          "test_name": "regional_mode_call_uses_unknown_sensor_fallback_and_emits_fusion_symbol_choice"
-        },
-        {
           "requirement_id": "OA-WS-004",
           "file": "crates/oa-workstation/tests/workstation.rs",
           "test_name": "position_preferences_are_separate_while_annotations_are_shared"
@@ -14853,6 +14849,7 @@
       "severity_status": "engineering_candidate",
       "severity_rationale": "Corrupted or lost track state can contribute to loss of separation; this is not a facility system safety assessment.",
       "mitigation_requirement_ids": [
+        "OA-REG-023",
         "OA-TRK-017",
         "OA-TRK-066",
         "OA-TRK-210",
@@ -14932,6 +14929,18 @@
         {
           "document": "REQUIREMENTS.md",
           "locator": "OA-TRK-066 through OA-TRK-413 in the owning functional sections"
+        },
+        {
+          "document": "FAA JO 7110.65BB",
+          "locator": "5-5-4"
+        },
+        {
+          "document": "FAA JO 7210.3EE",
+          "locator": "3-6-7"
+        },
+        {
+          "document": "FAA N JO 7110.676",
+          "locator": "terminal FUSION target symbol guidance"
         }
       ],
       "verification_refs": [
@@ -15299,6 +15308,16 @@
           "requirement_id": "OA-TRK-017",
           "file": "crates/oa-track-core/src/tracker.rs",
           "test_name": "all_tracker_buffer_capacities_stay_fixed_through_bounded_updates_and_flush"
+        },
+        {
+          "requirement_id": "OA-REG-023",
+          "file": "tools/oa-regional-session/src/runtime.rs",
+          "test_name": "regional_mode_call_uses_unknown_sensor_fallback_and_emits_fusion_symbol_choice"
+        },
+        {
+          "requirement_id": "OA-REG-023",
+          "file": "crates/oa-track/src/surveillance_mode.rs",
+          "test_name": "eligible_fusion_three_nm_uses_the_cue_but_coast_does_not"
         }
       ],
       "proof_refs": [
@@ -17324,6 +17343,12 @@
       "function": "migration_comparison_and_safety_evidence",
       "hazard_id": "HZ-EVIDENCE-001",
       "rationale": "Engineering safety candidate: losing or changing the selected replay profile while exporting, reimporting, or selecting a recording could make a comparison use different settings than its declared evidence. Settings/profile binding and sidecar-to-manifest checks constrain that mismatch; absent metadata retains the historical default. This offline reproducibility path does not authenticate the recording, prove input completeness, or establish operational behavior."
+    },
+    {
+      "id": "OA-REG-023",
+      "function": "surveillance_mode_policy_and_target_presentation",
+      "hazard_id": "HZ-SURV-STATE-001",
+      "rationale": "Engineering safety candidate: an incorrect surveillance-mode minimum or a misleading 3 NM cue can misstate target separation eligibility. The regional caller accepts exact-epoch caller evidence, preserves missing source/reliability/ISR/flight-level evidence as unknown, leaves FLAT unavailable because the current flight-view join does not aid tracking, reports refusal and the selected minimum, uses the terminal FUSION solid-circle cue only for an explicitly evidenced, separation-eligible 3 NM result, and leaves the independent conservative conflict-alert engine unchanged. This is a bounded policy/presentation path; caller claims are not authenticated, no facility adaptation is supplied or validated, no 3 NM symbology is inferred for ERAM, and no operational separation assurance is claimed."
     },
     {
       "id": "OA-RTE-001",
@@ -22945,7 +22970,7 @@
       "id": "OA-DSP-084",
       "function": "traffic_and_safety_status_display",
       "hazard_id": "HZ-DISPLAY-001",
-      "rationale": "Engineering safety candidate: a Fusion target drawn as the ordinary square could be mistaken for a different surveillance mode. An explicit caller flag selects the FAA solid-circle Fusion symbol and the separate ISR flag is rendered as an `ISR` data-block tag. This renderer does not choose surveillance mode or infer sensor reliability."
+      "rationale": "Engineering safety candidate: a misleading 3 NM cue could overstate Fusion separation eligibility. An explicit caller flag selects the FAA solid-circle cue only for a separation-eligible 3 NM Fusion result; a 5 NM fallback keeps the ordinary marker, and an asserted ISR flag is rendered separately as an `ISR` data-block tag. This renderer does not choose surveillance mode or infer sensor reliability."
     },
     {
       "id": "OA-IWXXM-005",
