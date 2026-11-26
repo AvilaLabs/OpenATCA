@@ -819,11 +819,12 @@ mod tests {
     }
 
     fn add_test_airport(model: &mut Model, ident: &str) {
+        let ident_ix = intern(model, ident);
         model.points.kind.push(air_model::point_kind::AIRPORT);
         model.points.lat.push(0);
         model.points.lon.push(0);
         model.points.elev_ft.push(air_model::ELEV_NONE);
-        model.points.ident.push(intern(model, ident));
+        model.points.ident.push(ident_ix);
         model.points.alt_ident.push(StrIx::NONE);
         model.points.region.push(StrIx::NONE);
         model.points.scope.push(StrIx::NONE);
