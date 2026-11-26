@@ -11,7 +11,7 @@ use crate::nam_handoff::{
     NamIngressResult, NamSessionIngress, SessionAcceptedMessage,
 };
 use crate::route::{self, RouteStore, MAX_ROUTE_REVISIONS};
-use oa_airspace::core::model::{self, Model};
+use oa_airspace::core::model::{self as air_model, Model};
 use oa_airspace::shell::route_parse::{
     resolve_icao_item15, Item15Reject as RouteReject, MagneticVariationSource,
 };
@@ -336,7 +336,14 @@ pub fn nam_flight_apply(
                 context.plan_id,
                 message.f13.and_then(|f| f.time),
             );
-            return accepted_reply(message, context.response_number);
+            let preferred_route = runtime
+                .plan_index(context.key, context.plan_id)
+                .and_then(|index| runtime.plans.get(index))
+                .map_or_else(
+                    || model_pfr_assessment(model, PreferredRouteStatus::NotAssessed, None),
+                    |plan| plan.preferred_route,
+                );
+            return accepted_reply(message, context.response_number, preferred_route);
         }
         _ => return fail(NamFlightReject::WrongMessageKind),
     };
@@ -478,11 +485,11 @@ fn ascii_code(value: &[u8; 4]) -> &str {
 fn alternate_airport_ident<'a>(model: &'a Model, filed_code: &str) -> Option<&'a str> {
     let mut alternate = None;
     for row in 0..model.points.kind.len() {
-        if *model.points.kind.get(row)? != model::point_kind::AIRPORT {
+        if *model.points.kind.get(row)? != air_model::point_kind::AIRPORT {
             continue;
         }
-        let ident = model::str_at(&model.strings, *model.points.ident.get(row)?)?;
-        let alt = model::str_at(&model.strings, *model.points.alt_ident.get(row)?)?;
+        let ident = air_model::str_at(&model.strings, *model.points.ident.get(row)?)?;
+        let alt = air_model::str_at(&model.strings, *model.points.alt_ident.get(row)?)?;
         if ident == filed_code || alt == filed_code {
             let candidate = if ident == filed_code { alt } else { ident };
             if candidate.is_empty() || alternate.is_some() {
@@ -503,12 +510,12 @@ fn assess_preferred_route(
     level_ft: Option<i32>,
 ) -> PreferredRouteAssessment {
     use PreferredRouteStatus as S;
-    if model.preferred_route_state != model::preferred_route_state::PRESENT {
+    if model.preferred_route_state != air_model::preferred_route_state::PRESENT {
         return model_pfr_assessment(model, S::SourceUnavailable, None);
     }
     let departure = ascii_code(departure);
     let destination = ascii_code(destination);
-    let mut range = model::preferred_route_range(model, departure, destination);
+    let mut range = air_model::preferred_route_range(model, departure, destination);
     if range.is_empty() {
         let (Some(origin_alias), Some(destination_alias)) = (
             alternate_airport_ident(model, departure),
@@ -516,7 +523,7 @@ fn assess_preferred_route(
         ) else {
             return model_pfr_assessment(model, S::NoPublishedPair, None);
         };
-        range = model::preferred_route_range(model, origin_alias, destination_alias);
+        range = air_model::preferred_route_range(model, origin_alias, destination_alias);
     }
     if range.is_empty() {
         return model_pfr_assessment(model, S::NoPublishedPair, None);
@@ -534,7 +541,7 @@ fn assess_preferred_route(
         let Some(route_text_ix) = table.route_string.get(row).copied() else {
             return model_pfr_assessment(model, S::Unavailable, None);
         };
-        let Some(route_text) = model::str_at(&model.strings, route_text_ix) else {
+        let Some(route_text) = air_model::str_at(&model.strings, route_text_ix) else {
             conversion_unavailable = true;
             continue;
         };
@@ -548,10 +555,10 @@ fn assess_preferred_route(
         let Some(destination_ix) = table.destination.get(row).copied() else {
             return model_pfr_assessment(model, S::Unavailable, None);
         };
-        let Some(origin) = model::str_at(&model.strings, origin_ix) else {
+        let Some(origin) = air_model::str_at(&model.strings, origin_ix) else {
             return model_pfr_assessment(model, S::Unavailable, None);
         };
-        let Some(destination) = model::str_at(&model.strings, destination_ix) else {
+        let Some(destination) = air_model::str_at(&model.strings, destination_ix) else {
             return model_pfr_assessment(model, S::Unavailable, None);
         };
         let mut tokens = route_text.split_ascii_whitespace().collect::<Vec<_>>();
@@ -577,12 +584,11 @@ fn assess_preferred_route(
         let route_type = table
             .route_type
             .get(row)
-            .and_then(|ix| model::str_at(&model.strings, *ix));
+            .and_then(|ix| air_model::str_at(&model.strings, *ix));
         let altitude_type_matches = match (route_type, level_ft) {
             (Some("L" | "LSD"), Some(level)) => level < 18_000,
             (Some("H" | "HSD"), Some(level)) => level >= 18_000,
             (Some("L" | "LSD" | "H" | "HSD"), None) => false,
-            (Some("L" | "LSD" | "H" | "HSD"), Some(_)) => false,
             _ => true,
         };
         if !altitude_type_matches {
@@ -597,7 +603,7 @@ fn assess_preferred_route(
         ]
         .into_iter()
         .flatten()
-        .any(|ix| model::str_at(&model.strings, *ix).is_none_or(|value| !value.is_empty()));
+        .any(|ix| air_model::str_at(&model.strings, *ix).is_none_or(|value| !value.is_empty()));
         if selected.is_none_or(|(_, old_unknown)| old_unknown && !unsupported_condition) {
             selected = Some((row, unsupported_condition));
         }
