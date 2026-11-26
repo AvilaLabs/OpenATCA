@@ -552,15 +552,19 @@ fn assess_preferred_route(
             conversion_unavailable = true;
             continue;
         }
-        let route_type = table
+        let Some(route_type) = table
             .route_type
             .get(row)
-            .and_then(|ix| air_model::str_at(&model.strings, *ix));
-        let altitude_type_matches = match (route_type, level_ft) {
-            (Some("L" | "LSD"), Some(level)) => level < 18_000,
-            (Some("H" | "HSD"), Some(level)) => level >= 18_000,
-            (Some("L" | "LSD" | "H" | "HSD"), None) => false,
-            _ => true,
+            .and_then(|ix| air_model::str_at(&model.strings, *ix))
+        else {
+            return model_pfr_assessment(model, S::Unavailable, None);
+        };
+        let (altitude_type_matches, type_needs_coordination) = match route_type {
+            "L" | "LSD" => (level_ft.is_some_and(|level| level < 18_000), false),
+            "H" | "HSD" => (level_ft.is_some_and(|level| level >= 18_000), false),
+            // The source identifies these preferred-route families, but this adapter does not
+            // infer their operating envelope from the code or free-text descriptions.
+            _ => (true, true),
         };
         if !altitude_type_matches {
             continue;
@@ -587,16 +591,17 @@ fn assess_preferred_route(
         if !same_converted_route_geometry(&filed.route, &candidate.route) {
             continue;
         }
-        let unsupported_condition = [
-            table.area_description.get(row),
-            table.altitude_description.get(row),
-            table.aircraft_description.get(row),
-            table.hours_description.get(row),
-            table.direction_description.get(row),
-        ]
-        .into_iter()
-        .flatten()
-        .any(|ix| air_model::str_at(&model.strings, *ix).is_none_or(|value| !value.is_empty()));
+        let unsupported_condition = type_needs_coordination
+            || [
+                table.area_description.get(row),
+                table.altitude_description.get(row),
+                table.aircraft_description.get(row),
+                table.hours_description.get(row),
+                table.direction_description.get(row),
+            ]
+            .into_iter()
+            .flatten()
+            .any(|ix| air_model::str_at(&model.strings, *ix).is_none_or(|value| !value.is_empty()));
         if selected.is_none_or(|(_, old_unknown)| old_unknown && !unsupported_condition) {
             selected = Some((row, unsupported_condition));
         }
@@ -1216,6 +1221,44 @@ mod tests {
                 .status,
             PreferredRouteStatus::CoordinationRequired
         );
+
+        let mut directional = model_fixture();
+        preferred_route(
+            &mut directional,
+            "KAAA",
+            "KBBB",
+            "H",
+            "FIXA FIXB",
+            None,
+            None,
+        );
+        let direction_ix = intern(&mut directional, "NORTHBOUND ONLY");
+        directional.preferred_routes.direction_description[0] = direction_ix;
+        let filed = resolve_icao_item15(&directional, &elements, Some(35_000), "KAAA", "KBBB", &[])
+            .expect("accepted route geometry");
+        assert_eq!(
+            assess_preferred_route(&directional, b"KAAA", b"KBBB", &filed, Some(35_000), &[],)
+                .status,
+            PreferredRouteStatus::CoordinationRequired
+        );
+
+        let mut terminal = model_fixture();
+        preferred_route(
+            &mut terminal,
+            "KAAA",
+            "KBBB",
+            "TEC",
+            "FIXA FIXB",
+            None,
+            None,
+        );
+        let filed = resolve_icao_item15(&terminal, &elements, Some(35_000), "KAAA", "KBBB", &[])
+            .expect("accepted route geometry");
+        assert_eq!(
+            assess_preferred_route(&terminal, b"KAAA", b"KBBB", &filed, Some(35_000), &[],).status,
+            PreferredRouteStatus::CoordinationRequired
+        );
+
         constrained.preferred_route_state = air_model::preferred_route_state::UNAVAILABLE;
         assert_eq!(
             assess_preferred_route(&constrained, b"KAAA", b"KBBB", &filed, Some(35_000), &[],)
