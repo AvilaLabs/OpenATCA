@@ -18,7 +18,10 @@ CORE_FFI = Path("crates/openatca-core-ffi")
 CORE_FFI_DEPS = {
     "oa-geo": "../oa-geo", "oa-ieee": "../oa-ieee",
     "oa-math": "../oa-math", "oa-sha256": "../oa-sha256",
+    "oa-csv": "../oa-csv", "oa-json": "../oa-json", "oa-xml": "../oa-xml",
 }
+CORE_FFI_CRATE_TYPES = ["cdylib", "staticlib", "rlib"]
+CORE_FFI_SOURCE_FILES = {"lib.rs", "ffi.rs", "text.rs"}
 STRICT_RUNTIME_CLIPPY_LINTS = ("unwrap_used", "expect_used", "panic", "indexing_slicing")
 # Pinned to oa-airspace::core::route::MAX_ROUTE_WORK: full identity scans across the
 # 11,640-point regional model need 744,960 visits for 64 endpoints, plus expansion.
@@ -558,11 +561,11 @@ def _core_ffi_exception_errors(root: Path, members: list[Path]) -> list[str]:
         errors.append("openatca-core-ffi must explicitly deny the four strict workspace Clippy lints")
 
     lib = data.get("lib", {})
-    if not isinstance(lib, dict) or lib.get("crate-type") != ["cdylib", "staticlib"]:
-        errors.append("openatca-core-ffi must expose exactly cdylib and staticlib crate types")
+    if not isinstance(lib, dict) or lib.get("crate-type") != CORE_FFI_CRATE_TYPES:
+        errors.append("openatca-core-ffi must expose exactly cdylib, staticlib and rlib crate types")
     actual_deps = data.get("dependencies", {})
     if not isinstance(actual_deps, dict) or set(actual_deps) != set(CORE_FFI_DEPS):
-        errors.append("openatca-core-ffi dependencies must be exactly oa-geo, oa-ieee, oa-math and oa-sha256")
+        errors.append("openatca-core-ffi dependencies must be exactly the four reviewed core crates and oa-csv, oa-json, oa-xml")
         actual_deps = actual_deps if isinstance(actual_deps, dict) else {}
     for name, relative in CORE_FFI_DEPS.items():
         declaration = actual_deps.get(name)
@@ -571,6 +574,31 @@ def _core_ffi_exception_errors(root: Path, members: list[Path]) -> list[str]:
     for section in ("dev-dependencies", "build-dependencies", "target"):
         if data.get(section):
             errors.append(f"openatca-core-ffi must not add {section}")
+
+    source_dir = declared_dir / "src"
+    package_dir = declared_dir.resolve()
+    if source_dir.is_symlink() or not source_dir.is_dir() or not _inside(source_dir.resolve(), package_dir):
+        errors.append("openatca-core-ffi source directory must be a real in-package directory")
+    else:
+        actual_sources: set[str] = set()
+        for source in source_dir.rglob("*.rs"):
+            relative = source.relative_to(source_dir).as_posix()
+            if source.is_symlink() or not _inside(source.resolve(), package_dir):
+                errors.append(f"openatca-core-ffi Rust source may not use symlinks or escape its package: {relative}")
+            actual_sources.add(relative)
+        if actual_sources != CORE_FFI_SOURCE_FILES:
+            errors.append("openatca-core-ffi Rust source inventory must be exactly src/lib.rs, src/ffi.rs and src/text.rs")
+        for relative in CORE_FFI_SOURCE_FILES:
+            source = source_dir / relative
+            if source.is_symlink() or not source.is_file() or not _inside(source.resolve(), package_dir):
+                errors.append(f"openatca-core-ffi required source must be a regular in-package file: src/{relative}")
+        text_source = source_dir / "text.rs"
+        try:
+            text_tokens = _rust_tokens(text_source.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError):
+            text_tokens = ""
+        if len(re.findall(r"#!\s*\[\s*forbid\s*\(\s*unsafe_code\s*\)\s*\]", text_tokens)) != 1:
+            errors.append("openatca-core-ffi src/text.rs must retain exactly one module-level unsafe-code prohibition")
 
     return errors
 

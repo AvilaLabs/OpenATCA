@@ -342,12 +342,15 @@ authors.workspace = true
 [package.metadata.openatca]
 class = "{class_name}"
 [lib]
-crate-type = ["cdylib", "staticlib"]
+crate-type = ["cdylib", "staticlib", "rlib"]
 [dependencies]
 oa-geo = {{ path = "../oa-geo" }}
 oa-ieee = {{ path = "../oa-ieee" }}
 oa-math = {{ path = "../oa-math" }}
 oa-sha256 = {{ path = "../oa-sha256" }}
+oa-csv = {{ path = "../oa-csv" }}
+oa-json = {{ path = "../oa-json" }}
+oa-xml = {{ path = "../oa-xml" }}
 [lints.rust]
 unsafe_code = "{unsafe_lint}"
 [lints.clippy]
@@ -359,9 +362,10 @@ indexing_slicing = "deny"
     if workspace_lints:
         with (crate / "Cargo.toml").open("a", encoding="utf-8") as stream:
             stream.write("\n[lints]\nworkspace = true\n")
-    write(crate / "src/lib.rs", "#![deny(unsafe_code)]\nmod ffi;\n")
+    write(crate / "src/lib.rs", "#![deny(unsafe_code)]\nmod ffi;\nmod text;\n")
     write(crate / "src/ffi.rs", "#![allow(unsafe_code)]\nfn boundary() {}\n")
-    for dep in ("oa-geo", "oa-ieee", "oa-math", "oa-sha256"):
+    write(crate / "src/text.rs", "#![forbid(unsafe_code)]\n")
+    for dep in ("oa-geo", "oa-ieee", "oa-math", "oa-sha256", "oa-csv", "oa-json", "oa-xml"):
         write(root / "crates" / dep / "Cargo.toml", f'[package]\nname = "{dep}"\nversion = "0.1.0"\n')
 
 
@@ -546,6 +550,41 @@ class AllocatorLayoutTests(unittest.TestCase):
             add_wasm_abi_exception(root, relative="tools/unreviewed-shell", name="unreviewed-shell")
             self.assertTrue(any("must inherit workspace lints" in error
                                 for error in gate.allocation_layout_errors(root)))
+
+    def test_core_ffi_exception_rejects_unreviewed_dependency_and_wrong_parser_path(self):
+        mutations = (
+            lambda manifest: manifest.write_text(
+                manifest.read_text(encoding="utf-8") + '\n[dependencies.oa-extra]\npath = "../oa-extra"\n',
+                encoding="utf-8"),
+            lambda manifest: manifest.write_text(
+                manifest.read_text(encoding="utf-8").replace(
+                    'oa-json = { path = "../oa-json" }',
+                    'oa-json = { path = "../oa-wrong" }'),
+                encoding="utf-8"),
+        )
+        for mutate in mutations:
+            with self.subTest(mutate=mutate), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                layout_tree(root)
+                add_core_ffi_exception(root)
+                mutate(root / "crates/openatca-core-ffi/Cargo.toml")
+                self.assertTrue(gate.allocation_layout_errors(root))
+
+    def test_core_ffi_exception_rejects_unreviewed_crate_type_and_source(self):
+        mutations = (
+            lambda crate: (crate / "Cargo.toml").write_text(
+                (crate / "Cargo.toml").read_text(encoding="utf-8").replace(
+                    '"rlib"]', '"rlib", "dylib"]'), encoding="utf-8"),
+            lambda crate: write(crate / "src/unreviewed.rs", "pub fn extra() {}\n"),
+            lambda crate: (crate / "src/text.rs").unlink(),
+        )
+        for mutate in mutations:
+            with self.subTest(mutate=mutate), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                layout_tree(root)
+                add_core_ffi_exception(root)
+                mutate(root / "crates/openatca-core-ffi")
+                self.assertTrue(gate.allocation_layout_errors(root))
 
     def test_presentation_exception_rejects_sibling_path_name_and_class_spoofs(self):
         cases = (
