@@ -1203,6 +1203,28 @@ mod transaction_tests {
             .contains("reconstruct"));
     }
 
+    // REQ: OA-REG-018
+    #[test]
+    fn clock_regression_refuses_the_frame_and_poisons_publication() {
+        let mut engine = runtime();
+        let receipt = |time_ns| ReceiptBatch {
+            receipt_ns: time_ns,
+            source_clock_regressions: 0,
+            events: Vec::new(),
+        };
+        regional_step(&mut engine, &receipt(1_000_000_000)).unwrap();
+
+        let error = regional_step(&mut engine, &receipt(1_000_000_000)).unwrap_err();
+        assert!(error.contains("frame gap"), "{error}");
+        assert!(engine.failed);
+        assert!(regional_pixels(&engine)
+            .unwrap_err()
+            .contains("no publishable frame"));
+        assert!(regional_step(&mut engine, &receipt(2_000_000_000))
+            .unwrap_err()
+            .contains("reconstruct"));
+    }
+
     // REQ: OA-REG-004
     #[test]
     fn recorded_profile_is_separate_and_stays_within_predeclared_bounds() {
