@@ -20,6 +20,57 @@ fn accepts_full_gufi_address_and_normalized_position() {
     ));
 }
 
+// REQ: OA-REG-024
+#[test]
+fn v2_preserves_native_adsb_source_quality_without_upgrading_it_to_reliability() {
+    let row = "v2\t1000000000\t900000000\t1\tSURVEILLANCE\t00000000000000000000000000000385\tABC123\tZAU1\tPOS\t410000000\t-870000000\t35000\t180000\t0\t0\t0\t0\t2\t8\t9\t4\t2\t1\t2\t1\t1\t0\t1200\t4C494E4530313233";
+    let event = parse_event_line(row).expect("bounded v2 position parses");
+    let EventKind::PositionV2 { evidence, .. } = event.kind else {
+        panic!("v2 position retains source evidence");
+    };
+    assert_eq!(evidence.source_type, 0);
+    assert_eq!(evidence.category, 0);
+    assert_eq!(evidence.version, 2);
+    assert_eq!(evidence.nic, 8);
+    assert_eq!(evidence.nac_p, 9);
+    assert_eq!(evidence.nac_v, 4);
+    assert_eq!(evidence.sil, 2);
+    assert_eq!(evidence.sil_type, 1);
+    assert_eq!(evidence.sda, 2);
+    assert_eq!(evidence.gva, 1);
+    assert_eq!(evidence.nic_baro, 1);
+    assert_eq!(evidence.row_flags, 0);
+    assert_eq!(evidence.squawk, 1200);
+    assert_eq!(evidence.callsign, *b"LINE0123");
+    let unknowns = row.replace(
+        "\t1\t0\t1200\t4C494E4530313233",
+        "\t-\t-\t-\t0000000000000000",
+    );
+    let event = parse_event_line(&unknowns).expect("absent quality is explicit");
+    let EventKind::PositionV2 { evidence, .. } = event.kind else {
+        panic!("v2 position retains absent-value sentinels");
+    };
+    assert_eq!(evidence.nic_baro, u8::MAX);
+    assert_eq!(evidence.row_flags, u8::MAX);
+    assert_eq!(evidence.squawk, u16::MAX);
+    assert_eq!(evidence.callsign, [0; 8]);
+    assert!(matches!(
+        parse_event_line(&row.replace("\t8\t9\t4", "\t8\t12\t4")),
+        Err(InputError::InvalidInteger)
+    ));
+    assert!(matches!(
+        parse_event_line(&row.replace("\t1200\t", "\t1280\t")),
+        Err(InputError::InvalidInteger)
+    ));
+    assert!(matches!(
+        parse_event_line(POSITION).unwrap().kind,
+        EventKind::Position { .. }
+    ));
+    let serialized = oa_regional_session::recordings::serialize_recorded_events(&[event])
+        .expect("v2 source evidence serializes losslessly");
+    assert_eq!(serialized, format!("OA-RS\t2\n{unknowns}\n"));
+}
+
 #[test]
 fn rejects_future_source_time_and_invalid_full_identity() {
     let future = POSITION.replace("900000000", "1000000001");

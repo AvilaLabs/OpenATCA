@@ -19,6 +19,7 @@ use oa_quarantine::{
     QuarantineQueue, ReasonFlags, SourceStats, REASON_INPUT_INVALID, REASON_RESOURCE_LIMIT,
     REASON_SURVEILLANCE_INVALID,
 };
+use oa_track::surveillance_mode::{ModeAdaptation, TargetModeEvidence};
 use std::time::Instant;
 
 const DEFAULT_SESSION_NAMESPACE: u16 = 1;
@@ -161,6 +162,7 @@ pub const MAX_PERFORMANCE_ENVELOPES: usize = MAX_DRIVER_FLIGHTS;
 fn transaction_item(event: &crate::input::NormalizedEvent) -> bool {
     match event.kind {
         crate::input::EventKind::Position { .. }
+        | crate::input::EventKind::PositionV2 { .. }
         | crate::input::EventKind::Flight(_)
         | crate::input::EventKind::FiledRoute { .. }
         | crate::input::EventKind::ActiveCursor { .. } => true,
@@ -322,6 +324,8 @@ fn surveillance_refusal_reason(error: surveillance::SurveillanceStageError) -> O
         surveillance::SurveillanceStageError::BarometricEvidenceCapacity => {
             Some(REASON_RESOURCE_LIMIT)
         }
+        surveillance::SurveillanceStageError::SourceEvidenceCapacity => Some(REASON_RESOURCE_LIMIT),
+        surveillance::SurveillanceStageError::InvalidSourceEvidence => Some(REASON_INPUT_INVALID),
         surveillance::SurveillanceStageError::WrongSourceKind
         | surveillance::SurveillanceStageError::InvalidPosition => {
             Some(REASON_SURVEILLANCE_INVALID)
@@ -507,6 +511,7 @@ fn execute(
     runtime: &mut RegionalRuntime,
     batch: &ReceiptBatch,
     performance: Option<&[PerformanceEnvelope]>,
+    surveillance_mode: Option<(ModeAdaptation, &[TargetModeEvidence])>,
 ) -> Result<RegionalFrame, String> {
     if batch.events.len() > MAX_EVENTS_PER_RECEIPT
         || batch
@@ -671,7 +676,12 @@ fn execute(
     }
     // Flight ownership presentation currently requires an explicitly selected flight. Per-flight
     // snapshots below preserve every owner; no arbitrary 'first' flight is promoted to selection.
-    let mut surveillance = surveillance::surveillance_finish(&mut runtime.surveillance, None)?;
+    let mut surveillance = surveillance::surveillance_finish_with_mode(
+        &mut runtime.surveillance,
+        None,
+        surveillance_mode.map(|(adaptation, _)| adaptation),
+        surveillance_mode.map_or(&[], |(_, evidence)| evidence),
+    )?;
     if runtime.profile.surveillance.render_scope {
         surveillance.frame_sha256 = surveillance::surveillance_present_controls(
             &mut runtime.surveillance,
@@ -815,7 +825,21 @@ pub fn regional_step(
     runtime: &mut RegionalRuntime,
     batch: &ReceiptBatch,
 ) -> Result<RegionalFrame, String> {
-    regional_step_inner(runtime, batch, None)
+    regional_step_inner(runtime, batch, None, None)
+}
+
+/// Apply one explicit facility mode adaptation to this receipt. Per-target source, reliability,
+/// ISR, flight-level, and FLAT claims must be caller supplied in exact-address order and at the
+/// receipt epoch. Missing evidence remains unknown; tracker output is mixed-source and cannot
+/// supply these claims. This selects a policy result and presentation only; the independent CA
+/// engine retains its configured conservative thresholds.
+pub fn regional_step_with_surveillance_mode(
+    runtime: &mut RegionalRuntime,
+    batch: &ReceiptBatch,
+    adaptation: ModeAdaptation,
+    target_evidence: &[TargetModeEvidence],
+) -> Result<RegionalFrame, String> {
+    regional_step_inner(runtime, batch, None, Some((adaptation, target_evidence)))
 }
 
 /// Opt in to vertical reachability for this receipt using only the caller-supplied, full-key
@@ -835,18 +859,19 @@ pub fn regional_step_with_performance(
             MAX_PERFORMANCE_ENVELOPES
         ));
     }
-    regional_step_inner(runtime, batch, Some(performance))
+    regional_step_inner(runtime, batch, Some(performance), None)
 }
 
 fn regional_step_inner(
     runtime: &mut RegionalRuntime,
     batch: &ReceiptBatch,
     performance: Option<&[PerformanceEnvelope]>,
+    surveillance_mode: Option<(ModeAdaptation, &[TargetModeEvidence])>,
 ) -> Result<RegionalFrame, String> {
     if runtime.failed {
         return Err("session failed; reconstruct from the admitted input prefix".into());
     }
-    match execute(runtime, batch, performance) {
+    match execute(runtime, batch, performance, surveillance_mode) {
         Ok(frame) => Ok(frame),
         Err(error) => {
             runtime.failed = true;
@@ -1078,6 +1103,179 @@ mod transaction_tests {
             },
         )
         .unwrap()
+    }
+
+    // REQ: OA-REG-023
+    #[test]
+    fn regional_mode_call_uses_unknown_sensor_fallback_and_emits_fusion_symbol_choice() {
+        let mut engine = runtime();
+        let adaptation = ModeAdaptation {
+            mode: oa_track::surveillance_mode::SurveillanceMode::TerminalFusion,
+            radar_class: oa_track::surveillance_mode::RadarClass::AsrOrDtas,
+            preferred_radar_lat_e7: 0,
+            preferred_radar_lon_e7: 0,
+            has_preferred_radar: 0,
+            track_based_display: 0,
+            area_3nm_adapted: 0,
+            map_3nm_visible: 0,
+        };
+        let mut last = None;
+        for sequence in 1..=5 {
+            let receipt_ns = i64::from(sequence) * surveillance::SECOND_NS;
+            let source_ns = receipt_ns - 100_000_000;
+            let line = format!(
+                "v1\t{source_ns}\t{receipt_ns}\t{sequence}\tSURVEILLANCE\t00000000000000000000000000000001\tABC123\tZAU1\tPOS\t410000000\t-870000000\t35000\t0\t0\t0"
+            );
+            let event = parse_event_line(&line).expect("bounded synthetic position");
+            last = Some(
+                regional_step_with_surveillance_mode(
+                    &mut engine,
+                    &ReceiptBatch {
+                        receipt_ns,
+                        source_clock_regressions: 0,
+                        events: vec![event],
+                    },
+                    adaptation,
+                    &[],
+                )
+                .expect("mode-selected receipt"),
+            );
+        }
+        let decision = last
+            .expect("at least one receipt")
+            .surveillance
+            .mode_decisions
+            .into_iter()
+            .find(|row| row.address == 0x00ab_c123)
+            .expect("confirmed track gets a mode result");
+        assert_eq!(decision.evidence_present, 0);
+        assert_eq!(
+            decision.source,
+            oa_track::surveillance_mode::TargetSource::Unknown
+        );
+        assert_eq!(
+            decision.reliability,
+            oa_track::surveillance_mode::ReliabilityEvidence::Unknown
+        );
+        assert_eq!(
+            decision.isr,
+            oa_track::surveillance_mode::IsrEvidence::Unknown
+        );
+        assert_eq!(decision.refusal, 0);
+        assert_eq!(decision.result.minimum_nm, 5);
+        assert_eq!(decision.result.three_nm_symbol, 0);
+        assert_eq!(decision.result.fusion_solid_circle, 0);
+        assert_eq!(decision.result.separation_eligible, 1);
+
+        let receipt_ns = 6 * surveillance::SECOND_NS;
+        let event = parse_event_line(&format!(
+            "v1\t{}\t{receipt_ns}\t6\tSURVEILLANCE\t00000000000000000000000000000001\tABC123\tZAU1\tPOS\t410000000\t-870000000\t35000\t0\t0\t0",
+            receipt_ns - 100_000_000
+        ))
+        .expect("bounded synthetic position");
+        let evidence = [TargetModeEvidence {
+            address: 0x00ab_c123,
+            state_ns: receipt_ns,
+            flight_level_hundreds: i16::MIN,
+            source: oa_track::surveillance_mode::TargetSource::Radar,
+            reliability: oa_track::surveillance_mode::ReliabilityEvidence::Reliable,
+            isr: oa_track::surveillance_mode::IsrEvidence::Clear,
+            controller_initiated_coast: 0,
+        }];
+        let selected = regional_step_with_surveillance_mode(
+            &mut engine,
+            &ReceiptBatch {
+                receipt_ns,
+                source_clock_regressions: 0,
+                events: vec![event],
+            },
+            adaptation,
+            &evidence,
+        )
+        .expect("explicit caller evidence");
+        let decision = selected
+            .surveillance
+            .mode_decisions
+            .into_iter()
+            .find(|row| row.address == 0x00ab_c123)
+            .expect("current target has a mode result");
+        assert_eq!(decision.evidence_present, 1);
+        assert_eq!(decision.refusal, 0);
+        assert_eq!(decision.result.minimum_nm, 3);
+        assert_eq!(decision.result.fusion_solid_circle, 1);
+        assert_eq!(decision.result.three_nm_symbol, 1);
+        assert_eq!(decision.result.flat_aided, 0);
+        assert_eq!(decision.flight_plan_aided, 0);
+    }
+
+    // REQ: OA-REG-024
+    #[test]
+    fn v2_adsb_provenance_reaches_mode_result_but_does_not_claim_reliability() {
+        let mut engine = runtime();
+        let adaptation = ModeAdaptation {
+            mode: oa_track::surveillance_mode::SurveillanceMode::TerminalFusion,
+            radar_class: oa_track::surveillance_mode::RadarClass::AsrOrDtas,
+            preferred_radar_lat_e7: 0,
+            preferred_radar_lon_e7: 0,
+            has_preferred_radar: 0,
+            track_based_display: 0,
+            area_3nm_adapted: 0,
+            map_3nm_visible: 0,
+        };
+        let mut last = None;
+        for sequence in 1..=5 {
+            let receipt_ns = i64::from(sequence) * surveillance::SECOND_NS;
+            let source_ns = receipt_ns - 100_000_000;
+            let line = format!(
+                "v2\t{receipt_ns}\t{source_ns}\t{sequence}\tSURVEILLANCE\t00000000000000000000000000000001\tABC123\tZAU1\tPOS\t410000000\t-870000000\t35000\t0\t0\t0\t0\t0\t2\t8\t9\t4\t2\t1\t2\t1\t1\t0\t1200\t0000000000000000"
+            );
+            let event = parse_event_line(&line).expect("bounded v2 synthetic ADS-B row");
+            last = Some(
+                regional_step_with_surveillance_mode(
+                    &mut engine,
+                    &ReceiptBatch {
+                        receipt_ns,
+                        source_clock_regressions: 0,
+                        events: vec![event],
+                    },
+                    adaptation,
+                    &[],
+                )
+                .expect("mode-selected receipt"),
+            );
+        }
+        let decision = last
+            .expect("at least one receipt")
+            .surveillance
+            .mode_decisions
+            .into_iter()
+            .find(|row| row.address == 0x00ab_c123)
+            .expect("confirmed track gets a mode result");
+        assert_eq!(decision.evidence_present, 1);
+        assert_eq!(
+            decision.source,
+            oa_track::surveillance_mode::TargetSource::AdsB
+        );
+        assert_eq!(
+            decision.reliability,
+            oa_track::surveillance_mode::ReliabilityEvidence::Unknown
+        );
+        assert_eq!(
+            decision.isr,
+            oa_track::surveillance_mode::IsrEvidence::Unknown
+        );
+        assert_eq!(decision.adsb_source_ns, 4_900_000_000);
+        assert_eq!(decision.adsb_event_sequence, 5);
+        assert_eq!(decision.adsb_evidence_present, 1);
+        assert_eq!(decision.adsb_evidence.source_type, 0);
+        assert_eq!(decision.adsb_evidence.category, 0);
+        assert_eq!(decision.adsb_evidence.version, 2);
+        assert_eq!(decision.adsb_evidence.nic, 8);
+        assert_eq!(decision.adsb_evidence.nac_p, 9);
+        assert_eq!(decision.adsb_evidence.squawk, 1200);
+        assert_eq!(decision.adsb_evidence.callsign, [0; 8]);
+        assert_eq!(decision.result.minimum_nm, 5);
+        assert_eq!(decision.result.fusion_solid_circle, 0);
     }
 
     // REQ: OA-REG-018

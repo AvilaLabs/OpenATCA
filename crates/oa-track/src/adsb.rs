@@ -102,6 +102,26 @@ pub struct AdsbStats {
 /// Measurements of `reports`, in time order (ties by input order), and what was removed. The
 /// per-aircraft carried quality values follow time order, as in oa-truth.
 pub fn adsb_measurements(reports: &Reports, cfg: &AdsbConfig) -> (Vec<Measurement>, AdsbStats) {
+    let (measurements, _, stats) = adsb_measurements_inner(reports, cfg, false);
+    (measurements, stats)
+}
+
+/// Same quality-gated measurements as [`adsb_measurements`], with parallel original-row indices.
+/// `source_row_indices[i]` identifies the exact row that supplied `measurements[i]` in the
+/// caller's immutable `Reports`; it avoids ambiguous address/time/coordinate re-matching when
+/// distinct same-time reports carry different source-quality fields.
+pub fn adsb_measurements_with_indices(
+    reports: &Reports,
+    cfg: &AdsbConfig,
+) -> (Vec<Measurement>, Vec<usize>, AdsbStats) {
+    adsb_measurements_inner(reports, cfg, true)
+}
+
+fn adsb_measurements_inner(
+    reports: &Reports,
+    cfg: &AdsbConfig,
+    capture_indices: bool,
+) -> (Vec<Measurement>, Vec<usize>, AdsbStats) {
     let n = reports_len(reports);
     let mut order: Vec<(i64, u32)> = Vec::with_capacity(n);
     for (i, &t) in reports.time_ns.iter().enumerate() {
@@ -114,6 +134,11 @@ pub fn adsb_measurements(reports: &Reports, cfg: &AdsbConfig) -> (Vec<Measuremen
     };
     let mut quality: BTreeMap<u32, QualityState> = BTreeMap::new();
     let mut out = Vec::with_capacity(n);
+    let mut source_indices = if capture_indices {
+        Vec::with_capacity(n)
+    } else {
+        Vec::new()
+    };
     for &(t, i) in &order {
         let Some(row) = reports_row(reports, i as usize) else {
             if let Some(c) = stats.removed.first_mut() {
@@ -204,6 +229,9 @@ pub fn adsb_measurements(reports: &Reports, cfg: &AdsbConfig) -> (Vec<Measuremen
         }
         stats.passed += 1;
         out.push(m);
+        if capture_indices {
+            source_indices.push(i as usize);
+        }
     }
-    (out, stats)
+    (out, source_indices, stats)
 }

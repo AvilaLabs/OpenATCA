@@ -30,8 +30,9 @@ use oa_display::core::scene::{
 };
 use oa_display::core::text::{text_clipped, text_new, text_push_dec, text_push_str, text_str};
 use oa_display::core::traffic::{
-    build_traffic, caps_add, targets_clear, targets_malformed, targets_new, targets_refused,
-    traffic_caps, TargetSet, TrafficStats, TrafficStyle, LAYER_BLOCK, MAX_TARGET_SYMBOL_RADIUS_PX,
+    build_traffic, caps_add, targets_apply_mode_flags, targets_clear, targets_malformed,
+    targets_new, targets_refused, traffic_caps, TargetSet, TrafficStats, TrafficStyle, LAYER_BLOCK,
+    MAX_TARGET_SYMBOL_RADIUS_PX,
 };
 use oa_safety::inhibit::InhibitTable;
 use oa_safety::net::StateTable;
@@ -430,8 +431,26 @@ pub fn replay_build_with_overlays(
     safety: Option<&ReplaySafety<'_>>,
     ownership: Option<&OwnershipStatus>,
 ) -> Result<FrameInfo, ReplayError> {
+    replay_build_with_mode_overlays(r, store, calls, t_ns, stamp, safety, ownership, &[])
+}
+
+/// Builds the usual scope frame and applies caller-selected mode flags to matching displayed
+/// targets before drawing. The overlay is bounded by the target set and must be sorted by address;
+/// absent addresses are valid because off-map targets are not inserted into the display set.
+pub fn replay_build_with_mode_overlays(
+    r: &mut Replay,
+    store: &RowStore,
+    calls: &Callsigns,
+    t_ns: i64,
+    stamp: &str,
+    safety: Option<&ReplaySafety<'_>>,
+    ownership: Option<&OwnershipStatus>,
+    mode_flags: &[(u32, u8)],
+) -> Result<FrameInfo, ReplayError> {
     targets_clear(&mut r.set);
     let convert = targets_at(store, calls, t_ns, &r.cfg.convert, &r.view.proj, &mut r.set);
+    targets_apply_mode_flags(&mut r.set, mode_flags)
+        .map_err(|_| ReplayError::Config(RowsError::Config("invalid surveillance mode overlay")))?;
     let scene = build_scene(&mut r.list, &r.model, &r.index, &r.view, &mut r.scratch)?;
     let traffic = build_traffic(&mut r.list, &r.view.proj, &r.ell, &r.set, &r.cfg.style)?;
     if let Some(s) = safety {

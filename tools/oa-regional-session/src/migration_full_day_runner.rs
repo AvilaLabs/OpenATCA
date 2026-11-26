@@ -315,6 +315,11 @@ impl FullDayRunner {
                     latitude_e7,
                     longitude_e7,
                     ..
+                }
+                | EventKind::PositionV2 {
+                    latitude_e7,
+                    longitude_e7,
+                    ..
                 } => {
                     self.counts.spatial_positions_seen = self
                         .counts
@@ -476,7 +481,10 @@ impl FullDayRunner {
                 .prior_source_ns
                 .get_mut(source_ix)
                 .ok_or("prior source time index invariant")? = Some(event.source_ns);
-            if let EventKind::Position { .. } = event.kind {
+            if matches!(
+                event.kind,
+                EventKind::Position { .. } | EventKind::PositionV2 { .. }
+            ) {
                 self.note_position_availability(event, original_receive_ns)?;
             }
             events.push(event);
