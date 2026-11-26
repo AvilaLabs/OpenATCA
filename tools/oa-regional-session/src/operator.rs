@@ -2,7 +2,7 @@
 //! cutoffs; command receipt times are the next recorded cutoff, never a live-clock assertion.
 
 use crate::input::{
-    row_matches_stream_version, stream_row_version, EventKind, Identity, NormalizedEvent,
+    row_version_conflicts_with_stream, stream_row_version, EventKind, Identity, NormalizedEvent,
     OperatorCommand, SourceKind, MAX_EVENT_LINE_BYTES,
 };
 use crate::runtime::{
@@ -296,7 +296,7 @@ pub fn parse_recording(bytes: &[u8]) -> Result<Vec<RecordedBatch>, String> {
         if line.len() > MAX_EVENT_LINE_BYTES {
             return Err("recording event row exceeds input line limit".into());
         }
-        if !row_matches_stream_version(line, row_version) {
+        if row_version_conflicts_with_stream(line, row_version) {
             return Err("OA-RS row version does not match stream header".into());
         }
         ordinal = ordinal.checked_add(1).ok_or("recording ordinal overflow")?;

@@ -7,7 +7,7 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 use oa_regional_session::{
-    flush_receipt_group, parse_event_line, push_event, row_matches_stream_version,
+    flush_receipt_group, parse_event_line, push_event, row_version_conflicts_with_stream,
     session_cursor_new_with_limit, session_total_events, stream_row_version, summarize_input_batch,
     FrameEvidence, InputError, MAX_EVENT_LINE_BYTES, MAX_RECORDED_PROFILE_EVENTS,
     MAX_SESSION_EVENTS,
@@ -397,7 +397,7 @@ fn parse_input_with_limit(bytes: &[u8], max_events: usize) -> Result<Vec<FrameEv
                 accounting,
             });
         }
-        if !row_matches_stream_version(line, row_version) {
+        if row_version_conflicts_with_stream(line, row_version) {
             let accounting = row_failure_accounting(&cursor, lines)?;
             return Err(CliError::BadLine {
                 line: line_number,

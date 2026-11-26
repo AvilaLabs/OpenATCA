@@ -18,10 +18,12 @@ pub fn stream_row_version(header: &str) -> Option<&'static str> {
     }
 }
 
-/// A stream header and every row must agree; v2-only operations cannot be smuggled into v1.
-pub fn row_matches_stream_version(line: &str, version: &str) -> bool {
-    line.split_once('\t')
-        .is_some_and(|(row_version, _)| row_version == version)
+/// Rejects a known v1/v2 row whose version conflicts with the stream header.
+/// Malformed prefixes remain the row parser's responsibility for stable error accounting.
+pub fn row_version_conflicts_with_stream(line: &str, version: &str) -> bool {
+    line.split_once('\t').is_some_and(|(row_version, _)| {
+        matches!(row_version, "v1" | "v2") && row_version != version
+    })
 }
 /// Maximum route fixes carried by one normalized route event.
 pub const MAX_ROUTE_FIXES: usize = 16;

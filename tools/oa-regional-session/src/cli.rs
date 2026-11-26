@@ -10,7 +10,7 @@ use crate::runtime::{
 };
 use crate::surveillance::{SurveillanceConfig, FRAME_HEIGHT, FRAME_WIDTH, MAX_FRAMES};
 use crate::{
-    flush_receipt_group, parse_event_line, push_event, row_matches_stream_version,
+    flush_receipt_group, parse_event_line, push_event, row_version_conflicts_with_stream,
     session_cursor_new_with_limit, stream_row_version,
 };
 use oa_airspace::core::model::{self, Model};
@@ -272,7 +272,7 @@ pub fn run_session_with_profile_options_and_quarantine_release(
         .map_err(|error| format!("session profile event capacity: {error:?}"))?;
     let mut batches = Vec::with_capacity(MAX_FRAMES);
     for row in rows.filter(|line| !line.is_empty()) {
-        if !row_matches_stream_version(row, row_version) {
+        if row_version_conflicts_with_stream(row, row_version) {
             return Err("OA-RS row version does not match stream header".into());
         }
         let event = parse_event_line(row).map_err(|e| format!("input: {e:?}"))?;
