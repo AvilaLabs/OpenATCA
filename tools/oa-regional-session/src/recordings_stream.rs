@@ -1117,8 +1117,7 @@ mod tests {
         adsb_frame.adsb_rows_dropped = 3;
         adsb_frame.adsb_quality_removed = [1; 13];
         for _ in 0..4_200 {
-            add_adapter_loss_counts(&mut aggregate, &adsb_frame)
-                .expect("aggregate source counters without overflow");
+            assert!(add_adapter_loss_counts(&mut aggregate, &adsb_frame).is_ok());
         }
         let mut sfdps_frame = crate::recordings::zero_recorded_adapter_counts();
         sfdps_frame.frames_sfdps = 1;
@@ -1126,8 +1125,7 @@ mod tests {
         sfdps_frame.sfdps_rows_no_operations = 1;
         sfdps_frame.unsupported_operations.fill(1);
         for _ in 0..66_475 {
-            add_adapter_loss_counts(&mut aggregate, &sfdps_frame)
-                .expect("aggregate source counters without overflow");
+            assert!(add_adapter_loss_counts(&mut aggregate, &sfdps_frame).is_ok());
         }
         assert_eq!(aggregate.adsb_frames, 4_200);
         assert_eq!(aggregate.adsb_rows_in, 5_157_600);
