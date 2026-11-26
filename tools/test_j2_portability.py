@@ -289,5 +289,67 @@ class SyntheticPortabilityTests(unittest.TestCase):
         with self.assertRaisesRegex(j2.DrillError, "differs from the executed binary"):
             j2.require_executable_digest_matches({"executable_sha256": "b" * 64}, measured)
 
+    def test_fresh_cargo_artifact_must_match_the_exact_binary_target(self) -> None:
+        clone = self.root / "fresh-clone"
+        manifest_dir = clone / "tools" / "oa-regional-session"
+        source = manifest_dir / "src" / "main.rs"
+        target = clone / "target"
+        source.parent.mkdir(parents=True)
+        (manifest_dir / "Cargo.toml").write_text("[package]\nname='oa-regional-session'\n", encoding="utf-8")
+        source.write_text("// synthetic source path\n", encoding="utf-8")
+        message = {
+            "reason": "compiler-artifact",
+            "package_id": f"path+{manifest_dir.resolve().as_uri()}#0.0.1",
+            "manifest_path": str((manifest_dir / "Cargo.toml").resolve()),
+            "target": {"name": "oa-regional-session", "kind": ["bin"], "src_path": str(source.resolve())},
+            "fresh": False,
+            "executable": str(target / "debug" / "oa-regional-session"),
+            "filenames": [str(target / "debug" / "oa-regional-session")],
+        }
+        binary = j2.cold_cargo_executable((json.dumps(message) + "\n").encode(), clone, target)
+        self.assertEqual(binary, target / "debug" / "oa-regional-session")
+        wrong = dict(message)
+        wrong["manifest_path"] = "/other/Cargo.toml"
+        with self.assertRaisesRegex(j2.DrillError, "unexpected manifest"):
+            j2.cold_cargo_executable((json.dumps(wrong) + "\n").encode(), clone, target)
+
+    def test_hardlinked_cargo_output_copies_to_verified_single_link_executable(self) -> None:
+        target = self.root / "target"
+        binary = target / "debug" / "oa-regional-session"
+        peer = target / "debug" / "deps" / "oa_regional_session-deadbeefcafefeed"
+        binary.parent.mkdir(parents=True)
+        peer.parent.mkdir()
+        content = b"synthetic compiled executable bytes"
+        binary.write_bytes(content)
+        binary.chmod(0o700)
+        peer.hardlink_to(binary)
+        copied = target / "debug" / ".j2-replay" / "oa-regional-session"
+        receipt = j2.copy_fresh_cargo_executable(binary, copied, binary, target)
+        self.assertEqual(copied.read_bytes(), content)
+        self.assertEqual(copied.stat().st_nlink, 1)
+        self.assertEqual(receipt["source_hardlinks"], 2)
+        self.assertEqual(receipt["sha256"], sha(content))
+
+    def test_cargo_copy_refuses_wrong_path_symlink_and_unlisted_extra_link(self) -> None:
+        target = self.root / "target"
+        debug = target / "debug"
+        debug.mkdir(parents=True)
+        expected = debug / "oa-regional-session"
+        real = debug / "real-executable"
+        real.write_bytes(b"synthetic executable")
+        real.chmod(0o700)
+        expected.symlink_to(real)
+        destination = debug / ".j2-replay" / "oa-regional-session"
+        with self.assertRaisesRegex(j2.DrillError, "exact cold Cargo artifact"):
+            j2.copy_fresh_cargo_executable(real, destination, expected, target)
+        with self.assertRaisesRegex(j2.DrillError, "non-symlink"):
+            j2.copy_fresh_cargo_executable(expected, destination, expected, target)
+        expected.unlink()
+        expected.hardlink_to(real)
+        (debug / "extra-link").hardlink_to(real)
+        (debug / "extra-link-2").hardlink_to(real)
+        with self.assertRaisesRegex(j2.DrillError, "unexpected hardlink count"):
+            j2.copy_fresh_cargo_executable(expected, destination, expected, target)
+
 if __name__ == "__main__":
     unittest.main()

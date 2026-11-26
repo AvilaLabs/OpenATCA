@@ -31,6 +31,7 @@ MAX_RUN_MANIFEST_BYTES = 64 * 1024 * 1024
 MAX_TOTAL_BUNDLE_BYTES = 2 * 1024 * 1024 * 1024
 MAX_MANIFEST_BYTES = 1024 * 1024
 MAX_BUILD_RECEIPT_BYTES = 64 * 1024
+MAX_COLD_EXECUTABLE_BYTES = 512 * 1024 * 1024
 CHUNK_BYTES = 64 * 1024
 HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 HEX40 = re.compile(r"[0-9a-f]{40}\Z")
@@ -558,6 +559,183 @@ def require_executable_digest_matches(manifest_fields: dict[str, str], binary_sh
         raise DrillError("regional run manifest executable digest differs from the executed binary")
 
 
+def cold_cargo_executable(build_stdout: bytes, clone: Path, target_dir: Path) -> Path:
+    """Pin the one fresh Cargo executable emitted by the fixed cold-build command."""
+    expected = target_dir / "debug" / "oa-regional-session"
+    manifest_dir = clone / "tools" / "oa-regional-session"
+    expected_manifest = manifest_dir / "Cargo.toml"
+    expected_src = manifest_dir / "src" / "main.rs"
+    matches: list[Path] = []
+    try:
+        lines = build_stdout.decode("utf-8").splitlines()
+        for line in lines:
+            if not line:
+                continue
+            message = json.loads(line)
+            if not isinstance(message, dict) or message.get("reason") != "compiler-artifact":
+                continue
+            target = message.get("target")
+            if not isinstance(target, dict) or target.get("name") != "oa-regional-session":
+                continue
+            if message.get("manifest_path") != str(expected_manifest.resolve(strict=True)):
+                raise DrillError("Cargo emitted the regional-session target from an unexpected manifest")
+            if target.get("kind") != ["bin"] or target.get("src_path") != str(expected_src.resolve(strict=True)):
+                raise DrillError("Cargo regional-session artifact has an unexpected target kind or source")
+            if message.get("fresh") is not False:
+                raise DrillError("Cargo regional-session executable was not freshly compiled")
+            executable = message.get("executable")
+            filenames = message.get("filenames")
+            if not isinstance(executable, str) or Path(executable) != expected:
+                raise DrillError("Cargo regional-session executable path differs from the cold target")
+            if not isinstance(filenames, list) or not all(isinstance(name, str) for name in filenames):
+                raise DrillError("Cargo regional-session artifact filenames are malformed")
+            paths = tuple(Path(name) for name in filenames)
+            if not paths or any(not path.is_absolute() or target_dir not in path.parents for path in paths):
+                raise DrillError("Cargo artifact inventory escapes the isolated target directory")
+            if expected not in paths:
+                raise DrillError("Cargo artifact inventory omits the expected executable")
+            matches.append(expected)
+    except (UnicodeDecodeError, json.JSONDecodeError, OSError, ValueError) as exc:
+        raise DrillError("Cargo artifact receipt is malformed") from exc
+    if len(matches) != 1:
+        raise DrillError("Cargo did not emit exactly one fresh regional-session executable")
+    return matches[0]
+
+
+def copy_fresh_cargo_executable(
+    source: Path,
+    destination: Path,
+    expected_source: Path,
+    target_dir: Path,
+) -> dict[str, object]:
+    """Copy only the pinned fresh Cargo executable, validating Cargo's local hardlink peer."""
+    if (source != expected_source or source != target_dir / "debug" / "oa-regional-session"
+            or destination != target_dir / "debug" / ".j2-replay" / "oa-regional-session"):
+        raise DrillError("replay executable is not the exact cold Cargo artifact")
+    created_copy = False
+    peer_fd: int | None = None
+    try:
+        GUARD.check(source)
+        if source.is_symlink() or not source.is_file():
+            raise DrillError("cold Cargo executable must be a regular non-symlink file")
+        before_path = source.lstat()
+        if not stat.S_ISREG(before_path.st_mode) or before_path.st_size <= 0 or before_path.st_size > MAX_COLD_EXECUTABLE_BYTES:
+            raise DrillError("cold Cargo executable is outside its fixed size bound")
+        if not os.access(source, os.X_OK):
+            raise DrillError("cold Cargo executable is not executable")
+        fd = os.open(source, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0))
+        digest = hashlib.sha256()
+        total = 0
+        try:
+            source_stat = os.fstat(fd)
+            if not stat.S_ISREG(source_stat.st_mode) or (source_stat.st_dev, source_stat.st_ino) != (before_path.st_dev, before_path.st_ino):
+                raise DrillError("cold Cargo executable changed before copy")
+            if (source_stat.st_size != before_path.st_size or source_stat.st_mtime_ns != before_path.st_mtime_ns
+                    or source_stat.st_nlink != before_path.st_nlink):
+                raise DrillError("cold Cargo executable changed before copy")
+            if source_stat.st_nlink == 2:
+                deps_dir = target_dir / "debug" / "deps"
+                GUARD.check(deps_dir)
+                deps_stat = deps_dir.lstat()
+                if not stat.S_ISDIR(deps_stat.st_mode) or stat.S_ISLNK(deps_stat.st_mode):
+                    raise DrillError("Cargo dependency artifact directory is not a real directory")
+                peers = []
+                for entry in os.scandir(deps_dir):
+                    if not re.fullmatch(r"oa_regional_session-[0-9a-f]{16}", entry.name):
+                        continue
+                    peer_stat = entry.stat(follow_symlinks=False)
+                    if (peer_stat.st_dev, peer_stat.st_ino) == (source_stat.st_dev, source_stat.st_ino):
+                        peers.append((Path(entry.path), peer_stat))
+                if len(peers) != 1:
+                    raise DrillError("Cargo hardlink peer was not unique inside the fresh dependency directory")
+                peer, peer_path_stat = peers[0]
+                if (not stat.S_ISREG(peer_path_stat.st_mode) or stat.S_ISLNK(peer_path_stat.st_mode)
+                        or not (peer_path_stat.st_mode & 0o111) or peer_path_stat.st_nlink != 2):
+                    raise DrillError("Cargo hardlink peer is not a single expected executable link")
+                peer_fd = os.open(peer, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0))
+                peer_open_stat = os.fstat(peer_fd)
+                if ((peer_open_stat.st_dev, peer_open_stat.st_ino) != (source_stat.st_dev, source_stat.st_ino)
+                        or peer_open_stat.st_nlink != 2 or not stat.S_ISREG(peer_open_stat.st_mode)):
+                    raise DrillError("opened Cargo hardlink peer changed or has the wrong identity")
+            elif source_stat.st_nlink != 1:
+                raise DrillError("cold Cargo executable has an unexpected hardlink count")
+            fd_path = Path(os.readlink(f"/proc/self/fd/{fd}"))
+            GUARD.check(fd_path)
+            if fd_path != source.resolve(strict=True):
+                raise DrillError("opened cold Cargo executable resolved to an unexpected path")
+            replay_dir = destination.parent
+            GUARD.check(replay_dir)
+            replay_dir.mkdir(mode=0o700, parents=False, exist_ok=False)
+            out_fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                             | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0), 0o700)
+            created_copy = True
+            try:
+                with os.fdopen(out_fd, "wb", closefd=True) as output:
+                    while True:
+                        block = os.read(fd, CHUNK_BYTES)
+                        if not block:
+                            break
+                        total += len(block)
+                        if total > MAX_COLD_EXECUTABLE_BYTES:
+                            raise DrillError("cold Cargo executable grew beyond its fixed size bound")
+                        digest.update(block)
+                        output.write(block)
+                    output.flush()
+                    os.fsync(output.fileno())
+            except BaseException:
+                destination.unlink(missing_ok=True)
+                raise
+            after_fd = os.fstat(fd)
+            after_path = source.lstat()
+            after_peer = os.fstat(peer_fd) if peer_fd is not None else None
+        finally:
+            if peer_fd is not None:
+                os.close(peer_fd)
+            os.close(fd)
+        copied_stat = destination.lstat()
+        if (total != source_stat.st_size or total != before_path.st_size
+                or (source_stat.st_dev, source_stat.st_ino) != (after_fd.st_dev, after_fd.st_ino)
+                or source_stat.st_nlink != after_fd.st_nlink
+                or source_stat.st_size != after_fd.st_size
+                or source_stat.st_mtime_ns != after_fd.st_mtime_ns
+                or (after_path.st_dev, after_path.st_ino) != (source_stat.st_dev, source_stat.st_ino)
+                or after_path.st_nlink != source_stat.st_nlink
+                or after_path.st_size != source_stat.st_size
+                or after_path.st_mtime_ns != source_stat.st_mtime_ns
+                or (after_peer is not None and ((after_peer.st_dev, after_peer.st_ino) != (source_stat.st_dev, source_stat.st_ino)
+                                                or after_peer.st_nlink != 2
+                                                or after_peer.st_size != source_stat.st_size
+                                                or after_peer.st_mtime_ns != source_stat.st_mtime_ns))
+                or not stat.S_ISREG(copied_stat.st_mode) or copied_stat.st_nlink != 1
+                or copied_stat.st_size != total or (copied_stat.st_mode & 0o111) == 0):
+            destination.unlink(missing_ok=True)
+            raise DrillError("cold Cargo executable changed or copied output failed verification")
+        copied_sha256 = digest.hexdigest()
+        try:
+            with GUARD.open_regular_read(destination, "rb") as copied:
+                copied_digest = hashlib.sha256()
+                copied_total = 0
+                while True:
+                    block = copied.read(CHUNK_BYTES)
+                    if not block:
+                        break
+                    copied_total += len(block)
+                    if copied_total > MAX_COLD_EXECUTABLE_BYTES:
+                        raise DrillError("single-link replay executable copy exceeded its fixed size bound")
+                    copied_digest.update(block)
+        except BaseException:
+            destination.unlink(missing_ok=True)
+            raise
+        if copied_total != total or copied_digest.hexdigest() != copied_sha256:
+            destination.unlink(missing_ok=True)
+            raise DrillError("single-link replay executable copy failed hash verification")
+        return {"bytes": total, "sha256": copied_sha256, "source_hardlinks": source_stat.st_nlink}
+    except (OSError, sealed_guard.SealedError) as exc:
+        if created_copy:
+            destination.unlink(missing_ok=True)
+        raise DrillError(f"cold Cargo executable copy refused: {exc}") from exc
+
+
 def reimport_bundle(bundle: Path, destination: Path) -> dict[str, object]:
     parsed, manifest = load_bundle(bundle)
     destination = require_private_path(destination, new=True)
@@ -774,11 +952,18 @@ def cold_portability_drill(source_repo: Path, bundle: Path, clone_out: Path, car
         raise DrillError(f"guarded empty-cache fresh-clone build failed with exit {build.returncode}")
     if not any(cargo_home.iterdir()) or not any(target_dir.iterdir()):
         raise DrillError("guarded build did not populate the isolated empty Cargo home and target")
-    binary = target_dir / "debug" / "oa-regional-session"
-    if not binary.is_file() or not os.access(binary, os.X_OK):
+    cargo_binary = cold_cargo_executable(build.stdout, clone_out, target_dir)
+    if not cargo_binary.is_file() or not os.access(cargo_binary, os.X_OK):
         raise DrillError("guarded build did not produce the expected regional-session executable")
+    copy_receipt = copy_fresh_cargo_executable(
+        cargo_binary,
+        target_dir / "debug" / ".j2-replay" / "oa-regional-session",
+        target_dir / "debug" / "oa-regional-session",
+        target_dir,
+    )
     os.mkdir(output, 0o700)
-    replay_result = run_replay(clone_out, binary, bundle, reimport_out, output / "replay", env)
+    replay_binary = target_dir / "debug" / ".j2-replay" / "oa-regional-session"
+    replay_result = run_replay(clone_out, replay_binary, bundle, reimport_out, output / "replay", env)
     cargo_entries, cargo_tree_sha = directory_digest(cargo_home)
     target_entries, target_tree_sha = directory_digest(target_dir)
     report = {
@@ -797,6 +982,9 @@ def cold_portability_drill(source_repo: Path, bundle: Path, clone_out: Path, car
         "frame_digest_set_sha256": replay_result["frame_digest_set_sha256"],
         "baseline_executable_sha256": replay_result["baseline_executable_sha256"],
         "executed_executable_sha256": replay_result["executed_executable_sha256"],
+        "cargo_executable_copy_bytes": copy_receipt["bytes"],
+        "cargo_executable_copy_sha256": copy_receipt["sha256"],
+        "cargo_executable_source_hardlinks": copy_receipt["source_hardlinks"],
         "cargo_home_empty_before_build": True,
         "target_empty_before_build": True,
         "cargo_home_entry_count_after_build": cargo_entries,
