@@ -248,10 +248,39 @@ class P010SyntheticGateTests(unittest.TestCase):
         self.assertEqual(result["status"], "COMPARISON_COMPLETE")
 
     def test_cross_capture_reader_still_refuses_bad_local_build_mapping(self) -> None:
-        malformed = self.cross_capture_summary("5" * 64)
-        malformed["bindings"]["build_binary_sha256"].pop(p010.BUILD_ROLES[0])
+        missing_role = self.cross_capture_summary("5" * 64)
+        missing_role["bindings"]["build_binary_sha256"].pop(p010.BUILD_ROLES[0])
         with self.assertRaises(p010.Refused):
-            p010._read_cross_capture_summary(self.write_cross_capture("bad-local-build.json", malformed))
+            p010._read_cross_capture_summary(self.write_cross_capture("missing-local-build-role.json", missing_role))
+
+    def test_cross_capture_cli_refuses_malformed_local_build_hashes(self) -> None:
+        for name, digest in (
+            ("uppercase", "E" * 64),
+            ("nonhex", "g" * 64),
+            ("short", "e" * 63),
+            ("long", "e" * 65),
+            ("wrong-type", 7),
+        ):
+            with self.subTest(name=name):
+                project = self.cross_capture_summary("5" * 64)
+                project["bindings"]["build_binary_sha256"][p010.BUILD_ROLES[0]] = digest
+                project_path = self.write_cross_capture(f"bad-build-{name}.json", project)
+                outsider_path = self.write_cross_capture(
+                    f"valid-build-{name}.json", self.cross_capture_summary("6" * 64, scale=0.0)
+                )
+                out = self.root / f"bad-build-output-{name}"
+                stdout = io.StringIO()
+                stderr = io.StringIO()
+                with mock.patch.object(p010, "_new_private_dir", side_effect=lambda path: path.mkdir(mode=0o700)):
+                    with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                        code = p010.main([
+                            "compare-captures", "--project-summary", str(project_path),
+                            "--outsider-summary", str(outsider_path), "--arm", "candidate-raw", "--out", str(out),
+                        ])
+                self.assertNotEqual(code, 0)
+                self.assertEqual(stdout.getvalue(), "")
+                self.assertIn("malformed binary hash", stderr.getvalue())
+                self.assertFalse(out.exists())
 
     def test_cross_capture_reader_refuses_private_duplicate_and_bad_accounting_fields(self) -> None:
         cases = []
