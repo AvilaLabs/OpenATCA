@@ -7274,6 +7274,8 @@ This is a bounded normalized-input composition, not facility, deadline or operat
 - **OA-REG-018** Runtime flight, route, and surveillance items are staged before accepted state mutation. Known malformed, unsupported, and bounded-capacity refusals enter class-partitioned quarantine without changing that item's accepted state; a following healthy item may commit. A rejected filed-route amendment retains a bounded full-key availability fence for as-of queries, so no older route becomes current at a cutoff after the refusal. Barometric evidence capacity is checked before tracker mutation. Unexpected internal and whole-batch finish failures still poison the runtime; quarantine timing is observational and does not preempt work.
 - **OA-REG-019** An explicitly selected recorded-replay CLI profile applies its versioned fixed capacities without changing default limits; rendered high-volume replay retains finite track, alert, pair, work, frame, and presentation bounds, and capacity exhaustion remains a refusal.
 - **OA-REG-020** A regional replay profile is persisted in settings covered by the run manifest digest. J2 export/reimport preserves those exact settings and cold replay selects only the matching known profile; absent profile metadata retains the historical default.
+- **OA-REG-021** Per-scan meter rows attach to displayed targets only when an in-crate source adapter supplies a source-qualified exact full regional flight key and address and the current unique flight table confirms both at that scan. No public caller-supplied key, callsign, address-only, `tmaId`, or unverified TBFM-GUFI equality can authorize a join. MFX and SFX pairs remain distinct; source rows, flight-bound rows, target-attached rows, unmatched rows, unbound rows, ambiguous-address rows, missing-time rows, and targets without a meter row remain visible.
+- **OA-REG-022** Per-scan source rows are bounded and sorted by unique (centre, feed identity); malformed identities, future receive times, or duplicate rows refuse before scope mutation. Only resolved target bindings are address-sorted; duplicate addresses are counted unbound rather than first-wins.
 
 ## Current alert presentation (oa-display)
 
@@ -7285,6 +7287,9 @@ This is a bounded normalized-input composition, not facility, deadline or operat
 - **OA-DSP-081** Missing STA and ETA remain absent, including when both are missing; a later supplied schedule is compared against the current supplied ETA without substituting another meter point.
 - **OA-DSP-082** Difference and aggregate-counter overflow are explicit; a counter overflow refuses the observation without changing any counter.
 - **OA-DSP-083** A meter list refuses capacities above its fixed limit and refuses a push at capacity without changing prior rows; clearing permits reuse within the same allocation.
+- **OA-DSP-084** A traffic data block may carry separate `MFX` and `SFX` meter-time lines; each line compares only the STA and ETA from that same reference and displays UTC times plus the signed `STA - ETA` value in milliseconds.
+- **OA-DSP-085** Missing STA or ETA remains visibly missing on its own reference line and does not become zero or borrow the other reference's value. A reference with both fields absent has no line.
+- **OA-DSP-086** Traffic capacity planning reserves room for both optional meter lines, and the longest supported data block is not clipped.
 
 ## Controller interaction (oa-display)
 

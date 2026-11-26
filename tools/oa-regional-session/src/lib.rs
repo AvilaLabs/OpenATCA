@@ -14,6 +14,7 @@ pub mod migration_g3;
 pub mod migration_shadow;
 pub mod migration_snapshot;
 // Pending F1 integration; must remain excluded from qualified landings until edge approval.
+pub mod metering;
 pub mod msaw_bridge;
 pub mod nam_flight;
 pub mod nam_handoff;
@@ -33,7 +34,8 @@ pub use input::{
     NormalizedEvent, RouteFixInput, SourceKind, MAX_EVENT_LINE_BYTES,
 };
 pub use runtime::{
-    regional_new_with_profile, regional_profile_limits, RegionalRunProfile,
+    regional_new_with_profile, regional_profile_limits, regional_step_with_metering,
+    RegionalRunProfile,
     DEFAULT_REGIONAL_RUN_PROFILE,
 };
 pub use session::{

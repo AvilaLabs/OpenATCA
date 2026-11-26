@@ -122,7 +122,10 @@ All of it is in the target colour (index 12). Each target also has a velocity le
 (default 1 minute of flight, none without a velocity), history dots in the dim text colour (default
 the last 5 positions) and a data block 14 px right and 30 px above the symbol: callsign (hex address
 without one), altitude in hundreds of feet and ground speed in knots over ten (`---` and `--` when
-absent), then the tags (`CST UNC CS? R95? REACQ`). Data blocks do not yet avoid one another (LS-401).
+absent), then the tags (`CST UNC CS? R95? REACQ`). Optional source-supplied meter fields follow as
+separate MFX and SFX rows; each uses only its own reference's STA and ETA, displays UTC time and
+signed `STA - ETA` milliseconds, and leaves absent fields blank. No TBFM-to-target identity is
+inferred by the display core. Data blocks do not yet avoid one another (LS-401).
 A frame allocates nothing: the data block text is written into a stack buffer, and the list's tables
 are sized once (checked by `validation/oa-alloc-check`).
 

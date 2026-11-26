@@ -36,6 +36,7 @@ fn plain(lat: i32, lon: i32) -> Target {
         r95_m: f32::NAN,
         trail: [(0, 0); MAX_TRAIL],
         trail_len: 0,
+        metering: oa_display::metering::NO_TARGET_METERING,
     }
 }
 
@@ -727,6 +728,64 @@ fn the_longest_data_block_fits_the_per_target_text_budget_and_is_never_clipped()
     assert_eq!(tx[1].0, "-99- 655");
     assert_eq!(tx[2].0, "CST UNC CS? R95? REACQ");
     assert!(l.text.len() <= 64, "{} bytes", l.text.len());
+    assert_eq!(st.text_clipped, 0);
+}
+
+// REQ: OA-DSP-084
+#[test]
+fn mfx_and_sfx_meter_lines_render_separately_with_same_point_signed_differences() {
+    let mut t = plain(ORD.0, ORD.1);
+    t.metering = oa_display::metering::TargetMetering {
+        mfx: oa_display::metering::MeterPointTimes {
+            sta_ms: Some(12 * 60 * 60 * 1_000 + 30_000),
+            eta_ms: Some(12 * 60 * 60 * 1_000),
+        },
+        sfx: oa_display::metering::MeterPointTimes {
+            sta_ms: Some(12 * 60 * 60 * 1_000),
+            eta_ms: Some(12 * 60 * 60 * 1_000 + 61_000),
+        },
+    };
+    let (l, st) = draw(&[t], &DEFAULT_STYLE);
+    let tx = texts_of(&l);
+    assert_eq!(tx[3].0, "MFX STA=12:00:30 ETA=12:00:00 DLY=+30000ms");
+    assert_eq!(tx[4].0, "SFX STA=12:00:00 ETA=12:01:01 DLY=-61000ms");
+    assert_eq!(st.text_clipped, 0);
+}
+
+// REQ: OA-DSP-085
+#[test]
+fn missing_sta_remains_blank_and_does_not_borrow_the_other_reference() {
+    let mut t = plain(ORD.0, ORD.1);
+    t.metering = oa_display::metering::TargetMetering {
+        mfx: oa_display::metering::MeterPointTimes {
+            sta_ms: None,
+            eta_ms: Some(45_000),
+        },
+        sfx: oa_display::metering::NO_METER_POINT_TIMES,
+    };
+    let (l, _) = draw(&[t], &DEFAULT_STYLE);
+    let tx = texts_of(&l);
+    assert_eq!(tx[3].0, "MFX STA=--:--:-- ETA=00:00:45 DLY=--");
+    assert_eq!(tx.len(), 4, "an absent SFX pair adds no line");
+}
+
+// REQ: OA-DSP-086
+#[test]
+fn longest_two_reference_meter_block_is_reserved_and_not_clipped() {
+    let mut t = plain(ORD.0, ORD.1);
+    t.metering = oa_display::metering::TargetMetering {
+        mfx: oa_display::metering::MeterPointTimes {
+            sta_ms: Some(i64::MAX),
+            eta_ms: Some(i64::MIN),
+        },
+        sfx: oa_display::metering::MeterPointTimes {
+            sta_ms: Some(i64::MIN),
+            eta_ms: Some(i64::MAX),
+        },
+    };
+    let (l, st) = draw(&[t], &DEFAULT_STYLE);
+    assert_eq!(texts_of(&l).len(), 5);
+    assert!(l.text.len() <= 192);
     assert_eq!(st.text_clipped, 0);
 }
 

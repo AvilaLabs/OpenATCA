@@ -26,7 +26,8 @@
 //! and a data block at a fixed offset: line 1 the callsign (the hex address without one, or with
 //! two callsigns heard for the address at one instant), line 2 the altitude in hundreds of feet
 //! and the ground speed in knots over ten (`---` or `--` when absent), line 3 the state tags
-//! above when there are any, in the order `CST UNC CS? R95? REACQ`.
+//! above when there are any, in the order `CST UNC CS? R95? REACQ`, followed by optional separate
+//! MFX and SFX rows with same-reference STA/ETA values.
 //!
 //! Data blocks are placed at one fixed offset from the symbol.
 // TODO(LS-401): automatic data block placement without overlap in holding and on final (M8);
@@ -51,6 +52,7 @@ use crate::core::list::{
     check_limit, push_circle, push_line, push_rect, push_text, DisplayError, DisplayList, ListCaps,
     ALIGN_LEFT, MAX_LIST_ROWS, MAX_LIST_TEXT_BYTES,
 };
+use crate::core::metering::{meter_fields, MeterPointTimes, TargetMetering};
 use crate::core::palette;
 use crate::core::project::{project, Projection};
 use crate::core::text::{
@@ -116,10 +118,10 @@ const NOTICE_FROM_BOTTOM: i32 = 22;
 const NOTICE_PITCH: i32 = 14;
 /// Notices a frame can carry: targets not drawn, targets malformed.
 const NOTICES: usize = 2;
-const MAX_BLOCK_LINES: usize = 3;
-/// Text bytes one target can need: line 1 at most 8 (a callsign) or 7 (a hex address), line 2 at
-/// most 8 (`999+ 655`), line 3 at most 22 (`CST UNC CS? R95? REACQ`); 37 in all, 64 allowed.
-const BYTES_PER_TARGET: usize = 64;
+const MAX_BLOCK_LINES: usize = 5;
+/// Text bytes reserved per target: 8-byte callsign, 8-byte altitude/speed line, 22-byte state line,
+/// and two 56-byte maximum UTC/signed-delay meter lines (150 bytes total, rounded up to 192).
+const BYTES_PER_TARGET: usize = 192;
 const NOTICE_BYTES: usize = 96;
 
 const fn px(n: i32) -> i32 {
@@ -185,8 +187,10 @@ pub struct Target {
     /// [`T_COAST`], [`T_UNCERTAIN`] and [`T_CS_CONFLICT`].
     pub flags: u8,
     pub trail_len: u8,
+    /// Exact same-reference MFX and SFX/arc times; absent values stay absent.
+    pub metering: TargetMetering,
 }
-const _: () = assert!(core::mem::size_of::<Target>() == 164);
+const _: () = assert!(core::mem::size_of::<Target>() == 232);
 
 /// The targets of one frame, struct-of-arrays (A3), of fixed capacity (C1, C2). Trail positions
 /// are `MAX_TRAIL` rows per target in the flat `trail_*` columns. The columns are private: the
@@ -210,6 +214,7 @@ pub struct TargetSet {
     trail_len: Vec<u8>,
     trail_lat_e7: Vec<i32>,
     trail_lon_e7: Vec<i32>,
+    metering: Vec<TargetMetering>,
 }
 
 /// Read access to the columns of a [`TargetSet`], all of one length (the number of targets), the
@@ -229,6 +234,7 @@ pub struct TargetColumns<'a> {
     pub trail_len: &'a [u8],
     pub trail_lat_e7: &'a [i32],
     pub trail_lon_e7: &'a [i32],
+    pub metering: &'a [TargetMetering],
 }
 
 /// An empty set with room for `capacity` targets; the only allocation. A capacity over
@@ -253,6 +259,7 @@ pub fn targets_new(capacity: usize) -> Result<TargetSet, DisplayError> {
         trail_len: Vec::with_capacity(capacity),
         trail_lat_e7: Vec::with_capacity(trail),
         trail_lon_e7: Vec::with_capacity(trail),
+        metering: Vec::with_capacity(capacity),
     })
 }
 
@@ -292,6 +299,7 @@ pub fn targets_columns(s: &TargetSet) -> TargetColumns<'_> {
         trail_len: &s.trail_len,
         trail_lat_e7: &s.trail_lat_e7,
         trail_lon_e7: &s.trail_lon_e7,
+        metering: &s.metering,
     }
 }
 
@@ -312,6 +320,7 @@ pub fn targets_clear(s: &mut TargetSet) {
     s.trail_len.clear();
     s.trail_lat_e7.clear();
     s.trail_lon_e7.clear();
+    s.metering.clear();
 }
 
 /// True when `lat_e7`, `lon_e7` is a position on the globe (within 90 and 180 degrees).
@@ -363,6 +372,7 @@ pub fn targets_push(s: &mut TargetSet, t: &Target) -> Result<(), TrafficError> {
     // Checked above: at most MAX_TRAIL (16).
     let n = usize::from(t.trail_len);
     s.trail_len.push(t.trail_len);
+    s.metering.push(t.metering);
     for k in 0..MAX_TRAIL {
         let (la, lo) = if k < n {
             t.trail.get(k).copied().unwrap_or((0, 0))
@@ -606,6 +616,48 @@ pub fn tags_text(b: &mut TextBuf, flags: u8, reacquired: bool, r95_unknown: bool
     }
 }
 
+fn push_utc_time(b: &mut TextBuf, value: Option<i64>) {
+    let Some(ms) = value else {
+        text_push_str(b, "--:--:--");
+        return;
+    };
+    const DAY_MS: i64 = 86_400_000;
+    let seconds = ms.rem_euclid(DAY_MS) / 1_000;
+    let hours = u64::try_from(seconds / 3_600).unwrap_or(0);
+    let minutes = u64::try_from((seconds % 3_600) / 60).unwrap_or(0);
+    let seconds = u64::try_from(seconds % 60).unwrap_or(0);
+    text_push_dec(b, hours, 2);
+    text_push_char(b, b':');
+    text_push_dec(b, minutes, 2);
+    text_push_char(b, b':');
+    text_push_dec(b, seconds, 2);
+}
+
+fn meter_line_text(b: &mut TextBuf, label: &str, times: MeterPointTimes) -> bool {
+    if times.sta_ms.is_none() && times.eta_ms.is_none() {
+        return false;
+    }
+    let fields = meter_fields(times.sta_ms, times.eta_ms);
+    text_push_str(b, label);
+    text_push_str(b, " STA=");
+    push_utc_time(b, times.sta_ms);
+    text_push_str(b, " ETA=");
+    push_utc_time(b, times.eta_ms);
+    text_push_str(b, " DLY=");
+    match fields.delay_sta_minus_eta_ms {
+        Some(delay) => {
+            text_push_char(b, if delay < 0 { b'-' } else { b'+' });
+            text_push_dec(b, delay.unsigned_abs(), 0);
+            text_push_str(b, "ms");
+        }
+        None if fields.status == crate::core::metering::MeterStatus::DifferenceOverflow => {
+            text_push_str(b, "OVERFLOW");
+        }
+        None => text_push_str(b, "--"),
+    }
+    true
+}
+
 fn add(p: (i32, i32), dx: i32, dy: i32) -> (i32, i32) {
     (p.0.saturating_add(dx), p.1.saturating_add(dy))
 }
@@ -760,6 +812,7 @@ struct Scalars {
     reacq_age: u16,
     flags: u8,
     trail_len: u8,
+    metering: TargetMetering,
 }
 
 fn scalars_at(s: &TargetSet, i: usize) -> Option<Scalars> {
@@ -775,6 +828,7 @@ fn scalars_at(s: &TargetSet, i: usize) -> Option<Scalars> {
         reacq_age: *s.reacq_age_s.get(i)?,
         flags: *s.flags.get(i)?,
         trail_len: *s.trail_len.get(i)?,
+        metering: *s.metering.get(i)?,
     })
 }
 
@@ -955,6 +1009,14 @@ pub fn build_traffic(
         text_clear(&mut tb);
         tags_text(&mut tb, t.flags, reacq, no_circle);
         block_line(l, &mut at_b, &tb, &mut stats)?;
+        text_clear(&mut tb);
+        if meter_line_text(&mut tb, "MFX", t.metering.mfx) {
+            block_line(l, &mut at_b, &tb, &mut stats)?;
+        }
+        text_clear(&mut tb);
+        if meter_line_text(&mut tb, "SFX", t.metering.sfx) {
+            block_line(l, &mut at_b, &tb, &mut stats)?;
+        }
         if conflict {
             stats.cs_conflict += 1;
         }

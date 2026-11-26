@@ -128,6 +128,7 @@ fn target() -> Target {
         r95_m: f32::NAN,
         trail: [(0, 0); MAX_TRAIL],
         trail_len: 0,
+        metering: oa_display::metering::NO_TARGET_METERING,
     }
 }
 

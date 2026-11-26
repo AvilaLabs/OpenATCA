@@ -1115,6 +1115,7 @@ impl DemoEngine {
                 reacq_age_s: NO_REACQ,
                 flags,
                 trail_len: n as u8,
+                metering: oa_display::metering::NO_TARGET_METERING,
             };
             match targets_push(&mut self.target_set, &target) {
                 Ok(()) => {}

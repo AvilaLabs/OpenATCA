@@ -8,7 +8,8 @@ use crate::core::raw::{
     raw_targets_at_with_source_stale, RawInputError, RawObservationColumns, RawStats,
 };
 use crate::core::rows::{
-    convert_check, targets_at, Callsigns, ConvertConfig, ConvertStats, RowStore, RowsError,
+    convert_check, targets_at, targets_at_with_metering, AddressMetering,
+    AddressMeteringError, Callsigns, ConvertConfig, ConvertStats, RowStore, RowsError,
 };
 use oa_airspace::core::model::Model;
 use oa_display::core::font::{text_width_units, CAP_HEIGHT};
@@ -61,6 +62,8 @@ pub enum ReplayError {
     Config(RowsError),
     /// The raw fallback input was not a bounded, ordered set of columns.
     RawInput(RawInputError),
+    /// Per-scan meter rows were not a bounded unique address-sorted set.
+    Metering(AddressMeteringError),
     /// The mandatory raw-only banner cannot fit the viewport clear of map target symbols.
     RawBannerDoesNotFit {
         width: u32,
@@ -75,6 +78,7 @@ impl fmt::Display for ReplayError {
             ReplayError::Render(e) => write!(f, "render: {e}"),
             ReplayError::Config(e) => write!(f, "configuration: {e}"),
             ReplayError::RawInput(e) => write!(f, "raw surveillance input: {e}"),
+            ReplayError::Metering(e) => write!(f, "per-scan metering input: {e}"),
             ReplayError::RawBannerDoesNotFit { width, height } => write!(
                 f,
                 "raw surveillance banner cannot fit safely in {width}x{height} viewport"
@@ -100,6 +104,12 @@ impl From<RenderError> for ReplayError {
 impl From<RawInputError> for ReplayError {
     fn from(e: RawInputError) -> Self {
         ReplayError::RawInput(e)
+    }
+}
+
+impl From<AddressMeteringError> for ReplayError {
+    fn from(e: AddressMeteringError) -> Self {
+        ReplayError::Metering(e)
     }
 }
 
@@ -430,8 +440,57 @@ pub fn replay_build_with_overlays(
     safety: Option<&ReplaySafety<'_>>,
     ownership: Option<&OwnershipStatus>,
 ) -> Result<FrameInfo, ReplayError> {
+    replay_build_internal(r, store, calls, t_ns, stamp, safety, ownership, None)
+}
+
+/// Builds a scope frame with exact-address, per-scan metering values and the optional safety and
+/// ownership overlays. Meter input must be uniquely sorted by address; malformed input refuses
+/// before any target is added. The ordinary frame path and its defaults are unchanged.
+pub fn replay_build_with_metering_and_overlays(
+    r: &mut Replay,
+    store: &RowStore,
+    calls: &Callsigns,
+    t_ns: i64,
+    stamp: &str,
+    meter_rows: &[AddressMetering],
+    safety: Option<&ReplaySafety<'_>>,
+    ownership: Option<&OwnershipStatus>,
+) -> Result<FrameInfo, ReplayError> {
+    replay_build_internal(
+        r,
+        store,
+        calls,
+        t_ns,
+        stamp,
+        safety,
+        ownership,
+        Some(meter_rows),
+    )
+}
+
+fn replay_build_internal(
+    r: &mut Replay,
+    store: &RowStore,
+    calls: &Callsigns,
+    t_ns: i64,
+    stamp: &str,
+    safety: Option<&ReplaySafety<'_>>,
+    ownership: Option<&OwnershipStatus>,
+    meter_rows: Option<&[AddressMetering]>,
+) -> Result<FrameInfo, ReplayError> {
     targets_clear(&mut r.set);
-    let convert = targets_at(store, calls, t_ns, &r.cfg.convert, &r.view.proj, &mut r.set);
+    let convert = match meter_rows {
+        Some(rows) => targets_at_with_metering(
+            store,
+            calls,
+            t_ns,
+            &r.cfg.convert,
+            &r.view.proj,
+            &mut r.set,
+            rows,
+        )?,
+        None => targets_at(store, calls, t_ns, &r.cfg.convert, &r.view.proj, &mut r.set),
+    };
     let scene = build_scene(&mut r.list, &r.model, &r.index, &r.view, &mut r.scratch)?;
     let traffic = build_traffic(&mut r.list, &r.view.proj, &r.ell, &r.set, &r.cfg.style)?;
     if let Some(s) = safety {

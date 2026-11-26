@@ -19,6 +19,7 @@ use oa_quarantine::{
     InputOutcome, InputSource, QuarantineEvent, QuarantineQueue, ReasonFlags, SourceStats,
     REASON_INPUT_INVALID, REASON_RESOURCE_LIMIT, REASON_SURVEILLANCE_INVALID,
 };
+use crate::metering::{resolve_metering_scan, MeteringScanReport, MeteringScanRow};
 use std::fmt::Write as _;
 use std::path::Path;
 use std::time::Instant;
@@ -42,6 +43,7 @@ pub struct RegionalRuntime {
     quarantine_queue: QuarantineQueue,
     interaction: oa_display::interaction::InteractionState,
     views: Vec<oa_display::interaction::TargetView>,
+    metering_views: Vec<crate::flight::SharedFlightView>,
     observed: Vec<crate::surveillance::ObservedTrack>,
     next_generation: u32,
     console_text: String,
@@ -136,6 +138,8 @@ pub struct RegionalFrame {
     pub controller_selection: Option<oa_display::interaction::FlightIdentity>,
     pub console_text: String,
     pub quarantine: RuntimeQuarantineReport,
+    /// Source rows and exact current-flight bindings supplied to the regional scope build.
+    pub metering: Option<MeteringScanReport>,
 }
 // A7.2: cold shell evidence, bounded by runtime capacities.
 
@@ -636,6 +640,7 @@ fn regional_new_with_profile_and_namespace_and_audit_checkpoint(
         quarantine_queue: oa_quarantine::queue_new_with_audit_checkpoint(audit_checkpoint),
         interaction: oa_display::interaction::interaction_new(),
         views: Vec::with_capacity(profile.max_flights),
+        metering_views: Vec::with_capacity(profile.max_flights),
         observed: Vec::with_capacity(profile.surveillance.max_tracks),
         next_generation: 0,
         console_text: String::with_capacity(128),
@@ -654,6 +659,7 @@ fn execute(
     runtime: &mut RegionalRuntime,
     batch: &ReceiptBatch,
     performance: Option<&[PerformanceEnvelope]>,
+    metering: Option<&[MeteringScanRow]>,
 ) -> Result<RegionalFrame, String> {
     if batch.events.len() > MAX_EVENTS_PER_RECEIPT
         || batch
@@ -670,6 +676,9 @@ fn execute(
             .any(|event| matches!(event.kind, crate::input::EventKind::Operator(_)))
     {
         return Err("operator requests are unavailable in the analysis-only replay profile".into());
+    }
+    if metering.is_some() && !runtime.profile.surveillance.render_scope {
+        return Err("per-scan metering requires the rendered regional scope profile".into());
     }
     let input = summarize_input_batch(batch).map_err(|e| format!("input accounting: {e:?}"))?;
     let performance_cutoff_ms = match performance {
@@ -817,7 +826,33 @@ fn execute(
     }
     // Flight ownership presentation currently requires an explicitly selected flight. Per-flight
     // snapshots below preserve every owner; no arbitrary 'first' flight is promoted to selection.
-    let mut surveillance = surveillance::surveillance_finish(&mut runtime.surveillance, None)?;
+    let (metering_addresses, mut metering_report) = if let Some(rows) = metering {
+        let (resolved, report) = resolve_metering_scan(
+            rows,
+            runtime.centre,
+            batch.receipt_ns,
+            batch.receipt_ns / 1_000_000,
+            &mut runtime.flights,
+            &mut runtime.metering_views,
+        )
+        .map_err(|error| format!("regional metering binding: {error}"))?;
+        (Some(resolved), Some(report))
+    } else {
+        (None, None)
+    };
+    let mut surveillance = surveillance::surveillance_finish_with_metering(
+        &mut runtime.surveillance,
+        None,
+        metering_addresses.as_deref(),
+    )?;
+    if let (Some(report), Some(convert)) = (
+        metering_report.as_mut(),
+        surveillance.metering_convert,
+    ) {
+        report.target_attached_rows = convert.meter_rows_attached;
+        report.target_unmatched_rows = convert.meter_rows_unmatched;
+        report.targets_without_meter_row = convert.targets_without_meter_row;
+    }
     if runtime.profile.surveillance.render_scope {
         surveillance.frame_sha256 = surveillance::surveillance_present_controls(
             &mut runtime.surveillance,
@@ -952,6 +987,7 @@ fn execute(
             records: quarantine_records,
             source_stats: quarantine_stats(&runtime.quarantine_queue)?,
         },
+        metering: metering_report,
     })
 }
 
@@ -961,7 +997,20 @@ pub fn regional_step(
     runtime: &mut RegionalRuntime,
     batch: &ReceiptBatch,
 ) -> Result<RegionalFrame, String> {
-    regional_step_inner(runtime, batch, None)
+    regional_step_inner(runtime, batch, None, None)
+}
+
+/// Builds one ordinary regional frame with a caller-owned per-scan metering snapshot.
+///
+/// The snapshot is consumed by the existing scope target conversion and traffic datablock path.
+/// Rows without an in-crate source-qualified full-key binding remain unbound and are counted;
+/// the API never accepts a public caller-supplied flight key as binding proof.
+pub fn regional_step_with_metering(
+    runtime: &mut RegionalRuntime,
+    batch: &ReceiptBatch,
+    rows: &[MeteringScanRow],
+) -> Result<RegionalFrame, String> {
+    regional_step_inner(runtime, batch, None, Some(rows))
 }
 
 /// Opt in to vertical reachability for this receipt using only the caller-supplied, full-key
@@ -981,18 +1030,19 @@ pub fn regional_step_with_performance(
             MAX_PERFORMANCE_ENVELOPES
         ));
     }
-    regional_step_inner(runtime, batch, Some(performance))
+    regional_step_inner(runtime, batch, Some(performance), None)
 }
 
 fn regional_step_inner(
     runtime: &mut RegionalRuntime,
     batch: &ReceiptBatch,
     performance: Option<&[PerformanceEnvelope]>,
+    metering: Option<&[MeteringScanRow]>,
 ) -> Result<RegionalFrame, String> {
     if runtime.failed {
         return Err("session failed; reconstruct from the admitted input prefix".into());
     }
-    match execute(runtime, batch, performance) {
+    match execute(runtime, batch, performance, metering) {
         Ok(frame) => Ok(frame),
         Err(error) => {
             runtime.failed = true;
@@ -1346,6 +1396,87 @@ mod transaction_tests {
             },
         )
         .unwrap()
+    }
+
+    // REQ: OA-REG-021
+    #[test]
+    fn tbfm_row_without_official_identity_link_stays_unbound_in_actual_scope_path() {
+        let mut engine = runtime();
+        let row = MeteringScanRow::unbound(
+            *b"ZAU1",
+            *b"N123456789\0\0",
+            [1; 32],
+            Some(900_000_000),
+            1_000_000_000,
+            oa_display::core::metering::TargetMetering {
+                mfx: oa_display::core::metering::MeterPointTimes {
+                    sta_ms: None,
+                    eta_ms: Some(1_800_000_000_000),
+                },
+                sfx: oa_display::core::metering::MeterPointTimes::default(),
+            },
+        );
+        let frame = regional_step_with_metering(
+            &mut engine,
+            &ReceiptBatch {
+                receipt_ns: 1_000_000_000,
+                source_clock_regressions: 0,
+                events: Vec::new(),
+            },
+            &[row],
+        )
+        .unwrap();
+        let report = frame.metering.unwrap();
+        assert_eq!(report.source_rows, 1);
+        assert_eq!(report.flight_bound_rows, 0);
+        assert_eq!(report.target_attached_rows, 0);
+        assert_eq!(report.unbound_rows, 1);
+        assert_eq!(
+            frame
+                .surveillance
+                .metering_convert
+                .unwrap()
+                .meter_rows_attached,
+            0
+        );
+    }
+
+    // REQ: OA-REG-021
+    #[test]
+    fn caller_supplied_full_key_and_address_do_not_bind_without_current_flight_table_match() {
+        let mut engine = runtime();
+        let row = MeteringScanRow::with_verified_binding(
+            *b"ZAU1",
+            *b"N123456789\0\0",
+            [2; 32],
+            Some(900_000_000),
+            1_000_000_000,
+            77,
+            0x00ab_cdef,
+            oa_display::core::metering::TargetMetering::default(),
+        );
+        let frame = regional_step_with_metering(
+            &mut engine,
+            &ReceiptBatch {
+                receipt_ns: 1_000_000_000,
+                source_clock_regressions: 0,
+                events: Vec::new(),
+            },
+            &[row],
+        )
+        .unwrap();
+        let report = frame.metering.unwrap();
+        assert_eq!(report.flight_bound_rows, 0);
+        assert_eq!(report.target_attached_rows, 0);
+        assert_eq!(report.unbound_rows, 1);
+        assert_eq!(
+            frame
+                .surveillance
+                .metering_convert
+                .unwrap()
+                .meter_rows_attached,
+            0
+        );
     }
 
     // REQ: OA-REG-018

@@ -303,6 +303,7 @@ pub(crate) fn raw_targets_at_with_source_stale(
                     reacq_age_s: NO_REACQ,
                     flags: T_UNCERTAIN,
                     trail_len: 0,
+                    metering: oa_display::metering::NO_TARGET_METERING,
                 };
                 if targets_push(set, &target).is_ok() {
                     stats.targets_admitted = stats.targets_admitted.saturating_add(1);

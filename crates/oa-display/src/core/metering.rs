@@ -19,6 +19,40 @@ pub const METER_WINDOW_MS: i64 = 60_000;
 /// the list unchanged.
 pub const MAX_METER_ROWS: usize = 1 << 16;
 
+/// One same-reference schedule/estimate pair in Unix milliseconds. `None` means the source did
+/// not provide that field; it never stands for zero.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(C)]
+pub struct MeterPointTimes {
+    pub sta_ms: Option<i64>,
+    pub eta_ms: Option<i64>,
+}
+
+const _: () = assert!(core::mem::size_of::<MeterPointTimes>() == 32);
+
+/// No value is available for this meter reference.
+pub const NO_METER_POINT_TIMES: MeterPointTimes = MeterPointTimes {
+    sta_ms: None,
+    eta_ms: None,
+};
+
+/// Same-reference values supplied for the meter fix and schedule fix. The two points are kept
+/// separate so an SFX/arc STA cannot be mistaken for an MFX STA.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(C)]
+pub struct TargetMetering {
+    pub mfx: MeterPointTimes,
+    pub sfx: MeterPointTimes,
+}
+
+const _: () = assert!(core::mem::size_of::<TargetMetering>() == 64);
+
+/// No metering values are available for this target.
+pub const NO_TARGET_METERING: TargetMetering = TargetMetering {
+    mfx: NO_METER_POINT_TIMES,
+    sfx: NO_METER_POINT_TIMES,
+};
+
 /// Result of comparing exact supplied STA and ETA values. `Early` means ETA precedes STA;
 /// `Late` means ETA follows STA. The ±60 second boundary is inclusive.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -380,6 +380,7 @@ fn busy_target(n: i32) -> Target {
         reacq_age_s: if n % 5 == 0 { 2 } else { NO_REACQ },
         flags: 0,
         trail_len: 5,
+        metering: oa_display::metering::NO_TARGET_METERING,
     };
     for (k, slot) in t.trail.iter_mut().enumerate() {
         let d = 1_000 * (k as i32 + 1);

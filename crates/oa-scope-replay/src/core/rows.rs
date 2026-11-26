@@ -26,6 +26,7 @@
 //! does not fit an `i64` is larger than any window, and is treated as such.
 
 use oa_display::core::project::Projection;
+use oa_display::core::metering::TargetMetering;
 use oa_display::core::traffic::{
     map_position, position_valid, targets_push, MapPos, Target, TargetSet, MAX_REACQ_AGE_S,
     MAX_TRAIL, NO_ALT, NO_REACQ, NO_U16, T_COAST, T_CS_CONFLICT, T_UNCERTAIN,
@@ -385,7 +386,52 @@ pub struct ConvertStats {
     pub trail_dropped: u32,
     /// LOSS: a stored row whose columns could not all be read (cannot happen: they have one length).
     pub columns_inconsistent: u32,
+    /// Meter rows supplied to the explicit metering conversion path.
+    pub meter_rows: u32,
+    /// Meter rows matched by exact aircraft address to a current track.
+    pub meter_rows_attached: u32,
+    /// Meter rows with no current target at the requested scan time.
+    pub meter_rows_unmatched: u32,
+    /// Current target rows without an exact-address metering row when metering input was supplied.
+    pub targets_without_meter_row: u32,
 }
+
+/// One positively bound per-address meter row. Inputs are strictly increasing by `address`;
+/// the builder does not derive this binding from callsign or flight-plan text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(C)]
+pub struct AddressMetering {
+    pub address: u32,
+    pub values: TargetMetering,
+}
+
+const _: () = assert!(core::mem::size_of::<AddressMetering>() == 72);
+
+/// Why a per-scan metering input was refused before the target set changed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AddressMeteringError {
+    TooMany { requested: usize, limit: usize },
+    InvalidAddress { index: usize, address: u32 },
+    NotStrictlySorted { index: usize },
+}
+
+impl fmt::Display for AddressMeteringError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TooMany { requested, limit } => {
+                write!(f, "meter input has {requested} rows; maximum is {limit}")
+            }
+            Self::InvalidAddress { index, address } => {
+                write!(f, "meter input row {index} has invalid aircraft address {address:#x}")
+            }
+            Self::NotStrictlySorted { index } => {
+                write!(f, "meter input address order is duplicate or descending at row {index}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for AddressMeteringError {}
 
 /// The newest row at or before `t_ns`.
 fn newest(v: &AddrRows, t_ns: i64) -> Option<usize> {
@@ -507,6 +553,7 @@ fn target_of(
         reacq_age_s,
         flags,
         trail_len,
+        metering: oa_display::metering::NO_TARGET_METERING,
     }
 }
 
@@ -522,7 +569,70 @@ pub fn targets_at(
     proj: &Projection,
     set: &mut TargetSet,
 ) -> ConvertStats {
+    targets_at_inner(store, calls, t_ns, cfg, proj, set, None)
+}
+
+/// Fills a scan's target set with exact-address metering values. `meter_rows` must be strictly
+/// sorted and unique; invalid input is refused before any target is added. The display path keeps
+/// MFX and SFX values separate in each target's data block. Every supplied row is accounted as
+/// attached or unmatched, and targets without a supplied row are counted separately.
+pub fn targets_at_with_metering(
+    store: &RowStore,
+    calls: &Callsigns,
+    t_ns: i64,
+    cfg: &ConvertConfig,
+    proj: &Projection,
+    set: &mut TargetSet,
+    meter_rows: &[AddressMetering],
+) -> Result<ConvertStats, AddressMeteringError> {
+    validate_address_metering(meter_rows)?;
+    Ok(targets_at_inner(
+        store,
+        calls,
+        t_ns,
+        cfg,
+        proj,
+        set,
+        Some(meter_rows),
+    ))
+}
+
+fn validate_address_metering(rows: &[AddressMetering]) -> Result<(), AddressMeteringError> {
+    if rows.len() > MAX_STORE_ADDRESSES {
+        return Err(AddressMeteringError::TooMany {
+            requested: rows.len(),
+            limit: MAX_STORE_ADDRESSES,
+        });
+    }
+    let mut previous = 0;
+    for (index, row) in rows.iter().enumerate() {
+        if row.address == 0 || row.address > 0x00FF_FFFF {
+            return Err(AddressMeteringError::InvalidAddress {
+                index,
+                address: row.address,
+            });
+        }
+        if index > 0 && row.address <= previous {
+            return Err(AddressMeteringError::NotStrictlySorted { index });
+        }
+        previous = row.address;
+    }
+    Ok(())
+}
+
+fn targets_at_inner(
+    store: &RowStore,
+    calls: &Callsigns,
+    t_ns: i64,
+    cfg: &ConvertConfig,
+    proj: &Projection,
+    set: &mut TargetSet,
+    meter_rows: Option<&[AddressMetering]>,
+) -> ConvertStats {
     let mut st = ConvertStats::default();
+    if let Some(rows) = meter_rows {
+        st.meter_rows = u32::try_from(rows.len()).unwrap_or(u32::MAX);
+    }
     for (&addr, v) in &store.by_addr {
         let Some(i) = newest(v, t_ns) else {
             continue;
@@ -539,6 +649,19 @@ pub fn targets_at(
             st.ended += 1;
             continue;
         }
+        let meter = meter_rows.and_then(|rows| {
+            rows.binary_search_by_key(&addr, |r| r.address)
+                .ok()
+                .and_then(|index| rows.get(index))
+                .map(|row| row.values)
+        });
+        if meter_rows.is_some() {
+            if meter.is_some() {
+                st.meter_rows_attached = st.meter_rows_attached.saturating_add(1);
+            } else {
+                st.targets_without_meter_row = st.targets_without_meter_row.saturating_add(1);
+            }
+        }
         match map_position(proj, row.lat_e7, row.lon_e7) {
             MapPos::On(_) => {}
             MapPos::Off => {
@@ -554,11 +677,15 @@ pub fn targets_at(
                 continue;
             }
         }
-        let t = target_of(v, &row, addr, calls, t_ns, cfg, &mut st);
+        let mut t = target_of(v, &row, addr, calls, t_ns, cfg, &mut st);
+        if let Some(meter) = meter {
+            t.metering = meter;
+        }
         // A refusal is counted by the set and shown on the frame.
         if targets_push(set, &t).is_ok() {
             st.added += 1;
         }
     }
+    st.meter_rows_unmatched = st.meter_rows.saturating_sub(st.meter_rows_attached);
     st
 }

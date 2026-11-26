@@ -20,6 +20,7 @@ use oa_scope_replay::frame::{
     ReplaySafety,
 };
 use oa_scope_replay::rows::{Callsigns, RowStore, DEFAULT_CONVERT};
+use oa_scope_replay::rows::AddressMetering;
 use oa_scope_replay::store::{store_add, store_finish};
 use oa_track::{
     output_clear, output_new, r95_m_of, tracker_advance, tracker_live_iter, tracker_new,
@@ -196,6 +197,7 @@ pub struct SurveillanceFrame {
     pub duplicate_rows_replaced: u32,
     pub displayed: u32,
     pub off_map: u32,
+    pub metering_convert: Option<oa_scope_replay::rows::ConvertStats>,
     pub warnings: Vec<String>,
 }
 // A7.2: cold owned frame evidence, retained at most MAX_FRAMES times.
@@ -658,6 +660,16 @@ pub fn surveillance_finish(
     s: &mut Surveillance,
     ownership: Option<&OwnershipStatus>,
 ) -> Result<SurveillanceFrame, String> {
+    surveillance_finish_with_metering(s, ownership, None)
+}
+
+/// Finishes one frame through the ordinary scope pipeline, optionally attaching validated
+/// per-address meter values before the traffic datablocks are built.
+pub fn surveillance_finish_with_metering(
+    s: &mut Surveillance,
+    ownership: Option<&OwnershipStatus>,
+    meter_rows: Option<&[AddressMetering]>,
+) -> Result<SurveillanceFrame, String> {
     if s.failed {
         return Err("surveillance failed; reconstruct from the admitted input prefix".into());
     }
@@ -843,9 +855,12 @@ pub fn surveillance_finish(
         &mut s.states,
     );
     let (ca_closed, ca_altitude_lost) = capture_ca_logs(s);
-    let (msaw_markers, digest, displayed, off_map, warnings) = if !s.profile.render_scope {
+    let (msaw_markers, digest, displayed, off_map, warnings, metering_convert) = if !s.profile.render_scope {
         let digest = offline_projection_digest(time_ns, &tracks, ca_open(&s.ca))?;
-        (None, digest, 0, 0, Vec::new())
+        if meter_rows.is_some() {
+            return Err("metering rows require the rendered regional scope path".into());
+        }
+        (None, digest, 0, 0, Vec::new(), None)
     } else {
         let mut store = RowStore::default();
         let stats = store_add(
@@ -890,21 +905,35 @@ pub fn surveillance_finish(
             feeds.push(FeedStatus { name, state });
         }
         let newest_track = tracker_newest_update_ns(&s.tracker);
-        let info = replay_build_with_overlays(
-            &mut s.scope,
-            &store,
-            &Callsigns::default(),
-            time_ns,
-            "REGIONAL RESEARCH",
-            Some(&ReplaySafety {
-                states: &s.states,
-                inhibits: &s.inhibits,
-                feeds: &feeds,
-                newest_track_ns: (newest_track != i64::MIN).then_some(newest_track),
-                frozen_limit_ns: 5 * SECOND_NS,
-            }),
-            ownership,
-        )
+        let safety = Some(&ReplaySafety {
+            states: &s.states,
+            inhibits: &s.inhibits,
+            feeds: &feeds,
+            newest_track_ns: (newest_track != i64::MIN).then_some(newest_track),
+            frozen_limit_ns: 5 * SECOND_NS,
+        });
+        let info = if let Some(rows) = meter_rows {
+            oa_scope_replay::frame::replay_build_with_metering_and_overlays(
+                &mut s.scope,
+                &store,
+                &Callsigns::default(),
+                time_ns,
+                "REGIONAL RESEARCH",
+                rows,
+                safety,
+                ownership,
+            )
+        } else {
+            replay_build_with_overlays(
+                &mut s.scope,
+                &store,
+                &Callsigns::default(),
+                time_ns,
+                "REGIONAL RESEARCH",
+                safety,
+                ownership,
+            )
+        }
         .map_err(err)?;
         if info.refused != 0
             || info.malformed != 0
@@ -1022,6 +1051,7 @@ pub fn surveillance_finish(
             info.convert.added,
             info.convert.off_map,
             warnings,
+            meter_rows.map(|_| info.convert),
         )
     };
     let track_transport_seen_ns = s.seen.first().copied().flatten();
@@ -1049,6 +1079,7 @@ pub fn surveillance_finish(
         duplicate_rows_replaced,
         displayed,
         off_map,
+        metering_convert,
         warnings,
     })
 }

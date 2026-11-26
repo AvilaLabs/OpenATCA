@@ -10,6 +10,7 @@
 use oa_adsb::{encode_payload, reports_push, Reports, Row, ROW_EMPTY};
 use oa_airspace::model::{empty_model, Meta, Model};
 use oa_display::core::palette;
+use oa_display::core::metering::{MeterPointTimes, TargetMetering};
 use oa_display::project::projection_new;
 use oa_display::raster::frame_digest;
 use oa_display::traffic::{
@@ -20,6 +21,7 @@ use oa_scope_replay::adapt::{callsigns_from_reports, row_columns, ColumnBuf};
 use oa_scope_replay::cli;
 use oa_scope_replay::frame::{
     replay_build, replay_build_raw, replay_build_with_safety, replay_new,
+    replay_build_with_metering_and_overlays,
     replay_new_with_top_inset, replay_raster, ReplayConfig, ReplayError, ReplaySafety,
 };
 use oa_scope_replay::publication::Publisher;
@@ -1203,6 +1205,91 @@ fn cols(n: usize) -> Cols {
         alt: vec![0.0; n],
         flags: vec![0; n],
     }
+}
+
+#[test]
+fn per_scan_metering_binds_by_exact_address_and_preserves_mfx_sfx_and_unmatched_counts() {
+    let mut c = cols(2);
+    c.addr = vec![0x111111, 0x222222];
+    let mut store = RowStore::default();
+    store_add(&mut store, &view(&c), i64::MIN).unwrap();
+    store_finish(&mut store);
+    let rows = [
+        AddressMetering {
+            address: 0x111111,
+            values: TargetMetering {
+                mfx: MeterPointTimes {
+                    sta_ms: None,
+                    eta_ms: Some(T0 + 45_000),
+                },
+                sfx: MeterPointTimes {
+                    sta_ms: Some(T0 + 90_000),
+                    eta_ms: Some(T0 + 30_000),
+                },
+            },
+        },
+        AddressMetering {
+            address: 0x333333,
+            values: TargetMetering::default(),
+        },
+    ];
+    let mut set = targets_new(4).unwrap();
+    let stats = targets_at_with_metering(
+        &store,
+        &Callsigns::default(),
+        T0,
+        &DEFAULT_CONVERT,
+        &proj(),
+        &mut set,
+        &rows,
+    )
+    .unwrap();
+    assert_eq!(
+        (
+            stats.meter_rows,
+            stats.meter_rows_attached,
+            stats.meter_rows_unmatched,
+            stats.targets_without_meter_row,
+        ),
+        (2, 1, 1, 1)
+    );
+    let columns = targets_columns(&set);
+    assert_eq!(columns.addr, [0x111111, 0x222222]);
+    assert_eq!(columns.metering[0], rows[0].values);
+    assert_eq!(columns.metering[1], TargetMetering::default());
+}
+
+#[test]
+fn malformed_meter_rows_refuse_before_any_target_is_inserted() {
+    let mut c = cols(1);
+    c.addr = vec![0x111111];
+    let mut store = RowStore::default();
+    store_add(&mut store, &view(&c), i64::MIN).unwrap();
+    store_finish(&mut store);
+    let bad = [
+        AddressMetering {
+            address: 0x222222,
+            values: TargetMetering::default(),
+        },
+        AddressMetering {
+            address: 0x222222,
+            values: TargetMetering::default(),
+        },
+    ];
+    let mut set = targets_new(4).unwrap();
+    assert!(matches!(
+        targets_at_with_metering(
+            &store,
+            &Callsigns::default(),
+            T0,
+            &DEFAULT_CONVERT,
+            &proj(),
+            &mut set,
+            &bad,
+        ),
+        Err(AddressMeteringError::NotStrictlySorted { index: 1 })
+    ));
+    assert_eq!(targets_len(&set), 0);
 }
 
 fn view(c: &Cols) -> RowColumns<'_> {
