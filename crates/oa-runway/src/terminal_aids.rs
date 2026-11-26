@@ -11,7 +11,7 @@ use crate::plane::Local;
 /// cap, the transform performs at most 512 bounded row visits and writes three 2 KiB f64 output
 /// columns; 257 rows are refused before inspecting or writing rows. This is a product engineering
 /// bound, not a facility traffic claim. Increasing it requires a revised allocation/work review.
-pub const MAX_CRDA_ROWS: usize = arv::MAX_ARV_FLIGHTS;
+pub const MAX_CRDA_ROWS: usize = crate::arv::MAX_ARV_FLIGHTS;
 /// One ATPA call evaluates up to every unordered pair in the same 256-flight envelope (32,640
 /// rows). Its two passes visit at most 65,280 pair rows; the caller owns the three 32,640-row
 /// outputs. Larger scans are refused before output mutation.
