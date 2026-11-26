@@ -398,7 +398,7 @@ fn a_coasting_or_uncertain_track_widens_the_vertical_minimum_and_is_flagged() {
     );
 }
 
-// REQ: OA-CA-006
+// REQ: OA-CA-006, OA-CA-021
 #[test]
 fn an_unknown_altitude_never_hides_a_horizontal_conflict_and_carries_alt_unknown() {
     for unknown in [(true, false), (false, true), (true, true)] {

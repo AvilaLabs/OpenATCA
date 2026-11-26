@@ -10,6 +10,7 @@
 pub mod accreditation;
 pub mod classcheck;
 pub mod floatscan;
+pub mod hazard_trace;
 
 use std::collections::BTreeMap;
 use std::fs;

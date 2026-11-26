@@ -44,7 +44,16 @@ fn main() -> ExitCode {
             println!("  ERROR: {error}");
         }
     }
-    if rep.ok() && classes.ok() && accreditation.is_empty() {
+    let hazard_errors = oa_trace::hazard_trace::check(&root);
+    if hazard_errors.is_empty() {
+        println!("\nHazard trace: declared hazard/requirement/test links pass.");
+    } else {
+        println!("\nHazard trace: {} issue(s)", hazard_errors.len());
+        for error in &hazard_errors {
+            println!("  {error}");
+        }
+    }
+    if rep.ok() && classes.ok() && accreditation.is_empty() && hazard_errors.is_empty() {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE

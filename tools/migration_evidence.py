@@ -26,6 +26,7 @@ PACKAGE_SCHEMA = "openatca.m6-evidence"
 PACKAGE_VERSION = 1
 MAX_MANIFEST_BYTES = 2 * 1024 * 1024
 MAX_JSON_ARTIFACT_BYTES = 16 * 1024 * 1024
+MAX_SELECTOR_REPORT_BYTES = 2 * 1024 * 1024
 MAX_OPAQUE_ARTIFACT_BYTES = 64 * 1024 * 1024
 MAX_TOTAL_ARTIFACT_BYTES = 256 * 1024 * 1024
 MAX_ARTIFACTS = 32
@@ -47,6 +48,7 @@ ARTIFACT_KINDS = {
     "exposure",
     "containment",
     "drill_results",
+    "synthetic_selector_report",
     "review_evidence",
     "recorded_traffic",
     "supporting_evidence",
@@ -298,20 +300,14 @@ def _relative_artifact_path(manifest_path: str, value: Any, where: str) -> str:
 
 
 def _validate_unit(unit: Any) -> dict[str, Any]:
-    unit = _object(
-        unit,
-        "unit",
-        {
-            "function_id",
-            "scope_id",
-            "comparison_family",
-            "window_start_ns",
-            "window_end_ns",
-            "stage",
-            "policy",
-            "source_epochs",
-        },
-    )
+    unit = _object(unit, "unit")
+    required = {
+        "function_id", "scope_id", "comparison_family", "window_start_ns", "window_end_ns",
+        "stage", "policy", "source_epochs",
+    }
+    allowed = required | {"m1_source_epoch_digest"}
+    if required - unit.keys() or unit.keys() - allowed:
+        _fail(f"unit: schema fields missing={sorted(required - unit.keys())} extra={sorted(unit.keys() - allowed)}")
     function_id = _integer(unit["function_id"], "unit.function_id", maximum=(1 << 32) - 1)
     scope_id = _integer(unit["scope_id"], "unit.scope_id", maximum=(1 << 32) - 1)
     if function_id == 0 or scope_id == 0:
@@ -339,6 +335,11 @@ def _validate_unit(unit: Any) -> dict[str, Any]:
         "window_end_ns": end,
         "stage": stage,
         "policy": {"id": policy_id, "version": policy_version, "sha256": policy_sha},
+        "m1_source_epoch_digest": (
+            _hash(unit["m1_source_epoch_digest"], "unit.m1_source_epoch_digest")
+            if "m1_source_epoch_digest" in unit
+            else None
+        ),
         "source_epochs": {
             "legacy": _hash(epochs["legacy"], "unit.source_epochs.legacy"),
             "candidate": _hash(epochs["candidate"], "unit.source_epochs.candidate"),
@@ -397,6 +398,8 @@ def _validate_manifest(value: Any, path: str) -> tuple[dict[str, Any], list[dict
         cap = (
             MAX_OPAQUE_ARTIFACT_BYTES
             if artifact["kind"] in {"review_evidence", "recorded_traffic", "supporting_evidence"}
+            else MAX_SELECTOR_REPORT_BYTES
+            if artifact["kind"] == "synthetic_selector_report"
             else MAX_JSON_ARTIFACT_BYTES
         )
         if artifact["declared_bytes"] > cap:
@@ -437,7 +440,10 @@ def _load_artifacts(artifacts: list[dict[str, Any]]) -> tuple[dict[str, Any], li
             remaining_total = MAX_TOTAL_ARTIFACT_BYTES - total
             if remaining_total <= 0:
                 raise EvidenceError("total input artifact byte cap exceeded")
-            if item["kind"] in {"review_evidence", "recorded_traffic", "supporting_evidence"}:
+            if item["kind"] == "synthetic_selector_report":
+                raw, digest, size = _read_file(item["path"], min(MAX_SELECTOR_REPORT_BYTES, remaining_total))
+                value = raw.decode("ascii", errors="strict")
+            elif item["kind"] in {"review_evidence", "recorded_traffic", "supporting_evidence"}:
                 digest, size = _hash_opaque(item["path"], min(MAX_OPAQUE_ARTIFACT_BYTES, remaining_total))
                 value = None
             else:
@@ -482,9 +488,80 @@ def _bind_doc(doc: dict[str, Any], unit: dict[str, Any], label: str) -> None:
             _fail(f"{label}: {key} differs from the swap unit")
 
 
-def _validate_hazards(doc: dict[str, Any], unit: dict[str, Any]) -> list[dict[str, Any]]:
+def _validate_hazards_v1(doc: dict[str, Any], unit: dict[str, Any]) -> list[dict[str, Any]]:
     doc = _object(doc, "hazard register", {"schema", "version", "function_id", "scope_id", "window_start_ns", "window_end_ns", "source", "hazards"})
-    _check_doc_header(doc, "openatca.m6-hazard-register", "hazard register")
+    _bind_doc(doc, unit, "hazard register")
+    source = _object(doc["source"], "hazard register source", {"document_ref", "revision", "coverage_status", "hazard_count"})
+    hazards = _list(doc["hazards"], "hazards", MAX_HAZARDS)
+    declared_count = _integer(source["hazard_count"], "hazard register source.hazard_count", maximum=MAX_HAZARDS)
+    if not hazards or declared_count != len(hazards):
+        _fail("legacy hazard register count is empty or does not reconcile")
+    ids: set[str] = set()
+    clean = []
+    for index, raw in enumerate(hazards):
+        hazard = _object(raw, f"hazards[{index}]", {"id", "description", "mitigations"})
+        hazard_id = _text(hazard["id"], f"hazards[{index}].id")
+        if hazard_id in ids:
+            _fail(f"duplicate hazard id {hazard_id}")
+        ids.add(hazard_id)
+        mitigations = _list(hazard["mitigations"], f"hazards[{index}].mitigations", 64)
+        if not mitigations:
+            _fail(f"hazard {hazard_id} has no listed mitigation")
+        clean_mitigations = []
+        requirement_ids = []
+        for mitigation_index, item in enumerate(mitigations):
+            mitigation = _object(item, f"hazards[{index}].mitigations[{mitigation_index}]", {"id", "description", "verification_ref"})
+            requirement = _text(mitigation["id"], "mitigation.id")
+            requirement_ids.append(requirement)
+            clean_mitigations.append(
+                {
+                    "id": requirement,
+                    "description": _text(mitigation["description"], "mitigation.description"),
+                    "verification_ref": _text(mitigation["verification_ref"], "mitigation.verification_ref"),
+                }
+            )
+        if len(set(requirement_ids)) != len(requirement_ids):
+            _fail(f"hazard {hazard_id} has duplicate mitigation IDs")
+        clean.append(
+            {
+                "id": hazard_id,
+                "function": None,
+                "cause": None,
+                "effect": None,
+                "severity_class": "Unassessed",
+                "severity_status": "unassessed",
+                "severity_rationale": "Legacy hazard register version has no function-specific severity rationale.",
+                "source_refs": [],
+                "mitigation_requirement_ids": sorted(requirement_ids),
+                "verification_refs": [],
+                "description": _text(hazard["description"], f"hazards[{index}].description"),
+                "mitigations": clean_mitigations,
+            }
+        )
+    return [
+        {
+            "source_document_ref": _text(source["document_ref"], "hazard source.document_ref"),
+            "source_revision": _text(source["revision"], "hazard source.revision"),
+            "coverage_status": _text(source["coverage_status"], "hazard source.coverage_status"),
+            "declared_hazard_count": declared_count,
+            "function_id": unit["function_id"],
+            "function_name": None,
+            "scope_id": unit["scope_id"],
+            "coverage_gap": "FUNCTION_HAZARD_DETAIL_NOT_PROVIDED",
+            "hazards": clean,
+        }
+    ]
+
+
+def _validate_hazards(doc: dict[str, Any], unit: dict[str, Any]) -> list[dict[str, Any]]:
+    if _text(doc.get("schema"), "hazard register.schema") != "openatca.m6-hazard-register":
+        _fail("unsupported hazard register schema")
+    version = _integer(doc.get("version"), "hazard register.version", maximum=65535)
+    if version == 1:
+        return _validate_hazards_v1(doc, unit)
+    if version != 2:
+        _fail("unsupported hazard register schema or version")
+    doc = _object(doc, "hazard register", {"schema", "version", "function_id", "scope_id", "window_start_ns", "window_end_ns", "source", "hazards"})
     _bind_doc(doc, unit, "hazard register")
     source = _object(
         doc.get("source"),
@@ -496,10 +573,20 @@ def _validate_hazards(doc: dict[str, Any], unit: dict[str, Any]) -> list[dict[st
     coverage_status = _text(source["coverage_status"], "hazard register source.coverage_status")
     declared_hazard_count = _integer(source["hazard_count"], "hazard register source.hazard_count", maximum=MAX_HAZARDS)
     hazards = _list(doc.get("hazards"), "hazards", MAX_HAZARDS)
+    if not hazards:
+        _fail("hazard register must contain at least one function hazard")
     ids: set[str] = set()
     result: list[dict[str, Any]] = []
     for index, raw in enumerate(hazards):
-        hazard = _object(raw, f"hazards[{index}]", {"id", "description", "mitigations"})
+        hazard = _object(
+            raw,
+            f"hazards[{index}]",
+            {
+                "id", "function", "cause", "effect", "severity_class", "severity_status",
+                "severity_rationale", "source_refs", "mitigation_requirement_ids",
+                "verification_refs", "description", "mitigations",
+            },
+        )
         hazard_id = _text(hazard["id"], f"hazards[{index}].id")
         if hazard_id in ids:
             _fail(f"duplicate hazard id {hazard_id}")
@@ -507,6 +594,25 @@ def _validate_hazards(doc: dict[str, Any], unit: dict[str, Any]) -> list[dict[st
         mitigations = _list(hazard["mitigations"], f"hazards[{index}].mitigations", 64)
         if not mitigations:
             _fail(f"hazard {hazard_id} has no listed mitigation")
+        severity_class = _text(hazard["severity_class"], f"hazards[{index}].severity_class")
+        if severity_class not in {"Catastrophic", "Hazardous", "Major", "Minor", "NoEffect", "Unassessed"}:
+            _fail(f"hazard {hazard_id} has an unknown severity class")
+        severity_status = _text(hazard["severity_status"], f"hazards[{index}].severity_status")
+        if severity_status not in {"engineering_candidate", "unassessed"}:
+            _fail(f"hazard {hazard_id} has an unknown severity status")
+        if (severity_class == "Unassessed") != (severity_status == "unassessed"):
+            _fail(f"hazard {hazard_id} severity class and status disagree")
+        requirement_ids = _list(hazard["mitigation_requirement_ids"], f"hazards[{index}].mitigation_requirement_ids", 128)
+        clean_requirement_ids = sorted({_text(value, "mitigation requirement id") for value in requirement_ids})
+        if len(clean_requirement_ids) != len(requirement_ids):
+            _fail(f"hazard {hazard_id} has duplicate mitigation requirement IDs")
+        source_refs = _list(hazard["source_refs"], f"hazards[{index}].source_refs", 128)
+        clean_source_refs = [_text(value, "hazard source reference") for value in source_refs]
+        verification_refs = _list(hazard["verification_refs"], f"hazards[{index}].verification_refs", 128)
+        clean_verification_refs = [_text(value, "hazard verification reference") for value in verification_refs]
+        if not clean_source_refs or not clean_verification_refs:
+            _fail(f"hazard {hazard_id} needs source and verification references")
+        mitigation_ids: set[str] = set()
         seen_mitigations: set[str] = set()
         clean_mitigations = []
         for j, raw_mitigation in enumerate(mitigations):
@@ -519,6 +625,7 @@ def _validate_hazards(doc: dict[str, Any], unit: dict[str, Any]) -> list[dict[st
             if mitigation_id in seen_mitigations:
                 _fail(f"hazard {hazard_id}: duplicate mitigation id {mitigation_id}")
             seen_mitigations.add(mitigation_id)
+            mitigation_ids.add(mitigation_id)
             clean_mitigations.append(
                 {
                     "id": mitigation_id,
@@ -526,21 +633,45 @@ def _validate_hazards(doc: dict[str, Any], unit: dict[str, Any]) -> list[dict[st
                     "verification_ref": _text(mitigation["verification_ref"], "mitigation.verification_ref"),
                 }
             )
+        if mitigation_ids != set(clean_requirement_ids):
+            _fail(f"hazard {hazard_id}: requirement IDs differ from mitigation records")
         result.append(
             {
                 "id": hazard_id,
+                "function": _text(hazard["function"], f"hazards[{index}].function"),
+                "cause": _text(hazard["cause"], f"hazards[{index}].cause"),
+                "effect": _text(hazard["effect"], f"hazards[{index}].effect"),
+                "severity_class": severity_class,
+                "severity_status": severity_status,
+                "severity_rationale": _text(hazard["severity_rationale"], f"hazards[{index}].severity_rationale"),
+                "source_refs": clean_source_refs,
+                "mitigation_requirement_ids": clean_requirement_ids,
+                "verification_refs": clean_verification_refs,
                 "description": _text(hazard["description"], f"hazards[{index}].description"),
                 "mitigations": clean_mitigations,
             }
         )
-    if coverage_status != "complete_for_function" or declared_hazard_count != len(result):
-        _fail("hazard register does not declare complete function coverage with a matching count")
+    if coverage_status not in {"complete_for_function", "declared_function_scope", "unassessed"} or declared_hazard_count != len(result):
+        _fail("hazard register coverage status or declared hazard count does not reconcile")
+    function_names = {item["function"] for item in result}
+    if len(function_names) != 1:
+        _fail("hazard register must bind hazards to exactly one function for this unit")
+    function_name = next(iter(function_names))
+    if coverage_status != "complete_for_function":
+        # A bounded list of hazards is not evidence that all function hazards were discovered.
+        result_coverage_gap = "FUNCTION_HAZARD_SCOPE_NOT_ASSESSED"
+    else:
+        result_coverage_gap = ""
     return [
         {
             "source_document_ref": source_ref,
             "source_revision": source_revision,
             "coverage_status": coverage_status,
             "declared_hazard_count": declared_hazard_count,
+            "function_id": unit["function_id"],
+            "function_name": function_name,
+            "scope_id": unit["scope_id"],
+            "coverage_gap": result_coverage_gap,
             "hazards": result,
         }
     ]
@@ -606,6 +737,7 @@ def _validate_shadow(
         "invalid_key_rows", "ambiguous_key_rows", "duplicate_rows",
     )}
     differences: list[dict[str, Any]] = []
+    classification_counts: dict[str, int] = {}
     field_issue_counts = {"Different": 0, "Unobservable": 0, "MissingRequired": 0}
     seen_comparison_ids: set[str] = set()
     review_gaps: list[str] = []
@@ -638,6 +770,7 @@ def _validate_shadow(
         else:
             _fail(f"comparison {comparison_id}: unknown outcome {outcome!r}")
         classification = _text(row["classification"], f"comparison {comparison_id}.classification")
+        classification_counts[classification] = classification_counts.get(classification, 0) + 1
         review = row["review"]
         evidence_hash = None
         reviewer_role = None
@@ -788,6 +921,7 @@ def _validate_shadow(
         "coverage": coverage,
         "family_counts": counters,
         "outcome_counts": row_counts,
+        "classification_counts": dict(sorted(classification_counts.items())),
         "differences": differences,
         "diff_count": len(differences),
     }
@@ -806,7 +940,7 @@ def _validate_source_identity(value: Any, comparison_id: str, side: str) -> Any:
     }
 
 
-def _validate_exposure(doc: dict[str, Any], unit: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str]]:
+def _validate_exposure(doc: dict[str, Any], unit: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str], dict[str, dict[str, Any]]]:
     doc = _object(doc, "exposure", {"schema", "version", "function_id", "scope_id", "window_start_ns", "window_end_ns", "records"})
     _check_doc_header(doc, "openatca.m6-exposure", "exposure")
     _bind_doc(doc, unit, "exposure")
@@ -880,7 +1014,23 @@ def _validate_exposure(doc: dict[str, Any], unit: dict[str, Any]) -> tuple[list[
             gaps.append(f"ZERO_{mode.upper()}_TRAFFIC_DENOMINATOR")
         if values and sum(item["traffic"]["unknown"] for item in values) > 0:
             gaps.append(f"UNKNOWN_{mode.upper()}_INPUT_ACCOUNTING")
-    return by_mode["shadow"] + by_mode["live"], gaps
+    records = by_mode["shadow"] + by_mode["live"]
+    totals: dict[str, dict[str, Any]] = {}
+    for mode, mode_records in by_mode.items():
+        duration = sum(item["duration_ns"] for item in mode_records)
+        traffic = {
+            key: sum(item["traffic"][key] for item in mode_records)
+            for key in ("received", "processed", "quarantined", "refused", "unknown")
+        }
+        if any(value > MAX_I64 for value in traffic.values()) or duration > (1 << 64) - 1:
+            _fail(f"{mode} exposure aggregate exceeds its integer bound")
+        totals[mode] = {
+            "interval_count": len(mode_records),
+            "duration_ns": duration,
+            "exposure_hours_milli": duration // 3_600_000_000,
+            "traffic": traffic,
+        }
+    return records, gaps, totals
 
 
 def _validate_containment(doc: dict[str, Any], unit: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str]]:
@@ -926,6 +1076,8 @@ def _validate_containment(doc: dict[str, Any], unit: dict[str, Any]) -> tuple[li
     if _integer(declared["rollback"], "containment.counts.rollback") != kinds["rollback"]:
         _fail("rollback event count does not reconcile")
     gaps = []
+    if not clean:
+        gaps.append("NO_CONTAINMENT_EVENT_RECORDS_SUBMITTED")
     if any(item["status"] != "completed" for item in clean):
         gaps.append("CONTAINMENT_EVENT_PENDING_OR_FAILED")
     return clean, gaps
@@ -1058,6 +1210,298 @@ def _validate_drills(
     return clean, summary, gaps
 
 
+def _parse_m3_selector_report(text: str, unit: dict[str, Any], source_sha256: str, source_bytes: int) -> tuple[dict[str, Any], list[str]]:
+    """Parse the bounded synthetic M3 selector receipt emitted by its existing example."""
+    if unit["comparison_family"] != "alert" or unit["stage"] != "S2Window":
+        _fail("synthetic conflict-alert selector report requires an alert-family S2Window unit")
+    if len(text.encode("ascii", errors="strict")) > MAX_SELECTOR_REPORT_BYTES:
+        _fail("synthetic selector report exceeds its byte cap")
+    selected_lines = [
+        line for line in text.splitlines()
+        if line.startswith(("M3DRILL\t", "CYCLE_FIELDS\t", "CYCLE\t", "CYCLE_FAILED\t", "FAULT\t", "SUMMARY\t"))
+    ]
+    if any(len(line) > 16_384 or line.count("\t") > 128 for line in selected_lines):
+        _fail("synthetic selector report line field cap exceeded")
+    headers = [line for line in selected_lines if line.startswith("M3DRILL\t")]
+    columns = [line for line in selected_lines if line.startswith("CYCLE_FIELDS\t")]
+    fault_lines = [line for line in selected_lines if line.startswith("FAULT\t")]
+    summary_lines = [line for line in selected_lines if line.startswith("SUMMARY\t")]
+    if len(headers) != 1 or len(columns) != 1 or len(fault_lines) > 1 or len(summary_lines) != 1:
+        _fail("synthetic selector report needs one header, columns and total summary, plus at most one fault summary")
+
+    def key_values(line: str, label: str, expected_keys: set[str] | None = None) -> dict[str, str]:
+        values: dict[str, str] = {}
+        for token in line.split("\t")[1:]:
+            key, separator, value = token.partition("=")
+            if not separator or not key or key in values:
+                _fail(f"{label}: malformed or duplicate field")
+            values[key] = value
+        if expected_keys is not None and values.keys() != expected_keys:
+            _fail(f"{label}: field set differs from the supported report schema")
+        return values
+
+    def number(values: dict[str, str], key: str, label: str, maximum: int = MAX_I64) -> int:
+        raw = values.get(key)
+        if raw is None or not raw.isascii() or not raw.isdecimal():
+            _fail(f"{label}.{key}: expected an unsigned decimal integer")
+        return _integer(int(raw), f"{label}.{key}", maximum=maximum)
+
+    header = key_values(
+        headers[0],
+        "M3DRILL",
+        {
+            "version", "mode", "recorded_mode", "qualification", "function_id", "function_name", "scope_id",
+            "scope_name", "evidence_policy_id", "m1_policy_version", "m1_policy_digest", "m1_source_epoch_digest",
+            "legacy_source_epoch", "candidate_source_epoch", "cycles", "cycle_window_ns", "cycle_step_ns", "seed",
+            "tracks_per_side", "flights_per_side", "handoffs_per_side", "alerts_per_side", "terminal_interval_ns",
+            "max_decision_delay_ns", "modeled_delivery_delay_ns", "delivery_timing_scope", "consumer_wire_adapter",
+            "quarantine_exercised", "ca_detection_exercised", "alert_payload_preservation_exercised",
+        },
+    )
+    if header.get("version") != "1" or header.get("mode") != "synthetic_capacity":
+        _fail("unsupported M3 selector report version or mode")
+    if header.get("recorded_mode") != "NOT_BUILT" or header.get("qualification") != "INCOMPLETE":
+        _fail("synthetic selector report must retain its non-operational qualification status")
+    if header.get("delivery_timing_scope") != "selector_api_only" or header.get("consumer_wire_adapter") != "NOT_BUILT":
+        _fail("synthetic selector report has an unknown timing or consumer-interface scope")
+    if number(header, "function_id", "M3DRILL", maximum=(1 << 32) - 1) != unit["function_id"]:
+        _fail("synthetic selector report function_id differs from the unit")
+    if number(header, "scope_id", "M3DRILL", maximum=(1 << 32) - 1) != unit["scope_id"]:
+        _fail("synthetic selector report scope_id differs from the unit")
+    function_name = _text(header.get("function_name"), "M3DRILL.function_name")
+    scope_name = _text(header.get("scope_name"), "M3DRILL.scope_name")
+    if function_name != "conflict_alert" or scope_name != "ZAU26":
+        _fail("synthetic selector report is not bound to the declared conflict-alert/ZAU26 fixture")
+    evidence_policy_id = _text(header.get("evidence_policy_id"), "M3DRILL.evidence_policy_id")
+    m1_policy_version = number(header, "m1_policy_version", "M3DRILL", maximum=65535)
+    m1_policy_digest = _hash(header.get("m1_policy_digest"), "M3DRILL.m1_policy_digest")
+    if evidence_policy_id != unit["policy"]["id"] or m1_policy_version != unit["policy"]["version"] or m1_policy_digest != unit["policy"]["sha256"]:
+        _fail("synthetic selector report policy identity differs from the unit")
+    source_epoch_digest = _hash(header.get("m1_source_epoch_digest"), "M3DRILL.m1_source_epoch_digest")
+    if unit["m1_source_epoch_digest"] is None or source_epoch_digest != unit["m1_source_epoch_digest"]:
+        _fail("synthetic selector report source epoch digest is missing or differs from the unit")
+    source_epoch_ids = {
+        "legacy": number(header, "legacy_source_epoch", "M3DRILL", maximum=(1 << 32) - 1),
+        "candidate": number(header, "candidate_source_epoch", "M3DRILL", maximum=(1 << 32) - 1),
+    }
+    cycles_expected = number(header, "cycles", "M3DRILL", maximum=MAX_DRILLS)
+    cycle_window_ns = number(header, "cycle_window_ns", "M3DRILL")
+    cycle_step_ns = number(header, "cycle_step_ns", "M3DRILL")
+    payload_counts = {
+        name: number(header, f"{name}_per_side", "M3DRILL")
+        for name in ("tracks", "flights", "handoffs", "alerts")
+    }
+    modeled_delivery_delay_ns = number(header, "modeled_delivery_delay_ns", "M3DRILL")
+    if cycles_expected == 0 or cycle_window_ns == 0 or cycle_step_ns < cycle_window_ns:
+        _fail("synthetic selector cycle window declaration is invalid")
+    if header.get("quarantine_exercised") != "0" or header.get("ca_detection_exercised") != "0" or header.get("alert_payload_preservation_exercised") != "1":
+        _fail("synthetic selector report must disclose unexercised quarantine/detection and alert preservation")
+
+    expected_columns = [
+        "index", "start_ns", "end_ns", "ready_ns", "promotion_ns", "rollback_ns",
+        "candidate_delivery_api_ns", "legacy_delivery_api_ns", "delivery_delay_ns", "tracks",
+        "flights", "handoffs", "alerts", "differences", "output_sequences", "losses", "error",
+    ]
+    declared_columns = columns[0].split("\t")[1:]
+    if declared_columns != expected_columns:
+        _fail("synthetic selector report cycle columns are unsupported")
+    cycles: list[dict[str, Any]] = []
+    failed_cycles: list[dict[str, Any]] = []
+    seen_indices: set[int] = set()
+    ordered_indices: list[int] = []
+    for line in selected_lines:
+        if line.startswith("CYCLE\t"):
+            values = line.split("\t")[1:]
+            if len(values) != len(expected_columns):
+                _fail("synthetic selector cycle has the wrong field count")
+            raw = dict(zip(expected_columns, values, strict=True))
+            index = number({"index": raw["index"]}, "index", "CYCLE", maximum=MAX_DRILLS)
+            if index in seen_indices:
+                _fail("synthetic selector report repeats a cycle index")
+            seen_indices.add(index)
+            ordered_indices.append(index)
+            start_ns = _i64(number({"start_ns": raw["start_ns"]}, "start_ns", "CYCLE"), "CYCLE.start_ns")
+            end_ns = _i64(number({"end_ns": raw["end_ns"]}, "end_ns", "CYCLE"), "CYCLE.end_ns")
+            if end_ns - start_ns != cycle_window_ns or start_ns < unit["window_start_ns"] or end_ns > unit["window_end_ns"]:
+                _fail("synthetic selector cycle window is outside the declared unit")
+            expected_start = unit["window_start_ns"] + index * cycle_step_ns
+            if start_ns != expected_start:
+                _fail("synthetic selector cycle start does not match its declared step")
+            sequences = raw["output_sequences"].split(",")
+            if not sequences or any(not value.isascii() or not value.isdecimal() for value in sequences):
+                _fail("synthetic selector output sequence list is malformed")
+            if raw["error"] != "NONE":
+                _fail("successful synthetic selector cycle carries an error")
+            cycles.append(
+                {
+                    "index": index,
+                    "start_ns": start_ns,
+                    "end_ns": end_ns,
+                    "ready_ns": number({"ready_ns": raw["ready_ns"]}, "ready_ns", "CYCLE"),
+                    "promotion_ns": number({"promotion_ns": raw["promotion_ns"]}, "promotion_ns", "CYCLE"),
+                    "rollback_ns": number({"rollback_ns": raw["rollback_ns"]}, "rollback_ns", "CYCLE"),
+                    "candidate_delivery_api_ns": number({"candidate_delivery_api_ns": raw["candidate_delivery_api_ns"]}, "candidate_delivery_api_ns", "CYCLE"),
+                    "legacy_delivery_api_ns": number({"legacy_delivery_api_ns": raw["legacy_delivery_api_ns"]}, "legacy_delivery_api_ns", "CYCLE"),
+                    "delivery_delay_ns": number({"delivery_delay_ns": raw["delivery_delay_ns"]}, "delivery_delay_ns", "CYCLE"),
+                    "tracks": number({"tracks": raw["tracks"]}, "tracks", "CYCLE"),
+                    "flights": number({"flights": raw["flights"]}, "flights", "CYCLE"),
+                    "handoffs": number({"handoffs": raw["handoffs"]}, "handoffs", "CYCLE"),
+                    "alerts": number({"alerts": raw["alerts"]}, "alerts", "CYCLE"),
+                    "differences": number({"differences": raw["differences"]}, "differences", "CYCLE"),
+                    "output_sequences": [int(value) for value in sequences],
+                    "losses": number({"losses": raw["losses"]}, "losses", "CYCLE"),
+                }
+            )
+        elif line.startswith("CYCLE_FAILED\t"):
+            parts = line.split("\t")
+            if len(parts) != 4:
+                _fail("failed synthetic selector cycle has malformed fields")
+            index = number({"index": parts[1]}, "index", "CYCLE_FAILED", maximum=MAX_DRILLS)
+            values = key_values("FAILED\t" + "\t".join(parts[2:]), "CYCLE_FAILED")
+            if index in seen_indices or not values.get("error"):
+                _fail("failed synthetic selector cycle duplicates an index or omits its refusal")
+            seen_indices.add(index)
+            ordered_indices.append(index)
+            start_ns = _i64(number(values, "start_ns", "CYCLE_FAILED"), "CYCLE_FAILED.start_ns")
+            end_ns = _i64(number(values, "end_ns", "CYCLE_FAILED"), "CYCLE_FAILED.end_ns")
+            expected_start = unit["window_start_ns"] + index * cycle_step_ns
+            if end_ns - start_ns != cycle_window_ns or start_ns != expected_start or end_ns > unit["window_end_ns"]:
+                _fail("failed synthetic selector cycle window does not match its declared unit/step")
+            failed_cycles.append({"index": index, "start_ns": start_ns, "end_ns": end_ns, "error": values["error"]})
+    summary = key_values(
+        summary_lines[0],
+        "SUMMARY",
+        {
+            "cycles_expected", "cycles_completed", "cycles_failed", "clean_cycle_delivery_expected",
+            "clean_cycle_delivery_observed", "clean_cycle_lost", "fault_cases", "sustained_same_selector_cycles",
+            "sustained_trace_capacity", "sustained_next_promotion", "sustained_fallback", "clean_cycle_consumer_gaps",
+            "clean_cycle_consumer_duplicates", "clean_cycle_consumer_out_of_order", "active_alerts_preserved",
+            "ack_suppression_fields_compared", "handoff_rows_compared", "decision_and_delivery_timings_separate",
+            "recorded_replay", "qualification",
+        },
+    )
+    if number(summary, "cycles_expected", "SUMMARY", maximum=MAX_DRILLS) != cycles_expected:
+        _fail("synthetic selector summary expected-cycle count differs from header")
+    if number(summary, "cycles_completed", "SUMMARY", maximum=MAX_DRILLS) != len(cycles):
+        _fail("synthetic selector summary completion count differs from cycle rows")
+    if number(summary, "cycles_failed", "SUMMARY", maximum=MAX_DRILLS) != len(failed_cycles):
+        _fail("synthetic selector summary failure count differs from refused rows")
+    if len(seen_indices) != cycles_expected or seen_indices != set(range(cycles_expected)):
+        _fail("synthetic selector report does not account for every expected cycle index")
+    if ordered_indices != list(range(cycles_expected)):
+        _fail("synthetic selector cycle rows are not in index order")
+    fault = key_values(
+        fault_lines[0],
+        "FAULT",
+        {
+            "version", "cases", "expected_refusals", "expected_delivery_gap_refusals", "expected_delivery_duplicates",
+            "expected_out_of_order", "epoch_change_after_reconcile", "duplicate_delivery", "sequence_gap",
+            "stale_legacy_health", "promotion_pending_rollback", "pending_fault_delivery_offered",
+            "pending_fault_delivery_delivered", "pending_fault_delivery_lost", "expired_mirror", "incomplete_family",
+            "fault_injections", "losses_preserved",
+        },
+    ) if fault_lines else {}
+    if fault_lines and (fault.get("version") != "1" or fault.get("fault_injections") != "synthetic_only"):
+        _fail("synthetic selector fault summary version or provenance is unsupported")
+    if not fault_lines and not failed_cycles:
+        _fail("successful synthetic selector report is missing its fault suite summary")
+    if not fault_lines and failed_cycles:
+        gaps_for_fault = ["M3_SYNTHETIC_FAULT_SUITE_NOT_RUN_AFTER_CYCLE_FAILURE"]
+    else:
+        gaps_for_fault = []
+    expected_deliveries = cycles_expected * 2
+    observed_deliveries = sum(len(item["output_sequences"]) for item in cycles)
+    if number(summary, "clean_cycle_delivery_expected", "SUMMARY") != expected_deliveries:
+        _fail("synthetic selector expected-delivery count does not reconcile")
+    if not failed_cycles and number(summary, "clean_cycle_delivery_observed", "SUMMARY") != observed_deliveries:
+        _fail("synthetic selector observed-delivery count does not reconcile")
+    if not failed_cycles and number(summary, "clean_cycle_lost", "SUMMARY") != sum(item["losses"] for item in cycles):
+        _fail("synthetic selector lost-delivery count does not reconcile")
+    fault_count = number(summary, "fault_cases", "SUMMARY")
+    if fault and fault_count != number(fault, "cases", "FAULT"):
+        _fail("synthetic selector fault case count does not reconcile")
+    if not fault and fault_count != 0:
+        _fail("synthetic selector fault case count does not reconcile")
+    if summary.get("recorded_replay") != "NOT_BUILT" or summary.get("qualification") != "INCOMPLETE":
+        _fail("synthetic selector total summary changed its qualification disclosure")
+    if number(summary, "sustained_same_selector_cycles", "SUMMARY") != 64:
+        _fail("synthetic selector sustained-cycle count differs from its defined fixture")
+    if number(summary, "handoff_rows_compared", "SUMMARY") != payload_counts["handoffs"]:
+        _fail("synthetic selector handoff comparison count does not reconcile")
+    run_quality_gaps: list[str] = []
+    if any(number(summary, key, "SUMMARY") > 0 for key in (
+        "clean_cycle_consumer_gaps", "clean_cycle_consumer_duplicates", "clean_cycle_consumer_out_of_order"
+    )):
+        run_quality_gaps.append("M3_SYNTHETIC_CONSUMER_SEQUENCE_ANOMALY")
+    if number(summary, "active_alerts_preserved", "SUMMARY") != 1:
+        run_quality_gaps.append("M3_SYNTHETIC_ALERT_PAYLOAD_NOT_PRESERVED")
+    if number(summary, "ack_suppression_fields_compared", "SUMMARY") != 1:
+        run_quality_gaps.append("M3_SYNTHETIC_ACK_SUPPRESSION_NOT_COMPARED")
+    if summary.get("sustained_next_promotion") != "TraceFull" or summary.get("sustained_fallback") != "Legacy":
+        run_quality_gaps.append("M3_SYNTHETIC_TRACE_CAPACITY_FALLBACK_MISMATCH")
+    cycle_exposure_ns = sum(item["end_ns"] - item["start_ns"] for item in cycles)
+    difference_count = sum(item["differences"] for item in cycles)
+    gaps = ["SYNTHETIC_SELECTOR_ONLY_NOT_OPERATIONALLY_QUALIFIED", "M3_QUARANTINE_NOT_EXERCISED", "CA_DETECTION_NOT_EXERCISED"]
+    gaps.extend(gaps_for_fault)
+    gaps.extend(run_quality_gaps)
+    if failed_cycles or number(summary, "cycles_failed", "SUMMARY", maximum=MAX_DRILLS) > 0:
+        gaps.append("M3_SYNTHETIC_SELECTOR_CYCLES_FAILED")
+    for cycle in cycles:
+        for name, expected in payload_counts.items():
+            if cycle[name] != expected:
+                _fail(f"synthetic selector cycle {name} count differs from header capacity")
+        if cycle["delivery_delay_ns"] != modeled_delivery_delay_ns:
+            _fail("synthetic selector cycle delivery delay differs from header")
+        if cycle["output_sequences"] != [1, 2] or cycle["losses"]:
+            gaps.append("M3_SYNTHETIC_SELECTOR_SEQUENCE_OR_LOSS_ANOMALY")
+    if difference_count or number(summary, "clean_cycle_lost", "SUMMARY") > 0 or (failed_cycles and observed_deliveries < expected_deliveries):
+        gaps.append("M3_SYNTHETIC_SELECTOR_DIFF_OR_DELIVERY_LOSS")
+    return (
+        {
+            "schema": "openatca.m6-synthetic-selector-result",
+            "version": 1,
+            "source_sha256": source_sha256,
+            "source_bytes": source_bytes,
+            "function_id": unit["function_id"],
+            "function_name": function_name,
+            "scope_id": unit["scope_id"],
+            "scope_name": scope_name,
+            "policy": {"id": evidence_policy_id, "version": m1_policy_version, "sha256": m1_policy_digest},
+            "policy_binding_note": "Evidence policy ID is a scenario label; M1 policy version and digest are the values from the selector policy.",
+            "m1_source_epoch_digest": source_epoch_digest,
+            "m3_side_source_epoch_ids": source_epoch_ids,
+            "m6_side_source_epoch_hashes": dict(unit["source_epochs"]),
+            "source_epoch_scope_note": "M1 pair digest and M3 synthetic side IDs are recorded separately from M6 unit source hashes.",
+            "qualification": "SYNTHETIC_SELECTOR_ONLY",
+            "timing_scope": "selector_api_only",
+            "cycle_window_ns": cycle_window_ns,
+            "cycle_step_ns": cycle_step_ns,
+            "cycles": cycles,
+            "failed_cycles": failed_cycles,
+            "cycle_count": len(cycles),
+            "synthetic_exposure": {
+                "unit_windows": len(cycles),
+                "duration_ns": cycle_exposure_ns,
+                "exposure_hours_milli": cycle_exposure_ns // 3_600_000_000,
+            },
+            "comparison_summary": {
+                "cycles_compared": len(cycles),
+                "cycles_with_differences": sum(item["differences"] > 0 for item in cycles),
+                "difference_count": difference_count,
+            },
+            "rollback_summary": {
+                "cycles_with_rollback": len(cycles),
+                "max_rollback_selector_ns": max((item["rollback_ns"] for item in cycles), default=0),
+            },
+            "fault_summary": fault,
+            "run_summary": summary,
+            "containment_status": "not_exercised",
+            "ca_detection_status": "not_exercised",
+        },
+        gaps,
+    )
+
+
 def _required_artifact(artifacts: dict[str, dict[str, Any]], kind: str) -> dict[str, Any] | None:
     matches = [item for item in artifacts.values() if item["kind"] == kind]
     if len(matches) > 1:
@@ -1093,7 +1537,9 @@ def _build_package(manifest_path: str) -> dict[str, Any]:
     hazard_source: dict[str, Any] | None = None
     shadow: dict[str, Any] | None = None
     exposure: list[dict[str, Any]] = []
+    exposure_totals: dict[str, dict[str, Any]] = {}
     containment: list[dict[str, Any]] = []
+    synthetic_selector: dict[str, Any] | None = None
     drills: list[dict[str, Any]] = []
     drill_summary: dict[str, Any] = {
         "reported_drills": 0,
@@ -1121,11 +1567,13 @@ def _build_package(manifest_path: str) -> dict[str, Any]:
                 if not hazards:
                     gaps.append("HAZARD_REGISTER_EMPTY")
                 hazard_source = {key: value for key, value in hazard_list[0].items() if key != "hazards"}
+                if hazard_source["coverage_gap"]:
+                    gaps.append(hazard_source["coverage_gap"])
             elif kind == "shadow_comparison":
                 shadow, _, artifact_gaps = _validate_shadow(doc, unit, artifacts)
                 gaps.extend(artifact_gaps)
             elif kind == "exposure":
-                exposure, artifact_gaps = validator(doc, unit)
+                exposure, artifact_gaps, exposure_totals = validator(doc, unit)
                 gaps.extend(artifact_gaps)
             elif kind == "containment":
                 containment, artifact_gaps = validator(doc, unit)
@@ -1141,10 +1589,26 @@ def _build_package(manifest_path: str) -> dict[str, Any]:
                 hazards = []
             elif kind == "exposure":
                 exposure = []
+                exposure_totals = {}
             elif kind == "containment":
                 containment = []
             elif kind == "drill_results":
                 drills = []
+    selector_artifact = _required_artifact(artifacts, "synthetic_selector_report")
+    if selector_artifact is not None and selector_artifact["id"] in loaded:
+        try:
+            selector_status = verified_by_id.get(selector_artifact["id"], {})
+            synthetic_selector, selector_gaps = _parse_m3_selector_report(
+                loaded[selector_artifact["id"]],
+                unit,
+                selector_status.get("actual_sha256") or selector_artifact["declared_sha256"],
+                selector_status.get("actual_bytes") or selector_artifact["declared_bytes"],
+            )
+            gaps.extend(selector_gaps)
+            if hazard_source is not None and hazard_source["function_name"] is not None and hazard_source["function_name"] != synthetic_selector["function_name"]:
+                gaps.append("SYNTHETIC_SELECTOR_FUNCTION_NAME_DIFFERS_FROM_HAZARD_SCOPE")
+        except EvidenceError as exc:
+            gaps.append(f"INVALID_ARTIFACT:synthetic_selector_report:{str(exc)[:256]}")
     if any(event["status"] != "completed" for event in containment):
         gaps.append("QUARANTINE_OR_ROLLBACK_STATUS_INCOMPLETE")
     if shadow and shadow["diff_count"]:
@@ -1166,11 +1630,13 @@ def _build_package(manifest_path: str) -> dict[str, Any]:
             "A recorded-traffic drill classification is a source claim; only the referenced bounded artifact bytes and hash are verified, not that the bytes are genuine traffic or a performed drill.",
             "No unavailable ERAM/SFDPS observations or controller actions are inferred.",
             "Interface allowances are not interpreted; absence of an approved ICD limit source leaves H5 interface continuity unassessed.",
+            "Containment counts are counts of submitted event rows only; no rows do not prove that no quarantine or rollback occurred.",
         ],
         "unit": unit,
         "resource_limits": {
             "manifest_bytes": MAX_MANIFEST_BYTES,
             "json_artifact_bytes_each": MAX_JSON_ARTIFACT_BYTES,
+            "synthetic_selector_report_bytes": MAX_SELECTOR_REPORT_BYTES,
             "opaque_artifact_bytes_each": MAX_OPAQUE_ARTIFACT_BYTES,
             "artifact_bytes_total": MAX_TOTAL_ARTIFACT_BYTES,
             "artifact_count": MAX_ARTIFACTS,
@@ -1194,9 +1660,19 @@ def _build_package(manifest_path: str) -> dict[str, Any]:
         "artifacts": sorted(artifact_statuses, key=lambda item: item["id"]),
         "hazard_register_source": hazard_source,
         "hazards": hazards,
+        "function_hazards": {
+            "function_id": unit["function_id"],
+            "function_name": None if hazard_source is None else hazard_source["function_name"],
+            "scope_id": unit["scope_id"],
+            "records": hazards,
+            "coverage_status": None if hazard_source is None else hazard_source["coverage_status"],
+        },
         "exposure": exposure,
+        "exposure_totals": exposure_totals,
+        "synthetic_selector_drill": synthetic_selector,
         "shadow": shadow,
         "containment_events": containment,
+        "containment_event_coverage_status": "event_rows_only_completeness_unassessed",
         "containment_counts": {
             "quarantine": sum(event["kind"] == "quarantine" for event in containment),
             "rollback": sum(event["kind"] == "rollback" for event in containment),

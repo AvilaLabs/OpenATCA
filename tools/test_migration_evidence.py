@@ -22,16 +22,23 @@ class MigrationEvidenceTests(unittest.TestCase):
         self.manifest = self.root / "manifest.json"
         self.output = self.root / "private-output"
         self.unit = {
-            "function_id": 7,
+            "function_id": 4,
             "scope_id": 26,
-            "comparison_family": "handoff",
-            "window_start_ns": 1_800_000_000,
-            "window_end_ns": 2_000_000_000,
+            "comparison_family": "alert",
+            "window_start_ns": 1_000_000_000,
+            "window_end_ns": 1_001_000_000_000,
             "stage": "S2Window",
-            "policy": {"id": "M4-H2-EXACT-1", "version": 1, "sha256": "a" * 64},
+            "policy": {"id": "M3-SYNTHETIC-SELECTOR-1", "version": 1, "sha256": "03" * 32},
+            "m1_source_epoch_digest": "04" * 32,
             "source_epochs": {"legacy": "b" * 64, "candidate": "c" * 64},
         }
         self.documents = self._documents()
+        report_path = os.environ.get("OPENATCA_M3_SELECTOR_REPORT")
+        if report_path:
+            raw, _, _ = m6._read_file(report_path, m6.MAX_SELECTOR_REPORT_BYTES)
+            self.selector_report = raw.decode("ascii", errors="strict")
+        else:
+            self.selector_report = self._selector_report_fixture()
         self._write_bundle()
 
     def tearDown(self) -> None:
@@ -78,10 +85,10 @@ class MigrationEvidenceTests(unittest.TestCase):
         return {
             "hazards": {
                 "schema": "openatca.m6-hazard-register",
-                "version": 1,
+                "version": 2,
                 **header,
                 "source": {
-                    "document_ref": "synthetic-fixture-only",
+                    "document_ref": "synthetic-conflict-alert-zau-sector-window-fixture-only",
                     "revision": "test",
                     "coverage_status": "complete_for_function",
                     "hazard_count": 1,
@@ -89,6 +96,15 @@ class MigrationEvidenceTests(unittest.TestCase):
                 "hazards": [
                     {
                         "id": "SYN-H-1",
+                        "function": "conflict_alert",
+                        "cause": "synthetic paired alert rows differ in the scoped window",
+                        "effect": "the package must retain and classify the synthetic difference",
+                        "severity_class": "Major",
+                        "severity_status": "engineering_candidate",
+                        "severity_rationale": "Synthetic fixture only; no operational assessment.",
+                        "source_refs": ["synthetic fixture: ZAU sector scope 26; no recording"],
+                        "mitigation_requirement_ids": ["SYN-M-1"],
+                        "verification_refs": ["tools/test_migration_evidence.py::test_synthetic_conflict_alert_zau_window_package"],
                         "description": "synthetic test hazard",
                         "mitigations": [
                             {"id": "SYN-M-1", "description": "synthetic mitigation", "verification_ref": "synthetic-test"}
@@ -100,7 +116,7 @@ class MigrationEvidenceTests(unittest.TestCase):
                 "schema": "openatca.m6-shadow-adapter",
                 "version": 1,
                 **header,
-                "family": "handoff",
+                "family": "alert",
                 "policy": dict(unit["policy"]),
                 "source_epochs": dict(unit["source_epochs"]),
                 "coverage": {"legacy": "CompleteWithEvents", "candidate": "CompleteWithEvents"},
@@ -185,14 +201,66 @@ class MigrationEvidenceTests(unittest.TestCase):
                     "bytes": len(raw),
                 }
             )
+        selector_report = self.selector_report.encode("ascii")
+        selector_path = self.root / "selector-v1.txt"
+        selector_path.write_bytes(selector_report)
+        artifact_rows.append(
+            {
+                "id": "selector-v1",
+                "kind": "synthetic_selector_report",
+                "path": selector_path.name,
+                "sha256": hashlib.sha256(selector_report).hexdigest(),
+                "bytes": len(selector_report),
+            }
+        )
         manifest = {"schema": m6.SCHEMA, "version": 1, "unit": self.unit, "artifacts": artifact_rows}
         self.manifest.write_text(json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n")
         self.manifest_doc = manifest
+
+    def _selector_report_fixture(self) -> str:
+        rows = [
+            f"M3DRILL\tversion=1\tmode=synthetic_capacity\trecorded_mode=NOT_BUILT\tqualification=INCOMPLETE"
+            f"\tfunction_id=4\tfunction_name=conflict_alert\tscope_id=26\tscope_name=ZAU26"
+            f"\tevidence_policy_id=M3-SYNTHETIC-SELECTOR-1\tm1_policy_version=1\tm1_policy_digest={'03' * 32}"
+            f"\tm1_source_epoch_digest={'04' * 32}"
+            "\tlegacy_source_epoch=11\tcandidate_source_epoch=12\tcycles=1\tcycle_window_ns=2000000000"
+            "\tcycle_step_ns=10000000000\tseed=1\ttracks_per_side=1\tflights_per_side=1\thandoffs_per_side=1"
+            "\talerts_per_side=1\tterminal_interval_ns=1000000000\tmax_decision_delay_ns=1000000000"
+            "\tmodeled_delivery_delay_ns=100000000\tdelivery_timing_scope=selector_api_only"
+            "\tconsumer_wire_adapter=NOT_BUILT\tquarantine_exercised=0\tca_detection_exercised=0"
+            "\talert_payload_preservation_exercised=1",
+            "CYCLE_FIELDS\tindex\tstart_ns\tend_ns\tready_ns\tpromotion_ns\trollback_ns\tcandidate_delivery_api_ns"
+            "\tlegacy_delivery_api_ns\tdelivery_delay_ns\ttracks\tflights\thandoffs\talerts\tdifferences"
+            "\toutput_sequences\tlosses\terror",
+            "CYCLE\t0\t1000000000\t3000000000\t100\t200\t300\t400\t500\t100000000\t1\t1\t1\t1\t0\t1,2\t0\tNONE",
+            "FAULT\tversion=1\tcases=8\texpected_refusals=8\texpected_delivery_gap_refusals=2"
+            "\texpected_delivery_duplicates=1\texpected_out_of_order=Stale\tepoch_change_after_reconcile=WrongUnit"
+            "\tduplicate_delivery=OutputDuplicate\tsequence_gap=OutputGap\tstale_legacy_health=Stale"
+            "\tpromotion_pending_rollback=accepted_then_delivery_gap\tpending_fault_delivery_offered=1"
+            "\tpending_fault_delivery_delivered=0\tpending_fault_delivery_lost=1\texpired_mirror=Stale"
+            "\tincomplete_family=Incomplete\tfault_injections=synthetic_only\tlosses_preserved=1",
+            "SUMMARY\tcycles_expected=1\tcycles_completed=1\tcycles_failed=0\tclean_cycle_delivery_expected=2"
+            "\tclean_cycle_delivery_observed=2\tclean_cycle_lost=0\tfault_cases=8\tsustained_same_selector_cycles=64"
+            "\tsustained_trace_capacity=128\tsustained_next_promotion=TraceFull\tsustained_fallback=Legacy"
+            "\tclean_cycle_consumer_gaps=0\tclean_cycle_consumer_duplicates=0\tclean_cycle_consumer_out_of_order=0"
+            "\tactive_alerts_preserved=1\tack_suppression_fields_compared=1\thandoff_rows_compared=1"
+            "\tdecision_and_delivery_timings_separate=1\trecorded_replay=NOT_BUILT\tqualification=INCOMPLETE",
+        ]
+        return "\n".join(rows) + "\n"
 
     def _rewrite_artifact(self, artifact_id: str, doc: dict) -> None:
         row = next(item for item in self.manifest_doc["artifacts"] if item["id"] == artifact_id)
         path = self.root / row["path"]
         raw = (json.dumps(doc, sort_keys=True, separators=(",", ":")) + "\n").encode()
+        path.write_bytes(raw)
+        row["sha256"] = hashlib.sha256(raw).hexdigest()
+        row["bytes"] = len(raw)
+        self.manifest.write_text(json.dumps(self.manifest_doc, sort_keys=True, separators=(",", ":")) + "\n")
+
+    def _rewrite_selector_report(self, content: str) -> None:
+        row = next(item for item in self.manifest_doc["artifacts"] if item["id"] == "selector-v1")
+        path = self.root / row["path"]
+        raw = content.encode("ascii")
         path.write_bytes(raw)
         row["sha256"] = hashlib.sha256(raw).hexdigest()
         row["bytes"] = len(raw)
@@ -225,6 +293,49 @@ class MigrationEvidenceTests(unittest.TestCase):
         self.assertEqual(os.stat(output_path).st_mode & 0o777, 0o600)
         with self.assertRaises(m6.EvidenceError):
             m6.generate(str(self.manifest), str(self.output))
+
+    # REQ: OA-MIG-602
+    def test_synthetic_conflict_alert_zau_window_package(self) -> None:
+        self.documents["hazards"]["source"]["coverage_status"] = "declared_function_scope"
+        self._rewrite_artifact("hazards-v1", self.documents["hazards"])
+        shadow_row = next(item for item in self.manifest_doc["artifacts"] if item["id"] == "shadow-v1")
+        shadow_row.update(path=None, sha256=None, bytes=None)
+        self.manifest.write_text(json.dumps(self.manifest_doc, sort_keys=True, separators=(",", ":")) + "\n")
+        self.documents["exposure"]["records"] = []
+        self._rewrite_artifact("exposure-v1", self.documents["exposure"])
+        _, package = m6.generate(str(self.manifest), str(self.output))
+        self.assertEqual(package["assessment_status"], "INCOMPLETE")
+        self.assertEqual(package["unit"]["scope_id"], 26)
+        self.assertEqual(package["function_hazards"]["records"][0]["function"], "conflict_alert")
+        self.assertEqual(package["hazard_register_source"]["coverage_gap"], "FUNCTION_HAZARD_SCOPE_NOT_ASSESSED")
+        self.assertIn("synthetic-conflict-alert-zau-sector-window", package["hazard_register_source"]["source_document_ref"])
+        self.assertIsNone(package["shadow"])
+        self.assertEqual(package["exposure_totals"]["shadow"]["interval_count"], 0)
+        self.assertEqual(package["exposure_totals"]["live"]["exposure_hours_milli"], 0)
+        selector = package["synthetic_selector_drill"]
+        self.assertEqual(selector["policy"]["id"], self.unit["policy"]["id"])
+        self.assertEqual(selector["m1_source_epoch_digest"], self.unit["m1_source_epoch_digest"])
+        self.assertEqual(selector["m3_side_source_epoch_ids"], {"legacy": 11, "candidate": 12})
+        self.assertEqual(selector["synthetic_exposure"]["unit_windows"], selector["cycle_count"])
+        self.assertEqual(len(selector["cycles"]), selector["cycle_count"])
+        self.assertGreater(selector["cycle_count"], 0)
+        self.assertEqual(package["synthetic_selector_drill"]["comparison_summary"]["difference_count"], 0)
+        self.assertEqual(selector["rollback_summary"]["cycles_with_rollback"], selector["cycle_count"])
+        self.assertEqual(package["synthetic_selector_drill"]["containment_status"], "not_exercised")
+        self.assertEqual(package["containment_counts"], {"quarantine": 0, "rollback": 0})
+        self.assertEqual(package["h5_metrics"]["reported_drills"], 0)
+        self.assertIn("MISSING_ARTIFACT:shadow-v1", package["gaps"])
+        self.assertIn("MISSING_SHADOW_EXPOSURE", package["gaps"])
+        self.assertIn("MISSING_LIVE_EXPOSURE", package["gaps"])
+        self.assertIn("M3_QUARANTINE_NOT_EXERCISED", package["gaps"])
+        self.assertIn("FUNCTION_HAZARD_SCOPE_NOT_ASSESSED", package["gaps"])
+
+    # REQ: OA-MIG-602
+    def test_synthetic_selector_report_refuses_wrong_scope_binding(self) -> None:
+        self._rewrite_selector_report(self._selector_report_fixture().replace("scope_id=26", "scope_id=27"))
+        _, package = m6.generate(str(self.manifest), str(self.output))
+        self.assertIsNone(package["synthetic_selector_drill"])
+        self.assertTrue(any(gap.startswith("INVALID_ARTIFACT:synthetic_selector_report:") for gap in package["gaps"]))
 
     # REQ: OA-MIG-601
     def test_wrong_artifact_hash_is_retained_as_incomplete_not_accepted(self) -> None:

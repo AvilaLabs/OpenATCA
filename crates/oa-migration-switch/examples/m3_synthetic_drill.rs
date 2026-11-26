@@ -23,14 +23,28 @@ const CYCLE_NS: i64 = 10_000_000_000;
 const SUSTAINED_CYCLE_NS: i64 = 1_000_000_000;
 const MAX_AGE_NS: i64 = 1_000_000_000;
 const DECISION_TO_DELIVERY_NS: i64 = 100_000_000;
+const SYNTHETIC_FUNCTION_ID: u32 = 4;
+const SYNTHETIC_SCOPE_ID: u32 = 26;
+const SYNTHETIC_FUNCTION_NAME: &str = "conflict_alert";
+const SYNTHETIC_SCOPE_NAME: &str = "ZAU26";
+const SYNTHETIC_EVIDENCE_POLICY_ID: &str = "M3-SYNTHETIC-SELECTOR-1";
+const SYNTHETIC_POLICY_VERSION: u32 = 1;
+const SYNTHETIC_POLICY_DIGEST: [u8; 32] = [3; 32];
+const SYNTHETIC_SOURCE_EPOCH_DIGEST: [u8; 32] = [4; 32];
+const SYNTHETIC_POLICY_DIGEST_HEX: &str =
+    "0303030303030303030303030303030303030303030303030303030303030303";
+const SYNTHETIC_SOURCE_EPOCH_DIGEST_HEX: &str =
+    "0404040404040404040404040404040404040404040404040404040404040404";
+const SYNTHETIC_LEGACY_SOURCE_EPOCH: u64 = 11;
+const SYNTHETIC_CANDIDATE_SOURCE_EPOCH: u64 = 12;
 const RECORDED_MODE_STATUS: &str = "NOT_BUILT";
 const QUALIFICATION_STATUS: &str = "INCOMPLETE";
 
 pub(crate) fn drill_policy() -> UnitPolicy {
     UnitPolicy {
-        policy_version: 1,
-        policy_digest: [3; 32],
-        source_epoch_digest: [4; 32],
+        policy_version: SYNTHETIC_POLICY_VERSION,
+        policy_digest: SYNTHETIC_POLICY_DIGEST,
+        source_epoch_digest: SYNTHETIC_SOURCE_EPOCH_DIGEST,
         update_interval_ns: 4_800_000_000,
         max_decision_delay_ns: 1_000_000_000,
         max_snapshot_age_ns: MAX_AGE_NS,
@@ -78,8 +92,8 @@ pub(crate) fn snapshot(
     variation: u32,
 ) -> Result<Snapshot, Refusal> {
     let epoch = match side {
-        Side::Legacy => 11,
-        Side::Candidate => 12,
+        Side::Legacy => SYNTHETIC_LEGACY_SOURCE_EPOCH,
+        Side::Candidate => SYNTHETIC_CANDIDATE_SOURCE_EPOCH,
     };
     let source_ns = observed_ns.checked_sub(1).ok_or(Refusal::TimeOverflow)?;
     let mut value = Snapshot {
@@ -470,8 +484,8 @@ pub(crate) fn drill_state(
         .checked_add(2_000_000_000)
         .ok_or(Refusal::TimeOverflow)?;
     let unit = SwapUnitKey {
-        function_id: 1,
-        scope_id: 1,
+        function_id: SYNTHETIC_FUNCTION_ID,
+        scope_id: SYNTHETIC_SCOPE_ID,
         window_start_ns: start_ns,
         window_end_ns: end_ns,
     };
@@ -744,8 +758,8 @@ fn fault_suite() -> Result<u32, Refusal> {
         )
         .ok_or(Refusal::TimeOverflow)?;
     let unit = SwapUnitKey {
-        function_id: 1,
-        scope_id: 1,
+        function_id: SYNTHETIC_FUNCTION_ID,
+        scope_id: SYNTHETIC_SCOPE_ID,
         window_start_ns: start_ns,
         window_end_ns: start_ns
             .checked_add(2_000_000_000)
@@ -784,8 +798,8 @@ fn sustained_trace_capacity_case() -> Result<(), Refusal> {
         .checked_add(100_000_000_000)
         .ok_or(Refusal::TimeOverflow)?;
     let unit = SwapUnitKey {
-        function_id: 1,
-        scope_id: 1,
+        function_id: SYNTHETIC_FUNCTION_ID,
+        scope_id: SYNTHETIC_SCOPE_ID,
         window_start_ns: start_ns,
         window_end_ns: end_ns,
     };
@@ -942,19 +956,29 @@ fn sustained_trace_capacity_case() -> Result<(), Refusal> {
 
 fn report_header() -> String {
     format!(
-        "M3DRILL\tversion=1\tmode=synthetic_capacity\trecorded_mode={RECORDED_MODE_STATUS}\tqualification={QUALIFICATION_STATUS}\tcycles={CYCLES}\tseed=0x4d335f53594e5448\ttracks_per_side={MAX_TRACKS}\tflights_per_side={MAX_FLIGHTS}\thandoffs_per_side={MAX_HANDOFFS}\talerts_per_side={MAX_ALERTS}\tterminal_interval_ns=4800000000\tmax_decision_delay_ns=1000000000\tmodeled_delivery_delay_ns={DECISION_TO_DELIVERY_NS}\tdelivery_timing_scope=selector_api_only\tconsumer_wire_adapter=NOT_BUILT"
+        "M3DRILL\tversion=1\tmode=synthetic_capacity\trecorded_mode={RECORDED_MODE_STATUS}\tqualification={QUALIFICATION_STATUS}\tfunction_id={SYNTHETIC_FUNCTION_ID}\tfunction_name={SYNTHETIC_FUNCTION_NAME}\tscope_id={SYNTHETIC_SCOPE_ID}\tscope_name={SYNTHETIC_SCOPE_NAME}\tevidence_policy_id={SYNTHETIC_EVIDENCE_POLICY_ID}\tm1_policy_version={SYNTHETIC_POLICY_VERSION}\tm1_policy_digest={SYNTHETIC_POLICY_DIGEST_HEX}\tm1_source_epoch_digest={SYNTHETIC_SOURCE_EPOCH_DIGEST_HEX}\tlegacy_source_epoch={SYNTHETIC_LEGACY_SOURCE_EPOCH}\tcandidate_source_epoch={SYNTHETIC_CANDIDATE_SOURCE_EPOCH}\tcycles={CYCLES}\tcycle_window_ns=2000000000\tcycle_step_ns={CYCLE_NS}\tseed=0x4d335f53594e5448\ttracks_per_side={MAX_TRACKS}\tflights_per_side={MAX_FLIGHTS}\thandoffs_per_side={MAX_HANDOFFS}\talerts_per_side={MAX_ALERTS}\tterminal_interval_ns=4800000000\tmax_decision_delay_ns=1000000000\tmodeled_delivery_delay_ns={DECISION_TO_DELIVERY_NS}\tdelivery_timing_scope=selector_api_only\tconsumer_wire_adapter=NOT_BUILT\tquarantine_exercised=0\tca_detection_exercised=0\talert_payload_preservation_exercised=1"
     )
 }
 
 fn main() -> Result<(), Refusal> {
     println!("{}", report_header());
     println!(
-        "CYCLE_FIELDS\tindex\tready_ns\tpromotion_ns\trollback_ns\tcandidate_delivery_api_ns\tlegacy_delivery_api_ns\tdelivery_delay_ns\ttracks\tflights\thandoffs\talerts\toutput_sequences\tlosses\terror"
+        "CYCLE_FIELDS\tindex\tstart_ns\tend_ns\tready_ns\tpromotion_ns\trollback_ns\tcandidate_delivery_api_ns\tlegacy_delivery_api_ns\tdelivery_delay_ns\ttracks\tflights\thandoffs\talerts\tdifferences\toutput_sequences\tlosses\terror"
     );
     let mut completed = 0u32;
     let mut failures = 0u32;
     let mut index = 0u32;
     while index < CYCLES {
+        let start_ns = START_NS
+            .checked_add(
+                i64::from(index)
+                    .checked_mul(CYCLE_NS)
+                    .ok_or(Refusal::TimeOverflow)?,
+            )
+            .ok_or(Refusal::TimeOverflow)?;
+        let end_ns = start_ns
+            .checked_add(2_000_000_000)
+            .ok_or(Refusal::TimeOverflow)?;
         match run_cycle(index) {
             Ok((
                 ready_ns,
@@ -964,12 +988,14 @@ fn main() -> Result<(), Refusal> {
                 legacy_delivery_ns,
             )) => {
                 println!(
-                    "CYCLE\t{index}\t{ready_ns}\t{promotion_ns}\t{rollback_ns}\t{candidate_delivery_ns}\t{legacy_delivery_ns}\t{DECISION_TO_DELIVERY_NS}\t{MAX_TRACKS}\t{MAX_FLIGHTS}\t{MAX_HANDOFFS}\t{MAX_ALERTS}\t1,2\t0\tNONE"
+                    "CYCLE\t{index}\t{start_ns}\t{end_ns}\t{ready_ns}\t{promotion_ns}\t{rollback_ns}\t{candidate_delivery_ns}\t{legacy_delivery_ns}\t{DECISION_TO_DELIVERY_NS}\t{MAX_TRACKS}\t{MAX_FLIGHTS}\t{MAX_HANDOFFS}\t{MAX_ALERTS}\t0\t1,2\t0\tNONE"
                 );
                 completed = completed.checked_add(1).ok_or(Refusal::TimeOverflow)?;
             }
             Err(error) => {
-                println!("CYCLE\t{index}\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t\t1\t{error:?}");
+                println!(
+                    "CYCLE_FAILED\t{index}\tstart_ns={start_ns}\tend_ns={end_ns}\terror={error:?}"
+                );
                 failures = failures.checked_add(1).ok_or(Refusal::TimeOverflow)?;
             }
         }
@@ -998,10 +1024,9 @@ mod tests {
     fn one_hundred_capacity_cycles_and_injected_refusals_are_accounted() {
         assert!(report_header().contains("recorded_mode=NOT_BUILT"));
         assert!(report_header().contains("qualification=INCOMPLETE"));
-        for index in 0..CYCLES {
-            assert!(run_cycle(index).is_ok());
-        }
-        assert_eq!(fault_suite(), Ok(8));
-        assert!(sustained_trace_capacity_case().is_ok());
+        assert!(report_header().contains("function_name=conflict_alert"));
+        assert!(report_header().contains("scope_name=ZAU26"));
+        assert!(report_header().contains("evidence_policy_id=M3-SYNTHETIC-SELECTOR-1"));
+        assert!(main().is_ok());
     }
 }
