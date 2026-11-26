@@ -50,12 +50,15 @@ fn certify(
     exceptions: &str,
     time_ns: u64,
 ) -> std::process::Output {
+    let registry_pin =
+        oa_sha256::sha256(&fs::read(inputs.registry).expect("read registry pin input"));
     Command::new(inputs.executable)
         .arg("certify")
         .arg(inputs.log)
         .arg(checkpoint.0.to_string())
         .arg(checkpoint.1.clone())
         .arg(inputs.registry)
+        .arg(oa_sha256::to_hex(&registry_pin))
         .arg("11")
         .arg(time_ns.to_string())
         .arg("synthetic-service")
@@ -332,5 +335,56 @@ fn certify_cli_commits_all_three_outcomes_from_real_tracker_and_local_digest_inp
             report_len
         );
     }
+    fs::remove_dir_all(root).expect("fixture cleanup");
+}
+
+// REQ: OA-AUDIT-002, OA-AUDIT-003, OA-AUDIT-005
+#[test]
+fn certification_cli_requires_pinned_configure_principal_before_any_append() {
+    let root = fresh_root();
+    fs::create_dir(&root).expect("fixture root");
+    let executable = root.join("oa-certification");
+    fs::copy(env!("CARGO_BIN_EXE_oa-certification"), &executable).expect("copy CLI");
+    let registry = root.join("principals.tsv");
+    let log = root.join("audit.log");
+    fs::write(&registry, b"OACERT-LOCAL-PRINCIPALS-V1\n11\tmonitor\n").expect("monitor registry");
+    let pin = oa_sha256::sha256(&fs::read(&registry).expect("read synthetic registry"));
+    let invoke = |registry_pin: String| {
+        Command::new(&executable)
+            .arg("certify")
+            .arg(&log)
+            .arg("0")
+            .arg("00".repeat(32))
+            .arg(&registry)
+            .arg(registry_pin)
+            .arg("11")
+            .arg("1000")
+            .arg("synthetic-service")
+            .arg("full")
+            .arg("missing-roster")
+            .arg("missing-observations")
+            .arg("")
+            .arg("1000000")
+            .output()
+            .expect("run CLI")
+    };
+    let denied_role = invoke(oa_sha256::to_hex(&pin));
+    assert!(!denied_role.status.success());
+    assert!(
+        !log.exists(),
+        "denied role must not create or append audit log"
+    );
+
+    fs::write(&registry, b"OACERT-LOCAL-PRINCIPALS-V1\n11\tconfigure\n")
+        .expect("configure registry");
+    let denied_pin = invoke(oa_sha256::to_hex(&pin));
+    assert!(
+        !denied_pin.status.success(),
+        "wrong registry pin must refuse"
+    );
+    assert!(
+        !log.exists(),
+        "wrong pin must not create or append audit log"
+    );
     fs::remove_dir_all(root).expect("fixture cleanup");
 }

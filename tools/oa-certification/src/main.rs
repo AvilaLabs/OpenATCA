@@ -50,9 +50,13 @@ fn main() -> ExitCode {
                 .map(|report| print!("{report}"))
                 .map_err(|error| error.to_string())
         }
-        [command, log, count, tail, registry_path, principal, time_ns, service, mode, expected_path, observations_path, exceptions, max_bytes]
+        [command, log, count, tail, registry_path, registry_pin, principal, time_ns, service, mode, expected_path, observations_path, exceptions, max_bytes]
             if command == "certify" =>
         {
+            let Some(registry_pin) = parse_digest(registry_pin) else {
+                eprintln!("registry pin must be exactly 64 lowercase hexadecimal characters");
+                return ExitCode::FAILURE;
+            };
             let Some(principal_id) = principal.parse::<u64>().ok().filter(|value| *value != 0)
             else {
                 eprintln!("principal must be a nonzero unsigned integer claim");
@@ -87,13 +91,17 @@ fn main() -> ExitCode {
                 }
             };
             let prepared = (|| -> Result<(), String> {
-                let registry = read_guarded(
-                    registry_path,
-                    oa_certification::MAX_AUTH_REGISTRY_BYTES as u64,
-                )?;
-                let authorization =
-                    oa_certification::authorize_configure_claim(&registry, principal_id)
-                        .map_err(|error| error.to_string())?;
+                let registry = oa_audit_log::shell::load_principal_registry(
+                    Path::new(registry_path),
+                    registry_pin,
+                )
+                .map_err(|error| error.to_string())?;
+                let authorization = oa_certification::authorize_configure_registry_claim(
+                    &registry,
+                    registry_pin,
+                    principal_id,
+                )
+                .map_err(|error| error.to_string())?;
                 let expected_bytes = read_guarded(
                     expected_path,
                     oa_certification::MAX_AUTH_REGISTRY_BYTES as u64,
@@ -147,7 +155,7 @@ fn digest_text(value: Option<oa_sha256::Digest>) -> String {
 }
 
 fn usage() {
-    eprintln!("usage: oa-certification pver <full|abbreviated> <g2-package-dir> <manifest-sha256> | report <log> <count> <tail-hex> | certify <log> <count> <tail-hex> <local-registry> <principal-claim> <time-ns-claim> <service> <full|abbreviated> <expected-roster.tsv> <observations.tsv> <exceptions> <artifact-cap>");
+    eprintln!("usage: oa-certification pver <full|abbreviated> <g2-package-dir> <manifest-sha256> | report <log> <count> <tail-hex> | certify <log> <count> <tail-hex> <local-registry> <registry-sha256-pin> <principal-claim> <time-ns-claim> <service> <full|abbreviated> <expected-roster.tsv> <observations.tsv> <exceptions> <artifact-cap>");
 }
 
 fn parse_checkpoint(count: &str, tail: &str) -> Option<oa_audit_core::Checkpoint> {
