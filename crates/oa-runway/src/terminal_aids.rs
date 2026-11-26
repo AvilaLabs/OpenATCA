@@ -7,15 +7,29 @@
 
 use crate::plane::Local;
 
-/// CRDA parent and projected ghost rows are bounded to the airport local-plane extent.
-pub const MAX_CRDA_ROWS: usize = 256;
-/// One ATPA call may evaluate at most every unordered pair of 256 final tracks.
+/// CRDA parent and projected ghost rows share ARV's 256-flight terminal-call envelope. At this
+/// cap, the transform performs at most 512 bounded row visits and writes three 2 KiB f64 output
+/// columns; 257 rows are refused before inspecting or writing rows. This is a product engineering
+/// bound, not a facility traffic claim. Increasing it requires a revised allocation/work review.
+pub const MAX_CRDA_ROWS: usize = arv::MAX_ARV_FLIGHTS;
+/// One ATPA call evaluates up to every unordered pair in the same 256-flight envelope (32,640
+/// rows). Its two passes visit at most 65,280 pair rows; the caller owns the three 32,640-row
+/// outputs. Larger scans are refused before output mutation.
 pub const MAX_ATPA_PAIRS: usize = MAX_CRDA_ROWS * (MAX_CRDA_ROWS - 1) / 2;
-/// FAA Pilot/Controller Glossary ATPA warning lead time, seconds before predicted loss.
+/// FAA JO 7110.10EE Basic with Changes 1 and 2 (1/22/26), Pilot/Controller Glossary, entry
+/// “AUTOMATED TERMINAL PROXIMITY ALERT (ATPA)”: warning cone at 45 seconds before predicted loss.
+/// This engine implements only this lead-time threshold over caller-adapted minimum spacing.
+/// Source: <https://www.faa.gov/documentLibrary/media/Order/7110.10EE_Bsc_w_Chg_1_and_2_dtd_1-22-26_Final.pdf>,
+/// PCG A-18, ATPA entry.
 pub const ATPA_WARNING_LEAD_SECONDS: f64 = 45.0;
-/// FAA Pilot/Controller Glossary ATPA alert lead time, seconds before predicted loss.
+/// Same source and entry: alert cone at 24 seconds before predicted loss. This is not a claim to
+/// implement the full facility ATPA process or approved minima.
 pub const ATPA_ALERT_LEAD_SECONDS: f64 = 24.0;
-const MAX_LOCAL_M: f64 = 20_000.0;
+// The supported caller geometry is the `oa-runway::plane::EXTENT_M` local-plane extent.
+const MAX_LOCAL_M: f64 = crate::plane::EXTENT_M;
+// Conservative rounded-down numeric guard near `oa-adsb-model::speed::SPEED_ENVELOPE_MPS`
+// (4,088 kt). It deliberately does not widen that accepted ADS-B envelope; it is not an adapted
+// approach-speed threshold, so the runtime must mark any faster input unavailable/refused.
 const MAX_GROUND_SPEED_MPS: f64 = 2_102.0;
 const NO_PREDICTED_LOSS_MS: u32 = u32::MAX;
 
@@ -37,6 +51,11 @@ pub struct CrdaTransform {
     pub target_offset_m: f64,
 }
 
+/// One monitor call accepts the same maximum flight count as ARV's bounded terminal profile.
+/// At 256 rows the result vectors hold at most 256 rows (about 3 KiB), the 32,640 unordered
+/// pairs fit the fixed pair cap, and ATPA performs at most 65,280 preflight/evaluation visits.
+/// This is a per-call engineering capacity shared with ARV, not a claim about facility demand;
+/// larger scans are refused whole. The pair cap is `256 * 255 / 2`.
 /// Parent aircraft positions and ground speeds, one row per aircraft.
 #[repr(C)]
 pub struct CrdaParents<'a> {
@@ -79,6 +98,24 @@ fn valid_line(line: ReferenceLine) -> bool {
         && line.axis_north.is_finite()
         && (line.axis_east * line.axis_east + line.axis_north * line.axis_north - 1.0).abs()
             <= 1.0e-9
+}
+
+fn checked_loss_time_ms(
+    distance_m: f64,
+    closure_mps: f64,
+    minimum_spacing_m: f64,
+) -> Result<u32, AtpaError> {
+    if distance_m <= minimum_spacing_m {
+        return Ok(0);
+    }
+    if closure_mps <= 0.0 {
+        return Ok(NO_PREDICTED_LOSS_MS);
+    }
+    let millis = ((distance_m - minimum_spacing_m) / closure_mps) * 1_000.0;
+    if !millis.is_finite() || millis + 0.5 > f64::from(NO_PREDICTED_LOSS_MS - 1) {
+        return Err(AtpaError::BadInput);
+    }
+    Ok((millis + 0.5) as u32)
 }
 
 /// Translate parent `(x,y)` coordinates relative to a source point/line onto a target
@@ -186,8 +223,10 @@ pub fn project_crda_ghosts(
 /// separation minimum is fabricated here.
 #[repr(C)]
 pub struct AtpaPairs<'a> {
-    pub runway_id: &'a [u32],
-    pub end_name: &'a [[u8; 3]],
+    pub lead_runway_id: &'a [u32],
+    pub trail_runway_id: &'a [u32],
+    pub lead_end_name: &'a [[u8; 3]],
+    pub trail_end_name: &'a [[u8; 3]],
     pub scan_ns: &'a [u64],
     pub lead_along_m: &'a [f64],
     pub trail_along_m: &'a [f64],
@@ -195,7 +234,7 @@ pub struct AtpaPairs<'a> {
     pub trail_speed_mps: &'a [f64],
     pub minimum_spacing_m: &'a [f64],
 }
-const _: () = assert!(core::mem::size_of::<AtpaPairs<'static>>() == 128);
+const _: () = assert!(core::mem::size_of::<AtpaPairs<'static>>() == 160);
 
 /// Result columns, one row for every input pair, in input order.
 #[repr(C)]
@@ -242,12 +281,14 @@ pub fn evaluate_atpa_pairs(
     pairs: AtpaPairs<'_>,
     rows: AtpaRows<'_>,
 ) -> Result<AtpaResult, AtpaError> {
-    let n = pairs.runway_id.len();
+    let n = pairs.lead_runway_id.len();
     if n > MAX_ATPA_PAIRS {
         return Err(AtpaError::Capacity);
     }
     let pair_columns = [
-        pairs.end_name.len(),
+        pairs.trail_runway_id.len(),
+        pairs.lead_end_name.len(),
+        pairs.trail_end_name.len(),
         pairs.scan_ns.len(),
         pairs.lead_along_m.len(),
         pairs.trail_along_m.len(),
@@ -271,8 +312,10 @@ pub fn evaluate_atpa_pairs(
     }
     for i in 0..n {
         let (
-            Some(&runway),
-            Some(&end),
+            Some(&lead_runway),
+            Some(&trail_runway),
+            Some(&lead_end),
+            Some(&trail_end),
             Some(&scan),
             Some(&lead),
             Some(&trail),
@@ -280,8 +323,10 @@ pub fn evaluate_atpa_pairs(
             Some(&trail_speed),
             Some(&min_space),
         ) = (
-            pairs.runway_id.get(i),
-            pairs.end_name.get(i),
+            pairs.lead_runway_id.get(i),
+            pairs.trail_runway_id.get(i),
+            pairs.lead_end_name.get(i),
+            pairs.trail_end_name.get(i),
             pairs.scan_ns.get(i),
             pairs.lead_along_m.get(i),
             pairs.trail_along_m.get(i),
@@ -295,8 +340,10 @@ pub fn evaluate_atpa_pairs(
         if scan != expected_scan_ns {
             return Err(AtpaError::ScanMismatch);
         }
-        if runway == 0
-            || end == [0; 3]
+        if lead_runway == 0
+            || trail_runway != lead_runway
+            || lead_end == [0; 3]
+            || trail_end != lead_end
             || !lead.is_finite()
             || !trail.is_finite()
             || lead.abs() > MAX_LOCAL_M
@@ -307,10 +354,11 @@ pub fn evaluate_atpa_pairs(
             || !(0.0..=MAX_GROUND_SPEED_MPS).contains(&lead_speed)
             || !(0.0..=MAX_GROUND_SPEED_MPS).contains(&trail_speed)
             || !min_space.is_finite()
-            || !(0.0..=MAX_LOCAL_M).contains(&min_space)
+            || !(f64::MIN_POSITIVE..=MAX_LOCAL_M).contains(&min_space)
         {
             return Err(AtpaError::BadInput);
         }
+        checked_loss_time_ms(lead - trail, trail_speed - lead_speed, min_space)?;
     }
     let (severities, distances, times) = (
         &mut *rows.severity,
@@ -343,9 +391,8 @@ pub fn evaluate_atpa_pairs(
             _ => AtpaSeverity::Clear,
         };
         let distance_nm_milli = ((distance_m / 1_852.0) * 1_000.0 + 0.5) as u32;
-        let time_ms = time_s.map_or(NO_PREDICTED_LOSS_MS, |seconds| {
-            (seconds * 1_000.0 + 0.5) as u32
-        });
+        // All rows were range-checked before any output mutation.
+        let time_ms = checked_loss_time_ms(distance_m, closure_mps, min_space)?;
         if let (Some(out_severity), Some(out_distance), Some(out_time)) = (
             severities.get_mut(i),
             distances.get_mut(i),
@@ -497,6 +544,113 @@ mod tests {
         assert_eq!(ghost_east, [77.0; 2]);
     }
 
+    // REQ: OA-RWY-022
+    #[test]
+    fn crda_validates_late_rows_and_geometry_boundaries_before_writing() {
+        let line = ReferenceLine {
+            origin: Local {
+                east_m: 0.0,
+                north_m: 0.0,
+            },
+            axis_east: 1.0,
+            axis_north: 0.0,
+        };
+        let east = [10.0, 20.0, f64::NAN];
+        let north = [0.0; 3];
+        let speed = [100.0; 3];
+        let mut ghost_east = [77.0; 3];
+        let mut ghost_north = [78.0; 3];
+        let mut ghost_speed = [79.0; 3];
+        assert_eq!(
+            project_crda_ghosts(
+                CrdaTransform {
+                    source: line,
+                    target: line,
+                    target_offset_m: 0.0,
+                },
+                CrdaParents {
+                    east_m: &east,
+                    north_m: &north,
+                    ground_speed_mps: &speed,
+                },
+                CrdaGhosts {
+                    east_m: &mut ghost_east,
+                    north_m: &mut ghost_north,
+                    ground_speed_mps: &mut ghost_speed,
+                },
+            ),
+            Err(CrdaError::BadInput)
+        );
+        assert_eq!(ghost_east, [77.0; 3]);
+        assert_eq!(ghost_north, [78.0; 3]);
+        assert_eq!(ghost_speed, [79.0; 3]);
+        assert_eq!(MAX_CRDA_ROWS, 256);
+    }
+
+    // REQ: OA-RWY-022
+    #[test]
+    fn crda_accepts_256_rows_and_refuses_257_before_write() {
+        let line = ReferenceLine {
+            origin: Local {
+                east_m: 0.0,
+                north_m: 0.0,
+            },
+            axis_east: 1.0,
+            axis_north: 0.0,
+        };
+        let east = vec![0.0; MAX_CRDA_ROWS];
+        let north = vec![0.0; MAX_CRDA_ROWS];
+        let speed = vec![100.0; MAX_CRDA_ROWS];
+        let mut ghost_east = vec![42.0; MAX_CRDA_ROWS + 1];
+        let mut ghost_north = vec![43.0; MAX_CRDA_ROWS + 1];
+        let mut ghost_speed = vec![44.0; MAX_CRDA_ROWS + 1];
+        let at_cap = project_crda_ghosts(
+            CrdaTransform {
+                source: line,
+                target: line,
+                target_offset_m: 0.0,
+            },
+            CrdaParents {
+                east_m: &east,
+                north_m: &north,
+                ground_speed_mps: &speed,
+            },
+            CrdaGhosts {
+                east_m: &mut ghost_east[..MAX_CRDA_ROWS],
+                north_m: &mut ghost_north[..MAX_CRDA_ROWS],
+                ground_speed_mps: &mut ghost_speed[..MAX_CRDA_ROWS],
+            },
+        )
+        .expect("256-row engineering cap is accepted");
+        assert_eq!(usize::from(at_cap.rows), MAX_CRDA_ROWS);
+        let too_many_east = vec![0.0; MAX_CRDA_ROWS + 1];
+        let too_many_north = vec![0.0; MAX_CRDA_ROWS + 1];
+        let too_many_speed = vec![100.0; MAX_CRDA_ROWS + 1];
+        assert_eq!(
+            project_crda_ghosts(
+                CrdaTransform {
+                    source: line,
+                    target: line,
+                    target_offset_m: 0.0,
+                },
+                CrdaParents {
+                    east_m: &too_many_east,
+                    north_m: &too_many_north,
+                    ground_speed_mps: &too_many_speed,
+                },
+                CrdaGhosts {
+                    east_m: &mut ghost_east,
+                    north_m: &mut ghost_north,
+                    ground_speed_mps: &mut ghost_speed,
+                },
+            ),
+            Err(CrdaError::Capacity)
+        );
+        assert_eq!(ghost_east[MAX_CRDA_ROWS], 42.0);
+        assert_eq!(ghost_north[MAX_CRDA_ROWS], 43.0);
+        assert_eq!(ghost_speed[MAX_CRDA_ROWS], 44.0);
+    }
+
     fn atpa_case(lead: f64, trail: f64, lead_speed: f64, trail_speed: f64) -> AtpaSeverity {
         let runway = [1];
         let end = [*b"27L"];
@@ -512,8 +666,10 @@ mod tests {
         evaluate_atpa_pairs(
             1_000,
             AtpaPairs {
-                runway_id: &runway,
-                end_name: &end,
+                lead_runway_id: &runway,
+                trail_runway_id: &runway,
+                lead_end_name: &end,
+                trail_end_name: &end,
                 scan_ns: &scan,
                 lead_along_m: &lead_pos,
                 trail_along_m: &trail_pos,
@@ -548,19 +704,21 @@ mod tests {
     // REQ: OA-RWY-023
     #[test]
     fn atpa_invalid_pairs_and_capacity_refuse_atomically() {
-        let runway = [1];
-        let end = [*b"27L"];
         let scan = [10, 11];
         let lead_pos = [2_000.0, 2_000.0];
         let trail_pos = [0.0, 0.0];
         let speed = [100.0, 100.0];
         let minimum = [1_000.0, 1_000.0];
+        let runways = [1, 1];
+        let ends = [*b"27L", *b"27L"];
         let mut severity = [AtpaSeverity::Clear; 2];
         let mut distance = [99; 2];
         let mut time = [99; 2];
         let pairs = AtpaPairs {
-            runway_id: &[1, 1],
-            end_name: &[end[0], end[0]],
+            lead_runway_id: &runways,
+            trail_runway_id: &runways,
+            lead_end_name: &ends,
+            trail_end_name: &ends,
             scan_ns: &scan,
             lead_along_m: &lead_pos,
             trail_along_m: &trail_pos,
@@ -583,14 +741,16 @@ mod tests {
         assert_eq!(severity, [AtpaSeverity::Clear; 2]);
         assert_eq!(distance, [99; 2]);
         assert_eq!(time, [99; 2]);
-        let one_runway = [runway[0]];
-        let one_end = [end[0]];
+        let one_runway = [1];
+        let one_end = [*b"27L"];
         assert_eq!(
             evaluate_atpa_pairs(
                 10,
                 AtpaPairs {
-                    runway_id: &one_runway,
-                    end_name: &one_end,
+                    lead_runway_id: &one_runway,
+                    trail_runway_id: &one_runway,
+                    lead_end_name: &one_end,
+                    trail_end_name: &one_end,
                     scan_ns: &[10],
                     lead_along_m: &[2_000.0],
                     trail_along_m: &[0.0],
@@ -606,5 +766,145 @@ mod tests {
             ),
             Err(AtpaError::Capacity)
         );
+    }
+
+    // REQ: OA-RWY-023
+    #[test]
+    fn atpa_rejects_bad_or_unrepresentable_late_row_without_output_mutation() {
+        let runways = [1, 1];
+        let ends = [*b"27L", *b"27L"];
+        let scans = [77, 77];
+        let leads = [2_000.0, 2_000.0];
+        let trails = [0.0, 0.0];
+        let lead_speeds = [100.0, 100.0];
+        let trail_speeds = [100.0, 100.000_001];
+        let minima = [1_000.0, 1_000.0];
+        let mut severity = [AtpaSeverity::Clear; 2];
+        let mut distance = [77; 2];
+        let mut time = [88; 2];
+        assert_eq!(
+            evaluate_atpa_pairs(
+                77,
+                AtpaPairs {
+                    lead_runway_id: &runways,
+                    trail_runway_id: &runways,
+                    lead_end_name: &ends,
+                    trail_end_name: &ends,
+                    scan_ns: &scans,
+                    lead_along_m: &leads,
+                    trail_along_m: &trails,
+                    lead_speed_mps: &lead_speeds,
+                    trail_speed_mps: &trail_speeds,
+                    minimum_spacing_m: &minima,
+                },
+                AtpaRows {
+                    severity: &mut severity,
+                    current_distance_milli_nm: &mut distance,
+                    seconds_to_loss_milli: &mut time,
+                },
+            ),
+            Err(AtpaError::BadInput)
+        );
+        assert_eq!(severity, [AtpaSeverity::Clear; 2]);
+        assert_eq!(distance, [77; 2]);
+        assert_eq!(time, [88; 2]);
+
+        let speeds = [100.0, f64::NAN];
+        assert_eq!(
+            evaluate_atpa_pairs(
+                77,
+                AtpaPairs {
+                    lead_runway_id: &runways,
+                    trail_runway_id: &runways,
+                    lead_end_name: &ends,
+                    trail_end_name: &ends,
+                    scan_ns: &scans,
+                    lead_along_m: &leads,
+                    trail_along_m: &trails,
+                    lead_speed_mps: &speeds,
+                    trail_speed_mps: &trail_speeds,
+                    minimum_spacing_m: &minima,
+                },
+                AtpaRows {
+                    severity: &mut severity,
+                    current_distance_milli_nm: &mut distance,
+                    seconds_to_loss_milli: &mut time,
+                },
+            ),
+            Err(AtpaError::BadInput)
+        );
+        assert_eq!(severity, [AtpaSeverity::Clear; 2]);
+        assert_eq!(distance, [77; 2]);
+        assert_eq!(time, [88; 2]);
+    }
+
+    // REQ: OA-RWY-023
+    #[test]
+    fn atpa_accepts_all_32640_pairs_and_refuses_pair_32641() {
+        let count = MAX_ATPA_PAIRS;
+        let runway = vec![1; count];
+        let end = vec![*b"27L"; count];
+        let scan = vec![1; count];
+        let lead = vec![2_000.0; count];
+        let trail = vec![0.0; count];
+        let speed = vec![100.0; count];
+        let minimum = vec![1_000.0; count];
+        let mut severity = vec![AtpaSeverity::Clear; count];
+        let mut distance = vec![0; count];
+        let mut time = vec![0; count];
+        let accepted = evaluate_atpa_pairs(
+            1,
+            AtpaPairs {
+                lead_runway_id: &runway,
+                trail_runway_id: &runway,
+                lead_end_name: &end,
+                trail_end_name: &end,
+                scan_ns: &scan,
+                lead_along_m: &lead,
+                trail_along_m: &trail,
+                lead_speed_mps: &speed,
+                trail_speed_mps: &speed,
+                minimum_spacing_m: &minimum,
+            },
+            AtpaRows {
+                severity: &mut severity,
+                current_distance_milli_nm: &mut distance,
+                seconds_to_loss_milli: &mut time,
+            },
+        )
+        .expect("all pair slots are accepted");
+        assert_eq!(usize::from(accepted.examined), MAX_ATPA_PAIRS);
+        let too_many_runway = vec![1; count + 1];
+        let too_many_end = vec![*b"27L"; count + 1];
+        let too_many_scan = vec![1; count + 1];
+        let too_many_position = vec![2_000.0; count + 1];
+        let too_many_trail = vec![0.0; count + 1];
+        let too_many_speed = vec![100.0; count + 1];
+        let too_many_minimum = vec![1_000.0; count + 1];
+        let before = severity.clone();
+        assert_eq!(
+            evaluate_atpa_pairs(
+                1,
+                AtpaPairs {
+                    lead_runway_id: &too_many_runway,
+                    trail_runway_id: &too_many_runway,
+                    lead_end_name: &too_many_end,
+                    trail_end_name: &too_many_end,
+                    scan_ns: &too_many_scan,
+                    lead_along_m: &too_many_position,
+                    trail_along_m: &too_many_trail,
+                    lead_speed_mps: &too_many_speed,
+                    trail_speed_mps: &too_many_speed,
+                    minimum_spacing_m: &too_many_minimum,
+                },
+                AtpaRows {
+                    severity: &mut severity,
+                    current_distance_milli_nm: &mut distance,
+                    seconds_to_loss_milli: &mut time,
+                },
+            ),
+            Err(AtpaError::Capacity)
+        );
+        assert_eq!(severity, before);
     }
 }
