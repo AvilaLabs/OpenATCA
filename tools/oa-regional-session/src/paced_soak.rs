@@ -792,8 +792,13 @@ pub fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), String> {
 mod tests {
     #![allow(clippy::unwrap_used)]
 
-    use super::{make_batch, AIRCRAFT_COUNT, FEED_FAULT_TICKS, FRAME_COUNT, RUN_DURATION, TICK_NS};
+    use super::{
+        make_batch, AIRCRAFT_COUNT, FEED_FAULT_START_TICK, FEED_FAULT_TICKS, FRAME_COUNT,
+        RUN_DURATION, TICK_NS,
+    };
+    use oa_regional_session::input::EventKind;
     use oa_regional_session::runtime::RegionalRunProfile;
+    use std::time::Duration;
 
     // REQ: OA-REG-021
     #[test]
