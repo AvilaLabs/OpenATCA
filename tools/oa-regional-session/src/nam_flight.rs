@@ -601,7 +601,10 @@ fn assess_preferred_route(
             ]
             .into_iter()
             .flatten()
-            .any(|ix| air_model::str_at(&model.strings, *ix).is_none_or(|value| !value.is_empty()));
+            .any(|ix| {
+                *ix != air_model::StrIx::NONE
+                    && air_model::str_at(&model.strings, *ix).is_none_or(|value| !value.is_empty())
+            });
         if selected.is_none_or(|(_, old_unknown)| old_unknown && !unsupported_condition) {
             selected = Some((row, unsupported_condition));
         }
