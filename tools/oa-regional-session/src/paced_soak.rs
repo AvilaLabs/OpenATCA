@@ -18,16 +18,16 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-const SCHEMA: &str = "openatca-d2-paced-soak/3";
+const SCHEMA: &str = "openatca-d2-paced-soak/4";
 const TICK_NS: i64 = 5_000_000_000;
 const TICK_DURATION: Duration = Duration::from_secs(5);
 const FRAME_COUNT: u64 = 34_560;
 const RUN_DURATION: Duration = Duration::from_secs(48 * 60 * 60);
 const WARMUP_FRAMES: u64 = 2;
 const EXPECTED_STEADY_FRAMES: u64 = FRAME_COUNT - WARMUP_FRAMES - FEED_FAULT_TICKS;
-const FIRST_ISSUE_NS: i64 = 1_000_000_000;
+const FIRST_ISSUE_NS: i64 = 2_000_000_000;
 const AIRCRAFT_COUNT: usize = 16;
-const SEQUENCE_STRIDE: u64 = 32;
+const SEQUENCE_STRIDE: u64 = 40;
 const FEED_FAULT_START_TICK: u64 = 12_000;
 const FEED_FAULT_TICKS: u64 = 2;
 const FEED_FAULT_END_TICK: u64 = FEED_FAULT_START_TICK + FEED_FAULT_TICKS;
@@ -38,7 +38,7 @@ const MAX_UTC_MONOTONIC_DRIFT_NS: u64 = 250_000_000;
 const MAX_PROGRESS_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_EXECUTABLE_BYTES: u64 = 128 * 1024 * 1024;
 const PROGRESS_SYNC_FRAMES: u64 = 12;
-const PROFILE_BYTES: &[u8] = b"D2-PACED-SOAK-V3;duration_ns=172800000000000;tick_ns=5000000000;frames=34560;tracks=16;grid_e7=250000;renderer=regional-base-raster-and-control-overlay-every-frame;profile=bounded-recorded-peak-derived;synthetic-model=public-test-fixture;feed-outage-start-tick=12000;feed-outage-ticks=2;schedule-late-max-ns=250000000;actual-gap-min-ns=4750000000;actual-gap-max-ns=5250000000;utc-monotonic-gap-drift-max-ns=250000000;steady-tracks-min=16;steady-track-source-time=every-address-current-batch;warmup-frames=2;feed-recovery-required=true;recovery-track-source-time=current-recovery-batch;single-inflight-presentation=true;pending-ledger-cap=8192;presentation-ack=ordered-after-progress-write";
+const PROFILE_BYTES: &[u8] = b"D2-PACED-SOAK-V4;duration_ns=172800000000000;tick_ns=5000000000;frames=34560;tracks=16;grid_e7=250000;renderer=regional-base-raster-and-control-overlay-every-frame;profile=bounded-recorded-peak-derived;synthetic-model=public-test-fixture;feed-outage-start-tick=12000;feed-outage-ticks=2;schedule-late-max-ns=250000000;actual-gap-min-ns=4750000000;actual-gap-max-ns=5250000000;utc-monotonic-gap-drift-max-ns=250000000;steady-tracks-min=16;steady-track-source-time=every-address-current-batch;initialization=two-position-reports-per-address-one-second-apart-in-first-batch;warmup-frames=2;feed-recovery-required=true;recovery-track-source-time=current-recovery-batch;single-inflight-presentation=true;pending-ledger-cap=8192;presentation-ack=ordered-after-progress-write";
 
 fn clean_reason(reason: &str) -> String {
     reason
@@ -214,24 +214,43 @@ fn tracks_refreshed_by_batch(tracks: &[ObservedTrack], batch: &ReceiptBatch) -> 
                 Some(count) => count,
                 None => return false,
             };
-            let Some(track) = tracks
+            if !tracks
                 .iter()
-                .find(|track| track.address == event.identity.aircraft_address)
-            else {
-                return false;
-            };
-            if track.newest_source_ns != event.source_ns {
+                .any(|track| track.address == event.identity.aircraft_address)
+            {
                 return false;
             }
         }
     }
-    positions == AIRCRAFT_COUNT
+    (positions == AIRCRAFT_COUNT || positions == AIRCRAFT_COUNT * 2)
+        && positions
+            == tracks
+                .iter()
+                .map(|track| {
+                    batch
+                        .events
+                        .iter()
+                        .filter(|event| {
+                            event.identity.aircraft_address == track.address
+                                && matches!(&event.kind, EventKind::Position { .. })
+                        })
+                        .count()
+                })
+                .sum::<usize>()
         && tracks.iter().all(|track| {
-            batch.events.iter().any(|event| {
-                event.identity.aircraft_address == track.address
-                    && event.source_ns == track.newest_source_ns
+            let mut latest = None;
+            let mut count = 0_usize;
+            for event in &batch.events {
+                if event.identity.aircraft_address == track.address
                     && matches!(&event.kind, EventKind::Position { .. })
-            })
+                {
+                    count += 1;
+                    latest = Some(latest.map_or(event.source_ns, |source_ns: i64| {
+                        source_ns.max(event.source_ns)
+                    }));
+                }
+            }
+            (count == 1 || count == 2) && latest == Some(track.newest_source_ns)
         })
 }
 
@@ -357,7 +376,11 @@ fn make_batch_with_fault(tick: u64, fault_start_tick: u64) -> Result<ReceiptBatc
         == fault_start_tick
             .checked_add(FEED_FAULT_TICKS)
             .ok_or("feed recovery tick overflow")?;
-    let mut events = Vec::with_capacity(AIRCRAFT_COUNT + if feed_down || feed_up { 1 } else { 0 });
+    let initial_bootstrap = tick == 0;
+    let mut events = Vec::with_capacity(
+        AIRCRAFT_COUNT * if initial_bootstrap { 2 } else { 1 }
+            + if feed_down || feed_up { 1 } else { 0 },
+    );
     let sequence_base = tick
         .checked_mul(SEQUENCE_STRIDE)
         .ok_or("source sequence overflow")?;
@@ -387,43 +410,53 @@ fn make_batch_with_fault(tick: u64, fault_start_tick: u64) -> Result<ReceiptBatc
             events,
         });
     }
-    for index in 0..AIRCRAFT_COUNT {
-        let row = i32::try_from(index / 4).map_err(|_| "synthetic row width")?;
-        let col = i32::try_from(index % 4).map_err(|_| "synthetic column width")?;
-        let lat_offset = row.checked_mul(250_000).ok_or("latitude offset overflow")?;
-        let lon_offset = col
-            .checked_mul(250_000)
-            .ok_or("longitude offset overflow")?;
-        let address = 0x00ab_c101_u32
-            .checked_add(u32::try_from(index).map_err(|_| "address index width")?)
-            .ok_or("synthetic address overflow")?;
-        let sequence = sequence_base
-            .checked_add(u64::try_from(index).map_err(|_| "event index width")?)
-            .and_then(|value| value.checked_add(if feed_up { 3 } else { 2 }))
-            .ok_or("source sequence overflow")?;
-        events.push(NormalizedEvent {
-            receipt_ns,
-            source_ns: receipt_ns,
-            sequence,
-            source: SourceKind::Surveillance,
-            identity: Identity {
-                flight_gufi: 0,
-                aircraft_address: address,
-            },
-            centre: *b"ZAU1",
-            kind: EventKind::Position {
-                latitude_e7: 410_000_000_i32
-                    .checked_add(lat_offset)
-                    .ok_or("synthetic latitude overflow")?,
-                longitude_e7: -870_000_000_i32
-                    .checked_add(lon_offset)
-                    .ok_or("synthetic longitude overflow")?,
-                altitude_ft: Some(20_000),
-                east_mmps: 0,
-                north_mmps: 0,
-                vertical_rate_fpm: Some(0),
-            },
-        });
+    for report in 0..if initial_bootstrap { 2 } else { 1 } {
+        for index in 0..AIRCRAFT_COUNT {
+            let row = i32::try_from(index / 4).map_err(|_| "synthetic row width")?;
+            let col = i32::try_from(index % 4).map_err(|_| "synthetic column width")?;
+            let lat_offset = row.checked_mul(250_000).ok_or("latitude offset overflow")?;
+            let lon_offset = col
+                .checked_mul(250_000)
+                .ok_or("longitude offset overflow")?;
+            let address = 0x00ab_c101_u32
+                .checked_add(u32::try_from(index).map_err(|_| "address index width")?)
+                .ok_or("synthetic address overflow")?;
+            let offset =
+                u64::try_from(report * AIRCRAFT_COUNT + index).map_err(|_| "event index width")?;
+            let sequence = sequence_base
+                .checked_add(offset)
+                .and_then(|value| value.checked_add(if feed_down || feed_up { 2 } else { 0 }))
+                .ok_or("source sequence overflow")?;
+            events.push(NormalizedEvent {
+                receipt_ns,
+                source_ns: if initial_bootstrap && report == 0 {
+                    receipt_ns
+                        .checked_sub(1_000_000_000)
+                        .ok_or("bootstrap source time underflow")?
+                } else {
+                    receipt_ns
+                },
+                sequence,
+                source: SourceKind::Surveillance,
+                identity: Identity {
+                    flight_gufi: 0,
+                    aircraft_address: address,
+                },
+                centre: *b"ZAU1",
+                kind: EventKind::Position {
+                    latitude_e7: 410_000_000_i32
+                        .checked_add(lat_offset)
+                        .ok_or("synthetic latitude overflow")?,
+                    longitude_e7: -870_000_000_i32
+                        .checked_add(lon_offset)
+                        .ok_or("synthetic longitude overflow")?,
+                    altitude_ft: Some(20_000),
+                    east_mmps: 0,
+                    north_mmps: 0,
+                    vertical_rate_fpm: Some(0),
+                },
+            });
+        }
     }
     Ok(ReceiptBatch {
         receipt_ns,
@@ -583,7 +616,7 @@ pub fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), String> {
     let snapshot = oa_airspace::core::snapshot::encode(&model)
         .map_err(|error| format!("synthetic adaptation encode: {error:?}"))?;
     let snapshot_sha = oa_sha256::sha256(&snapshot);
-    let input_sha = oa_sha256::sha256(b"D2-SYNTHETIC-POSITIONS-V1;16 fixed addresses;4x4 grid;0.025deg spacing;20000ft;zero horizontal velocity;5s issues");
+    let input_sha = oa_sha256::sha256(b"D2-SYNTHETIC-POSITIONS-V2;16 fixed addresses;4x4 grid;0.025deg spacing;20000ft;zero horizontal velocity;5s issues;first batch has two reports per address at 1s spacing for tracker M-of-N initialization");
     let config_sha = hash_config(&args.candidate_commit, &snapshot_sha)?;
     let profile = oa_regional_session::runtime::RegionalRunProfile::paced_d2_soak();
     let mut runtime = regional_new_with_profile(
@@ -1181,8 +1214,9 @@ mod tests {
         let generated_events = usize::try_from(FRAME_COUNT).unwrap() * AIRCRAFT_COUNT
             - usize::try_from(FEED_FAULT_TICKS).unwrap() * AIRCRAFT_COUNT
             + usize::try_from(FEED_FAULT_TICKS).unwrap()
-            + 1;
-        assert_eq!(generated_events, 552_931);
+            + 1
+            + AIRCRAFT_COUNT;
+        assert_eq!(generated_events, 552_947);
         assert!(generated_events <= profile.max_total_events);
     }
 
@@ -1191,7 +1225,7 @@ mod tests {
     fn paced_synthetic_batches_preserve_unique_addresses_and_five_second_source_clock() {
         let first = make_batch(0).unwrap();
         let second = make_batch(1).unwrap();
-        assert_eq!(first.events.len(), AIRCRAFT_COUNT);
+        assert_eq!(first.events.len(), AIRCRAFT_COUNT * 2);
         assert_eq!(second.receipt_ns - first.receipt_ns, TICK_NS);
         let addresses = first
             .events
@@ -1199,9 +1233,24 @@ mod tests {
             .map(|event| event.identity.aircraft_address)
             .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(addresses.len(), AIRCRAFT_COUNT);
-        assert!(first.events.iter().all(
-            |event| event.source_ns == first.receipt_ns && event.receipt_ns == first.receipt_ns
-        ));
+        assert!(first
+            .events
+            .iter()
+            .all(|event| event.receipt_ns == first.receipt_ns));
+        assert!(first
+            .events
+            .windows(2)
+            .all(|pair| pair[0].source_ns <= pair[1].source_ns));
+        assert!(first.events[AIRCRAFT_COUNT..]
+            .iter()
+            .all(|event| event.source_ns == first.receipt_ns));
+        assert!(first.events[..AIRCRAFT_COUNT]
+            .iter()
+            .zip(&first.events[AIRCRAFT_COUNT..])
+            .all(|(initial, confirmation)| {
+                initial.identity.aircraft_address == confirmation.identity.aircraft_address
+                    && confirmation.source_ns - initial.source_ns == 1_000_000_000
+            }));
         assert!(second
             .events
             .iter()
