@@ -137,10 +137,11 @@ mod trace;
 pub use archive::{scan_archive, scan_archive_counted, ScanEnd, ScanError, ScanResult};
 pub use category::{category_is_reserved, category_observe, CategoryState, CATEGORY_PERSIST};
 pub use frames::{
-    decode_payload, decode_payload_lenient, encode_payload, frame_ranges, PayloadCounts,
-    PayloadError, DEFAULT_FRAME_MS, LEGACY_MAX_ROWS, LEGACY_PAYLOAD_MAGIC, LEGACY_RECORD_LEN,
-    MAX_FRAME_MS, MAX_ROWS_PER_FRAME, MIN_FRAME_MS, PAYLOAD_HEADER_LEN, PAYLOAD_MAGIC,
-    PREVIOUS_PAYLOAD_MAGIC, RECORD_LEN, TIME_MAX_NS, TIME_MIN_NS,
+    decode_payload, decode_payload_lenient, decode_payload_lenient_with_dropped, encode_payload,
+    frame_ranges, payload_record_count, PayloadCounts, PayloadError, DEFAULT_FRAME_MS,
+    LEGACY_MAX_ROWS, LEGACY_PAYLOAD_MAGIC, LEGACY_RECORD_LEN, MAX_FRAME_MS, MAX_ROWS_PER_FRAME,
+    MIN_FRAME_MS, PAYLOAD_HEADER_LEN, PAYLOAD_MAGIC, PREVIOUS_PAYLOAD_MAGIC, RECORD_LEN,
+    TIME_MAX_NS, TIME_MIN_NS,
 };
 pub use snapshot::{
     decode_snapshot, SnapshotError, SnapshotStats, MAX_POSITION_AGE_MS, MAX_SNAPSHOT_BYTES,

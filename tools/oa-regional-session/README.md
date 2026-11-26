@@ -16,13 +16,36 @@ regional-recording-import --sfdps FILE --adsb FILE --centre ZAU1 --out NEW_DIR
 ```
 
 `regional-recording-import` reads up to eight explicitly typed OAF files, including bounded gzip
-inputs, and writes `normalized.tsv`, `provenance.tsv`, `counts.tsv`, `manifest.tsv`, and
-`COMPLETE` last. The normalized file is directly admissible to `stage`; provenance binds each
+inputs, and writes `normalized.tsv`, `provenance.tsv`, `quarantine.tsv`, `counts.tsv`,
+`manifest.tsv`, and `COMPLETE` last. The normalized file is directly admissible to `stage`; provenance binds each
 event to its source stream hash, OAF frame and exact subsecond receipt while the normalized issue
 cutoff is conservatively ceiled to a positive whole second. Inputs are capped at 16 MiB compressed
 and 16 MiB expanded total, 100,000 OAF frames, and 4 MiB per frame. Normalized output is capped at
 the session's 16 MiB input limit. This development adapter does not cover the much larger known
 STDDS captures or establish operational capacity.
+
+The recording adapter keeps normalized events in local bounded staging, then classifies each
+emitted ADS-B row and decoded SFDPS row after bounded decoding, row validation, and receipt-group
+checks. It returns normalized output only after the quarantine core returns `Accepted`. Refused rows keep a stream/frame/row locator in
+`quarantine.tsv`; raw payloads are not copied. Counts partition flight data, surveillance, and
+adaptation decisions, and queue-full events are marked `manual_handling_required` for immediate
+operator handling. `counts.tsv` reports `REVIEW_REQUIRED` whenever any refusal locator exists and
+separately counts queue-full direct-manual events. The metadata queue holds 128 events per class; the importer retains all refusal
+locators in a separately capped output (462,144 records / 64 MiB). This is a manual retrieval
+artifact, not a durable acknowledgement or operator workflow. Existing ADS-B ground exclusions
+remain intentional. Decoder summary losses that expose only aggregate counts, such as FIXM
+not-decoded rows without an ordinal, remain visible in `counts.tsv` but cannot be individually
+retrieved from `quarantine.tsv`.
+
+The queue's monotonic timestamps are measured from the start of the offline conversion. Its
+elapsed limit is observational and does not stop a running parser. Actual work is bounded by the
+16 MiB byte envelope, 100,000 SFDPS rows, 262,144 ADS-B rows, per-frame row limits, parser tables,
+and the per-SFDPS-row operation cap. No wall-clock preemption guarantee is made. The parser and
+FIXM decoder retain only scratch tables and aggregate statistics; they do not mutate accepted
+flight/session state. This caller protects normalized-output admission, not later live receiver,
+runtime, route-store, or durable operator state.
+ADS-B's exact header row count is charged against the adaptation cap before per-row decoding; the
+FIXM decoder receives its remaining row budget before it decodes message rows.
 
 The first command exercises two-report tracker confirmation, two aircraft, route forecasts,
 controller handoff offer/accept/take, unauthorized and authorized altitude requests, feed loss,

@@ -5,7 +5,8 @@ use crate::input::{EventKind, Identity, NormalizedEvent, SourceKind};
 use crate::recordings_reader::{RecordedFrame, RecordingCounts, RecordingSource};
 
 use oa_adsb::{
-    decode_payload_lenient, reports_len, reports_push, reports_row, Reports, F_GROUND, NONE_I32,
+    decode_payload_lenient_with_dropped, reports_len, reports_push, reports_row, Reports, F_GROUND,
+    NONE_I32,
 };
 use oa_fixm::{new_events, Decoder, Field, Limits as FixmLimits};
 use oa_flight::{
@@ -14,7 +15,14 @@ use oa_flight::{
     OP_REQUEST, OP_SET_PLAN,
 };
 use oa_flight_sfdps::{row_ops, AdapterStats as SfdpsAdapterStats, MAX_OPS_PER_MESSAGE};
+use oa_quarantine::{
+    queue_new, route_input, Disposition, InputIdentity, InputOutcome, InputSource, QuarantineEvent,
+    QuarantineQueue, ReasonFlags, SourceStats, REASON_ALTITUDE_ROUTE_INVALID,
+    REASON_IDENTITY_OR_LOCATION_CONFLICT, REASON_INPUT_INVALID, REASON_RESOURCE_LIMIT,
+    REASON_SURVEILLANCE_INVALID,
+};
 use oa_xml::{Limits as XmlLimits, Parser};
+use std::time::Instant;
 
 /// Stable source-order key supplied by the recording reader. It is preserved verbatim.
 // A7.2: cold shell decoded row, retained only within bounded offline adaptation.
@@ -140,6 +148,11 @@ pub const DEVELOPMENT_RECORDING_BUDGET: RecordingBudget = RecordingBudget {
 /// 64 bytes; FIXM rows are capped at the same 100k event budget as normalized output.
 pub const MAX_ADSB_ROWS_PER_ADAPTATION: usize = 262_144;
 pub const MAX_SFDPS_ROWS_PER_ADAPTATION: usize = 100_000;
+/// Maximum manual-handling records: all bounded source rows plus one frame-level record per OAF
+/// frame. This reserves a finite worst-case artifact instead of silently dropping overflow.
+pub const MAX_QUARANTINE_RECORDS: usize = crate::recordings_reader::MAX_RECORDING_FRAMES
+    + MAX_ADSB_ROWS_PER_ADAPTATION
+    + MAX_SFDPS_ROWS_PER_ADAPTATION;
 
 /// Worst-case retained normalized event storage for this profile, excluding allocator overhead.
 /// This arithmetic is deliberately based on the actual inline event size, including route payload
@@ -294,6 +307,241 @@ pub struct RecordedAdaptation {
     pub provenance: Vec<EventProvenance>,
     pub counts: RecordedAdapterCounts,
     pub recording: RecordingCounts,
+    /// Refused source items with exact source-local locators for later manual retrieval.
+    pub quarantine: Vec<RecordedQuarantine>,
+    /// Final queue counters, partitioned by flight data, surveillance, and adaptation.
+    pub quarantine_stats: [SourceStats; oa_quarantine::INPUT_SOURCE_COUNT],
+}
+
+/// A manual-handling record linked to a bounded raw source item, never a copied payload.
+// A7.2: cold offline output row capped by `MAX_QUARANTINE_RECORDS`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RecordedQuarantine {
+    pub event: QuarantineEvent,
+    pub stream_index: u8,
+    pub frame_sequence: u64,
+    pub frame_byte_offset: u64,
+    /// Rows use source ordinal + 1; 131071 is reserved for an unlocatable frame-level refusal.
+    pub row_locator: u32,
+    /// True means the source-class queue was full and immediate manual handling is required.
+    pub manual_handling_required: bool,
+}
+
+const QUARANTINE_FRAME_ROW_LOCATOR: u32 = 131_071;
+const QUARANTINE_ITEM_SHIFT: u32 = 17;
+
+fn zero_quarantine_stats() -> [SourceStats; oa_quarantine::INPUT_SOURCE_COUNT] {
+    [SourceStats {
+        accepted: 0,
+        queued: 0,
+        queue_full_manual_events: 0,
+        acknowledged: 0,
+        reason_counts: [0; oa_quarantine::REASON_COUNTER_COUNT],
+    }; oa_quarantine::INPUT_SOURCE_COUNT]
+}
+
+fn quarantine_source(source: RecordingSource) -> InputSource {
+    match source {
+        RecordingSource::Adsb => InputSource::Surveillance,
+        RecordingSource::Sfdps => InputSource::FlightData,
+    }
+}
+
+/// Account one source item after bounded decoding/validation. This classifies completed work; it
+/// does not interrupt a parser or provide a wall-time preemption guarantee.
+// The source locator, bounded queue, work accounting, and offline clock fields form one decision.
+#[allow(clippy::too_many_arguments)]
+fn quarantine_item(
+    queue: &mut QuarantineQueue,
+    records: &mut Vec<RecordedQuarantine>,
+    frame: &RecordedFrame,
+    row_locator: u32,
+    reasons: u16,
+    work_units: u32,
+    work_limit: u32,
+    clock_origin: Instant,
+    item_started: Instant,
+) -> Result<bool, AdapterError> {
+    let source_instance = u16::from(frame.stream_index)
+        .checked_add(1)
+        .ok_or(AdapterError::CountOverflow)?;
+    if frame.byte_offset >= (1u64 << (64 - QUARANTINE_ITEM_SHIFT))
+        || row_locator >= (1u32 << QUARANTINE_ITEM_SHIFT)
+    {
+        return Err(AdapterError::WorkBudget);
+    }
+    let item_id = frame
+        .byte_offset
+        .checked_shl(QUARANTINE_ITEM_SHIFT)
+        .and_then(|base| base.checked_add(u64::from(row_locator)))
+        .ok_or(AdapterError::CountOverflow)?;
+    let started_ns = i64::try_from(
+        item_started
+            .checked_duration_since(clock_origin)
+            .ok_or(AdapterError::WorkBudget)?
+            .as_nanos(),
+    )
+    .map_err(|_| AdapterError::CountOverflow)?;
+    let completed_ns = i64::try_from(clock_origin.elapsed().as_nanos())
+        .map_err(|_| AdapterError::CountOverflow)?;
+    let decision = route_input(
+        queue,
+        InputOutcome {
+            identity: InputIdentity {
+                source: quarantine_source(frame.source),
+                source_instance,
+                item_id,
+            },
+            refusal_reasons: ReasonFlags(reasons),
+            clock_domain_id: 1,
+            started_at_ns: started_ns,
+            completed_at_ns: completed_ns,
+            // Offline importer classification observes completion only; it never claims to
+            // preempt parser work. The finite byte/row ceilings bound actual work before loops.
+            elapsed_limit_ns: u64::MAX,
+            work_units,
+            work_limit,
+        },
+    )
+    .map_err(|_| AdapterError::WorkBudget)?;
+    match decision {
+        Disposition::Accepted => Ok(true),
+        Disposition::Queued(event) | Disposition::ManualHandlingRequired(event) => {
+            if records.len() >= MAX_QUARANTINE_RECORDS {
+                return Err(AdapterError::WorkBudget);
+            }
+            records
+                .try_reserve(1)
+                .map_err(|_| AdapterError::AllocationRefused)?;
+            records.push(RecordedQuarantine {
+                event,
+                stream_index: frame.stream_index,
+                frame_sequence: frame.sequence,
+                frame_byte_offset: frame.byte_offset,
+                row_locator,
+                manual_handling_required: matches!(
+                    decision,
+                    Disposition::ManualHandlingRequired(_)
+                ),
+            });
+            Ok(false)
+        }
+    }
+}
+
+fn provenance_row_locator(origin: EventProvenance) -> Result<u32, AdapterError> {
+    let row = match origin.source {
+        RecordingSource::Adsb => origin.emitted_item_ordinal,
+        RecordingSource::Sfdps => origin.emitted_item_ordinal / (MAX_OPS_PER_MESSAGE as u32),
+    };
+    row.checked_add(1)
+        .filter(|value| *value < QUARANTINE_FRAME_ROW_LOCATOR)
+        .ok_or(AdapterError::WorkBudget)
+}
+
+fn quarantine_origin(
+    queue: &mut QuarantineQueue,
+    records: &mut Vec<RecordedQuarantine>,
+    origin: EventProvenance,
+    reasons: u16,
+    work_units: u32,
+    clock_origin: Instant,
+) -> Result<bool, AdapterError> {
+    let frame = RecordedFrame {
+        source: origin.source,
+        stream_index: origin.stream_index,
+        receipt_ns: origin.input_receipt_ns,
+        sequence: origin.frame_sequence,
+        jms_timestamp_ms: origin.jms_timestamp_ms,
+        mono_ns: origin.mono_ns,
+        oaf_flags: origin.oaf_flags,
+        byte_offset: origin.frame_byte_offset,
+        skipped_before: origin.skipped_before,
+        kind: oa_feed::Kind::Message,
+        payload: Vec::new(),
+    };
+    quarantine_item(
+        queue,
+        records,
+        &frame,
+        provenance_row_locator(origin)?,
+        reasons,
+        work_units,
+        if origin.source == RecordingSource::Sfdps {
+            MAX_OPS_PER_MESSAGE as u32
+        } else {
+            1
+        },
+        clock_origin,
+        clock_origin,
+    )
+}
+
+fn account_provenance_range(
+    queue: &mut QuarantineQueue,
+    records: &mut Vec<RecordedQuarantine>,
+    provenance: &[EventProvenance],
+    range: core::ops::Range<usize>,
+    reasons: u16,
+    clock_origin: Instant,
+) -> Result<(), AdapterError> {
+    let mut index = range.start;
+    while index < range.end {
+        let origin = *provenance
+            .get(index)
+            .ok_or(AdapterError::UnsupportedEvent)?;
+        let key = (
+            origin.source,
+            origin.stream_index,
+            origin.frame_sequence,
+            origin.frame_byte_offset,
+            provenance_row_locator(origin)?,
+        );
+        let mut end = index.checked_add(1).ok_or(AdapterError::CountOverflow)?;
+        while end < range.end {
+            let next = *provenance.get(end).ok_or(AdapterError::UnsupportedEvent)?;
+            let next_key = (
+                next.source,
+                next.stream_index,
+                next.frame_sequence,
+                next.frame_byte_offset,
+                provenance_row_locator(next)?,
+            );
+            if next_key != key {
+                break;
+            }
+            end = end.checked_add(1).ok_or(AdapterError::CountOverflow)?;
+        }
+        let accepted = quarantine_origin(
+            queue,
+            records,
+            origin,
+            reasons,
+            u32::try_from(end - index).map_err(|_| AdapterError::WorkBudget)?,
+            clock_origin,
+        )?;
+        if (reasons == 0) != accepted {
+            return Err(AdapterError::WorkBudget);
+        }
+        index = end;
+    }
+    Ok(())
+}
+
+fn account_final_events(
+    queue: &mut QuarantineQueue,
+    records: &mut Vec<RecordedQuarantine>,
+    provenance: &[EventProvenance],
+    clock_origin: Instant,
+) -> Result<(), AdapterError> {
+    account_provenance_range(
+        queue,
+        records,
+        provenance,
+        0..provenance.len(),
+        0,
+        clock_origin,
+    )
 }
 
 // A7.2: cold provenance row paired with one normalized event.
@@ -396,6 +644,8 @@ pub fn adapt_recorded_frames(
         provenance: Vec::new(),
         counts: zero_recorded_adapter_counts(),
         recording: recording_counts,
+        quarantine: Vec::new(),
+        quarantine_stats: zero_quarantine_stats(),
     };
     out.events
         .try_reserve_exact(max_events.min(4096))
@@ -414,16 +664,41 @@ pub fn adapt_recorded_frames(
     let mut fixm_limits = FixmLimits::new(oa_sealed::sealed_drop_window());
     fixm_limits.max_elements = 262_144;
     let mut sfdps_decoder = Decoder::new(fixm_limits);
+    let mut quarantine_queue = queue_new();
+    let conversion_started = Instant::now();
     let mut next_surveillance_sequence = 0u64;
     let mut next_flight_sequence = 0u64;
     for frame in frames {
+        let frame_started = Instant::now();
         if frame.kind != oa_feed::Kind::Message {
             out.counts.nonmessage_frames_refused =
                 out.counts.nonmessage_frames_refused.saturating_add(1);
+            quarantine_item(
+                &mut quarantine_queue,
+                &mut out.quarantine,
+                frame,
+                QUARANTINE_FRAME_ROW_LOCATOR,
+                REASON_INPUT_INVALID,
+                u32::try_from(frame.payload.len()).unwrap_or(u32::MAX),
+                oa_feed::MAX_PAYLOAD as u32,
+                conversion_started,
+                frame_started,
+            )?;
             continue;
         }
         if frame.payload.len() > oa_feed::MAX_PAYLOAD {
             out.counts.invalid_frame_metadata = out.counts.invalid_frame_metadata.saturating_add(1);
+            quarantine_item(
+                &mut quarantine_queue,
+                &mut out.quarantine,
+                frame,
+                QUARANTINE_FRAME_ROW_LOCATOR,
+                REASON_RESOURCE_LIMIT,
+                u32::try_from(frame.payload.len()).unwrap_or(u32::MAX),
+                oa_feed::MAX_PAYLOAD as u32,
+                conversion_started,
+                frame_started,
+            )?;
             continue;
         }
         let issue_receipt_ns = match issue_cutoff(frame.receipt_ns) {
@@ -431,101 +706,282 @@ pub fn adapt_recorded_frames(
             Err(CutoffRefusal::Negative) => {
                 out.counts.cutoff_negative_refused =
                     out.counts.cutoff_negative_refused.saturating_add(1);
+                quarantine_item(
+                    &mut quarantine_queue,
+                    &mut out.quarantine,
+                    frame,
+                    QUARANTINE_FRAME_ROW_LOCATOR,
+                    REASON_INPUT_INVALID,
+                    frame.payload.len() as u32,
+                    oa_feed::MAX_PAYLOAD as u32,
+                    conversion_started,
+                    frame_started,
+                )?;
                 continue;
             }
             Err(CutoffRefusal::Zero) => {
                 out.counts.cutoff_zero_refused = out.counts.cutoff_zero_refused.saturating_add(1);
+                quarantine_item(
+                    &mut quarantine_queue,
+                    &mut out.quarantine,
+                    frame,
+                    QUARANTINE_FRAME_ROW_LOCATOR,
+                    REASON_INPUT_INVALID,
+                    frame.payload.len() as u32,
+                    oa_feed::MAX_PAYLOAD as u32,
+                    conversion_started,
+                    frame_started,
+                )?;
                 continue;
             }
             Err(CutoffRefusal::SealedReceipt) => {
                 out.counts.cutoff_sealed_receipt_refused =
                     out.counts.cutoff_sealed_receipt_refused.saturating_add(1);
+                quarantine_item(
+                    &mut quarantine_queue,
+                    &mut out.quarantine,
+                    frame,
+                    QUARANTINE_FRAME_ROW_LOCATOR,
+                    REASON_INPUT_INVALID,
+                    frame.payload.len() as u32,
+                    oa_feed::MAX_PAYLOAD as u32,
+                    conversion_started,
+                    frame_started,
+                )?;
                 continue;
             }
             Err(CutoffRefusal::Overflow) => {
                 out.counts.cutoff_overflow_refused =
                     out.counts.cutoff_overflow_refused.saturating_add(1);
+                quarantine_item(
+                    &mut quarantine_queue,
+                    &mut out.quarantine,
+                    frame,
+                    QUARANTINE_FRAME_ROW_LOCATOR,
+                    REASON_INPUT_INVALID,
+                    frame.payload.len() as u32,
+                    oa_feed::MAX_PAYLOAD as u32,
+                    conversion_started,
+                    frame_started,
+                )?;
                 continue;
             }
             Err(CutoffRefusal::SealedCutoff) => {
                 out.counts.cutoff_sealed_issue_refused =
                     out.counts.cutoff_sealed_issue_refused.saturating_add(1);
+                quarantine_item(
+                    &mut quarantine_queue,
+                    &mut out.quarantine,
+                    frame,
+                    QUARANTINE_FRAME_ROW_LOCATOR,
+                    REASON_INPUT_INVALID,
+                    frame.payload.len() as u32,
+                    oa_feed::MAX_PAYLOAD as u32,
+                    conversion_started,
+                    frame_started,
+                )?;
                 continue;
             }
         };
         if out.events.len() >= max_events {
             out.counts.unprocessed_frames = out.counts.unprocessed_frames.saturating_add(1);
+            quarantine_item(
+                &mut quarantine_queue,
+                &mut out.quarantine,
+                frame,
+                QUARANTINE_FRAME_ROW_LOCATOR,
+                REASON_RESOURCE_LIMIT,
+                frame.payload.len() as u32,
+                oa_feed::MAX_PAYLOAD as u32,
+                conversion_started,
+                frame_started,
+            )?;
             continue;
         }
         match frame.source {
             RecordingSource::Adsb => {
                 out.counts.frames_adsb = out.counts.frames_adsb.saturating_add(1);
-                adapt_adsb_frame(
+                let mut quarantine = std::mem::take(&mut out.quarantine);
+                let result = adapt_adsb_frame(
                     frame,
                     issue_receipt_ns,
                     adsb_centre,
                     max_events,
                     &mut next_surveillance_sequence,
+                    &mut quarantine_queue,
+                    &mut quarantine,
+                    conversion_started,
+                    frame_started,
                     &mut out,
-                )?;
+                );
+                out.quarantine = quarantine;
+                result?;
             }
             RecordingSource::Sfdps => {
                 out.counts.frames_sfdps = out.counts.frames_sfdps.saturating_add(1);
-                adapt_sfdps_frame(
+                let mut quarantine = std::mem::take(&mut out.quarantine);
+                let result = adapt_sfdps_frame(
                     frame,
                     issue_receipt_ns,
                     max_events,
                     &mut next_flight_sequence,
                     &mut parser,
                     &mut sfdps_decoder,
+                    &mut quarantine_queue,
+                    &mut quarantine,
+                    conversion_started,
+                    frame_started,
                     &mut out,
-                )?;
+                );
+                out.quarantine = quarantine;
+                result?;
             }
         }
     }
-    sort_and_refuse_oversize_receipt_groups(&mut out)?;
+    sort_and_refuse_oversize_receipt_groups_with_quarantine(
+        &mut out,
+        &mut quarantine_queue,
+        conversion_started,
+    )?;
     out.counts.events_emitted =
         u64::try_from(out.events.len()).map_err(|_| AdapterError::CountOverflow)?;
+    out.quarantine_stats = [
+        oa_quarantine::source_stats(&quarantine_queue, InputSource::FlightData)
+            .map_err(|_| AdapterError::WorkBudget)?,
+        oa_quarantine::source_stats(&quarantine_queue, InputSource::Surveillance)
+            .map_err(|_| AdapterError::WorkBudget)?,
+        oa_quarantine::source_stats(&quarantine_queue, InputSource::Adaptation)
+            .map_err(|_| AdapterError::WorkBudget)?,
+    ];
     Ok(out)
 }
 
+// Keep source-specific state and accounting explicit at this narrow adapter boundary.
+#[allow(clippy::too_many_arguments)]
 fn adapt_adsb_frame(
     frame: &RecordedFrame,
     issue_receipt_ns: i64,
     adsb_centre: [u8; 4],
     max_events: usize,
     next_sequence: &mut u64,
+    quarantine_queue: &mut QuarantineQueue,
+    quarantine: &mut Vec<RecordedQuarantine>,
+    conversion_started: Instant,
+    frame_started: Instant,
     out: &mut RecordedAdaptation,
 ) -> Result<(), AdapterError> {
-    let mut reports = Reports::default();
-    let counts = match decode_payload_lenient(&frame.payload, &mut reports) {
-        Ok(counts) => counts,
+    let record_count = match oa_adsb::payload_record_count(&frame.payload) {
+        Ok(count) => count,
         Err(_) => {
             out.counts.adsb_payload_refused = out.counts.adsb_payload_refused.saturating_add(1);
+            quarantine_item(
+                quarantine_queue,
+                quarantine,
+                frame,
+                QUARANTINE_FRAME_ROW_LOCATOR,
+                REASON_INPUT_INVALID,
+                u32::try_from(frame.payload.len()).map_err(|_| AdapterError::WorkBudget)?,
+                oa_feed::MAX_PAYLOAD as u32,
+                conversion_started,
+                frame_started,
+            )?;
             return Ok(());
         }
     };
-    out.counts.adsb_rows_in = out
-        .counts
-        .adsb_rows_in
-        .saturating_add(u64::try_from(counts.records).map_err(|_| AdapterError::CountOverflow)?);
+    let previous_rows =
+        usize::try_from(out.counts.adsb_rows_in).map_err(|_| AdapterError::WorkBudget)?;
+    let admitted_rows = previous_rows
+        .checked_add(record_count)
+        .ok_or(AdapterError::WorkBudget)?;
+    out.counts.adsb_rows_in =
+        u64::try_from(admitted_rows).map_err(|_| AdapterError::CountOverflow)?;
+    if admitted_rows > MAX_ADSB_ROWS_PER_ADAPTATION {
+        out.counts.adsb_rows_over_capacity = out
+            .counts
+            .adsb_rows_over_capacity
+            .saturating_add(u64::try_from(record_count).map_err(|_| AdapterError::CountOverflow)?);
+        for ordinal in 0..record_count {
+            let row_locator = u32::try_from(ordinal)
+                .ok()
+                .and_then(|value| value.checked_add(1))
+                .filter(|value| *value < QUARANTINE_FRAME_ROW_LOCATOR)
+                .ok_or(AdapterError::WorkBudget)?;
+            quarantine_item(
+                quarantine_queue,
+                quarantine,
+                frame,
+                row_locator,
+                REASON_RESOURCE_LIMIT,
+                1,
+                1,
+                conversion_started,
+                frame_started,
+            )?;
+        }
+        return Ok(());
+    }
+    let mut reports = Reports::default();
+    let mut dropped_ordinals = Vec::new();
+    dropped_ordinals
+        .try_reserve(record_count)
+        .map_err(|_| AdapterError::AllocationRefused)?;
+    let counts =
+        match decode_payload_lenient_with_dropped(&frame.payload, &mut reports, |ordinal| {
+            dropped_ordinals.push(ordinal)
+        }) {
+            Ok(counts) => counts,
+            Err(_) => {
+                out.counts.adsb_payload_refused = out.counts.adsb_payload_refused.saturating_add(1);
+                quarantine_item(
+                    quarantine_queue,
+                    quarantine,
+                    frame,
+                    QUARANTINE_FRAME_ROW_LOCATOR,
+                    REASON_INPUT_INVALID,
+                    u32::try_from(frame.payload.len()).map_err(|_| AdapterError::WorkBudget)?,
+                    oa_feed::MAX_PAYLOAD as u32,
+                    conversion_started,
+                    frame_started,
+                )?;
+                return Ok(());
+            }
+        };
+    if counts.records != record_count {
+        return Err(AdapterError::WorkBudget);
+    }
     out.counts.adsb_rows_dropped = out
         .counts
         .adsb_rows_dropped
         .saturating_add(u64::try_from(counts.dropped).map_err(|_| AdapterError::CountOverflow)?);
-    let previously_admitted = usize::try_from(out.counts.adsb_rows_in)
-        .map_err(|_| AdapterError::WorkBudget)?
-        .checked_sub(counts.records)
-        .ok_or(AdapterError::CountOverflow)?;
-    if previously_admitted
-        .checked_add(counts.records)
-        .is_none_or(|n| n > MAX_ADSB_ROWS_PER_ADAPTATION)
-    {
-        out.counts.adsb_rows_over_capacity = out
-            .counts
-            .adsb_rows_over_capacity
-            .saturating_add(u64::try_from(counts.kept).map_err(|_| AdapterError::CountOverflow)?);
-        return Ok(());
+    let mut decoded_source_ordinals = Vec::new();
+    decoded_source_ordinals
+        .try_reserve_exact(counts.kept)
+        .map_err(|_| AdapterError::AllocationRefused)?;
+    let mut drop_cursor = 0usize;
+    for ordinal in 0..counts.records {
+        if dropped_ordinals.get(drop_cursor) == Some(&ordinal) {
+            drop_cursor += 1;
+        } else {
+            decoded_source_ordinals.push(ordinal);
+        }
+    }
+    for &ordinal in &dropped_ordinals {
+        let row_locator = u32::try_from(ordinal)
+            .ok()
+            .and_then(|value| value.checked_add(1))
+            .filter(|value| *value < QUARANTINE_FRAME_ROW_LOCATOR)
+            .ok_or(AdapterError::WorkBudget)?;
+        quarantine_item(
+            quarantine_queue,
+            quarantine,
+            frame,
+            row_locator,
+            REASON_SURVEILLANCE_INVALID,
+            1,
+            1,
+            conversion_started,
+            frame_started,
+        )?;
     }
     if reports
         .time_ns
@@ -538,9 +994,60 @@ fn adapt_adsb_frame(
             .counts
             .adsb_rows_order_refused
             .saturating_add(u64::try_from(counts.kept).map_err(|_| AdapterError::CountOverflow)?);
+        for &ordinal in &decoded_source_ordinals {
+            let row_locator = u32::try_from(ordinal)
+                .ok()
+                .and_then(|value| value.checked_add(1))
+                .filter(|value| *value < QUARANTINE_FRAME_ROW_LOCATOR)
+                .ok_or(AdapterError::WorkBudget)?;
+            quarantine_item(
+                quarantine_queue,
+                quarantine,
+                frame,
+                row_locator,
+                REASON_INPUT_INVALID,
+                1,
+                1,
+                conversion_started,
+                frame_started,
+            )?;
+        }
         return Ok(());
     }
-    let airborne_reports = airborne_adsb_reports(&reports, &mut out.counts)?;
+    let (airborne_reports, airborne_report_indexes, unknown_ground_indexes) =
+        airborne_adsb_reports(&reports, &mut out.counts)?;
+    let mut airborne_source_ordinals = Vec::new();
+    airborne_source_ordinals
+        .try_reserve_exact(airborne_report_indexes.len())
+        .map_err(|_| AdapterError::AllocationRefused)?;
+    for report_index in airborne_report_indexes {
+        airborne_source_ordinals.push(
+            *decoded_source_ordinals
+                .get(report_index)
+                .ok_or(AdapterError::WorkBudget)?,
+        );
+    }
+    for report_index in unknown_ground_indexes {
+        let ordinal = *decoded_source_ordinals
+            .get(report_index)
+            .ok_or(AdapterError::WorkBudget)?;
+        let row_locator = u32::try_from(ordinal)
+            .ok()
+            .and_then(|value| value.checked_add(1))
+            .filter(|value| *value < QUARANTINE_FRAME_ROW_LOCATOR)
+            .ok_or(AdapterError::WorkBudget)?;
+        quarantine_item(
+            quarantine_queue,
+            quarantine,
+            frame,
+            row_locator,
+            REASON_SURVEILLANCE_INVALID,
+            1,
+            1,
+            conversion_started,
+            frame_started,
+        )?;
+    }
     // Reuse the tracker’s existing quality/velocity conversion so the regional adapter does not
     // duplicate ADS-B unit math or platform trig. All quality-gated row losses remain reported.
     let (measurements, stats) =
@@ -554,18 +1061,14 @@ fn adapt_adsb_frame(
         *dst = dst.saturating_add(src);
     }
     let mut source_row_cursor = 0usize;
-    for (measurement_ordinal, measurement) in measurements.into_iter().enumerate() {
-        if out.events.len() >= max_events {
-            out.counts.output_capacity_refusals =
-                out.counts.output_capacity_refusals.saturating_add(1);
-            continue;
-        }
-        if measurement.flags & oa_track::M_HAS_VEL == 0 {
-            out.counts.adsb_velocity_unavailable =
-                out.counts.adsb_velocity_unavailable.saturating_add(1);
-            continue;
-        }
+    let mut represented_rows = Vec::new();
+    represented_rows
+        .try_reserve_exact(airborne_source_ordinals.len())
+        .map_err(|_| AdapterError::AllocationRefused)?;
+    represented_rows.resize(airborne_source_ordinals.len(), false);
+    for measurement in measurements {
         let mut source_row = None;
+        let mut source_index = None;
         while source_row_cursor < reports_len(&airborne_reports) {
             let index = source_row_cursor;
             source_row_cursor += 1;
@@ -578,6 +1081,7 @@ fn adapt_adsb_frame(
                 && candidate.lon_e7 == measurement.lon_e7
             {
                 source_row = Some(candidate);
+                source_index = Some(index);
                 break;
             }
         }
@@ -585,17 +1089,96 @@ fn adapt_adsb_frame(
             out.counts.invalid_position_rows = out.counts.invalid_position_rows.saturating_add(1);
             continue;
         };
+        let source_index = source_index.ok_or(AdapterError::WorkBudget)?;
+        let represented = represented_rows
+            .get_mut(source_index)
+            .ok_or(AdapterError::WorkBudget)?;
+        *represented = true;
+        let source_row_ordinal = airborne_source_ordinals
+            .get(source_index)
+            .copied()
+            .ok_or(AdapterError::WorkBudget)?;
+        let row_locator = u32::try_from(source_row_ordinal)
+            .ok()
+            .and_then(|value| value.checked_add(1))
+            .filter(|value| *value < QUARANTINE_FRAME_ROW_LOCATOR)
+            .ok_or(AdapterError::WorkBudget)?;
+        if out.events.len() >= max_events {
+            out.counts.output_capacity_refusals =
+                out.counts.output_capacity_refusals.saturating_add(1);
+            quarantine_item(
+                quarantine_queue,
+                quarantine,
+                frame,
+                row_locator,
+                REASON_RESOURCE_LIMIT,
+                1,
+                1,
+                conversion_started,
+                frame_started,
+            )?;
+            continue;
+        }
+        if measurement.flags & oa_track::M_HAS_VEL == 0 {
+            out.counts.adsb_velocity_unavailable =
+                out.counts.adsb_velocity_unavailable.saturating_add(1);
+            quarantine_item(
+                quarantine_queue,
+                quarantine,
+                frame,
+                row_locator,
+                REASON_SURVEILLANCE_INVALID,
+                1,
+                1,
+                conversion_started,
+                frame_started,
+            )?;
+            continue;
+        }
         if measurement.toa_ns > frame.receipt_ns {
             out.counts.source_after_receipt = out.counts.source_after_receipt.saturating_add(1);
             out.counts.invalid_position_rows = out.counts.invalid_position_rows.saturating_add(1);
+            quarantine_item(
+                quarantine_queue,
+                quarantine,
+                frame,
+                row_locator,
+                REASON_INPUT_INVALID,
+                1,
+                1,
+                conversion_started,
+                frame_started,
+            )?;
             continue;
         }
         let Some(east_mmps) = fixed_mmps(measurement.vel_east_mps) else {
             out.counts.invalid_position_rows = out.counts.invalid_position_rows.saturating_add(1);
+            quarantine_item(
+                quarantine_queue,
+                quarantine,
+                frame,
+                row_locator,
+                REASON_SURVEILLANCE_INVALID,
+                1,
+                1,
+                conversion_started,
+                frame_started,
+            )?;
             continue;
         };
         let Some(north_mmps) = fixed_mmps(measurement.vel_north_mps) else {
             out.counts.invalid_position_rows = out.counts.invalid_position_rows.saturating_add(1);
+            quarantine_item(
+                quarantine_queue,
+                quarantine,
+                frame,
+                row_locator,
+                REASON_SURVEILLANCE_INVALID,
+                1,
+                1,
+                conversion_started,
+                frame_started,
+            )?;
             continue;
         };
         let altitude_ft = (measurement.alt_ft != oa_track::NONE_I32).then_some(measurement.alt_ft);
@@ -641,7 +1224,7 @@ fn adapt_adsb_frame(
                 oaf_flags: frame.oaf_flags,
                 frame_byte_offset: frame.byte_offset,
                 skipped_before: frame.skipped_before,
-                emitted_item_ordinal: u32::try_from(measurement_ordinal)
+                emitted_item_ordinal: u32::try_from(source_row_ordinal)
                     .map_err(|_| AdapterError::CountOverflow)?,
                 native_flags: u32::from(source_row.flags),
                 native_source: [source_row.source, 0],
@@ -649,6 +1232,41 @@ fn adapt_adsb_frame(
             *next_sequence = next;
         } else {
             out.counts.invalid_position_rows = out.counts.invalid_position_rows.saturating_add(1);
+            quarantine_item(
+                quarantine_queue,
+                quarantine,
+                frame,
+                row_locator,
+                REASON_SURVEILLANCE_INVALID,
+                1,
+                1,
+                conversion_started,
+                frame_started,
+            )?;
+        }
+    }
+    for (index, represented) in represented_rows.into_iter().enumerate() {
+        if !represented {
+            let source_ordinal = airborne_source_ordinals
+                .get(index)
+                .copied()
+                .ok_or(AdapterError::WorkBudget)?;
+            let row_locator = u32::try_from(source_ordinal)
+                .ok()
+                .and_then(|value| value.checked_add(1))
+                .filter(|value| *value < QUARANTINE_FRAME_ROW_LOCATOR)
+                .ok_or(AdapterError::WorkBudget)?;
+            quarantine_item(
+                quarantine_queue,
+                quarantine,
+                frame,
+                row_locator,
+                REASON_SURVEILLANCE_INVALID,
+                1,
+                1,
+                conversion_started,
+                frame_started,
+            )?;
         }
     }
     Ok(())
@@ -657,8 +1275,10 @@ fn adapt_adsb_frame(
 fn airborne_adsb_reports(
     reports: &Reports,
     counts: &mut RecordedAdapterCounts,
-) -> Result<Reports, AdapterError> {
+) -> Result<(Reports, Vec<usize>, Vec<usize>), AdapterError> {
     let mut airborne_reports = Reports::default();
+    let mut source_ordinals = Vec::new();
+    let mut unknown_ground_ordinals = Vec::new();
     airborne_reports
         .icao
         .try_reserve(reports_len(reports))
@@ -673,6 +1293,12 @@ fn airborne_adsb_reports(
         .map_err(|_| AdapterError::AllocationRefused)?;
     airborne_reports
         .lon_e7
+        .try_reserve(reports_len(reports))
+        .map_err(|_| AdapterError::AllocationRefused)?;
+    source_ordinals
+        .try_reserve(reports_len(reports))
+        .map_err(|_| AdapterError::AllocationRefused)?;
+    unknown_ground_ordinals
         .try_reserve(reports_len(reports))
         .map_err(|_| AdapterError::AllocationRefused)?;
     for i in 0..reports_len(reports) {
@@ -698,12 +1324,16 @@ fn airborne_adsb_reports(
             }
             AdsGroundClass::Unknown => {
                 counts.adsb_unknown_ground_refused =
-                    counts.adsb_unknown_ground_refused.saturating_add(1)
+                    counts.adsb_unknown_ground_refused.saturating_add(1);
+                unknown_ground_ordinals.push(i);
             }
-            AdsGroundClass::Airborne => reports_push(&mut airborne_reports, &row),
+            AdsGroundClass::Airborne => {
+                reports_push(&mut airborne_reports, &row);
+                source_ordinals.push(i);
+            }
         }
     }
-    Ok(airborne_reports)
+    Ok((airborne_reports, source_ordinals, unknown_ground_ordinals))
 }
 
 /// Refuses any decoded FIXM timestamp whose discarded sub-millisecond digits carry information.
@@ -768,8 +1398,18 @@ fn has_submillisecond_flight_timestamp(doc: &oa_xml::Doc<'_>, input: &[u8]) -> b
     false
 }
 
+#[cfg(test)]
 fn sort_and_refuse_oversize_receipt_groups(
     out: &mut RecordedAdaptation,
+) -> Result<(), AdapterError> {
+    let mut queue = queue_new();
+    sort_and_refuse_oversize_receipt_groups_with_quarantine(out, &mut queue, Instant::now())
+}
+
+fn sort_and_refuse_oversize_receipt_groups_with_quarantine(
+    out: &mut RecordedAdaptation,
+    quarantine_queue: &mut QuarantineQueue,
+    clock_origin: Instant,
 ) -> Result<(), AdapterError> {
     use crate::session::MAX_EVENTS_PER_RECEIPT;
     use crate::surveillance::{MAX_FRAMES, MAX_FRAME_GAP_NS};
@@ -877,6 +1517,14 @@ fn sort_and_refuse_oversize_receipt_groups(
                 .counts
                 .receipt_group_events_refused
                 .saturating_add(u64::try_from(group_len).map_err(|_| AdapterError::CountOverflow)?);
+            account_provenance_range(
+                quarantine_queue,
+                &mut out.quarantine,
+                &out.provenance,
+                start..end,
+                REASON_RESOURCE_LIMIT,
+                clock_origin,
+            )?;
         } else if accepted_groups >= MAX_FRAMES {
             out.counts.receipt_groups_over_frame_capacity = out
                 .counts
@@ -886,6 +1534,14 @@ fn sort_and_refuse_oversize_receipt_groups(
                 .counts
                 .receipt_frame_capacity_events_refused
                 .saturating_add(u64::try_from(group_len).map_err(|_| AdapterError::CountOverflow)?);
+            account_provenance_range(
+                quarantine_queue,
+                &mut out.quarantine,
+                &out.provenance,
+                start..end,
+                REASON_RESOURCE_LIMIT,
+                clock_origin,
+            )?;
         } else if let Some(previous) = previous_receipt {
             let gap = receipt
                 .checked_sub(previous)
@@ -897,6 +1553,14 @@ fn sort_and_refuse_oversize_receipt_groups(
                     out.counts.receipt_gap_events_refused.saturating_add(
                         u64::try_from(group_len).map_err(|_| AdapterError::CountOverflow)?,
                     );
+                account_provenance_range(
+                    quarantine_queue,
+                    &mut out.quarantine,
+                    &out.provenance,
+                    start..end,
+                    REASON_INPUT_INVALID,
+                    clock_origin,
+                )?;
             } else {
                 if end > event_len || write > start {
                     return Err(AdapterError::UnsupportedEvent);
@@ -927,6 +1591,12 @@ fn sort_and_refuse_oversize_receipt_groups(
     out.provenance.truncate(write);
     out.counts.events_emitted =
         u64::try_from(out.events.len()).map_err(|_| AdapterError::CountOverflow)?;
+    account_final_events(
+        quarantine_queue,
+        &mut out.quarantine,
+        &out.provenance,
+        clock_origin,
+    )?;
     Ok(())
 }
 
@@ -941,6 +1611,8 @@ fn fixed_mmps(mps: f32) -> Option<i32> {
     Some(rounded as i32)
 }
 
+// Keep source-specific state and accounting explicit at this narrow adapter boundary.
+#[allow(clippy::too_many_arguments)]
 fn adapt_sfdps_frame(
     frame: &RecordedFrame,
     issue_receipt_ns: i64,
@@ -948,6 +1620,10 @@ fn adapt_sfdps_frame(
     next_sequence: &mut u64,
     parser: &mut Parser,
     decoder: &mut Decoder,
+    quarantine_queue: &mut QuarantineQueue,
+    quarantine: &mut Vec<RecordedQuarantine>,
+    conversion_started: Instant,
+    frame_started: Instant,
     out: &mut RecordedAdaptation,
 ) -> Result<(), AdapterError> {
     let already_decoded =
@@ -957,12 +1633,34 @@ fn adapt_sfdps_frame(
         out.counts.sfdps_frames_over_capacity =
             out.counts.sfdps_frames_over_capacity.saturating_add(1);
         out.counts.unprocessed_frames = out.counts.unprocessed_frames.saturating_add(1);
+        quarantine_item(
+            quarantine_queue,
+            quarantine,
+            frame,
+            QUARANTINE_FRAME_ROW_LOCATOR,
+            REASON_RESOURCE_LIMIT,
+            frame.payload.len() as u32,
+            oa_feed::MAX_PAYLOAD as u32,
+            conversion_started,
+            frame_started,
+        )?;
         return Ok(());
     }
     let doc = match parser.parse(&frame.payload) {
         Ok(doc) => doc,
         Err(_) => {
             out.counts.sfdps_payload_refused = out.counts.sfdps_payload_refused.saturating_add(1);
+            quarantine_item(
+                quarantine_queue,
+                quarantine,
+                frame,
+                QUARANTINE_FRAME_ROW_LOCATOR,
+                REASON_INPUT_INVALID,
+                frame.payload.len() as u32,
+                oa_feed::MAX_PAYLOAD as u32,
+                conversion_started,
+                frame_started,
+            )?;
             return Ok(());
         }
     };
@@ -972,6 +1670,17 @@ fn adapt_sfdps_frame(
             .sfdps_timestamp_precision_refused
             .saturating_add(1);
         out.counts.sfdps_rows_refused = out.counts.sfdps_rows_refused.saturating_add(1);
+        quarantine_item(
+            quarantine_queue,
+            quarantine,
+            frame,
+            QUARANTINE_FRAME_ROW_LOCATOR,
+            REASON_INPUT_INVALID,
+            frame.payload.len() as u32,
+            oa_feed::MAX_PAYLOAD as u32,
+            conversion_started,
+            frame_started,
+        )?;
         return Ok(());
     }
     let mut events = new_events(remaining_rows.min(4096), 1 << 20);
@@ -987,6 +1696,17 @@ fn adapt_sfdps_frame(
         Ok(summary) => summary,
         Err(_) => {
             out.counts.sfdps_payload_refused = out.counts.sfdps_payload_refused.saturating_add(1);
+            quarantine_item(
+                quarantine_queue,
+                quarantine,
+                frame,
+                QUARANTINE_FRAME_ROW_LOCATOR,
+                REASON_INPUT_INVALID,
+                frame.payload.len() as u32,
+                oa_feed::MAX_PAYLOAD as u32,
+                conversion_started,
+                frame_started,
+            )?;
             return Ok(());
         }
     };
@@ -998,6 +1718,19 @@ fn adapt_sfdps_frame(
         .counts
         .sfdps_rows_not_decoded_capacity
         .saturating_add(u64::from(summary.not_decoded));
+    if summary.not_decoded > 0 {
+        quarantine_item(
+            quarantine_queue,
+            quarantine,
+            frame,
+            QUARANTINE_FRAME_ROW_LOCATOR,
+            REASON_RESOURCE_LIMIT,
+            summary.not_decoded,
+            u32::try_from(remaining_rows).unwrap_or(u32::MAX),
+            conversion_started,
+            frame_started,
+        )?;
+    }
     out.counts.sfdps_sealed_messages = out
         .counts
         .sfdps_sealed_messages
@@ -1095,6 +1828,20 @@ fn adapt_sfdps_frame(
         if ops.is_empty() {
             out.counts.sfdps_rows_no_operations =
                 out.counts.sfdps_rows_no_operations.saturating_add(1);
+            quarantine_item(
+                quarantine_queue,
+                quarantine,
+                frame,
+                u32::try_from(row)
+                    .ok()
+                    .and_then(|value| value.checked_add(1))
+                    .ok_or(AdapterError::WorkBudget)?,
+                REASON_INPUT_INVALID,
+                1,
+                MAX_OPS_PER_MESSAGE as u32,
+                conversion_started,
+                frame_started,
+            )?;
             continue;
         }
         if out
@@ -1106,6 +1853,20 @@ fn adapt_sfdps_frame(
             out.counts.output_capacity_refusals =
                 out.counts.output_capacity_refusals.saturating_add(1);
             out.counts.sfdps_rows_refused = out.counts.sfdps_rows_refused.saturating_add(1);
+            quarantine_item(
+                quarantine_queue,
+                quarantine,
+                frame,
+                u32::try_from(row)
+                    .ok()
+                    .and_then(|value| value.checked_add(1))
+                    .ok_or(AdapterError::WorkBudget)?,
+                REASON_RESOURCE_LIMIT,
+                u32::try_from(ops.len()).map_err(|_| AdapterError::WorkBudget)?,
+                MAX_OPS_PER_MESSAGE as u32,
+                conversion_started,
+                frame_started,
+            )?;
             continue;
         }
         let mut pending = Vec::new();
@@ -1113,6 +1874,7 @@ fn adapt_sfdps_frame(
             .try_reserve_exact(ops.len())
             .map_err(|_| AdapterError::AllocationRefused)?;
         let mut unsupported = false;
+        let mut refusal_reasons = 0u16;
         for (operation_index, op) in ops.iter().enumerate() {
             match normalized_flight_operation(NormalizedFlightOperationInput {
                 kind: op.kind,
@@ -1131,36 +1893,42 @@ fn adapt_sfdps_frame(
                         out.counts.invalid_operation_time =
                             out.counts.invalid_operation_time.saturating_add(1);
                         unsupported = true;
+                        refusal_reasons |= REASON_INPUT_INVALID;
                         continue;
                     };
                     if source_ns < 0 {
                         out.counts.invalid_operation_time =
                             out.counts.invalid_operation_time.saturating_add(1);
                         unsupported = true;
+                        refusal_reasons |= REASON_INPUT_INVALID;
                         continue;
                     }
                     if source_ns > frame.receipt_ns {
                         out.counts.source_after_receipt =
                             out.counts.source_after_receipt.saturating_add(1);
                         unsupported = true;
+                        refusal_reasons |= REASON_INPUT_INVALID;
                         continue;
                     }
                     if op.key.gufi == 0 {
                         out.counts.invalid_operation_identity =
                             out.counts.invalid_operation_identity.saturating_add(1);
                         unsupported = true;
+                        refusal_reasons |= REASON_IDENTITY_OR_LOCATION_CONFLICT;
                         continue;
                     }
                     if !op.centre.iter().all(u8::is_ascii_alphanumeric) {
                         out.counts.invalid_operation_centre =
                             out.counts.invalid_operation_centre.saturating_add(1);
                         unsupported = true;
+                        refusal_reasons |= REASON_IDENTITY_OR_LOCATION_CONFLICT;
                         continue;
                     }
                     if op.kind == OP_ADDRESS && (address == 0 || address > 0x01ff_ffff) {
                         out.counts.invalid_operation_address =
                             out.counts.invalid_operation_address.saturating_add(1);
                         unsupported = true;
+                        refusal_reasons |= REASON_IDENTITY_OR_LOCATION_CONFLICT;
                         continue;
                     }
                     pending.push((
@@ -1188,11 +1956,30 @@ fn adapt_sfdps_frame(
                         *count = count.saturating_add(1);
                     }
                     unsupported = true;
+                    refusal_reasons |= REASON_ALTITUDE_ROUTE_INVALID;
                 }
             }
         }
         if unsupported {
             out.counts.sfdps_rows_refused = out.counts.sfdps_rows_refused.saturating_add(1);
+            quarantine_item(
+                quarantine_queue,
+                quarantine,
+                frame,
+                u32::try_from(row)
+                    .ok()
+                    .and_then(|value| value.checked_add(1))
+                    .ok_or(AdapterError::WorkBudget)?,
+                if refusal_reasons == 0 {
+                    REASON_INPUT_INVALID
+                } else {
+                    refusal_reasons
+                },
+                u32::try_from(ops.len()).map_err(|_| AdapterError::WorkBudget)?,
+                MAX_OPS_PER_MESSAGE as u32,
+                conversion_started,
+                frame_started,
+            )?;
             continue;
         }
         let pending_count =
@@ -1652,6 +2439,47 @@ pub fn serialize_provenance(
     Ok(out)
 }
 
+/// Serializes refusal locators and reason metadata. Raw payloads are deliberately not copied;
+/// operators use stream index, frame offset, and source row locator to retrieve the original item.
+pub fn serialize_quarantine(records: &[RecordedQuarantine]) -> Result<String, AdapterError> {
+    use core::fmt::Write;
+    if records.len() > MAX_QUARANTINE_RECORDS {
+        return Err(AdapterError::WorkBudget);
+    }
+    let reserve = records
+        .len()
+        .checked_mul(136)
+        .and_then(|size| size.checked_add(64))
+        .ok_or(AdapterError::CountOverflow)?;
+    let mut out = String::new();
+    out.try_reserve_exact(reserve)
+        .map_err(|_| AdapterError::AllocationRefused)?;
+    out.push_str("OA-REGIONAL-QUARANTINE\t1\n");
+    for record in records {
+        let source = match record.event.identity.source {
+            InputSource::FlightData => "FLIGHT",
+            InputSource::Surveillance => "SURVEILLANCE",
+            InputSource::Adaptation => "ADAPTATION",
+        };
+        writeln!(
+            out,
+            "ITEM\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            source,
+            record.stream_index,
+            record.frame_sequence,
+            record.frame_byte_offset,
+            record.row_locator,
+            record.event.identity.item_id,
+            record.event.reasons.0,
+            record.event.clock_domain_id,
+            record.event.completed_at_ns,
+            u8::from(record.manual_handling_required)
+        )
+        .map_err(|_| AdapterError::CountOverflow)?;
+    }
+    Ok(out)
+}
+
 fn ascii_field(bytes: &[u8]) -> Result<String, AdapterError> {
     if !bytes.is_ascii() || bytes.contains(&0) {
         return Err(AdapterError::InvalidField);
@@ -1803,6 +2631,120 @@ mod tests {
         assert_eq!(got.counts.adsb_payload_refused, 1);
         assert_eq!(got.counts.sfdps_payload_refused, 1);
         assert_eq!(got.counts.events_emitted, 0);
+        assert_eq!(got.quarantine.len(), 2);
+        assert_eq!(got.quarantine_stats[0].queued, 1);
+        assert_eq!(got.quarantine_stats[1].queued, 1);
+        assert_eq!(got.quarantine_stats[2].accepted, 0);
+    }
+
+    // REQ: OA-REG-017
+    #[test]
+    fn fixm_capacity_and_receipt_group_losses_are_separate_and_later_frame_survives() {
+        const OPEN: &str = r#"<ns5:MessageCollection xmlns:ns5="http://www.faa.aero/nas/3.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">"#;
+        let repeated_message = r#"<message xsi:type="ns5:FlightMessageType"><flight xsi:type="ns5:NasFlightType" centre="ZXX1" source="TH" system="SLC" timestamp="2030-01-02T03:04:05.000Z"><gufi codeSpace="urn:uuid">11111111-2222-3333-4444-555555555555</gufi><controllingUnit unitIdentifier="ZXX1"/></flight></message>"#;
+        let healthy_message = r#"<message xsi:type="ns5:FlightMessageType"><flight xsi:type="ns5:NasFlightType" centre="ZXX1" source="TH" system="SLC" timestamp="2030-01-02T03:04:06.000Z"><gufi codeSpace="urn:uuid">21111111-2222-3333-4444-555555555555</gufi><controllingUnit unitIdentifier="ZXX1"/></flight></message>"#;
+        let mut xml = String::from(OPEN);
+        for _ in 0..4_097 {
+            xml.push_str(repeated_message);
+        }
+        xml.push_str("</ns5:MessageCollection>");
+        let payload = xml.into_bytes();
+        let receipt_ms = oa_fixm::parse_iso_ms(b"2030-01-02T03:04:05.250Z").unwrap();
+        let receipt_ns = receipt_ms.checked_mul(1_000_000).unwrap();
+        let later_xml = format!("{OPEN}{healthy_message}</ns5:MessageCollection>");
+        let later_payload = later_xml.into_bytes();
+        let later_receipt_ms = oa_fixm::parse_iso_ms(b"2030-01-02T03:04:06.250Z").unwrap();
+        let frames = [
+            RecordedFrame {
+                source: RecordingSource::Sfdps,
+                stream_index: 0,
+                receipt_ns,
+                sequence: 1,
+                jms_timestamp_ms: receipt_ms,
+                mono_ns: None,
+                oaf_flags: 0,
+                byte_offset: 0,
+                skipped_before: 0,
+                kind: oa_feed::Kind::Message,
+                payload: payload.clone(),
+            },
+            RecordedFrame {
+                source: RecordingSource::Sfdps,
+                stream_index: 0,
+                receipt_ns: later_receipt_ms.checked_mul(1_000_000).unwrap(),
+                sequence: 2,
+                jms_timestamp_ms: later_receipt_ms,
+                mono_ns: None,
+                oaf_flags: 0,
+                byte_offset: u64::try_from(payload.len()).unwrap(),
+                skipped_before: 0,
+                kind: oa_feed::Kind::Message,
+                payload: later_payload.clone(),
+            },
+        ];
+        let got = adapt_recorded_frames(
+            &frames,
+            RecordingCounts {
+                total_decoded_bytes: u64::try_from(payload.len() + later_payload.len()).unwrap(),
+                ..RecordingCounts::default()
+            },
+            5_000,
+            *b"ZAU1",
+        )
+        .unwrap();
+
+        assert_eq!(got.counts.sfdps_rows_decoded, 4_097);
+        assert_eq!(got.counts.sfdps_rows_not_decoded_capacity, 1);
+        assert_eq!(got.counts.receipt_groups_over_capacity, 1);
+        assert_eq!(got.counts.receipt_group_events_refused, 4_096);
+        assert_eq!(got.events.len(), 1);
+        assert_eq!(got.counts.events_emitted, 1);
+        assert_eq!(got.quarantine.len(), 4_097);
+        let capacity_loss = got
+            .quarantine
+            .iter()
+            .find(|record| {
+                record.frame_sequence == 1 && record.row_locator == QUARANTINE_FRAME_ROW_LOCATOR
+            })
+            .expect("capacity loss has a frame-level locator");
+        assert_eq!(capacity_loss.event.reasons.0, REASON_RESOURCE_LIMIT);
+        assert_eq!(got.quarantine_stats[0].queued, 128);
+        assert_eq!(got.quarantine_stats[0].queue_full_manual_events, 3_969);
+    }
+
+    #[test]
+    fn full_source_queue_keeps_every_refusal_visible_for_manual_handling() {
+        let frames = (0..=oa_quarantine::MAX_PENDING_PER_SOURCE)
+            .map(|index| RecordedFrame {
+                source: RecordingSource::Adsb,
+                stream_index: 0,
+                receipt_ns: 1_000_000_000,
+                sequence: u64::try_from(index).unwrap(),
+                jms_timestamp_ms: 1_000,
+                mono_ns: None,
+                oaf_flags: 0,
+                byte_offset: u64::try_from(index * 32).unwrap(),
+                skipped_before: 0,
+                kind: oa_feed::Kind::Message,
+                payload: b"bad ADS-B payload".to_vec(),
+            })
+            .collect::<Vec<_>>();
+        let decoded_bytes = frames.iter().map(|frame| frame.payload.len() as u64).sum();
+        let counts = RecordingCounts {
+            total_decoded_bytes: decoded_bytes,
+            ..RecordingCounts::default()
+        };
+        let got = adapt_recorded_frames(&frames, counts, 8, *b"ZAU1").unwrap();
+        assert_eq!(got.counts.adsb_payload_refused, 129);
+        assert_eq!(got.quarantine.len(), 129);
+        assert_eq!(got.quarantine_stats[1].queued, 128);
+        assert_eq!(got.quarantine_stats[1].queue_full_manual_events, 1);
+        assert!(got
+            .quarantine
+            .iter()
+            .take(128)
+            .all(|item| !item.manual_handling_required));
+        assert!(got.quarantine.last().unwrap().manual_handling_required);
     }
 
     #[test]
@@ -2036,6 +2978,8 @@ mod tests {
             ],
             counts: zero_recorded_adapter_counts(),
             recording: RecordingCounts::default(),
+            quarantine: Vec::new(),
+            quarantine_stats: zero_quarantine_stats(),
         };
         sort_and_refuse_oversize_receipt_groups(&mut output).unwrap();
         assert_eq!(
@@ -2067,6 +3011,8 @@ mod tests {
             provenance: Vec::new(),
             counts: zero_recorded_adapter_counts(),
             recording: RecordingCounts::default(),
+            quarantine: Vec::new(),
+            quarantine_stats: zero_quarantine_stats(),
         };
         for index in 0..=crate::session::MAX_EVENTS_PER_RECEIPT {
             output
@@ -2099,6 +3045,8 @@ mod tests {
             ],
             counts: zero_recorded_adapter_counts(),
             recording: RecordingCounts::default(),
+            quarantine: Vec::new(),
+            quarantine_stats: zero_quarantine_stats(),
         };
         sort_and_refuse_oversize_receipt_groups(&mut output).unwrap();
         assert_eq!(

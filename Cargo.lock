@@ -428,6 +428,7 @@ dependencies = [
  "oa-legacy-traj",
  "oa-msaw",
  "oa-msaw-run",
+ "oa-quarantine",
  "oa-safety",
  "oa-scope-replay",
  "oa-sealed",

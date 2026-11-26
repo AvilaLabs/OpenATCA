@@ -2,8 +2,8 @@
 //! frames, decodes source payloads, and produces the ordinary OA-RS v1 normalized input text.
 
 use crate::recordings::{
-    adapt_recorded_frames, serialize_provenance, serialize_recorded_events, AdapterError,
-    RecordedAdaptation,
+    adapt_recorded_frames, serialize_provenance, serialize_quarantine, serialize_recorded_events,
+    AdapterError, RecordedAdaptation,
 };
 use crate::recordings_reader::{
     read_oaf_inputs, RecordingFrames, RecordingInput, RecordingReadError,
@@ -21,6 +21,7 @@ pub enum RecordingCliError {
 pub struct RecordingCliOutput {
     pub normalized_tsv: String,
     pub provenance_tsv: String,
+    pub quarantine_tsv: String,
     pub adaptation: RecordedAdaptation,
     pub frame_count: u64,
     pub streams: Vec<RecordingStreamProvenance>,
@@ -44,9 +45,12 @@ pub fn convert_recordings(
         serialize_recorded_events(&adaptation.events).map_err(RecordingCliError::Adapt)?;
     let provenance_tsv = serialize_provenance(&adaptation.events, &adaptation.provenance, &streams)
         .map_err(RecordingCliError::Adapt)?;
+    let quarantine_tsv =
+        serialize_quarantine(&adaptation.quarantine).map_err(RecordingCliError::Adapt)?;
     Ok(RecordingCliOutput {
         normalized_tsv,
         provenance_tsv,
+        quarantine_tsv,
         adaptation,
         frame_count,
         streams,

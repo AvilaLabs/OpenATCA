@@ -54,6 +54,9 @@ oa-fixm = { path = "../../crates/oa-fixm" }
 oa-xml = { path = "../../crates/oa-xml" }
 # Source-faithful SFDPS event→operation adapter; import site: recordings.rs.
 oa-flight-sfdps = { path = "../../crates/oa-flight-sfdps" }
+# F1: Connor approved this caller link on 2026-11-26; recorded source rows are classified before
+# normalized events are committed, with bounded per-source manual-handling accounting.
+oa-quarantine = { path = "../../crates/oa-quarantine" }
 
 [package.metadata.openatca]
 class = "shell"

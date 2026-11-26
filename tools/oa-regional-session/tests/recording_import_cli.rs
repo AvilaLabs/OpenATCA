@@ -55,7 +55,7 @@ fn synthetic_oaf_import_runs_through_tracking_and_stage_contract() {
     let staged = scratch.join("staged");
     let run = scratch.join("run");
 
-    let xml = br#"<ns5:MessageCollection xmlns:ns5="http://www.faa.aero/nas/3.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><message xsi:type="ns5:FlightMessageType"><flight xsi:type="ns5:NasFlightType" centre="ZXX1" source="TH" system="SLC" timestamp="2030-01-02T03:04:05.000Z"><gufi codeSpace="urn:uuid">11111111-2222-3333-4444-555555555555</gufi><controllingUnit unitIdentifier="ZXX1"/></flight></message></ns5:MessageCollection>"#;
+    let xml = br#"<ns5:MessageCollection xmlns:ns5="http://www.faa.aero/nas/3.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><message xsi:type="ns5:FlightMessageType"><flight xsi:type="ns5:NasFlightType" centre="ZXX1" source="TH" system="SLC" timestamp="2030-01-02T03:04:05.000Z"><gufi codeSpace="urn:uuid">11111111-2222-3333-4444-555555555555</gufi><controllingUnit unitIdentifier="ZXX1"/></flight></message><message xsi:type="ns5:FlightMessageType"><flight xsi:type="ns5:NasFlightType" centre="ZXX1" source="TH" system="SLC" timestamp="2030-01-02T03:04:08.000Z"><gufi codeSpace="urn:uuid">21111111-2222-3333-4444-555555555555</gufi><controllingUnit unitIdentifier="ZXX1"/></flight></message></ns5:MessageCollection>"#;
     let receipt_ms = oa_fixm::parse_iso_ms(b"2030-01-02T03:04:05.250Z").unwrap();
     let receipt_ns = receipt_ms
         .checked_mul(1_000_000)
@@ -72,8 +72,9 @@ fn synthetic_oaf_import_runs_through_tracking_and_stage_contract() {
         xml,
     );
 
-    // Two valid airborne reports one second apart exercise actual tracker confirmation. The
-    // following ground and no-altitude rows prove the importer accounts for its exclusions.
+    // Two valid airborne reports one second apart exercise actual tracker confirmation. Ground
+    // and missing-altitude rows retain their distinct exclusions; a final malformed row is
+    // quarantined by exact source ordinal without discarding its healthy siblings.
     let base_ms = oa_fixm::parse_iso_ms(b"2030-01-02T03:04:03.000Z").unwrap();
     let base_ns = base_ms.checked_mul(1_000_000).unwrap();
     let mut reports = oa_adsb::Reports::default();
@@ -92,11 +93,14 @@ fn synthetic_oaf_import_runs_through_tracking_and_stage_contract() {
             row.baro_alt_ft = oa_adsb::NONE_I32;
             row
         },
+        adsb_row(base_ns + 3_000_000_000, 41.900_400_0, -88.296_000_0),
     ] {
         oa_adsb::reports_push(&mut reports, &row);
     }
     let mut payload = Vec::new();
-    oa_adsb::encode_payload(&mut payload, &reports, 0, 4).unwrap();
+    oa_adsb::encode_payload(&mut payload, &reports, 0, 5).unwrap();
+    let malformed_at = oa_adsb::PAYLOAD_HEADER_LEN + 4 * oa_adsb::RECORD_LEN;
+    *payload.get_mut(malformed_at + 7).unwrap() = 0x7f;
     write_oaf(
         &adsb_path,
         oa_feed::Kind::Message as u8,
@@ -135,6 +139,10 @@ fn synthetic_oaf_import_runs_through_tracking_and_stage_contract() {
     assert!(imported.join("COMPLETE").is_file());
 
     let normalized = fs::read_to_string(imported.join("normalized.tsv")).unwrap();
+    assert!(
+        normalized.lines().any(|line| line.contains("\tFLIGHT\t")),
+        "{normalized}"
+    );
     let position = normalized
         .lines()
         .skip(1)
@@ -160,6 +168,30 @@ fn synthetic_oaf_import_runs_through_tracking_and_stage_contract() {
         counts.contains("adsb_unknown_gufi_positions: 2"),
         "{counts}"
     );
+    assert!(counts.contains("adsb_rows_dropped: 1"), "{counts}");
+    assert!(counts.contains("quarantine_records\t3"), "{counts}");
+    assert!(
+        counts.contains("manual_handling_required\t3\tstatus=REVIEW_REQUIRED"),
+        "{counts}"
+    );
+    assert!(counts.contains("sfdps_rows_refused: 1"), "{counts}");
+    assert!(counts.contains("sfdps_rows_decoded: 2"), "{counts}");
+    let quarantine = fs::read_to_string(imported.join("quarantine.tsv")).unwrap();
+    assert!(quarantine.contains("OA-REGIONAL-QUARANTINE\t1"));
+    assert!(
+        quarantine.contains("ITEM\tSURVEILLANCE\t0\t1\t0\t4\t4\t"),
+        "{quarantine}"
+    );
+    assert!(
+        quarantine.contains("ITEM\tSURVEILLANCE\t0\t1\t0\t5\t5\t"),
+        "{quarantine}"
+    );
+    assert!(
+        quarantine.contains("ITEM\tFLIGHT\t1\t1\t0\t2\t2\t"),
+        "{quarantine}"
+    );
+    let manifest_text = fs::read_to_string(imported.join("manifest.tsv")).unwrap();
+    assert!(manifest_text.contains("quarantine_sha256\t"));
 
     let stage_result = Command::new(env!("CARGO_BIN_EXE_oa-regional-session"))
         .args([

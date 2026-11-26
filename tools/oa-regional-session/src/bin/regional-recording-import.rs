@@ -16,6 +16,7 @@ use oa_regional_session::surveillance::{MAX_FRAMES, MAX_FRAME_GAP_NS};
 
 const MAX_NORMALIZED_BYTES: usize = 16 * 1024 * 1024;
 const MAX_PROVENANCE_BYTES: usize = 32 * 1024 * 1024;
+const MAX_QUARANTINE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_REPORT_BYTES: usize = 64 * 1024;
 const MAX_MANIFEST_BYTES: usize = 1024 * 1024;
 const MAX_EXECUTABLE_BYTES: u64 = 128 * 1024 * 1024;
@@ -153,6 +154,9 @@ fn run() -> Result<(), String> {
     if output.provenance_tsv.len() > MAX_PROVENANCE_BYTES {
         return Err("provenance TSV exceeds the 32 MiB publication limit".into());
     }
+    if output.quarantine_tsv.len() > MAX_QUARANTINE_BYTES {
+        return Err("quarantine TSV exceeds the 64 MiB publication limit".into());
+    }
 
     use std::fmt::Write as FmtWrite;
     let mut report = String::from("OA_RECORDING_IMPORT_REPORT\t1\n");
@@ -168,6 +172,54 @@ fn run() -> Result<(), String> {
     .map_err(|_| "report formatting failed")?;
     writeln!(report, "adapter_counts\t{:?}", output.adaptation.counts)
         .map_err(|_| "report formatting failed")?;
+    writeln!(
+        report,
+        "quarantine_stats\t{:?}",
+        output.adaptation.quarantine_stats
+    )
+    .map_err(|_| "report formatting failed")?;
+    writeln!(
+        report,
+        "quarantine_records\t{}",
+        output.adaptation.quarantine.len()
+    )
+    .map_err(|_| "report formatting failed")?;
+    let direct_manual_required = output
+        .adaptation
+        .quarantine
+        .iter()
+        .filter(|record| record.manual_handling_required)
+        .count();
+    writeln!(
+        report,
+        "manual_handling_required\t{}\tstatus={}",
+        output.adaptation.quarantine.len(),
+        if output.adaptation.quarantine.is_empty() {
+            "NONE"
+        } else {
+            "REVIEW_REQUIRED"
+        }
+    )
+    .map_err(|_| "report formatting failed")?;
+    writeln!(report, "queue_full_direct_manual\t{direct_manual_required}")
+        .map_err(|_| "report formatting failed")?;
+    let [flight_stats, surveillance_stats, adaptation_stats] = output.adaptation.quarantine_stats;
+    for (name, stats) in [
+        ("FLIGHT", flight_stats),
+        ("SURVEILLANCE", surveillance_stats),
+        ("ADAPTATION", adaptation_stats),
+    ] {
+        writeln!(
+            report,
+            "quarantine_class\t{name}\taccepted={}\tqueued={}\tqueue_full_manual={}\tacknowledged={}\treasons={:?}",
+            stats.accepted,
+            stats.queued,
+            stats.queue_full_manual_events,
+            stats.acknowledged,
+            stats.reason_counts
+        )
+        .map_err(|_| "report formatting failed")?;
+    }
     for stream in &output.streams {
         let source = match stream.source {
             RecordingSource::Adsb => "ADSB",
@@ -191,12 +243,14 @@ fn run() -> Result<(), String> {
 
     let normalized_hash = oa_sha256::sha256(output.normalized_tsv.as_bytes());
     let provenance_hash = oa_sha256::sha256(output.provenance_tsv.as_bytes());
+    let quarantine_hash = oa_sha256::sha256(output.quarantine_tsv.as_bytes());
     let report_hash = oa_sha256::sha256(report.as_bytes());
-    let mut manifest = format!("OA_RECORDING_IMPORT_MANIFEST\t1\ncentre\t{}\nnormalized_bytes\t{}\nnormalized_sha256\t{}\nprovenance_bytes\t{}\nprovenance_sha256\t{}\nreport_bytes\t{}\nreport_sha256\t{}\nexecutable_sha256\t{}\nphysical_input_cap_bytes\t{}\nexpanded_input_cap_bytes\t{}\nframe_cap\t{}\nstream_cap\t{}\nnormalized_input_cap_bytes\t{}\nnormalized_event_cap\t{}\nevents_per_receipt_cap\t{}\nruntime_group_cap\t{}\nruntime_gap_cap_ns\t{}\n",
+    let mut manifest = format!("OA_RECORDING_IMPORT_MANIFEST\t1\ncentre\t{}\nnormalized_bytes\t{}\nnormalized_sha256\t{}\nprovenance_bytes\t{}\nprovenance_sha256\t{}\nquarantine_bytes\t{}\nquarantine_sha256\t{}\nreport_bytes\t{}\nreport_sha256\t{}\nexecutable_sha256\t{}\nphysical_input_cap_bytes\t{}\nexpanded_input_cap_bytes\t{}\nframe_cap\t{}\nstream_cap\t{}\nnormalized_input_cap_bytes\t{}\nnormalized_event_cap\t{}\nevents_per_receipt_cap\t{}\nruntime_group_cap\t{}\nruntime_gap_cap_ns\t{}\nquarantine_record_cap\t{}\nquarantine_bytes_cap\t{}\n",
         core::str::from_utf8(&args.centre).map_err(|_| "centre encoding")?, output.normalized_tsv.len(), oa_sha256::to_hex(&normalized_hash),
-        output.provenance_tsv.len(), oa_sha256::to_hex(&provenance_hash), report.len(), oa_sha256::to_hex(&report_hash),
+        output.provenance_tsv.len(), oa_sha256::to_hex(&provenance_hash), output.quarantine_tsv.len(), oa_sha256::to_hex(&quarantine_hash), report.len(), oa_sha256::to_hex(&report_hash),
         oa_sha256::to_hex(&executable_sha), MAX_RECORDING_INPUT_BYTES, MAX_RECORDING_INPUT_BYTES, MAX_RECORDING_FRAMES, MAX_RECORDING_STREAMS,
-        MAX_NORMALIZED_BYTES, MAX_SESSION_EVENTS, MAX_EVENTS_PER_RECEIPT, MAX_FRAMES, MAX_FRAME_GAP_NS);
+        MAX_NORMALIZED_BYTES, MAX_SESSION_EVENTS, MAX_EVENTS_PER_RECEIPT, MAX_FRAMES, MAX_FRAME_GAP_NS,
+        oa_regional_session::recordings::MAX_QUARANTINE_RECORDS, MAX_QUARANTINE_BYTES);
     for stream in &output.streams {
         let source = match stream.source {
             RecordingSource::Adsb => "ADSB",
@@ -222,10 +276,12 @@ fn run() -> Result<(), String> {
     create_output_dir(&args.output)?;
     let normalized_path = args.output.join("normalized.tsv");
     let provenance_path = args.output.join("provenance.tsv");
+    let quarantine_path = args.output.join("quarantine.tsv");
     let report_path = args.output.join("counts.tsv");
     let manifest_path = args.output.join("manifest.tsv");
     write_new(&normalized_path, output.normalized_tsv.as_bytes())?;
     write_new(&provenance_path, output.provenance_tsv.as_bytes())?;
+    write_new(&quarantine_path, output.quarantine_tsv.as_bytes())?;
     write_new(&report_path, report.as_bytes())?;
     write_new(&manifest_path, manifest.as_bytes())?;
     verify_file(
@@ -237,6 +293,11 @@ fn run() -> Result<(), String> {
         &provenance_path,
         output.provenance_tsv.len(),
         &provenance_hash,
+    )?;
+    verify_file(
+        &quarantine_path,
+        output.quarantine_tsv.len(),
+        &quarantine_hash,
     )?;
     verify_file(&report_path, report.len(), &report_hash)?;
     verify_file(&manifest_path, manifest.len(), &manifest_hash)?;
@@ -269,8 +330,9 @@ fn run() -> Result<(), String> {
         ));
     }
     eprintln!(
-        "recording import complete: events={} streams={} frames={} output={}",
+        "recording import complete: events={} quarantine={} streams={} frames={} output={}",
         output.adaptation.events.len(),
+        output.adaptation.quarantine.len(),
         output.streams.len(),
         output.frame_count,
         args.output.display()

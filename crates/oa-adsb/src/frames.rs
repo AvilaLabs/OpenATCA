@@ -361,6 +361,12 @@ fn parse_header(bytes: &[u8]) -> Result<(bool, usize, usize), PayloadError> {
     Ok((legacy, count, rec_len))
 }
 
+/// Validates a payload header and exact row envelope without decoding records. Callers can use
+/// the count to charge a finite row budget before entering the per-record decode loop.
+pub fn payload_record_count(bytes: &[u8]) -> Result<usize, PayloadError> {
+    parse_header(bytes).map(|(_, count, _)| count)
+}
+
 /// Parses one payload, appending every record that can be read and counting the rest. A payload
 /// whose header or length is wrong is refused whole (the records cannot be located) and appends
 /// nothing. A record whose position or flags are out of range is dropped and counted; a record
@@ -370,6 +376,23 @@ pub fn decode_payload_lenient(
     bytes: &[u8],
     out: &mut Reports,
 ) -> Result<PayloadCounts, PayloadError> {
+    decode_payload_lenient_with_dropped(bytes, out, |_| {})
+}
+
+/// Leniently decodes a payload and reports the source ordinal of every record it drops.
+///
+/// The callback runs once per malformed record in input order. It receives no borrowed bytes, so
+/// callers that need a durable locator can retain the bounded ordinal without copying payloads.
+/// The payload header and exact row count are checked before the callback is invoked. Valid rows
+/// are still appended even when neighboring rows are malformed.
+pub fn decode_payload_lenient_with_dropped<F>(
+    bytes: &[u8],
+    out: &mut Reports,
+    mut on_dropped: F,
+) -> Result<PayloadCounts, PayloadError>
+where
+    F: FnMut(usize),
+{
     let (legacy, count, rec_len) = parse_header(bytes)?;
     let ads3 = bytes.get(..4) == Some(&PAYLOAD_MAGIC[..]);
     let mut c = PayloadCounts {
@@ -393,6 +416,7 @@ pub fn decode_payload_lenient(
                 c.bad_time +=
                     usize::from(t.is_some_and(|t| !(TIME_MIN_NS..TIME_MAX_NS).contains(&t)));
                 c.first_dropped.get_or_insert(i);
+                on_dropped(i);
             }
         }
     }

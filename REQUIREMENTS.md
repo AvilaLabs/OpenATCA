@@ -7030,6 +7030,7 @@ This is a bounded normalized-input composition, not facility, deadline or operat
 - **OA-REG-014** Vertical profile integration is opt-in and uses only explicit eligible performance evidence for the exact full flight key. Missing, duplicate or foreign evidence has a visible per-flight refusal and cannot change horizontal forecasts or observed safety nets.
 - **OA-REG-015** Operated replay selection checks the exact displayed address, generation and full identity; refusal clears selection and remains visible. Bounded console redraws replace only control primitives, preserve the observation epoch and safety presentation, and retain selection/input evidence.
 - **OA-REG-016** The operated recorded-session console caps action parsing, inserts explicitly bound local commands in source order with sequence audit, refuses stale or ambiguous targets, and closes a manifest only after frame and journal files are durably written. Script-mode CLI tests verify accepted commands, visible refusals and every listed output hash; native input is accepted only on the active VT and idle polling is not input loss.
+- **OA-REG-017** Recorded ADS-B source rows and SFDPS decoded rows are classified before normalized output is committed. A refused item retains a source-local frame/row locator and class-partition accounting; healthy sibling items continue, while queue overflow is surfaced as immediate manual handling. Classification occurs after bounded work and is not parser preemption.
 
 ## Current alert presentation (oa-display)
 

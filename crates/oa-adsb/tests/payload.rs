@@ -121,6 +121,38 @@ fn bad_payloads_are_refused_and_append_nothing() {
     assert!(q.len() <= oa_feed::MAX_PAYLOAD);
 }
 
+// REQ: OA-ADSB-011
+#[test]
+fn lenient_decode_reports_each_dropped_input_ordinal_and_keeps_siblings() {
+    let source = sample_rows(5);
+    let mut payload = Vec::new();
+    encode_payload(&mut payload, &source, 0, 5).unwrap();
+    // Corrupt the latitude of input rows 1 and 3. The other three records remain independently
+    // decodable and their original input ordinals are not renumbered by the drops.
+    for row in [1usize, 3] {
+        let at = PAYLOAD_HEADER_LEN + row * RECORD_LEN;
+        payload[at + 7] = 0x7f;
+    }
+    let mut decoded = Reports::default();
+    let mut dropped = Vec::new();
+    let counts = decode_payload_lenient_with_dropped(&payload, &mut decoded, |ordinal| {
+        dropped.push(ordinal);
+    })
+    .unwrap();
+    assert_eq!(counts.records, 5);
+    assert_eq!(counts.kept, 3);
+    assert_eq!(counts.dropped, 2);
+    assert_eq!(counts.first_dropped, Some(1));
+    assert_eq!(dropped, [1, 3]);
+    assert_eq!(reports_len(&decoded), 3);
+    for (decoded_ordinal, source_ordinal) in [0usize, 2, 4].into_iter().enumerate() {
+        assert_eq!(
+            reports_row(&decoded, decoded_ordinal).unwrap(),
+            reports_row(&source, source_ordinal).unwrap()
+        );
+    }
+}
+
 fn track(points: &[(u32, i64, i32, i32, u8, u8)]) -> Reports {
     let mut r = Reports::default();
     for &(icao, t_s, lat, lon, flags, nac_p) in points {
