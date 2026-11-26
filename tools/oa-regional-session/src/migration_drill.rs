@@ -4715,9 +4715,42 @@ pub fn run_recorded_stream(
         && summary.normalized_events > 0
         && summary.recording.counts.frames > 0
         && summary.recording.counts.reject_frames == 0
+        && summary.recording.counts.invalid_frames == 0
+        && summary.recording.counts.truncated_frames == 0
+        && summary.recording.counts.skipped_bytes == 0
+        && summary.recording.counts.files_refused == 0
         && summary.quarantine_rows == 0
         && summary.manual_handling_required == 0
         && summary.unprocessed_frames == 0;
+
+    let invalid_source_frame_count = summary
+        .recording
+        .counts
+        .adsb
+        .invalid_frames
+        .checked_add(summary.recording.counts.sfdps.invalid_frames)
+        .ok_or("invalid source frame count overflow")?;
+    let truncated_source_frame_count = summary
+        .recording
+        .counts
+        .adsb
+        .truncated_frames
+        .checked_add(summary.recording.counts.sfdps.truncated_frames)
+        .ok_or("truncated source frame count overflow")?;
+    let skipped_source_bytes = summary
+        .recording
+        .counts
+        .adsb
+        .skipped_bytes
+        .checked_add(summary.recording.counts.sfdps.skipped_bytes)
+        .ok_or("skipped source byte count overflow")?;
+    let source_files_refused = summary
+        .recording
+        .counts
+        .adsb
+        .files_refused
+        .checked_add(summary.recording.counts.sfdps.files_refused)
+        .ok_or("refused source file count overflow")?;
 
     let mut cycle_reports = Vec::new();
     cycle_reports
@@ -4881,10 +4914,10 @@ pub fn run_recorded_stream(
         handoff_operation_count: counts.handoffs,
         quarantine_record_count: summary.quarantine_rows,
         manual_handling_required_count: summary.manual_handling_required,
-        invalid_source_frame_count: 0,
-        truncated_source_frame_count: 0,
-        skipped_source_bytes: 0,
-        source_files_refused: 0,
+        invalid_source_frame_count,
+        truncated_source_frame_count,
+        skipped_source_bytes,
+        source_files_refused,
         consumer_receipts: Vec::new(),
         replay_consumer_receipts: Vec::new(),
         cycles: cycle_reports,
