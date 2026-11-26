@@ -57,3 +57,5 @@ Refusals return the unchanged stage and a reason-bearing audit event. A successf
 the next unit value and event; this function performs no I/O, clock read, network operation, or
 output switch. It provides no claim about the truth of source measurements, live readiness, zero
 downtime, or facility authorization beyond the external evidence and approvals supplied.
+
+Operational procedure: docs/migration/TRANSITION_PROCEDURE.md
