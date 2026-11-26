@@ -18,7 +18,9 @@ include!(concat!(env!("OUT_DIR"), "/asset_binding.rs"));
 static SCENARIO_OASD: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/scenario.oasd"));
 
 struct Runtime {
-    engine: DemoEngine,
+    // Startup-only fixed engine ownership avoids copying the large bounded safety tables
+    // through the WASM ABI constructor stack. No allocation occurs during scans.
+    engine: Box<DemoEngine>,
     packet: Vec<u8>,
 }
 
@@ -33,7 +35,9 @@ impl Runtime {
             .map_err(|_| ABI_STATE_ERROR)?;
         packet.resize(FRAME_PACKET_BYTES, 0);
         let mut runtime = Self {
-            engine: from_oasd(SCENARIO_OASD, ASSET_SHA256).map_err(|error| error.status_code())?,
+            engine: Box::new(
+                from_oasd(SCENARIO_OASD, ASSET_SHA256).map_err(|error| error.status_code())?,
+            ),
             packet,
         };
         runtime
