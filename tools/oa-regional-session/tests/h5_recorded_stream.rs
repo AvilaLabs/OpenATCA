@@ -9,7 +9,7 @@ use oa_regional_session::migration_drill::{
 };
 use oa_regional_session::recordings_reader::RecordingSource;
 use oa_regional_session::recordings_stream::StreamInput;
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -101,7 +101,7 @@ fn write_synthetic_adsb(path: &Path) {
             &payload,
         )
         .expect("encode synthetic OAF frame");
-        file.write_all(&frame[..bytes])
+        file.write_all(frame.get(..bytes).expect("encoded frame slice"))
             .expect("write synthetic frame");
         receive_ns += SYNTHETIC_STEP_NS;
     }
