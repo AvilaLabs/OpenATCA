@@ -1,0 +1,130 @@
+name: Publish Python wheel
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: openatca-pypi-${{ github.event.release.tag_name || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: startsWith(github.event.release.tag_name, 'openatca-python-v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: control
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.sha }}
+          path: source
+          persist-credentials: false
+      - name: Check the release tag matches package metadata
+        working-directory: source/python
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          EXPECTED_COMMIT: ${{ github.sha }}
+          GH_API_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 ../../control/.github/scripts/check_python_release_preflight.py
+          python3 - <<'PY'
+          import os
+          import tomllib
+          from pathlib import Path
+
+          metadata = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+          version = metadata["project"]["version"]
+          expected = f"openatca-python-v{version}"
+          if os.environ["RELEASE_TAG"] != expected:
+              raise SystemExit(f"release tag must be {expected!r}")
+          PY
+      - name: Test release preflight and wheel verification with synthetic inputs
+        working-directory: control/.github/scripts
+        run: python3 -m unittest -v test_check_python_release_preflight test_verify_python_wheel
+      - name: Test the stdlib wheel backend
+        working-directory: source/python
+        run: python3 -m unittest discover -s tests -v
+      - name: Build and inventory the pure Python wheel
+        working-directory: source/python
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib
+          from pathlib import Path
+          import tomllib
+          import openatca_build
+
+          project = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))["project"]
+          expected = f"{project['name']}-{project['version']}-py3-none-any.whl"
+          if expected != openatca_build.WHEEL_FILENAME:
+              raise SystemExit("pyproject metadata and wheel backend identity disagree")
+          output = Path("dist")
+          output.mkdir(mode=0o700)
+          filename = openatca_build.build_wheel(str(output))
+          if filename != expected:
+              raise SystemExit(f"unexpected wheel name: {filename!r}")
+          files = sorted(path for path in output.iterdir() if path.is_file() and not path.is_symlink())
+          if [path.name for path in files] != [expected]:
+              raise SystemExit("dist must contain exactly the expected wheel")
+          payload = files[0].read_bytes()
+          print(f"{files[0]} sha256={hashlib.sha256(payload).hexdigest()} bytes={len(payload)}")
+          PY
+      - name: Upload the exact wheel artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: openatca-python-wheel
+          path: source/python/dist/*.whl
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: build
+    if: startsWith(github.event.release.tag_name, 'openatca-python-v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment:
+      name: pypi
+      url: https://pypi.org/project/openatca/
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: control
+          persist-credentials: false
+      - name: Download the wheel built by the unprivileged job
+        # F1 approved 2026-11-26: transfer only the wheel artifact from the unprivileged build job; action pinned to its immutable commit.
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: openatca-python-wheel
+          path: dist
+      - name: Verify downloaded wheel inventory and RECORD
+        working-directory: control
+        run: python3 .github/scripts/verify_python_wheel.py ../dist
+      - name: Recheck release commit and qualification immediately before upload
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          EXPECTED_COMMIT: ${{ github.sha }}
+          GH_API_TOKEN: ${{ github.token }}
+        run: python3 control/.github/scripts/check_python_release_preflight.py
+      - name: Publish through PyPI trusted publishing
+        # F1 approved 2026-11-26: PyPI OIDC only, isolated pypi environment, and job-scoped id-token permission; action pinned to its immutable commit.
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+        with:
+          packages-dir: dist/

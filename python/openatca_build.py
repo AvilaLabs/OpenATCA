@@ -111,6 +111,8 @@ def _metadata(readme: bytes) -> bytes:
         "License-Expression: Apache-2.0",
         "License-File: LICENSE",
         "Author: Avila Labs",
+        "Project-URL: Repository, https://github.com/AvilaLabs/OpenATCA",
+        "Project-URL: Documentation, https://github.com/AvilaLabs/OpenATCA/tree/main/python",
         "Classifier: Development Status :: 2 - Pre-Alpha",
         "Classifier: License :: OSI Approved :: Apache Software License",
         "Classifier: Operating System :: OS Independent",

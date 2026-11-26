@@ -6,7 +6,7 @@ backend-path = ["."]
 [project]
 name = "openatca"
 version = "0.1.0"
-description = "Provisional pure-Python ctypes wrapper for selected OpenATCA L0 C ABI operations"
+description = "Provisional ctypes binding for selected L0 math, SHA-256, and WGS-84 geodesy operations"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
@@ -24,3 +24,7 @@ classifiers = [
   "Topic :: Scientific/Engineering",
 ]
 dependencies = []
+
+[project.urls]
+Repository = "https://github.com/AvilaLabs/OpenATCA"
+Documentation = "https://github.com/AvilaLabs/OpenATCA/tree/main/python"

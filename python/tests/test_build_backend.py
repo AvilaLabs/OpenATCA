@@ -48,6 +48,11 @@ class WheelBackendTests(unittest.TestCase):
             self.assertIn("Version: 0.1.0\n", metadata)
             self.assertIn("Requires-Python: >=3.10\n", metadata)
             self.assertIn("License-Expression: Apache-2.0\n", metadata)
+            self.assertIn("Project-URL: Repository, https://github.com/AvilaLabs/OpenATCA\n", metadata)
+            self.assertIn(
+                "Project-URL: Documentation, https://github.com/AvilaLabs/OpenATCA/tree/main/python\n",
+                metadata,
+            )
             self.assertNotIn("Requires-Dist:", metadata)
             wheel_info = archive.read(f"{backend.DIST_INFO}/WHEEL").decode("ascii")
             self.assertIn("Root-Is-Purelib: true\n", wheel_info)

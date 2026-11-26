@@ -18,6 +18,10 @@ jobs:
         run: cargo +1.89.0 clippy --workspace --all-targets --locked -- -D warnings
       - name: Candidate evaluator tests
         run: python3 tools/test_validate_candidate.py
+      - name: Python wheel backend tests
+        run: python3 -m unittest discover -s python/tests -v
+      - name: Python release gate and wheel verification tests
+        run: python3 -m unittest discover -s .github/scripts -p "test_*.py" -v
       - name: Reusable tracker package boundary tests
         run: python3 tools/test_tracker_package_boundary.py
       - name: Allocator evaluator tests
