@@ -54,9 +54,14 @@ reclassified by changing model settings after observing results.
   is enabled. Guarded request `openatca-L1-D1-accreditation-20261126-233909-9fc8a8` recorded
   7,491 bytes with SHA-256
   `dd4e138b932e1484bb2eeb3fe3ef29d6710b4e5dcefa56de31e1d516e5c1d5a6` over the full payload.
-  The command was `oa-sensorsim test:--test=sim -- --nocapture`; 19 synthetic tests passed. The
-  producer is source commit `8c4a196d826be9cf6b2a14d2e1c7365c7f44e503`. This golden is distinct
-  from the same-seed comparison and the separate round-trip test.
+  The exact full payload is pinned as text hex in
+  `crates/oa-sensorsim/tests/fixtures/cat048_seed77.hex` and compared byte-for-byte by the test;
+  this assertion was added in `326507c82f43e263aae2ac6227862b7fdd315700`. The output was produced
+  by the deterministic synthetic case introduced in source commit
+  `8c4a196d826be9cf6b2a14d2e1c7365c7f44e503`. Guarded request
+  `openatca-L1-D1-accreditation-20261126-001746-015878` passed formatting, Clippy, and the
+  simulator's 19 tests. This golden is distinct from the same-seed comparison and separate
+  round-trip test.
 
 The cited cases validate only the encoded synthetic model behavior, not physical sensor fidelity.
 
