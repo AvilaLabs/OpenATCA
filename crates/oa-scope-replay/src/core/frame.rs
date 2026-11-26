@@ -146,7 +146,8 @@ pub struct ReplaySafety<'a> {
 }
 
 /// Borrowed optional inputs for one frame build. This groups safety, ownership and exact-address
-/// mode presentation data without changing allocation or frame behavior.
+/// mode presentation data without changing allocation or frame behavior. On supported 64-bit
+/// targets, the two thin references and one slice reference occupy 32 bytes.
 #[derive(Clone, Copy, Default)]
 pub struct FrameOverlays<'r, 'a> {
     pub safety: Option<&'r ReplaySafety<'a>>,
@@ -154,7 +155,7 @@ pub struct FrameOverlays<'r, 'a> {
     pub mode_flags: Option<&'r [(u32, u8)]>,
 }
 
-const _: () = assert!(std::mem::size_of::<FrameOverlays<'_, '_>>() == 24);
+const _: () = assert!(std::mem::size_of::<FrameOverlays<'_, '_>>() == 32);
 
 /// What one frame build drew and left out. A7.2: cold struct (one per frame).
 #[derive(Clone, Copy, Debug, PartialEq)]
