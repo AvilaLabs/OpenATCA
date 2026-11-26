@@ -738,11 +738,19 @@ pub fn place_labels(s: &mut Scratch) -> u32 {
     placed
 }
 
+// A7.1/C2: all 512 layer-switch combinations at the largest displayed threshold
+// (19999.9 NM, below the 20000 NM view limit) need at most 254 bytes for HIDDEN.
+// The exhaustive test below pins that bound. 256 replaces the insufficient 192;
+// this is stack-only formatting scratch, not a larger display/input collection.
+const LABEL_BYTES: usize = 256;
+
 /// A short string built on the stack, so a frame allocates nothing for its labels.
+#[repr(C)]
 struct Label {
-    buf: [u8; 192],
+    buf: [u8; LABEL_BYTES],
     len: usize,
 }
+const _: () = assert!(std::mem::size_of::<Label>() == LABEL_BYTES + std::mem::size_of::<usize>());
 
 impl Write for Label {
     fn write_str(&mut self, s: &str) -> std::fmt::Result {
@@ -756,7 +764,7 @@ impl Write for Label {
 
 fn label() -> Label {
     Label {
-        buf: [0; 192],
+        buf: [0; LABEL_BYTES],
         len: 0,
     }
 }
@@ -769,11 +777,11 @@ fn label_str(l: &Label) -> &str {
 }
 
 /// Writes a number of nautical miles: whole when whole, else one decimal.
-fn put_nm(l: &mut Label, nm: f64) {
+fn put_nm(l: &mut Label, nm: f64) -> std::fmt::Result {
     if (nm - oa_ieee::round(nm)).abs() < 1e-9 {
-        let _ = write!(l, "{}", oa_ieee::round(nm) as i64);
+        write!(l, "{}", oa_ieee::round(nm) as i64)
     } else {
-        let _ = write!(l, "{nm:.1}");
+        write!(l, "{nm:.1}")
     }
 }
 
@@ -1231,7 +1239,7 @@ fn rings(
         let (lx, ly) = (ax + 5 * 16, ay - 12 * 16);
         if lx < w16 && ly > top16 {
             let mut t = label();
-            put_nm(&mut t, nm);
+            put_nm(&mut t, nm).map_err(legend_format_full)?;
             // Point labels keep clear of this one.
             let (wd, ht) = (
                 legend_width16(label_str(&t).len()),
@@ -1654,59 +1662,67 @@ fn legend_width16(chars: usize) -> i32 {
 }
 
 /// The `HIDDEN:` line: every range threshold or layer switch that is hiding something.
-fn hidden_line(v: &View) -> Label {
+fn hidden_line(v: &View) -> Result<Label, std::fmt::Error> {
     let mut t = label();
-    let _ = write!(t, "HIDDEN: ");
+    write!(t, "HIDDEN: ")?;
     let mut n = 0;
     let range = v.proj.range_nm;
     let lay = &v.layers;
-    let mut item = |t: &mut Label, text: &str, nm: Option<f64>| {
+    let mut item = |t: &mut Label, text: &str, nm: Option<f64>| -> std::fmt::Result {
         if n > 0 {
-            let _ = write!(t, ", ");
+            write!(t, ", ")?;
         }
-        let _ = write!(t, "{text}");
+        write!(t, "{text}")?;
         if let Some(nm) = nm {
-            let _ = write!(t, ">");
-            put_nm(t, nm);
-            let _ = write!(t, "NM");
+            write!(t, ">")?;
+            put_nm(t, nm)?;
+            write!(t, "NM")?;
         }
         n += 1;
+        Ok(())
     };
     if lay.fixes && range > v.fix_max_nm {
-        item(&mut t, "FIXES", Some(v.fix_max_nm));
+        item(&mut t, "FIXES", Some(v.fix_max_nm))?;
     }
     if lay.fixes && range > v.terminal_wpt_max_nm {
-        item(&mut t, "TERMINAL WPTS", Some(v.terminal_wpt_max_nm));
+        item(&mut t, "TERMINAL WPTS", Some(v.terminal_wpt_max_nm))?;
     }
     if lay.airports && range > v.runway_max_nm {
-        item(&mut t, "RWY/LOC", Some(v.runway_max_nm));
+        item(&mut t, "RWY/LOC", Some(v.runway_max_nm))?;
     }
     if lay.airports && range > v.non_ifr_airport_max_nm {
-        item(&mut t, "NON-IFR APTS", Some(v.non_ifr_airport_max_nm));
+        item(&mut t, "NON-IFR APTS", Some(v.non_ifr_airport_max_nm))?;
     }
     if lay.vors && range > v.minor_navaid_max_nm {
-        item(&mut t, "NDB/DME/TACAN", Some(v.minor_navaid_max_nm));
+        item(&mut t, "NDB/DME/TACAN", Some(v.minor_navaid_max_nm))?;
     }
     if lay.labels && range > v.label_max_nm {
-        item(&mut t, "LABELS", Some(v.label_max_nm));
+        item(&mut t, "LABELS", Some(v.label_max_nm))?;
     }
     if lay.labels && range > v.major_label_max_nm {
-        item(&mut t, "VOR/IFR APT LABELS", Some(v.major_label_max_nm));
+        item(&mut t, "VOR/IFR APT LABELS", Some(v.major_label_max_nm))?;
     }
     for (name, on) in LAYER_NAMES.iter().zip(layers_flags(lay)) {
         if !on {
             let mut up = label();
             for c in name.chars() {
-                let _ = write!(up, "{}", c.to_ascii_uppercase());
+                write!(up, "{}", c.to_ascii_uppercase())?;
             }
-            let _ = write!(up, " OFF");
-            item(&mut t, label_str(&up), None);
+            write!(up, " OFF")?;
+            item(&mut t, label_str(&up), None)?;
         }
     }
     if n == 0 {
-        let _ = write!(t, "NONE");
+        write!(t, "NONE")?;
     }
-    t
+    Ok(t)
+}
+
+fn legend_format_full(_: std::fmt::Error) -> DisplayError {
+    DisplayError::Full {
+        table: "legend formatting bytes",
+        capacity: LABEL_BYTES,
+    }
 }
 
 /// One legend text. When it runs past the right edge of the screen it is marked there with a
@@ -1767,15 +1783,16 @@ fn legend(
     )?;
 
     let mut t = label();
-    let _ = write!(
+    write!(
         t,
         "{} NASR {} CIFP {}  NORTH UP  RANGE ",
         m.meta.artcc, m.meta.nasr_effective, m.meta.cifp_cycle
-    );
-    put_nm(&mut t, p.range_nm);
-    let _ = write!(t, " NM  RINGS ");
-    put_nm(&mut t, ring_step_nm(p));
-    let _ = write!(t, " NM");
+    )
+    .map_err(legend_format_full)?;
+    put_nm(&mut t, p.range_nm).map_err(legend_format_full)?;
+    write!(t, " NM  RINGS ").map_err(legend_format_full)?;
+    put_nm(&mut t, ring_step_nm(p)).map_err(legend_format_full)?;
+    write!(t, " NM").map_err(legend_format_full)?;
     legend_text(l, st, width16, (x, y), palette::TEXT, label_str(&t))?;
     y += pitch;
 
@@ -1789,9 +1806,9 @@ fn legend(
     ] {
         let mut k = label();
         if own {
-            let _ = write!(k, "{} {name}", m.meta.artcc);
+            write!(k, "{} {name}", m.meta.artcc).map_err(legend_format_full)?;
         } else {
-            let _ = write!(k, "{name}");
+            write!(k, "{name}").map_err(legend_format_full)?;
         }
         legend_text(l, st, width16, (kx, y), colour, label_str(&k))?;
         kx = kx
@@ -1800,14 +1817,15 @@ fn legend(
     }
     y += pitch;
 
-    let h = hidden_line(v);
+    let h = hidden_line(v).map_err(legend_format_full)?;
     legend_text(l, st, width16, (x, y), palette::TEXT, label_str(&h))?;
     y += pitch;
 
     let mut nx = x;
     if st.legs_at_border > 0 {
         let mut t = label();
-        let _ = write!(t, "{} LEGS END AT BORDER CROSSINGS", st.legs_at_border);
+        write!(t, "{} LEGS END AT BORDER CROSSINGS", st.legs_at_border)
+            .map_err(legend_format_full)?;
         legend_text(l, st, width16, (nx, y), palette::TEXT, label_str(&t))?;
         nx = nx
             .saturating_add(legend_width16(t.len))
@@ -1816,7 +1834,7 @@ fn legend(
     // Normal colour: a dropped label is expected on a busy screen, not a fault.
     if st.labels + st.labels_dropped > 0 {
         let mut t = label();
-        let _ = write!(t, "LABELS DROPPED: {}", st.labels_dropped);
+        write!(t, "LABELS DROPPED: {}", st.labels_dropped).map_err(legend_format_full)?;
         legend_text(l, st, width16, (nx, y), palette::TEXT, label_str(&t))?;
     }
     y += pitch;
@@ -1824,11 +1842,12 @@ fn legend(
     // The alert colour is for what needs attention: data the map tried to place and could not.
     if st.points_unplaced + st.legs_unplaced + st.edges_unplaced > 0 {
         let mut t = label();
-        let _ = write!(
+        write!(
             t,
             "NOT PLACED {} PTS {} LEGS {} EDGES",
             st.points_unplaced, st.legs_unplaced, st.edges_unplaced
-        );
+        )
+        .map_err(legend_format_full)?;
         legend_text(l, st, width16, (x, y), palette::ALERT, label_str(&t))?;
     }
     Ok(())
@@ -1855,6 +1874,61 @@ mod work_budget_tests {
             nasr_sha256: [0; 32],
             cifp_sha256: [0; 32],
         })
+    }
+
+    fn largest_hidden_view() -> View {
+        let mut view = view_new(0, 0, 20_000.0, 1920, 1080).unwrap();
+        view.fix_max_nm = 19_999.9;
+        view.terminal_wpt_max_nm = 19_999.9;
+        view.runway_max_nm = 19_999.9;
+        view.non_ifr_airport_max_nm = 19_999.9;
+        view.minor_navaid_max_nm = 19_999.9;
+        view.label_max_nm = 19_999.9;
+        view.major_label_max_nm = 19_999.9;
+        view
+    }
+
+    // REQ: OA-DSP-025
+    #[test]
+    fn combined_hidden_range_and_layer_disclosures_are_complete() {
+        let mut view = largest_hidden_view();
+        for name in [
+            "own-boundary",
+            "neighbour-boundaries",
+            "high-airways",
+            "low-airways",
+            "rings",
+        ] {
+            assert!(layer_set(&mut view.layers, name, false));
+        }
+        let text = hidden_line(&view).unwrap();
+        assert_eq!(
+            label_str(&text),
+            concat!(
+                "HIDDEN: FIXES>19999.9NM, TERMINAL WPTS>19999.9NM, RWY/LOC>19999.9NM, ",
+                "NON-IFR APTS>19999.9NM, NDB/DME/TACAN>19999.9NM, LABELS>19999.9NM, ",
+                "VOR/IFR APT LABELS>19999.9NM, OWN-BOUNDARY OFF, NEIGHBOUR-BOUNDARIES OFF, ",
+                "HIGH-AIRWAYS OFF, LOW-AIRWAYS OFF, RINGS OFF"
+            )
+        );
+        assert_eq!(text.len, 254);
+    }
+
+    // REQ: OA-DSP-025
+    #[test]
+    fn every_hidden_layer_combination_fits_the_analyzed_stack_budget() {
+        let mut maximum = 0;
+        // Nine fixed switches give exactly512 configurations, independent of input size.
+        for bits in 0u16..512 {
+            let mut view = largest_hidden_view();
+            for (bit, name) in LAYER_NAMES.iter().enumerate() {
+                assert!(layer_set(&mut view.layers, name, bits & (1 << bit) != 0));
+            }
+            let text = hidden_line(&view).unwrap();
+            maximum = maximum.max(text.len);
+            assert!(text.len <= LABEL_BYTES);
+        }
+        assert_eq!(maximum, 254);
     }
 
     // REQ: OA-DSP-054
