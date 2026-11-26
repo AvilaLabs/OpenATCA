@@ -255,7 +255,16 @@ fn recorded_stream_runs_100_paired_m2_flip_rollback_bins_and_consumer_applies_ea
         report.per_update_consumer.decision_to_first_output_exceeded,
         0
     );
-    assert!(report.replay_output_ack_count > 0);
+    assert!(
+        report.replay_output_ack_count > 0,
+        "selected-state ACK count={}, per-cycle row counts={:?}",
+        report.replay_output_ack_count,
+        report
+            .cycles
+            .iter()
+            .map(|cycle| cycle.selected_state_applied_family_counts)
+            .collect::<Vec<_>>()
+    );
     assert!(report.cycles.iter().any(|cycle| {
         cycle.selected_display_block_rows.unwrap_or(0) > 0
             && cycle.selected_state_applied_sha256.is_some()
