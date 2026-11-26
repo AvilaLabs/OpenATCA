@@ -3981,12 +3981,7 @@ pub fn run_recorded(
         map_centre_lat_e7,
         map_centre_lon_e7,
         map_range_nm,
-        source_state_families_available: [
-            positions > 0,
-            flights > 0,
-            handoffs > 0,
-            false,
-        ],
+        source_state_families_available: [positions > 0, flights > 0, handoffs > 0, false],
         qualification: "INCOMPLETE_RECORDED_REPLAY_STATE",
         authority_mode: "UNAVAILABLE_NO_LOCAL_FIXTURE",
         m2_attempt_count: m2_cycle_count
