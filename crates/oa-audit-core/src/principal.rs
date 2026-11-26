@@ -77,6 +77,12 @@ pub enum PrincipalAuthorizationError {
     RoleDenied,
 }
 
+struct RegistryColumns<'a> {
+    id: &'a [u8],
+    role: &'a [u8],
+    status: Option<&'a [u8]>,
+}
+
 /// Authorizes a configured, enabled principal for an action using the three declared roles.
 /// This checks only the local registry's claim; it does not authenticate the caller.
 pub fn authorize_principal(
@@ -175,8 +181,8 @@ pub fn parse_principal_registry(bytes: &[u8]) -> Result<PrincipalRegistry, Regis
                 .ok_or(RegistryError::BadHeaderOrFraming)?;
             continue;
         }
-        let (id_bytes, role_bytes, status_bytes) = parse_columns(line, explicit_status)?;
-        let principal_id = parse_principal_id(id_bytes)?;
+        let columns = parse_columns(line, explicit_status)?;
+        let principal_id = parse_principal_id(columns.id)?;
         let current = registry
             .entries
             .get(..registry.len())
@@ -187,8 +193,8 @@ pub fn parse_principal_registry(bytes: &[u8]) -> Result<PrincipalRegistry, Regis
         {
             return Err(RegistryError::DuplicatePrincipal);
         }
-        let role = parse_role(role_bytes)?;
-        let enabled = match status_bytes {
+        let role = parse_role(columns.role)?;
+        let enabled = match columns.status {
             None => true,
             Some(status) if status == b"enabled" => true,
             Some(status) if status == b"disabled" => false,
@@ -233,10 +239,7 @@ pub fn parse_principal_registry(bytes: &[u8]) -> Result<PrincipalRegistry, Regis
     Ok(registry)
 }
 
-fn parse_columns(
-    line: &[u8],
-    explicit_status: bool,
-) -> Result<(&[u8], &[u8], Option<&[u8]>), RegistryError> {
+fn parse_columns(line: &[u8], explicit_status: bool) -> Result<RegistryColumns<'_>, RegistryError> {
     let first_tab = line
         .iter()
         .position(|byte| *byte == b'\t')
@@ -280,7 +283,7 @@ fn parse_columns(
     if id.is_empty() || role.is_empty() || status.is_some_and(|value| value.is_empty()) {
         return Err(RegistryError::BadHeaderOrFraming);
     }
-    Ok((id, role, status))
+    Ok(RegistryColumns { id, role, status })
 }
 
 fn parse_principal_id(bytes: &[u8]) -> Result<u64, RegistryError> {
