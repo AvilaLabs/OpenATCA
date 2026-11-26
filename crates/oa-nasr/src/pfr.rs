@@ -296,15 +296,15 @@ mod tests {
     #[test]
     fn orphan_duplicate_and_effective_date_conflicts_are_reported() {
         let base = concat!(
-            "EFF_DATE,ORIGIN_ID,DSTN_ID,PFR_TYPE_CODE,ROUTE_NO,ROUTE_STRING\n",
-            "2026/10/29,ORD,JFK,H,1,ORD J60 JFK\n",
+            "EFF_DATE,ORIGIN_ID,DSTN_ID,PFR_TYPE_CODE,ROUTE_NO,SPECIAL_AREA_DESCRIP,ALT_DESCRIP,AIRCRAFT,HOURS,ROUTE_DIR_DESCRIP,ROUTE_STRING\n",
+            "2026/10/29,ORD,JFK,H,1,,,,,,ORD J60 JFK\n",
         );
         let segments = concat!(
-            "EFF_DATE,ORIGIN_ID,DSTN_ID,PFR_TYPE_CODE,ROUTE_NO,SEGMENT_SEQ,SEG_VALUE,SEG_TYPE\n",
-            "2026/10/29,ORD,JFK,H,1,1,ORD,FIX\n",
-            "2026/10/29,ORD,JFK,H,1,1,JFK,FIX\n",
-            "2026/10/29,LAX,JFK,H,2,1,LAX,FIX\n",
-            "2026/09/03,ORD,JFK,H,1,2,J60,AWY\n",
+            "EFF_DATE,ORIGIN_ID,DSTN_ID,PFR_TYPE_CODE,ROUTE_NO,SEGMENT_SEQ,SEG_VALUE,SEG_TYPE,STATE_CODE,COUNTRY_CODE,ICAO_REGION_CODE,NAV_TYPE,NEXT_SEG\n",
+            "2026/10/29,ORD,JFK,H,1,1,ORD,FIX,,,,,\n",
+            "2026/10/29,ORD,JFK,H,1,1,JFK,FIX,,,,,\n",
+            "2026/10/29,LAX,JFK,H,2,1,LAX,FIX,,,,,\n",
+            "2026/09/03,ORD,JFK,H,1,2,J60,AWY,,,,,\n",
         );
         let parsed = parse_routes(
             "PFR_BASE.csv",
