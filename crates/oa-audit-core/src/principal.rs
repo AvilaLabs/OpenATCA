@@ -324,8 +324,9 @@ mod tests {
 
     // REQ: OA-AUDIT-007
     #[test]
-    fn local_registry_looks_up_enabled_and_disabled_principals_by_exact_id() {
-        let registry = parse_principal_registry(REGISTRY).unwrap();
+    fn local_registry_looks_up_enabled_and_disabled_principals_by_exact_id(
+    ) -> Result<(), RegistryError> {
+        let registry = parse_principal_registry(REGISTRY)?;
         assert_eq!(registry.len(), 3);
         assert_eq!(
             registry.lookup(1),
@@ -356,15 +357,16 @@ mod tests {
             authorize_principal(&registry, 99, Action::Verify),
             Err(PrincipalAuthorizationError::UnknownPrincipal)
         );
+        Ok(())
     }
 
     // REQ: OA-AUDIT-007
     #[test]
-    fn local_registry_v1_is_compatible_with_existing_i1_configure_claim_rows() {
+    fn local_registry_v1_is_compatible_with_existing_i1_configure_claim_rows(
+    ) -> Result<(), RegistryError> {
         let registry = parse_principal_registry(
             b"OACERT-LOCAL-PRINCIPALS-V1\r\n12\tmonitor\r\n\r\n11\tconfigure",
-        )
-        .unwrap();
+        )?;
         assert_eq!(registry.len(), 2);
         assert_eq!(
             authorize_principal(&registry, 11, Action::Certification),
@@ -374,6 +376,7 @@ mod tests {
             authorize_principal(&registry, 12, Action::MigrationFlip),
             Err(PrincipalAuthorizationError::RoleDenied)
         );
+        Ok(())
     }
 
     // REQ: OA-AUDIT-007
@@ -428,7 +431,7 @@ mod tests {
 
     // REQ: OA-AUDIT-007
     #[test]
-    fn local_registry_row_and_byte_limits_refuse_without_truncation() {
+    fn local_registry_row_and_byte_limits_refuse_without_truncation() -> Result<(), RegistryError> {
         let too_large = [0_u8; MAX_PRINCIPAL_REGISTRY_BYTES + 1];
         assert_eq!(
             parse_principal_registry(&too_large),
@@ -438,21 +441,27 @@ mod tests {
         let mut rows = [0_u8; MAX_PRINCIPAL_REGISTRY_BYTES];
         let mut len = PRINCIPAL_REGISTRY_V2_HEADER.len();
         rows.get_mut(..len)
-            .unwrap()
+            .ok_or(RegistryError::BadHeaderOrFraming)?
             .copy_from_slice(PRINCIPAL_REGISTRY_V2_HEADER);
         for principal in 1..=MAX_PRINCIPAL_REGISTRY_ROWS + 1 {
             let mut value = principal as u64;
             let mut digits = [0_u8; 20];
             let mut digit_count = 0;
             while value > 0 {
-                let digit = u8::try_from(value % 10).unwrap();
+                let digit =
+                    u8::try_from(value % 10).map_err(|_| RegistryError::InvalidPrincipalId)?;
                 if let Some(slot) = digits.get_mut(digit_count) {
                     *slot = b'0' + digit;
                 }
                 digit_count += 1;
                 value /= 10;
             }
-            for digit in digits.get(..digit_count).unwrap().iter().rev() {
+            for digit in digits
+                .get(..digit_count)
+                .ok_or(RegistryError::BadHeaderOrFraming)?
+                .iter()
+                .rev()
+            {
                 if let Some(slot) = rows.get_mut(len) {
                     *slot = *digit;
                 }
@@ -460,12 +469,15 @@ mod tests {
             }
             let part = b"\tmonitor\tenabled\n";
             let end = len + part.len();
-            rows.get_mut(len..end).unwrap().copy_from_slice(part);
+            rows.get_mut(len..end)
+                .ok_or(RegistryError::BadHeaderOrFraming)?
+                .copy_from_slice(part);
             len = end;
         }
         assert_eq!(
-            parse_principal_registry(rows.get(..len).unwrap()),
+            parse_principal_registry(rows.get(..len).ok_or(RegistryError::BadHeaderOrFraming)?,),
             Err(RegistryError::TooManyPrincipals)
         );
+        Ok(())
     }
 }
