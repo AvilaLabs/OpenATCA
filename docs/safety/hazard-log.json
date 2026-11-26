@@ -10186,7 +10186,9 @@
         "OA-AUDIT-003",
         "OA-AUDIT-004",
         "OA-AUDIT-005",
-        "OA-AUDIT-006"
+        "OA-AUDIT-006",
+        "OA-AUDIT-007",
+        "OA-AUDIT-008"
       ],
       "source_refs": [
         {
@@ -10196,6 +10198,11 @@
         {
           "document": "REQUIREMENTS.md",
           "locator": "OA-MIG-414"
+        },
+        {
+          "document": "REQUIREMENTS.md",
+          "locator": "OA-MIG-101 through OA-MIG-305 and OA-AUDIT-001 through OA-AUDIT-008 in the owning functional sections"
+        }
         }
       ],
       "verification_refs": [
@@ -10377,7 +10384,35 @@
         {
           "requirement_id": "OA-MIG-414",
           "file": "tools/oa-regional-session/tests/migration_drill_consumer.rs",
-          "test_name": "worker_refuses_a_hash_valid_normalized_row_with_a_sealed_timestamp"
+          "test_name": "worker_refuses_a_hash_valid_normalized_row_with_a_sealed_timestamp",
+          "requirement_id": "OA-AUDIT-007",
+          "file": "crates/oa-audit-core/src/principal.rs",
+          "test_name": "local_registry_looks_up_enabled_and_disabled_principals_by_exact_id"
+        },
+        {
+          "requirement_id": "OA-AUDIT-007",
+          "file": "crates/oa-audit-core/src/principal.rs",
+          "test_name": "local_registry_v1_is_compatible_with_existing_i1_configure_claim_rows"
+        },
+        {
+          "requirement_id": "OA-AUDIT-007",
+          "file": "crates/oa-audit-core/src/principal.rs",
+          "test_name": "local_registry_rejects_noncanonical_ids_roles_statuses_and_duplicates"
+        },
+        {
+          "requirement_id": "OA-AUDIT-007",
+          "file": "crates/oa-audit-core/src/principal.rs",
+          "test_name": "local_registry_row_and_byte_limits_refuse_without_truncation"
+        },
+        {
+          "requirement_id": "OA-AUDIT-008",
+          "file": "crates/oa-audit-log/src/shell/mod.rs",
+          "test_name": "principal_registry_loader_checks_external_pin_and_parses_exact_opened_bytes"
+        },
+        {
+          "requirement_id": "OA-AUDIT-008",
+          "file": "crates/oa-audit-log/src/shell/mod.rs",
+          "test_name": "principal_registry_loader_refuses_oversize_and_sealed_paths"
         }
       ],
       "proof_refs": []
@@ -23432,7 +23467,17 @@
       "id": "OA-CERT-010",
       "function": "migration_comparison_and_safety_evidence",
       "hazard_id": "HZ-EVIDENCE-001",
-      "rationale": "Engineering safety candidate: reporting an outcome before durable audit commit, or omitting a failed append, could leave a reviewer with an uncommitted or incomplete certification record. The CLI requires the append receipt after file and directory sync and emits no committed result on failure; this does not authenticate principal or timestamp claims or establish operational certification."
+      "rationale": "Engineering safety candidate: reporting an outcome before durable audit commit, or omitting a failed append, could leave a reviewer with an uncommitted or incomplete certification record. The CLI requires the append receipt after file and directory sync and emits no committed result on failure; this does not authenticate principal or timestamp claims or establish operational certification.",
+      "id": "OA-AUDIT-007",
+      "function": "migration_selector_and_rollback",
+      "hazard_id": "HZ-CUTOVER-001",
+      "rationale": "Engineering safety candidate: a malformed, duplicated, disabled, or insufficient local role entry could reject a valid privileged action or permit an action under an incorrect role claim. Core tests cover the fixed-table parser, exact ID lookup, disabled refusal, and the three-role action matrix, including compatible I1 V1 parsing. This registry validates local configuration only; it does not authenticate a person, credential, origin, or authority, and production callers still need to use the shared loader."
+    },
+    {
+      "id": "OA-AUDIT-008",
+      "function": "migration_selector_and_rollback",
+      "hazard_id": "HZ-CUTOVER-001",
+      "rationale": "Engineering safety candidate: using an unverified or changed local registry could make a privileged action depend on stale or altered role configuration. Shell tests verify a separately supplied digest pin, fixed byte cap, and refusal of a sealed path before reading. This does not authenticate the pin's publisher, registry author, or caller, and no production CLI integration is claimed by these tests."
     }
   ],
   "unresolved_requirement_assessments": []
