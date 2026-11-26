@@ -1354,6 +1354,11 @@ mod tests {
         add_test_airport(&mut model, "KAAA");
         add_test_airport(&mut model, "KBBB");
         preferred_route(&mut model, "ORD", "JFK", "H", "FIXA FIXB", None, None);
+        assert!(
+            air_model::validate_model(&model).is_ok(),
+            "synthetic model: {:?}",
+            air_model::validate_model(&model)
+        );
         let elements = vec!["FIXA".to_string(), "FIXB".to_string()];
         let filed = resolve_icao_item15(&model, &elements, Some(35_000), "KAAA", "KBBB", &[])
             .expect("accepted route geometry");
