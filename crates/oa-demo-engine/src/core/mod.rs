@@ -1385,7 +1385,7 @@ fn choose_label_bounds(
         y1: projection.height as i32 * 16,
     };
     let mut best = EMPTY_LABEL;
-    let mut best_score = (true, usize::MAX, i64::MAX);
+    let mut best_score = (true, MAX_AIRCRAFT, i64::MAX);
     for (x0, y0) in candidates {
         let candidate = LabelBounds {
             x0,
