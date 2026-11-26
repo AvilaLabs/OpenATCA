@@ -1093,6 +1093,23 @@ pub fn surveillance_pixels(s: &Surveillance) -> Result<&[u8], String> {
     Ok(&s.scope.buf)
 }
 
+#[cfg(test)]
+pub(super) fn rendered_scope_texts(s: &Surveillance) -> Vec<String> {
+    s.scope
+        .list
+        .texts
+        .start
+        .iter()
+        .zip(&s.scope.list.texts.len)
+        .filter_map(|(&start, &len)| {
+            let start = usize::try_from(start).ok()?;
+            let end = start.checked_add(usize::try_from(len).ok()?)?;
+            let bytes = s.scope.list.text.get(start..end)?;
+            std::str::from_utf8(bytes).ok().map(str::to_owned)
+        })
+        .collect()
+}
+
 /// Appends controller selection/outcome to one completed frame, then re-rasterizes that exact
 /// list. A failure invalidates publication; the returned digest replaces the pre-overlay one.
 pub fn surveillance_present_interaction(

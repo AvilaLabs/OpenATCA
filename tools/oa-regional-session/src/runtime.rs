@@ -1396,6 +1396,222 @@ mod transaction_tests {
         .unwrap()
     }
 
+    const METER_TEST_GUFI: u128 = 1;
+    const METER_TEST_ADDRESS: u32 = 0x00ab_cdef;
+    const METER_TEST_KEY: [u8; 12] = *b"N123456789\0\0";
+    const METER_TEST_ETA_MS: i64 = 43_200_000;
+
+    fn meter_test_row(
+        scan_ns: i64,
+        digest_byte: u8,
+        sta_ms: Option<i64>,
+        eta_ms: Option<i64>,
+    ) -> MeteringScanRow {
+        MeteringScanRow::with_verified_binding(
+            *b"ZAU1",
+            METER_TEST_KEY,
+            [digest_byte; 32],
+            Some(scan_ns - 200_000_000),
+            scan_ns - 100_000_000,
+            METER_TEST_GUFI,
+            METER_TEST_ADDRESS,
+            oa_display::core::metering::TargetMetering {
+                mfx: oa_display::core::metering::MeterPointTimes { sta_ms, eta_ms },
+                sfx: oa_display::core::metering::MeterPointTimes::default(),
+            },
+        )
+    }
+
+    fn first_meter_test_frame(engine: &mut RegionalRuntime) -> RegionalFrame {
+        let events = [
+            parse_event_line(
+                "v1\t1000000000\t1000000000\t1\tFLIGHT\t00000000000000000000000000000001\tABCDEF\tZAU1\tFLIGHT\tPLAN\tPLAN00000001\t2",
+            )
+            .unwrap(),
+            parse_event_line(
+                "v1\t2000000000\t2000000000\t2\tFLIGHT\t00000000000000000000000000000001\tABCDEF\tZAU1\tFLIGHT\tADDRESS",
+            )
+            .unwrap(),
+            parse_event_line(
+                "v1\t3000000000\t3000000000\t3\tSURVEILLANCE\t00000000000000000000000000000001\tABCDEF\tZAU1\tPOS\t410000000\t-870000000\t10000\t0\t0\t0",
+            )
+            .unwrap(),
+        ];
+        regional_step_with_metering(
+            engine,
+            &ReceiptBatch {
+                receipt_ns: 4_000_000_000,
+                source_clock_regressions: 0,
+                events: events.to_vec(),
+            },
+            &[meter_test_row(
+                4_000_000_000,
+                1,
+                Some(METER_TEST_ETA_MS),
+                Some(METER_TEST_ETA_MS),
+            )],
+        )
+        .unwrap()
+    }
+
+    fn next_meter_test_frame(
+        engine: &mut RegionalRuntime,
+        scan_ns: i64,
+        sequence: u64,
+        digest_byte: u8,
+        sta_ms: Option<i64>,
+        eta_ms: Option<i64>,
+    ) -> RegionalFrame {
+        let line = format!(
+            "v1\t{scan_ns}\t{scan_ns}\t{sequence}\tSURVEILLANCE\t00000000000000000000000000000001\tABCDEF\tZAU1\tPOS\t410000000\t-870000000\t10000\t0\t0\t0"
+        );
+        let event = parse_event_line(&line).unwrap();
+        regional_step_with_metering(
+            engine,
+            &ReceiptBatch {
+                receipt_ns: scan_ns,
+                source_clock_regressions: 0,
+                events: vec![event],
+            },
+            &[meter_test_row(scan_ns, digest_byte, sta_ms, eta_ms)],
+        )
+        .unwrap()
+    }
+
+    fn assert_meter_attached(frame: &RegionalFrame) {
+        let report = frame.metering.as_ref().unwrap();
+        assert_eq!(report.source_rows, 1);
+        assert_eq!(report.flight_bound_rows, 1);
+        assert_eq!(report.target_attached_rows, 1);
+        assert_eq!(report.unbound_rows, 0);
+        assert_eq!(frame.surveillance.displayed, 1);
+        assert_eq!(
+            frame
+                .surveillance
+                .metering_convert
+                .as_ref()
+                .unwrap()
+                .meter_rows_attached,
+            1
+        );
+    }
+
+    // REQ: OA-REG-021, OA-REG-022
+    #[test]
+    fn admitted_flight_per_scan_metering_renders_schedule_and_counts_same_reference_window() {
+        let mut engine = runtime();
+        let first = first_meter_test_frame(&mut engine);
+        assert_meter_attached(&first);
+        assert_eq!(first.flights.len(), 1);
+        assert_eq!(
+            first.flights[0].view.as_ref().map(|view| view.plan_state),
+            Some(oa_flight::ST_ACTIVE)
+        );
+        let first_texts = surveillance::rendered_scope_texts(&engine.surveillance);
+        assert!(first_texts
+            .iter()
+            .any(|text| { text == "MFX STA=12:00:00 ETA=12:00:00 DLY=+0ms" }));
+        assert_eq!(first.metering.as_ref().unwrap().mfx_counts.within_window, 1);
+
+        let cases = [
+            (
+                Some(METER_TEST_ETA_MS + 60_000),
+                Some(METER_TEST_ETA_MS),
+                true,
+                false,
+                false,
+            ),
+            (
+                Some(METER_TEST_ETA_MS - 60_000),
+                Some(METER_TEST_ETA_MS),
+                true,
+                false,
+                false,
+            ),
+            (
+                Some(METER_TEST_ETA_MS + 60_001),
+                Some(METER_TEST_ETA_MS),
+                false,
+                true,
+                false,
+            ),
+            (
+                Some(METER_TEST_ETA_MS - 60_001),
+                Some(METER_TEST_ETA_MS),
+                false,
+                false,
+                true,
+            ),
+        ];
+        for (index, (sta, eta, inside, early, late)) in cases.into_iter().enumerate() {
+            let scan_ns = 5_000_000_000 + i64::try_from(index).unwrap() * 1_000_000_000;
+            let frame = next_meter_test_frame(
+                &mut engine,
+                scan_ns,
+                4 + u64::try_from(index).unwrap(),
+                2 + u8::try_from(index).unwrap(),
+                sta,
+                eta,
+            );
+            assert_meter_attached(&frame);
+            let counts = frame.metering.as_ref().unwrap().mfx_counts;
+            assert_eq!(counts.within_window, u64::from(inside));
+            assert_eq!(counts.early, u64::from(early));
+            assert_eq!(counts.late, u64::from(late));
+            let texts = surveillance::rendered_scope_texts(&engine.surveillance);
+            assert!(texts.iter().any(|text| text.starts_with("MFX STA=")));
+        }
+
+        let amended = next_meter_test_frame(
+            &mut engine,
+            9_000_000_000,
+            8,
+            10,
+            Some(METER_TEST_ETA_MS + 30_000),
+            Some(METER_TEST_ETA_MS),
+        );
+        assert_meter_attached(&amended);
+        let amended_texts = surveillance::rendered_scope_texts(&engine.surveillance);
+        assert!(amended_texts
+            .iter()
+            .any(|text| text == "MFX STA=12:00:30 ETA=12:00:00 DLY=+30000ms"));
+
+        let changed = next_meter_test_frame(
+            &mut engine,
+            10_000_000_000,
+            9,
+            11,
+            Some(METER_TEST_ETA_MS + 45_000),
+            Some(METER_TEST_ETA_MS),
+        );
+        assert_meter_attached(&changed);
+        assert_ne!(
+            amended.surveillance.frame_sha256,
+            changed.surveillance.frame_sha256
+        );
+        let changed_texts = surveillance::rendered_scope_texts(&engine.surveillance);
+        assert!(changed_texts
+            .iter()
+            .any(|text| text == "MFX STA=12:00:45 ETA=12:00:00 DLY=+45000ms"));
+
+        let missing = next_meter_test_frame(
+            &mut engine,
+            11_000_000_000,
+            10,
+            12,
+            None,
+            Some(METER_TEST_ETA_MS),
+        );
+        assert_meter_attached(&missing);
+        let counts = missing.metering.as_ref().unwrap().mfx_counts;
+        assert_eq!(counts.missing_sta, 1);
+        assert_eq!(counts.missing_eta, 0);
+        let missing_texts = surveillance::rendered_scope_texts(&engine.surveillance);
+        assert!(missing_texts
+            .iter()
+            .any(|text| text == "MFX STA=--:--:-- ETA=12:00:00 DLY=--"));
+    }
+
     // REQ: OA-REG-021
     #[test]
     fn tbfm_row_without_official_identity_link_stays_unbound_in_actual_scope_path() {

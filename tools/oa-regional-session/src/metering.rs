@@ -14,7 +14,7 @@
 use crate::flight::{
     flight_view_for_gufi, flight_views_for_address, FlightDriver, FlightViewStatus,
 };
-use oa_display::core::metering::TargetMetering;
+use oa_display::core::metering::{meter_counts_observe, meter_fields, MeterCounts, TargetMetering};
 use oa_scope_replay::rows::AddressMetering;
 use std::fmt;
 
@@ -111,6 +111,10 @@ pub struct MeteringScanReport {
     pub invalid_source_time_rows: u32,
     pub ambiguous_address_rows: u32,
     pub oldest_source_age_ms: Option<u64>,
+    /// STA/ETA dispositions for the unique, current-flight-bound MFX values in this scan.
+    pub mfx_counts: MeterCounts,
+    /// STA/ETA dispositions for the unique, current-flight-bound SFX values in this scan.
+    pub sfx_counts: MeterCounts,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -121,6 +125,7 @@ pub enum MeteringScanError {
     InvalidReceiveTime { index: usize },
     FutureReceiveTime { index: usize },
     AddressCapacity,
+    MeterCountOverflow,
 }
 
 impl fmt::Display for MeteringScanError {
@@ -147,6 +152,7 @@ impl fmt::Display for MeteringScanError {
                 "metering source row {index} was received after the regional scan"
             ),
             Self::AddressCapacity => f.write_str("resolved metering rows exceed target capacity"),
+            Self::MeterCountOverflow => f.write_str("metering scan disposition counter overflow"),
         }
     }
 }
@@ -316,6 +322,18 @@ pub fn resolve_metering_scan(
     }
     let resolved = unique;
     report.flight_bound_rows = u32::try_from(resolved.len()).unwrap_or(u32::MAX);
+    for row in &resolved {
+        meter_counts_observe(
+            &mut report.mfx_counts,
+            meter_fields(row.values.mfx.sta_ms, row.values.mfx.eta_ms),
+        )
+        .map_err(|_| MeteringScanError::MeterCountOverflow)?;
+        meter_counts_observe(
+            &mut report.sfx_counts,
+            meter_fields(row.values.sfx.sta_ms, row.values.sfx.eta_ms),
+        )
+        .map_err(|_| MeteringScanError::MeterCountOverflow)?;
+    }
     Ok((resolved, report))
 }
 
