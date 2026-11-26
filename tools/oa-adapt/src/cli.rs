@@ -7,6 +7,10 @@
 //! oa-adapt diff <a> <b>
 //! oa-adapt package --snapshot <snapshot> --out-root <new-directory> --release <id>
 //!                   --facility <ARTCC> --change-ref <approved-record>
+//! oa-adapt issue --snapshot <snapshot> --out-root <new-directory> --previous-package-root <dir>
+//!                 --previous-manifest-sha256 <hex> --release <id> --facility <ARTCC>
+//!                 --change-ref <record> --change-class initial|routine|field-change
+//!                 --issuer <principal-id> --approver <principal-id> --reason <text>
 //! ```
 //!
 //! `build` writes `<snapshot>` and `<snapshot>.report.txt`. `diff` prints to standard output.
@@ -84,6 +88,10 @@ pub const USAGE: &str = "usage:
   oa-adapt diff <snapshot-a> <snapshot-b>
   oa-adapt package --snapshot <snapshot> --out-root <new-directory> --release <id>
                    --facility <ARTCC> --change-ref <approved-record>
+  oa-adapt issue --snapshot <snapshot> --out-root <new-directory> --previous-package-root <dir>
+                 --previous-manifest-sha256 <hex> --release <id> --facility <ARTCC>
+                 --change-ref <record> --change-class initial|routine|field-change
+                 --issuer <principal-id> --approver <principal-id> --reason <text>
   oa-adapt route --snapshot <snapshot> --steps <identity-qualified instructions>
   oa-adapt route --package-root <directory> --expected-manifest-sha256 <hex> --steps <instructions>";
 
@@ -374,19 +382,228 @@ pub fn run_package(args: &[String], out: &mut dyn Write) -> Result<(), CliError>
     Ok(())
 }
 
+/// `issue`: create a bounded v2 manifest at the next version after verifying the prior pin.
+pub fn run_issue(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
+    const FIELDS: [&str; 11] = [
+        "--snapshot",
+        "--out-root",
+        "--previous-package-root",
+        "--previous-manifest-sha256",
+        "--release",
+        "--facility",
+        "--change-ref",
+        "--change-class",
+        "--issuer",
+        "--approver",
+        "--reason",
+    ];
+    if args.len() != FIELDS.len() * 2 {
+        return Err(CliError::Usage(
+            "issue requires exactly twelve flag/value pairs".into(),
+        ));
+    }
+    if args
+        .iter()
+        .any(|arg| arg.len() > MAX_PACKAGE_ARGUMENT_BYTES)
+    {
+        return Err(CliError::Usage("issue argument exceeds byte limit".into()));
+    }
+    let mut values = std::collections::BTreeMap::<&str, &str>::new();
+    for pair in args.chunks_exact(2) {
+        let flag = pair
+            .first()
+            .ok_or_else(|| CliError::Usage("missing issue flag".into()))?;
+        let value = pair
+            .get(1)
+            .ok_or_else(|| CliError::Usage("missing issue value".into()))?;
+        if !FIELDS.contains(&flag.as_str()) {
+            return Err(CliError::Usage(format!("unknown issue argument {flag:?}")));
+        }
+        if value.is_empty() || value.starts_with("--") {
+            return Err(CliError::Usage(format!("{flag} needs a value")));
+        }
+        if values.insert(flag, value).is_some() {
+            return Err(CliError::Usage(format!("{flag} given more than once")));
+        }
+    }
+    let get = |name: &'static str| {
+        values
+            .get(name)
+            .copied()
+            .ok_or_else(|| CliError::Usage(format!("issue needs {name}")))
+    };
+    let change_class = match get("--change-class")? {
+        "initial" => crate::manifest::ChangeClass::Initial,
+        "routine" => crate::manifest::ChangeClass::Routine,
+        "field-change" => crate::manifest::ChangeClass::FieldChange,
+        other => {
+            return Err(CliError::Usage(format!(
+                "unsupported --change-class {other:?}"
+            )))
+        }
+    };
+    let snapshot_path = PathBuf::from(get("--snapshot")?);
+    let output_root = PathBuf::from(get("--out-root")?);
+    let previous_root = PathBuf::from(get("--previous-package-root")?);
+    let previous_pin = crate::manifest::parse_pin(get("--previous-manifest-sha256")?)
+        .map_err(|e| CliError::Usage(e.to_string()))?;
+    let snapshot_bytes = read_snapshot(&snapshot_path)?;
+    let (version, digest) = crate::manifest::issue_new_package(
+        &output_root,
+        &snapshot_bytes,
+        get("--release")?,
+        get("--facility")?,
+        get("--change-ref")?,
+        &previous_root,
+        previous_pin,
+        change_class,
+        get("--issuer")?,
+        get("--approver")?,
+        get("--reason")?,
+    )
+    .map_err(|e| failed("adaptation issue", e))?;
+    writeln!(
+        out,
+        "adaptation_issue_status\tissued_unverified_for_activation"
+    )
+    .map_err(|e| failed("write output", e))?;
+    writeln!(out, "adaptation_version\t{version}").map_err(|e| failed("write output", e))?;
+    writeln!(out, "manifest_sha256\t{}", to_hex(&digest)).map_err(|e| failed("write output", e))?;
+    writeln!(
+        out,
+        "integrity_scope\tsha256 consistency only; principal IDs are not authenticated"
+    )
+    .map_err(|e| failed("write output", e))?;
+    Ok(())
+}
+
 /// Dispatches on the first argument; `args` excludes the program name.
 pub fn run(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
     match args.split_first() {
         Some((cmd, rest)) if cmd == "build" => run_build(rest, out),
         Some((cmd, rest)) if cmd == "diff" => run_diff(rest, out),
         Some((cmd, rest)) if cmd == "package" => run_package(rest, out),
+        Some((cmd, rest)) if cmd == "issue" => run_issue(rest, out),
         Some((cmd, rest)) if cmd == "route" => crate::route_cli::run_route(rest, out),
         Some((cmd, _)) if cmd == "--help" || cmd == "-h" => {
             let _ = writeln!(out, "{USAGE}");
             Ok(())
         }
         _ => Err(CliError::Usage(
-            "expected a command: build, diff, package, or route".into(),
+            "expected a command: build, diff, package, issue, or route".into(),
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )]
+
+    use super::*;
+    use crate::manifest::{
+        issue_new_package, parse_pin, verify_current, write_new_package, ChangeClass,
+    };
+    use oa_airspace::model::{empty_model, Meta};
+    use oa_airspace::snapshot::encode;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn issue_command_computes_next_version_and_records_field_change() {
+        let serial = NEXT.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "oa-adapt-cli-issue-{}-{serial}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&root).expect("create synthetic test directory");
+        let snapshot = encode(&empty_model(Meta {
+            nasr_effective: 20_261_029,
+            cifp_cycle: 2611,
+            artcc: "ZAU".to_owned(),
+            buffer_m: 92_600,
+            nasr_sha256: [0x11; 32],
+            cifp_sha256: [0x22; 32],
+        }))
+        .expect("synthetic snapshot encodes");
+        let snapshot_path = root.join("candidate.snapshot");
+        std::fs::write(&snapshot_path, &snapshot).expect("write synthetic snapshot");
+
+        let prior_root = root.join("prior");
+        let prior_pin = write_new_package(&prior_root, &snapshot, "legacy", "ZAU", "BASE-1")
+            .expect("legacy package writes");
+        let first_root = root.join("first");
+        let (_, first_pin) = issue_new_package(
+            &first_root,
+            &snapshot,
+            "adapt-1",
+            "ZAU",
+            "CHG-1",
+            &prior_root,
+            prior_pin,
+            ChangeClass::Initial,
+            "issuer-1",
+            "approver-2",
+            "initial issue",
+        )
+        .expect("first issue establishes version one");
+
+        let candidate_root = root.join("candidate");
+        let first_pin_hex = oa_sha256::to_hex(&first_pin);
+        let args = [
+            "issue",
+            "--snapshot",
+            snapshot_path.to_str().expect("snapshot path is utf8"),
+            "--out-root",
+            candidate_root.to_str().expect("output path is utf8"),
+            "--previous-package-root",
+            first_root.to_str().expect("prior path is utf8"),
+            "--previous-manifest-sha256",
+            first_pin_hex.as_str(),
+            "--release",
+            "adapt-2",
+            "--facility",
+            "ZAU",
+            "--change-ref",
+            "FIELD-1",
+            "--change-class",
+            "field-change",
+            "--issuer",
+            "issuer-3",
+            "--approver",
+            "approver-4",
+            "--reason",
+            "sector field correction",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+        let mut output = Vec::new();
+        run(&args, &mut output).expect("issue CLI command succeeds without a version argument");
+        let text = String::from_utf8(output).expect("CLI output is UTF-8");
+        assert!(text.lines().any(|line| line == "adaptation_version\t2"));
+        let manifest_hash = text
+            .lines()
+            .find_map(|line| line.strip_prefix("manifest_sha256\t"))
+            .expect("command prints issued manifest digest");
+        let pin = parse_pin(manifest_hash).expect("output pin is canonical");
+        let verified = verify_current(&candidate_root, pin).expect("issued output verifies");
+        let issue = verified
+            .identity()
+            .issue
+            .as_ref()
+            .expect("issued metadata exists");
+        assert_eq!(issue.adaptation_version, 2);
+        assert_eq!(issue.change_class, ChangeClass::FieldChange);
+        assert_eq!(issue.previous_manifest_sha256, first_pin);
+        assert_eq!(issue.issuer_principal_id, "issuer-3");
+        assert_eq!(issue.approver_principal_id, "approver-4");
+        assert_eq!(issue.reason, "sector field correction");
+        let _ = std::fs::remove_dir_all(root);
     }
 }

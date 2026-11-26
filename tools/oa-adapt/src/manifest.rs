@@ -17,7 +17,8 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 const MAGIC: &[u8; 8] = b"OAG2ADPT";
-const MANIFEST_VERSION: u16 = 1;
+const LEGACY_MANIFEST_VERSION: u16 = 1;
+const ISSUED_MANIFEST_VERSION: u16 = 2;
 const READER_API: u16 = 1;
 const MANIFEST_FILE: &str = "manifest.oag2";
 const SNAPSHOT_FILE: &str = "airspace.snapshot";
@@ -26,7 +27,10 @@ const MAX_PACKAGE_BYTES: u64 = MAX_SNAPSHOT_BYTES as u64 + MAX_MANIFEST_BYTES as
 const MAX_RELEASE_BYTES: usize = 64;
 const MAX_FACILITY_BYTES: usize = 64;
 const MAX_CHANGE_REF_BYTES: usize = 128;
+const MAX_PRINCIPAL_ID_BYTES: usize = 64;
+const MAX_ISSUE_REASON_BYTES: usize = 256;
 const FIXED_HEADER_BYTES: usize = 58;
+const ISSUED_HEADER_BYTES: usize = FIXED_HEADER_BYTES + 45;
 
 /// Explicit refusal reason; safe to include in operator-facing status.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -103,6 +107,31 @@ pub struct PackageIdentity {
     pub facility: String,
     pub change_ref: String,
     pub snapshot_bytes: u64,
+    /// Present for structured issues; the legacy package command has no issued version.
+    pub adaptation_version: Option<u64>,
+    /// Structured issue metadata; SHA-256 still does not authenticate these claims.
+    pub issue: Option<Box<IssueMetadata>>,
+}
+
+/// Structured issuance record. Principal IDs are caller-supplied identifiers, not authenticated.
+#[derive(Clone, Debug, PartialEq, Eq)]
+// A7.2: cold lifecycle metadata, size bounded by manifest schema.
+pub struct IssueMetadata {
+    pub adaptation_version: u64,
+    pub previous_manifest_sha256: Digest,
+    pub change_class: ChangeClass,
+    pub issuer_principal_id: String,
+    pub approver_principal_id: String,
+    pub reason: String,
+}
+
+/// Change classification stored in a canonical issued manifest.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ChangeClass {
+    Initial = 1,
+    Routine = 2,
+    FieldChange = 3,
 }
 
 /// A verified immutable model plus identity. The model came from the exact bytes that were hashed.
@@ -127,6 +156,7 @@ impl VerifiedPackage {
 #[derive(Clone, Debug, PartialEq, Eq)]
 // A7.2: cold serialized manifest model; size guard waived.
 struct Manifest {
+    schema_version: u16,
     reader_min: u16,
     reader_max: u16,
     release: String,
@@ -134,6 +164,7 @@ struct Manifest {
     change_ref: String,
     snapshot_len: u64,
     snapshot_sha256: Digest,
+    issue: Option<IssueMetadata>,
 }
 
 fn field<'a>(bytes: &'a [u8], offset: &mut usize, len: usize) -> Result<&'a [u8], VerifyError> {
@@ -149,6 +180,13 @@ fn u16_at(bytes: &[u8], offset: &mut usize) -> Result<u16, VerifyError> {
     let value = field(bytes, offset, 2)?;
     let array: [u8; 2] = value.try_into().map_err(|_| VerifyError::Truncated)?;
     Ok(u16::from_le_bytes(array))
+}
+
+fn u8_at(bytes: &[u8], offset: &mut usize) -> Result<u8, VerifyError> {
+    field(bytes, offset, 1)?
+        .first()
+        .copied()
+        .ok_or(VerifyError::Truncated)
 }
 
 fn u64_at(bytes: &[u8], offset: &mut usize) -> Result<u64, VerifyError> {
@@ -172,6 +210,32 @@ fn valid_token(text: &str, limit: usize, field_name: &'static str) -> Result<(),
     Ok(())
 }
 
+fn validate_issue_fields(issuer: &str, approver: &str, reason: &str) -> Result<(), VerifyError> {
+    for (value, name) in [
+        (issuer, "issuer principal ID"),
+        (approver, "approver principal ID"),
+    ] {
+        if value.is_empty()
+            || value.len() > MAX_PRINCIPAL_ID_BYTES
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        {
+            return Err(VerifyError::InvalidField(name));
+        }
+    }
+    if issuer == approver {
+        return Err(VerifyError::InvalidField("issuer and approver must differ"));
+    }
+    if reason.is_empty()
+        || reason.len() > MAX_ISSUE_REASON_BYTES
+        || !reason.bytes().all(|byte| (0x20..=0x7e).contains(&byte))
+    {
+        return Err(VerifyError::InvalidField("issue reason"));
+    }
+    Ok(())
+}
+
 fn parse_manifest(bytes: &[u8]) -> Result<Manifest, VerifyError> {
     if bytes.len() > MAX_MANIFEST_BYTES {
         return Err(VerifyError::Oversize("manifest"));
@@ -184,7 +248,7 @@ fn parse_manifest(bytes: &[u8]) -> Result<Manifest, VerifyError> {
         return Err(VerifyError::BadMagic);
     }
     let version = u16_at(bytes, &mut offset)?;
-    if version != MANIFEST_VERSION {
+    if version != LEGACY_MANIFEST_VERSION && version != ISSUED_MANIFEST_VERSION {
         return Err(VerifyError::UnsupportedManifestVersion(version));
     }
     let reader_min = u16_at(bytes, &mut offset)?;
@@ -201,6 +265,38 @@ fn parse_manifest(bytes: &[u8]) -> Result<Manifest, VerifyError> {
     let digest: Digest = field(bytes, &mut offset, 32)?
         .try_into()
         .map_err(|_| VerifyError::Truncated)?;
+    let issue = if version == ISSUED_MANIFEST_VERSION {
+        let adaptation_version = u64_at(bytes, &mut offset)?;
+        let previous_manifest_sha256: Digest = field(bytes, &mut offset, 32)?
+            .try_into()
+            .map_err(|_| VerifyError::Truncated)?;
+        let change_class = match u8_at(bytes, &mut offset)? {
+            1 => ChangeClass::Initial,
+            2 => ChangeClass::Routine,
+            3 => ChangeClass::FieldChange,
+            _ => return Err(VerifyError::InvalidField("change class")),
+        };
+        let issuer_len = usize::from(u8_at(bytes, &mut offset)?);
+        let approver_len = usize::from(u8_at(bytes, &mut offset)?);
+        let reason_len = usize::from(u16_at(bytes, &mut offset)?);
+        if adaptation_version == 0
+            || issuer_len > MAX_PRINCIPAL_ID_BYTES
+            || approver_len > MAX_PRINCIPAL_ID_BYTES
+            || reason_len > MAX_ISSUE_REASON_BYTES
+        {
+            return Err(VerifyError::InvalidField("issue metadata bounds"));
+        }
+        Some((
+            adaptation_version,
+            previous_manifest_sha256,
+            change_class,
+            issuer_len,
+            approver_len,
+            reason_len,
+        ))
+    } else {
+        None
+    };
     if release_len > MAX_RELEASE_BYTES
         || facility_len > MAX_FACILITY_BYTES
         || change_len > MAX_CHANGE_REF_BYTES
@@ -216,6 +312,41 @@ fn parse_manifest(bytes: &[u8]) -> Result<Manifest, VerifyError> {
     let change_ref = std::str::from_utf8(field(bytes, &mut offset, change_len)?)
         .map_err(|_| VerifyError::InvalidField("change reference"))?
         .to_owned();
+    let issue = if let Some((
+        adaptation_version,
+        previous_manifest_sha256,
+        change_class,
+        issuer_len,
+        approver_len,
+        reason_len,
+    )) = issue
+    {
+        let issuer_principal_id = std::str::from_utf8(field(bytes, &mut offset, issuer_len)?)
+            .map_err(|_| VerifyError::InvalidField("issuer principal ID"))?
+            .to_owned();
+        let approver_principal_id = std::str::from_utf8(field(bytes, &mut offset, approver_len)?)
+            .map_err(|_| VerifyError::InvalidField("approver principal ID"))?
+            .to_owned();
+        let reason = std::str::from_utf8(field(bytes, &mut offset, reason_len)?)
+            .map_err(|_| VerifyError::InvalidField("issue reason"))?
+            .to_owned();
+        validate_issue_fields(&issuer_principal_id, &approver_principal_id, &reason)?;
+        if (adaptation_version == 1) != (change_class == ChangeClass::Initial) {
+            return Err(VerifyError::InvalidField(
+                "initial change class/version mismatch",
+            ));
+        }
+        Some(IssueMetadata {
+            adaptation_version,
+            previous_manifest_sha256,
+            change_class,
+            issuer_principal_id,
+            approver_principal_id,
+            reason,
+        })
+    } else {
+        None
+    };
     if offset != bytes.len() {
         return Err(VerifyError::NonCanonical);
     }
@@ -229,6 +360,7 @@ fn parse_manifest(bytes: &[u8]) -> Result<Manifest, VerifyError> {
         });
     }
     let manifest = Manifest {
+        schema_version: version,
         reader_min,
         reader_max,
         release,
@@ -236,6 +368,7 @@ fn parse_manifest(bytes: &[u8]) -> Result<Manifest, VerifyError> {
         change_ref,
         snapshot_len,
         snapshot_sha256: digest,
+        issue,
     };
     if encode_manifest(&manifest)?.as_slice() != bytes {
         return Err(VerifyError::NonCanonical);
@@ -251,6 +384,31 @@ fn encode_manifest(manifest: &Manifest) -> Result<Vec<u8>, VerifyError> {
         MAX_CHANGE_REF_BYTES,
         "change reference",
     )?;
+    if manifest.schema_version != LEGACY_MANIFEST_VERSION
+        && manifest.schema_version != ISSUED_MANIFEST_VERSION
+    {
+        return Err(VerifyError::UnsupportedManifestVersion(
+            manifest.schema_version,
+        ));
+    }
+    if (manifest.schema_version == LEGACY_MANIFEST_VERSION) != manifest.issue.is_none() {
+        return Err(VerifyError::InvalidField("manifest issue schema"));
+    }
+    if let Some(issue) = &manifest.issue {
+        if issue.adaptation_version == 0 {
+            return Err(VerifyError::InvalidField("adaptation version"));
+        }
+        if (issue.adaptation_version == 1) != (issue.change_class == ChangeClass::Initial) {
+            return Err(VerifyError::InvalidField(
+                "initial change class/version mismatch",
+            ));
+        }
+        validate_issue_fields(
+            &issue.issuer_principal_id,
+            &issue.approver_principal_id,
+            &issue.reason,
+        )?;
+    }
     if manifest.reader_min > manifest.reader_max
         || manifest.release.len() > MAX_RELEASE_BYTES
         || manifest.facility.len() > MAX_FACILITY_BYTES
@@ -259,16 +417,25 @@ fn encode_manifest(manifest: &Manifest) -> Result<Vec<u8>, VerifyError> {
         return Err(VerifyError::InvalidField("manifest metadata"));
     }
     let mut bytes = Vec::new();
+    let issue_text_bytes = manifest.issue.as_ref().map_or(0, |issue| {
+        issue.issuer_principal_id.len() + issue.approver_principal_id.len() + issue.reason.len()
+    });
+    let fixed_bytes = if manifest.issue.is_some() {
+        ISSUED_HEADER_BYTES
+    } else {
+        FIXED_HEADER_BYTES
+    };
     bytes
         .try_reserve_exact(
-            FIXED_HEADER_BYTES
+            fixed_bytes
                 + manifest.release.len()
                 + manifest.facility.len()
-                + manifest.change_ref.len(),
+                + manifest.change_ref.len()
+                + issue_text_bytes,
         )
         .map_err(|_| VerifyError::Oversize("manifest allocation"))?;
     bytes.extend_from_slice(MAGIC);
-    bytes.extend_from_slice(&MANIFEST_VERSION.to_le_bytes());
+    bytes.extend_from_slice(&manifest.schema_version.to_le_bytes());
     bytes.extend_from_slice(&manifest.reader_min.to_le_bytes());
     bytes.extend_from_slice(&manifest.reader_max.to_le_bytes());
     bytes.push(
@@ -286,9 +453,32 @@ fn encode_manifest(manifest: &Manifest) -> Result<Vec<u8>, VerifyError> {
     bytes.push(1); // The sole v1 component role and filename are fixed by this schema.
     bytes.extend_from_slice(&manifest.snapshot_len.to_le_bytes());
     bytes.extend_from_slice(&manifest.snapshot_sha256);
+    if let Some(issue) = &manifest.issue {
+        bytes.extend_from_slice(&issue.adaptation_version.to_le_bytes());
+        bytes.extend_from_slice(&issue.previous_manifest_sha256);
+        bytes.push(issue.change_class as u8);
+        bytes.push(
+            u8::try_from(issue.issuer_principal_id.len())
+                .map_err(|_| VerifyError::InvalidField("issuer principal ID length"))?,
+        );
+        bytes.push(
+            u8::try_from(issue.approver_principal_id.len())
+                .map_err(|_| VerifyError::InvalidField("approver principal ID length"))?,
+        );
+        bytes.extend_from_slice(
+            &u16::try_from(issue.reason.len())
+                .map_err(|_| VerifyError::InvalidField("issue reason length"))?
+                .to_le_bytes(),
+        );
+    }
     bytes.extend_from_slice(manifest.release.as_bytes());
     bytes.extend_from_slice(manifest.facility.as_bytes());
     bytes.extend_from_slice(manifest.change_ref.as_bytes());
+    if let Some(issue) = &manifest.issue {
+        bytes.extend_from_slice(issue.issuer_principal_id.as_bytes());
+        bytes.extend_from_slice(issue.approver_principal_id.as_bytes());
+        bytes.extend_from_slice(issue.reason.as_bytes());
+    }
     if bytes.len() > MAX_MANIFEST_BYTES {
         return Err(VerifyError::Oversize("manifest"));
     }
@@ -467,6 +657,11 @@ fn decode_verified(
             facility: manifest.facility,
             change_ref: manifest.change_ref,
             snapshot_bytes: actual_len,
+            adaptation_version: manifest
+                .issue
+                .as_ref()
+                .map(|issue| issue.adaptation_version),
+            issue: manifest.issue.map(Box::new),
         },
     })
 }
@@ -617,6 +812,7 @@ pub fn manifest_for_snapshot(
         });
     }
     let manifest = Manifest {
+        schema_version: LEGACY_MANIFEST_VERSION,
         reader_min: READER_API,
         reader_max: READER_API,
         release: release.to_owned(),
@@ -625,6 +821,53 @@ pub fn manifest_for_snapshot(
         snapshot_len: u64::try_from(snapshot_bytes.len())
             .map_err(|_| VerifyError::Oversize("snapshot"))?,
         snapshot_sha256: sha256(snapshot_bytes),
+        issue: None,
+    };
+    let bytes = encode_manifest(&manifest)?;
+    let digest = sha256(&bytes);
+    Ok((bytes, digest))
+}
+
+/// Build a version-2 canonical manifest with caller-recorded issuance metadata.
+fn issued_manifest_for_snapshot(
+    snapshot_bytes: &[u8],
+    release: &str,
+    facility: &str,
+    change_ref: &str,
+    issue: IssueMetadata,
+) -> Result<(Vec<u8>, Digest), VerifyError> {
+    if snapshot_bytes.len() > MAX_SNAPSHOT_BYTES {
+        return Err(VerifyError::Oversize("snapshot"));
+    }
+    let decoded = decode(snapshot_bytes).map_err(|e| VerifyError::SnapshotDecode(e.to_string()))?;
+    if encode(&decoded).map_err(|e| VerifyError::SnapshotDecode(e.to_string()))? != snapshot_bytes {
+        return Err(VerifyError::NonCanonical);
+    }
+    if facility != decoded.meta.artcc {
+        return Err(VerifyError::FacilityMismatch {
+            manifest: facility.to_owned(),
+            snapshot: decoded.meta.artcc,
+        });
+    }
+    if issue.adaptation_version == 0 {
+        return Err(VerifyError::InvalidField("adaptation version"));
+    }
+    validate_issue_fields(
+        &issue.issuer_principal_id,
+        &issue.approver_principal_id,
+        &issue.reason,
+    )?;
+    let manifest = Manifest {
+        schema_version: ISSUED_MANIFEST_VERSION,
+        reader_min: READER_API,
+        reader_max: READER_API,
+        release: release.to_owned(),
+        facility: facility.to_owned(),
+        change_ref: change_ref.to_owned(),
+        snapshot_len: u64::try_from(snapshot_bytes.len())
+            .map_err(|_| VerifyError::Oversize("snapshot"))?,
+        snapshot_sha256: sha256(snapshot_bytes),
+        issue: Some(issue),
     };
     let bytes = encode_manifest(&manifest)?;
     let digest = sha256(&bytes);
@@ -658,6 +901,60 @@ pub fn write_new_package(
         ))
     })?;
     Ok(manifest_digest)
+}
+
+/// Issue a new immutable package only at the exact next version after a separately pinned package.
+/// The principal IDs are recorded claims; this function does not authenticate or authorize them.
+#[allow(clippy::too_many_arguments)]
+pub fn issue_new_package(
+    root: &Path,
+    snapshot_bytes: &[u8],
+    release: &str,
+    facility: &str,
+    change_ref: &str,
+    previous_root: &Path,
+    previous_manifest_sha256: Digest,
+    change_class: ChangeClass,
+    issuer_principal_id: &str,
+    approver_principal_id: &str,
+    reason: &str,
+) -> Result<(u64, Digest), VerifyError> {
+    let previous = verify_current(previous_root, previous_manifest_sha256)?;
+    if previous.identity().facility != facility {
+        return Err(VerifyError::InvalidField(
+            "previous package facility differs from issued facility",
+        ));
+    }
+    let prior_version = previous.identity().adaptation_version.unwrap_or(0);
+    let required_version = prior_version
+        .checked_add(1)
+        .ok_or(VerifyError::InvalidField("adaptation version overflow"))?;
+    let adaptation_version = required_version;
+    if (adaptation_version == 1) != (change_class == ChangeClass::Initial) {
+        return Err(VerifyError::InvalidField(
+            "initial change class/version mismatch",
+        ));
+    }
+    let issue = IssueMetadata {
+        adaptation_version,
+        previous_manifest_sha256,
+        change_class,
+        issuer_principal_id: issuer_principal_id.to_owned(),
+        approver_principal_id: approver_principal_id.to_owned(),
+        reason: reason.to_owned(),
+    };
+    let (manifest_bytes, manifest_digest) =
+        issued_manifest_for_snapshot(snapshot_bytes, release, facility, change_ref, issue)?;
+    oa_sealed::refuse(root).map_err(VerifyError::Path)?;
+    fs::create_dir(root).map_err(|e| VerifyError::Output(format!("{}: {e}", root.display())))?;
+    write_new_file(&root.join(SNAPSHOT_FILE), snapshot_bytes)?;
+    write_new_file(&root.join(MANIFEST_FILE), &manifest_bytes)?;
+    verify_current(root, manifest_digest).map_err(|e| {
+        VerifyError::Output(format!(
+            "issued package read-back verification failed; directory retained: {e}"
+        ))
+    })?;
+    Ok((adaptation_version, manifest_digest))
 }
 
 fn write_new_file(path: &Path, bytes: &[u8]) -> Result<(), VerifyError> {
@@ -734,6 +1031,140 @@ mod tests {
             verified.identity().snapshot_sha256
         );
         let _ = fs::remove_dir_all(root);
+    }
+
+    // REQ: OA-ADAPT-003
+    #[test]
+    fn issue_chains_exactly_one_version_and_records_field_change_approval_claims() {
+        let (_, bytes) = sample();
+        let previous_root = temp_root("issue-previous");
+        let previous_pin = write_new_package(&previous_root, &bytes, "legacy", "ZAU", "BASE-1")
+            .expect("legacy baseline package writes");
+        let first_root = temp_root("issue-first");
+        let (first_version, first_pin) = issue_new_package(
+            &first_root,
+            &bytes,
+            "adapt-1",
+            "ZAU",
+            "CHG-1",
+            &previous_root,
+            previous_pin,
+            ChangeClass::Initial,
+            "issuer-1",
+            "approver-2",
+            "initial issue",
+        )
+        .expect("initial issue is version one");
+        assert_eq!(first_version, 1);
+        let first = verify_current(&first_root, first_pin).expect("issued package verifies");
+        assert_eq!(first.identity().adaptation_version, Some(1));
+        assert_eq!(
+            first
+                .identity()
+                .issue
+                .as_ref()
+                .map(|item| item.change_class),
+            Some(ChangeClass::Initial)
+        );
+        assert_eq!(
+            first
+                .identity()
+                .issue
+                .as_ref()
+                .map(|item| item.previous_manifest_sha256),
+            Some(previous_pin)
+        );
+
+        let second_root = temp_root("issue-second");
+        let (second_version, second_pin) = issue_new_package(
+            &second_root,
+            &bytes,
+            "adapt-2",
+            "ZAU",
+            "FIELD-1",
+            &first_root,
+            first_pin,
+            ChangeClass::FieldChange,
+            "issuer-3",
+            "approver-4",
+            "sector field correction",
+        )
+        .expect("field change uses the same issue command at the next version");
+        assert_eq!(second_version, 2);
+        let second =
+            verify_current(&second_root, second_pin).expect("second issued package verifies");
+        let metadata = second
+            .identity()
+            .issue
+            .as_ref()
+            .expect("issue metadata present");
+        assert_eq!(metadata.adaptation_version, 2);
+        assert_eq!(metadata.change_class, ChangeClass::FieldChange);
+        assert_eq!(metadata.issuer_principal_id, "issuer-3");
+        assert_eq!(metadata.approver_principal_id, "approver-4");
+        assert_eq!(metadata.reason, "sector field correction");
+        assert_eq!(metadata.previous_manifest_sha256, first_pin);
+        let _ = fs::remove_dir_all(previous_root);
+        let _ = fs::remove_dir_all(first_root);
+        let _ = fs::remove_dir_all(second_root);
+    }
+
+    // REQ: OA-ADAPT-003
+    #[test]
+    fn issue_refuses_wrong_initial_class_same_principal_and_wrong_previous_pin() {
+        let (_, bytes) = sample();
+        let previous_root = temp_root("issue-refusal-previous");
+        let pin = write_new_package(&previous_root, &bytes, "legacy", "ZAU", "BASE-2")
+            .expect("legacy baseline package writes");
+        let wrong_class_root = temp_root("issue-refusal-class");
+        assert!(issue_new_package(
+            &wrong_class_root,
+            &bytes,
+            "adapt-2",
+            "ZAU",
+            "CHG-2",
+            &previous_root,
+            pin,
+            ChangeClass::Routine,
+            "issuer-1",
+            "approver-2",
+            "initial class required for first issue",
+        )
+        .is_err());
+        assert!(!wrong_class_root.exists());
+        let same_principal_root = temp_root("issue-refusal-principal");
+        assert!(issue_new_package(
+            &same_principal_root,
+            &bytes,
+            "adapt-1",
+            "ZAU",
+            "CHG-3",
+            &previous_root,
+            pin,
+            ChangeClass::Initial,
+            "same",
+            "same",
+            "distinct principals required",
+        )
+        .is_err());
+        assert!(!same_principal_root.exists());
+        let wrong_pin_root = temp_root("issue-refusal-pin");
+        assert!(issue_new_package(
+            &wrong_pin_root,
+            &bytes,
+            "adapt-1",
+            "ZAU",
+            "CHG-4",
+            &previous_root,
+            [0; 32],
+            ChangeClass::Initial,
+            "issuer-1",
+            "approver-2",
+            "pin must match",
+        )
+        .is_err());
+        assert!(!wrong_pin_root.exists());
+        let _ = fs::remove_dir_all(previous_root);
     }
 
     // REQ: OA-ADAPT-002
@@ -831,10 +1262,10 @@ mod tests {
         let (_, snapshot) = sample();
         let (mut unsupported, _) = manifest_for_snapshot(&snapshot, "test-1", "ZAU", "CHG-17")
             .expect("valid synthetic manifest");
-        unsupported[8..10].copy_from_slice(&2u16.to_le_bytes());
+        unsupported[8..10].copy_from_slice(&3u16.to_le_bytes());
         assert!(matches!(
             parse_manifest(&unsupported),
-            Err(VerifyError::UnsupportedManifestVersion(2))
+            Err(VerifyError::UnsupportedManifestVersion(3))
         ));
         let _ = fs::remove_dir_all(root);
     }

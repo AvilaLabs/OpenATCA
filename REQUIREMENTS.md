@@ -413,6 +413,16 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
   Root/file identities and bounded inventory are checked before and after reads, but this is a point-in-time
   consistency check, not an atomic multi-file filesystem snapshot or lock against hostile replacement/restoration.
   SHA-256 checks agreement with an independently supplied pin; it does not authenticate an issuer or software.
+- **OA-ADAPT-003** `oa-adapt issue` writes one canonical, bounded issued-manifest schema that records the next
+  positive adaptation version computed by the command, previous manifest SHA-256, change class (`initial`, `routine`, or `field-change`),
+  distinct issuer and approver principal IDs, and a bounded reason. The first issue is version 1 with class
+  `initial`; every subsequent issue must verify the previous package against its separately supplied manifest
+  pin and increment exactly by one; the caller does not supply the new version. A field change uses this same command with class `field-change`. The returned
+  manifest SHA-256 identifies those exact bytes; recorded principal IDs are claims, not authenticated approval.
+  Startup and on-demand processor inventories compare each processor's loaded and on-disk adaptation digest to
+  the issued manifest digest, retaining every expected processor and any mismatch. The current
+  `oa-techops::assess_inventory` result remains `ClaimsMatchUnverified` at best; it is integrity/status evidence,
+  not an authenticated issuer, deployment attestation, or operational certification.
 
 ### Route conversion (oa-airspace)
 

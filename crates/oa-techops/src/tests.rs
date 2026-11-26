@@ -159,6 +159,50 @@ fn matching_inventory_claims_never_become_pass() {
     assert_eq!(result.unique_sequences, result.expected_sequences);
 }
 
+// REQ: OA-ADAPT-003, OA-TECHOPS-001, OA-TECHOPS-002
+#[test]
+fn issued_adaptation_pin_is_checked_for_each_processor_at_startup_and_on_demand() {
+    let mut expected_a = expected(1, 1, 2);
+    let mut expected_b = expected(2, 1, 2);
+    expected_a.adaptation_sha256 = [8; 32];
+    expected_b.adaptation_sha256 = [8; 32];
+    let inventory = [expected_a, expected_b];
+    let mut query = inventory_query(Some(ServiceEpoch(6)), 100);
+    query.release_manifest_sha256 = [8; 32];
+
+    // Startup: every processor reports the same independently pinned issued manifest and digest.
+    let mut startup_a = report(1, 1, 980);
+    let mut startup_b = report(2, 1, 980);
+    for row in [&mut startup_a, &mut startup_b] {
+        row.release_manifest_sha256 = [8; 32];
+        row.loaded_adaptation_sha256 = [8; 32];
+        row.disk_adaptation_sha256 = [8; 32];
+    }
+    let startup = assess_inventory(&inventory, &[startup_a, startup_b], query)
+        .expect("bounded startup inventory");
+    assert_eq!(startup.state, AssessmentState::ClaimsMatchUnverified);
+    assert_eq!(startup.release_manifest_mismatches, 0);
+    assert_eq!(startup.loaded_adaptation_mismatches, 0);
+    assert_eq!(startup.disk_adaptation_mismatches, 0);
+
+    let mut on_demand_a = report(1, 1, 980);
+    let mut on_demand_b = report(2, 1, 980);
+    for row in [&mut on_demand_a, &mut on_demand_b] {
+        row.release_manifest_sha256 = [8; 32];
+        row.loaded_adaptation_sha256 = [8; 32];
+        row.disk_adaptation_sha256 = [8; 32];
+    }
+    on_demand_b.disk_adaptation_sha256 = [10; 32];
+    let on_demand = assess_inventory(&inventory, &[on_demand_a, on_demand_b], query)
+        .expect("bounded on-demand inventory");
+    assert_eq!(on_demand.expected_processor_count, 2);
+    assert_eq!(on_demand.disk_adaptation_mismatches, 1);
+    assert_eq!(on_demand.state, AssessmentState::Mismatch);
+    assert_eq!(on_demand.processors[0].disk_adaptation_mismatches, 0);
+    assert_eq!(on_demand.processors[1].disk_adaptation_mismatches, 1);
+    assert!(on_demand.provenance_unverified);
+}
+
 // REQ: OA-TECHOPS-002
 #[test]
 fn invalid_monotonic_timestamp_is_counted_and_not_called_future_or_fresh() {
