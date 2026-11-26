@@ -44,8 +44,6 @@ dependencies = [
  "oa-ca",
  "oa-display",
  "oa-geo",
- "oa-migration",
- "oa-migration-switch",
  "oa-nam",
  "oa-runway",
  "oa-safety",
@@ -169,17 +167,6 @@ name = "oa-math"
 version = "0.0.1"
 dependencies = [
  "oa-ieee",
-]
-
-[[package]]
-name = "oa-migration"
-version = "0.0.1"
-
-[[package]]
-name = "oa-migration-switch"
-version = "0.0.1"
-dependencies = [
- "oa-migration",
 ]
 
 [[package]]

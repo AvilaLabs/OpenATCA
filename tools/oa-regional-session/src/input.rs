@@ -8,23 +8,6 @@ use oa_flight::FlightKey;
 
 /// Maximum bytes in one protocol line, excluding its line ending.
 pub const MAX_EVENT_LINE_BYTES: usize = 768;
-
-/// Returns the normalized row version declared by a supported stream header.
-pub fn stream_row_version(header: &str) -> Option<&'static str> {
-    match header {
-        "OA-RS\t1" => Some("v1"),
-        "OA-RS\t2" => Some("v2"),
-        _ => None,
-    }
-}
-
-/// Rejects a known v1/v2 row whose version conflicts with the stream header.
-/// Malformed prefixes remain the row parser's responsibility for stable error accounting.
-pub fn row_version_conflicts_with_stream(line: &str, version: &str) -> bool {
-    line.split_once('\t').is_some_and(|(row_version, _)| {
-        matches!(row_version, "v1" | "v2") && row_version != version
-    })
-}
 /// Maximum route fixes carried by one normalized route event.
 pub const MAX_ROUTE_FIXES: usize = 16;
 /// Maximum bytes in one source label or fix name.
@@ -125,53 +108,10 @@ pub enum FlightOperation {
         from_unit: [u8; 8],
         to_unit: [u8; 8],
     },
-    /// Native oa-flight lifecycle operations retained by OA-RS v2.
-    Lifecycle(FlightLifecycle),
-    /// Native altitude specification, including non-simple forms and at-fix metadata.
-    AssignedAltitude(FlightAltitude),
-    RequestedAltitude(FlightAltitude),
-    /// Native handoff events retain both units and distinguish update from retract.
-    HandoffEvent(FlightHandoff),
 }
 // A7.2: cold enum, size guard waived; one normalized operation.
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FlightLifecycle {
-    Depart,
-    Complete,
-    Cancel,
-    Drop,
-}
-
-/// Native oa-flight altitude shape. Numeric values are feet; `AtFix` keeps the source fix key.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FlightAltitude {
-    Simple(i32),
-    Vfr,
-    VfrOnTopPlus(i32),
-    Block {
-        above_ft: i32,
-        below_ft: i32,
-    },
-    AtFix {
-        before_ft: i32,
-        after_ft: i32,
-        fix: [u8; 12],
-    },
-    Nil,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FlightHandoff {
-    Initiate { from: [u8; 8], to: [u8; 8] },
-    Update { to: [u8; 8] },
-    Accept { by: [u8; 8] },
-    Take { by: [u8; 8] },
-    Retract,
-    Fail,
-}
-
-/// Handoff state operation. Only `Take` transfers ownership.
+/// Handoff state operation. Only `Take` transfers flight ownership.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HandoffOperation {
     /// A NAM RLA acknowledges/routs an offer; it does not mean controller acceptance.
@@ -326,20 +266,6 @@ fn fixed_field<const N: usize>(text: &str) -> Result<[u8; N], InputError> {
     Ok(out)
 }
 
-fn centre_field(text: &str) -> Result<[u8; 4], InputError> {
-    if text.is_empty()
-        || text.len() > 4
-        || !text.is_ascii()
-        || !text.bytes().all(|byte| byte.is_ascii_alphanumeric())
-    {
-        return Err(InputError::InvalidLabel);
-    }
-    let mut out = [0u8; 4];
-    let prefix = out.get_mut(..text.len()).ok_or(InputError::InvalidLabel)?;
-    prefix.copy_from_slice(text.as_bytes());
-    Ok(out)
-}
-
 fn option_i32(text: &str) -> Result<Option<i32>, InputError> {
     if text == "-" {
         Ok(None)
@@ -386,7 +312,7 @@ fn parse_position(parts: &[&str]) -> Result<EventKind, InputError> {
     })
 }
 
-fn parse_flight(parts: &[&str], version: &str) -> Result<EventKind, InputError> {
+fn parse_flight(parts: &[&str]) -> Result<EventKind, InputError> {
     let op = match part(parts, 9)? {
         "PLAN" if parts.len() == 12 => FlightOperation::SetPlan {
             plan_id: fixed_field::<12>(part(parts, 10)?)?,
@@ -414,7 +340,7 @@ fn parse_flight(parts: &[&str], version: &str) -> Result<EventKind, InputError> 
             operation: HandoffOperation::Offer,
             unit: field::<8>(part(parts, 10)?)?,
         },
-        "HO_UPDATE" if version == "v1" && parts.len() == 11 => FlightOperation::Handoff {
+        "HO_UPDATE" if parts.len() == 11 => FlightOperation::Handoff {
             operation: HandoffOperation::Update,
             unit: field::<8>(part(parts, 10)?)?,
         },
@@ -434,103 +360,9 @@ fn parse_flight(parts: &[&str], version: &str) -> Result<EventKind, InputError> 
             operation: HandoffOperation::Fail,
             unit: field::<8>(part(parts, 10)?)?,
         },
-        _ if version == "v2" => parse_flight_v2(parts)?,
         _ => return Err(InputError::InvalidOperation),
     };
     Ok(EventKind::Flight(op))
-}
-
-fn parse_flight_v2(parts: &[&str]) -> Result<FlightOperation, InputError> {
-    use FlightAltitude as A;
-    use FlightHandoff as H;
-    use FlightLifecycle as L;
-    let operation = part(parts, 9)?;
-    let altitude = |form: &str, a: &str, b: &str, fix: &str| -> Result<A, InputError> {
-        Ok(match form {
-            "SIMPLE" if b == "0" && fix == "-" => A::Simple(parse_i32(a)?),
-            "VFR" if a == "0" && b == "0" && fix == "-" => A::Vfr,
-            "VFR_PLUS" if b == "0" && fix == "-" => A::VfrOnTopPlus(parse_i32(a)?),
-            "BLOCK" if fix == "-" => A::Block {
-                above_ft: parse_i32(a)?,
-                below_ft: parse_i32(b)?,
-            },
-            "AT_FIX" if fix != "-" => {
-                let fix = field::<12>(fix)?;
-                if fix.iter().all(|byte| matches!(*byte, 0 | b' '))
-                    || !fix
-                        .iter()
-                        .all(|byte| *byte == 0 || (32..=126).contains(byte))
-                {
-                    return Err(InputError::InvalidLabel);
-                }
-                A::AtFix {
-                    before_ft: parse_i32(a)?,
-                    after_ft: parse_i32(b)?,
-                    fix,
-                }
-            }
-            "NIL" if a == "0" && b == "0" && fix == "-" => A::Nil,
-            _ => return Err(InputError::InvalidOperation),
-        })
-    };
-    let parse_alt = || -> Result<A, InputError> {
-        if parts.len() != 14 {
-            return Err(InputError::BadFieldCount);
-        }
-        altitude(
-            part(parts, 10)?,
-            part(parts, 11)?,
-            part(parts, 12)?,
-            part(parts, 13)?,
-        )
-    };
-    Ok(match operation {
-        "DEPART" if parts.len() == 10 => FlightOperation::Lifecycle(L::Depart),
-        "COMPLETE" if parts.len() == 10 => FlightOperation::Lifecycle(L::Complete),
-        "CANCEL" if parts.len() == 10 => FlightOperation::Lifecycle(L::Cancel),
-        "DROP" if parts.len() == 10 => FlightOperation::Lifecycle(L::Drop),
-        "ASSIGNED_ALT" => FlightOperation::AssignedAltitude(parse_alt()?),
-        "INTERIM_ALT" => {
-            let value = parse_alt()?;
-            if !matches!(value, A::Simple(_) | A::Nil) {
-                return Err(InputError::InvalidOperation);
-            }
-            FlightOperation::SetInterimAltitude {
-                altitude_ft: match value {
-                    A::Simple(altitude_ft) => Some(altitude_ft),
-                    A::Nil => None,
-                    _ => return Err(InputError::InvalidOperation),
-                },
-            }
-        }
-        "REQUESTED_ALT" => {
-            let value = parse_alt()?;
-            if !matches!(value, A::Simple(_) | A::Vfr | A::VfrOnTopPlus(_)) {
-                return Err(InputError::InvalidOperation);
-            }
-            FlightOperation::RequestedAltitude(value)
-        }
-        "HO_INITIATE" if parts.len() == 12 => FlightOperation::HandoffEvent(H::Initiate {
-            from: field::<8>(part(parts, 10)?)?,
-            to: field::<8>(part(parts, 11)?)?,
-        }),
-        "HO_UPDATE" if parts.len() == 11 => FlightOperation::HandoffEvent(H::Update {
-            to: field::<8>(part(parts, 10)?)?,
-        }),
-        "HO_UPDATE_LEGACY" if parts.len() == 11 => FlightOperation::Handoff {
-            operation: HandoffOperation::Update,
-            unit: field::<8>(part(parts, 10)?)?,
-        },
-        "HO_ACCEPT_NATIVE" if parts.len() == 11 => FlightOperation::HandoffEvent(H::Accept {
-            by: field::<8>(part(parts, 10)?)?,
-        }),
-        "HO_TAKE_NATIVE" if parts.len() == 11 => FlightOperation::HandoffEvent(H::Take {
-            by: field::<8>(part(parts, 10)?)?,
-        }),
-        "HO_RETRACT" if parts.len() == 10 => FlightOperation::HandoffEvent(H::Retract),
-        "HO_FAIL_NATIVE" if parts.len() == 10 => FlightOperation::HandoffEvent(H::Fail),
-        _ => return Err(InputError::InvalidOperation),
-    })
 }
 
 fn parse_route(parts: &[&str]) -> Result<EventKind, InputError> {
@@ -601,10 +433,7 @@ fn parse_filed_route(parts: &[&str]) -> Result<EventKind, InputError> {
 /// Parses one protocol event. The caller checks line length before calling this function.
 ///
 /// Position rows have 15 fields; the event type selects the remaining fields:
-/// `v1` or `v2<TAB>receipt_ns<TAB>source_ns<TAB>sequence<TAB>source<TAB>gufi_hex<TAB>address_hex<TAB>centre<TAB>kind...`.
-/// OA-RS v2 adds lossless native flight-operation forms; v1 retains its original grammar.
-/// `centre` is canonical one-to-four-character ASCII alphanumeric text; internal storage zero-pads
-/// it to the fixed four-byte source identity.
+/// `v1<TAB>receipt_ns<TAB>source_ns<TAB>sequence<TAB>source<TAB>gufi_hex<TAB>address_hex<TAB>centre<TAB>kind...`.
 /// Position rows append `lat<TAB>lon<TAB>alt-or--<TAB>east-mmps<TAB>north-mmps<TAB>vertical-rate-or--`;
 /// flight and route payloads use the field counts checked below.
 pub fn parse_event_line(line: &str) -> Result<NormalizedEvent, InputError> {
@@ -615,8 +444,7 @@ pub fn parse_event_line(line: &str) -> Result<NormalizedEvent, InputError> {
     if parts.len() < 9 {
         return Err(InputError::BadFieldCount);
     }
-    let version = part(&parts, 0)?;
-    if !matches!(version, "v1" | "v2") {
+    if part(&parts, 0)? != "v1" {
         return Err(InputError::BadVersion);
     }
     let receipt_ns = parse_i64(part(&parts, 1)?)?;
@@ -630,7 +458,7 @@ pub fn parse_event_line(line: &str) -> Result<NormalizedEvent, InputError> {
     let source = parse_source(part(&parts, 4)?)?;
     let flight_gufi = parse_hex_u128(part(&parts, 5)?)?;
     let aircraft_address = parse_hex_u32(part(&parts, 6)?)?;
-    let centre = centre_field(part(&parts, 7)?)?;
+    let centre = fixed_field::<4>(part(&parts, 7)?)?;
     let kind_name = part(&parts, 8)?;
     // ADS-B carries an aircraft address, not a GUFI. Preserve explicit absence instead of
     // requiring a normalizer to manufacture a flight identity for raw surveillance.
@@ -664,7 +492,7 @@ pub fn parse_event_line(line: &str) -> Result<NormalizedEvent, InputError> {
     }
     let kind = match kind_name {
         "POS" if parts.len() == 15 => parse_position(&parts)?,
-        "FLIGHT" => parse_flight(&parts, version)?,
+        "FLIGHT" => parse_flight(&parts)?,
         "COMMAND" if parts.len() == 14 || parts.len() == 15 => {
             use oa_display::interaction::Intent;
             let name = part(&parts, 13)?;

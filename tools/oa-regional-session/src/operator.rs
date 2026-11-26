@@ -2,8 +2,7 @@
 //! cutoffs; command receipt times are the next recorded cutoff, never a live-clock assertion.
 
 use crate::input::{
-    row_version_conflicts_with_stream, stream_row_version, EventKind, Identity, NormalizedEvent,
-    OperatorCommand, SourceKind, MAX_EVENT_LINE_BYTES,
+    EventKind, Identity, NormalizedEvent, OperatorCommand, SourceKind, MAX_EVENT_LINE_BYTES,
 };
 use crate::runtime::{
     regional_new, regional_pixels, regional_step, RegionalFrame, RegionalRuntime,
@@ -285,19 +284,16 @@ pub fn parse_recording(bytes: &[u8]) -> Result<Vec<RecordedBatch>, String> {
         return Err("recording exceeds 16 MiB".into());
     }
     let text = std::str::from_utf8(bytes).map_err(|_| "recording is not UTF-8")?;
-    let mut rows = text.lines();
-    let header = rows.next().ok_or("missing OA-RS header")?;
-    let row_version = stream_row_version(header).ok_or("unsupported OA-RS header")?;
+    if text.lines().next() != Some("OA-RS\t1") {
+        return Err("expected OA-RS header".into());
+    }
     let mut cursor = session_cursor_new();
     let mut pending: Vec<RecordedEvent> = Vec::with_capacity(crate::MAX_EVENTS_PER_RECEIPT);
     let mut batches = Vec::with_capacity(MAX_FRAMES);
     let mut ordinal = 0u64;
-    for line in rows.filter(|line| !line.is_empty()) {
+    for line in text.lines().skip(1).filter(|line| !line.is_empty()) {
         if line.len() > MAX_EVENT_LINE_BYTES {
             return Err("recording event row exceeds input line limit".into());
-        }
-        if row_version_conflicts_with_stream(line, row_version) {
-            return Err("OA-RS row version does not match stream header".into());
         }
         ordinal = ordinal.checked_add(1).ok_or("recording ordinal overflow")?;
         if ordinal > crate::MAX_SESSION_EVENTS as u64 {

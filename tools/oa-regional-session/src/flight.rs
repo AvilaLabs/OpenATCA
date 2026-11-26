@@ -4,17 +4,13 @@
 
 use oa_flight::{
     flight_get, flights_apply, flights_claiming_address, flights_len, flights_new, key_gufi,
-    op_new, Alt, Flight, FlightConfig, FlightTable, Outcome, Stamp, ALT_AT_FIX, ALT_BLOCK, ALT_NIL,
-    ALT_NONE, ALT_SIMPLE, ALT_VFR, ALT_VFR_ON_TOP_PLUS, C_COUNT, HO_NONE, MAX_VIEWS, OP_ADDRESS,
-    OP_ASSIGN, OP_CANCEL, OP_COMPLETE, OP_COUNT, OP_DEPART, OP_DROP, OP_HO_ACCEPT, OP_HO_FAIL,
-    OP_HO_INITIATE, OP_HO_RETRACT, OP_HO_TAKE, OP_HO_UPDATE, OP_IDENTITY, OP_INTERIM, OP_OWNER,
-    OP_REQUEST, OP_SET_PLAN, R_COUNT, ST_ACTIVE, ST_PROPOSED,
+    op_new, Alt, Flight, FlightConfig, FlightTable, Outcome, Stamp, ALT_NIL, ALT_NONE, ALT_SIMPLE,
+    C_COUNT, HO_NONE, MAX_VIEWS, OP_ADDRESS, OP_ASSIGN, OP_CANCEL, OP_COUNT, OP_HO_ACCEPT,
+    OP_HO_FAIL, OP_HO_INITIATE, OP_HO_RETRACT, OP_HO_TAKE, OP_HO_UPDATE, OP_IDENTITY, OP_INTERIM,
+    OP_OWNER, OP_SET_PLAN, R_COUNT, ST_ACTIVE, ST_PROPOSED,
 };
 
-use crate::input::{
-    EventKind, FlightAltitude, FlightHandoff, FlightLifecycle, FlightOperation, HandoffOperation,
-    NormalizedEvent, SourceKind,
-};
+use crate::input::{EventKind, FlightOperation, HandoffOperation, NormalizedEvent, SourceKind};
 
 /// The driver never admits more than this many flights. A regional demonstration is deliberately
 /// small; larger deployment sizing belongs to a separate explicit configuration review.
@@ -640,16 +636,6 @@ fn flight_apply_validated_event(
             None,
             None,
         ),
-        FlightOperation::AssignedAltitude(altitude) => (
-            OP_ASSIGN,
-            0,
-            [0; 12],
-            Some(core_altitude(altitude)),
-            [0; 8],
-            [0; 8],
-            None,
-            None,
-        ),
         FlightOperation::SetInterimAltitude { altitude_ft } => (
             OP_INTERIM,
             0,
@@ -666,31 +652,6 @@ fn flight_apply_validated_event(
                     b_ft: 0,
                 },
             }),
-            [0; 8],
-            [0; 8],
-            None,
-            None,
-        ),
-        FlightOperation::RequestedAltitude(altitude) => (
-            OP_REQUEST,
-            0,
-            [0; 12],
-            Some(core_altitude(altitude)),
-            [0; 8],
-            [0; 8],
-            None,
-            None,
-        ),
-        FlightOperation::Lifecycle(transition) => (
-            match transition {
-                FlightLifecycle::Depart => OP_DEPART,
-                FlightLifecycle::Complete => OP_COMPLETE,
-                FlightLifecycle::Cancel => OP_CANCEL,
-                FlightLifecycle::Drop => OP_DROP,
-            },
-            0,
-            [0; 12],
-            None,
             [0; 8],
             [0; 8],
             None,
@@ -835,20 +796,6 @@ fn flight_apply_validated_event(
             ),
             HandoffOperation::Fail => (OP_HO_FAIL, 0, [0; 12], None, from_unit, [0; 8], None, None),
         },
-        FlightOperation::HandoffEvent(operation) => match operation {
-            FlightHandoff::Initiate { from, to } => {
-                (OP_HO_INITIATE, 0, [0; 12], None, from, to, None, None)
-            }
-            FlightHandoff::Update { to } => {
-                (OP_HO_UPDATE, 0, [0; 12], None, [0; 8], to, None, None)
-            }
-            FlightHandoff::Accept { by } => {
-                (OP_HO_ACCEPT, 0, [0; 12], None, [0; 8], by, None, None)
-            }
-            FlightHandoff::Take { by } => (OP_HO_TAKE, 0, [0; 12], None, [0; 8], by, None, None),
-            FlightHandoff::Retract => (OP_HO_RETRACT, 0, [0; 12], None, [0; 8], [0; 8], None, None),
-            FlightHandoff::Fail => (OP_HO_FAIL, 0, [0; 12], None, [0; 8], [0; 8], None, None),
-        },
     };
     let mut op = op_new(
         kind,
@@ -862,9 +809,6 @@ fn flight_apply_validated_event(
     op.plan_id = plan_id;
     if let Some(altitude) = alt {
         op.alt = altitude;
-    }
-    if let FlightOperation::AssignedAltitude(FlightAltitude::AtFix { fix, .. }) = operation {
-        op.fix = fix;
     }
     op.unit_a = unit_a;
     op.unit_b = unit_b;
@@ -881,45 +825,6 @@ fn flight_apply_validated_event(
         operation: Some(result),
         adapter_refusal: None,
         ignored_non_flight_event: false,
-    }
-}
-
-fn core_altitude(altitude: FlightAltitude) -> Alt {
-    match altitude {
-        FlightAltitude::Simple(a_ft) => Alt {
-            form: ALT_SIMPLE,
-            a_ft,
-            b_ft: 0,
-        },
-        FlightAltitude::Vfr => Alt {
-            form: ALT_VFR,
-            a_ft: 0,
-            b_ft: 0,
-        },
-        FlightAltitude::VfrOnTopPlus(a_ft) => Alt {
-            form: ALT_VFR_ON_TOP_PLUS,
-            a_ft,
-            b_ft: 0,
-        },
-        FlightAltitude::Block { above_ft, below_ft } => Alt {
-            form: ALT_BLOCK,
-            a_ft: above_ft,
-            b_ft: below_ft,
-        },
-        FlightAltitude::AtFix {
-            before_ft,
-            after_ft,
-            ..
-        } => Alt {
-            form: ALT_AT_FIX,
-            a_ft: before_ft,
-            b_ft: after_ft,
-        },
-        FlightAltitude::Nil => Alt {
-            form: ALT_NIL,
-            a_ft: 0,
-            b_ft: 0,
-        },
     }
 }
 
@@ -1194,205 +1099,5 @@ fn view_result(
         status,
         claimants,
         views_written,
-    }
-}
-
-#[cfg(test)]
-mod native_operation_tests {
-    #![allow(clippy::expect_used, clippy::unwrap_used, clippy::indexing_slicing)]
-
-    use super::*;
-    use crate::input::{FlightAltitude, FlightHandoff, FlightLifecycle};
-
-    fn driver() -> FlightDriver {
-        flight_driver_new(FlightDriverConfig {
-            flight_capacity: 8,
-            refusal_log_capacity: 16,
-            conflict_log_capacity: 16,
-        })
-        .expect("small bounded test driver")
-    }
-
-    fn event(
-        gufi: u128,
-        receipt_ms: i64,
-        sequence: u64,
-        operation: FlightOperation,
-    ) -> NormalizedEvent {
-        NormalizedEvent {
-            receipt_ns: receipt_ms * 1_000_000,
-            source_ns: receipt_ms * 1_000_000,
-            sequence,
-            source: SourceKind::Flight,
-            identity: crate::input::Identity {
-                flight_gufi: gufi,
-                aircraft_address: 0,
-            },
-            centre: *b"ZAU1",
-            kind: EventKind::Flight(operation),
-        }
-    }
-
-    fn apply(driver: &mut FlightDriver, gufi: u128, ms: i64, seq: u64, op: FlightOperation) {
-        let result = flight_apply_event(driver, &event(gufi, ms, seq, op)).expect("valid event");
-        assert_eq!(result.adapter_refusal, None);
-        assert_eq!(result.operation, Some(Outcome::Applied));
-    }
-
-    #[test]
-    fn native_altitude_handoff_and_lifecycle_values_reach_core_without_reduction() {
-        let mut active_driver = driver();
-        apply(
-            &mut active_driver,
-            100,
-            1_000,
-            1,
-            FlightOperation::SetPlan {
-                plan_id: *b"PLAN00000001",
-                status: ST_ACTIVE,
-            },
-        );
-        apply(
-            &mut active_driver,
-            100,
-            1_001,
-            2,
-            FlightOperation::AssignedAltitude(FlightAltitude::AtFix {
-                before_ft: 8_000,
-                after_ft: 7_000,
-                fix: *b"FIX         ",
-            }),
-        );
-        apply(
-            &mut active_driver,
-            100,
-            1_002,
-            3,
-            FlightOperation::RequestedAltitude(FlightAltitude::VfrOnTopPlus(5_500)),
-        );
-        apply(
-            &mut active_driver,
-            100,
-            1_003,
-            4,
-            FlightOperation::HandoffEvent(FlightHandoff::Initiate {
-                from: *b"FROM\0\0\0\0",
-                to: *b"TO\0\0\0\0\0\0",
-            }),
-        );
-        apply(
-            &mut active_driver,
-            100,
-            1_004,
-            5,
-            FlightOperation::HandoffEvent(FlightHandoff::Update {
-                to: *b"NEXT\0\0\0\0",
-            }),
-        );
-        apply(
-            &mut active_driver,
-            100,
-            1_005,
-            6,
-            FlightOperation::HandoffEvent(FlightHandoff::Accept {
-                by: *b"NEXT\0\0\0\0",
-            }),
-        );
-        apply(
-            &mut active_driver,
-            100,
-            1_006,
-            7,
-            FlightOperation::HandoffEvent(FlightHandoff::Take {
-                by: *b"NEXT\0\0\0\0",
-            }),
-        );
-        apply(
-            &mut active_driver,
-            100,
-            1_007,
-            8,
-            FlightOperation::Lifecycle(FlightLifecycle::Depart),
-        );
-        apply(
-            &mut active_driver,
-            100,
-            1_008,
-            9,
-            FlightOperation::Lifecycle(FlightLifecycle::Complete),
-        );
-        let record =
-            flight_get(&active_driver.table, &key_gufi(100)).expect("flight remains inspectable");
-        assert_eq!(
-            record.assigned,
-            Alt {
-                form: ALT_AT_FIX,
-                a_ft: 8_000,
-                b_ft: 7_000
-            }
-        );
-        assert_eq!(record.assigned_fix, *b"FIX         ");
-        assert_eq!(
-            record.requested,
-            Alt {
-                form: ALT_VFR_ON_TOP_PLUS,
-                a_ft: 5_500,
-                b_ft: 0
-            }
-        );
-        assert_eq!(record.ho_state, HO_NONE);
-        assert_eq!(record.owner, *b"NEXT\0\0\0\0");
-        assert_eq!(
-            view_for_flight(&record, *b"ZAU1").unwrap().plan_state,
-            oa_flight::ST_COMPLETED
-        );
-
-        let mut cancelled = driver();
-        apply(
-            &mut cancelled,
-            200,
-            2_000,
-            1,
-            FlightOperation::SetPlan {
-                plan_id: *b"PLAN00000002",
-                status: ST_PROPOSED,
-            },
-        );
-        apply(
-            &mut cancelled,
-            200,
-            2_001,
-            2,
-            FlightOperation::Lifecycle(FlightLifecycle::Cancel),
-        );
-        let record = flight_get(&cancelled.table, &key_gufi(200)).unwrap();
-        assert_eq!(
-            view_for_flight(&record, *b"ZAU1").unwrap().plan_state,
-            oa_flight::ST_CANCELLED
-        );
-
-        let mut dropped = driver();
-        apply(
-            &mut dropped,
-            300,
-            3_000,
-            1,
-            FlightOperation::SetPlan {
-                plan_id: *b"PLAN00000003",
-                status: ST_PROPOSED,
-            },
-        );
-        apply(
-            &mut dropped,
-            300,
-            3_001,
-            2,
-            FlightOperation::Lifecycle(FlightLifecycle::Drop),
-        );
-        let record = flight_get(&dropped.table, &key_gufi(300)).unwrap();
-        assert_eq!(
-            view_for_flight(&record, *b"ZAU1").unwrap().plan_state,
-            oa_flight::ST_DROPPED
-        );
     }
 }

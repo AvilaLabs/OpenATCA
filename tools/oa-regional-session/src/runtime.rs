@@ -313,7 +313,7 @@ fn evaluate_assigned_atpa(
     scratch.severity.resize(pair_count, AtpaSeverity::Clear);
     scratch.current_distance_milli_nm.resize(pair_count, 0);
     scratch.seconds_to_loss_milli.resize(pair_count, 0);
-    let _result = terminal_aids::evaluate_atpa_pairs(
+    let result = terminal_aids::evaluate_atpa_pairs(
         scan_ns,
         AtpaPairs {
             lead_runway_id: &scratch.runway_id,
@@ -764,7 +764,7 @@ fn runway_aid_packets(
 
 #[cfg(test)]
 mod runway_aid_packet_tests {
-    use super::{runway_aid_packets, AtpaScratch};
+    use super::runway_aid_packets;
     use oa_display::core::runway_aids::Availability;
 
     // REQ: OA-RWY-022
@@ -1277,7 +1277,6 @@ pub struct QuarantineMaintenanceRequest<'a> {
     pub expected_identity: InputIdentity,
     pub audit_log: &'a Path,
     pub expected_checkpoint: oa_audit_core::Checkpoint,
-    pub principal_registry: &'a oa_audit_core::PrincipalRegistry,
     pub principal: u64,
     pub role: oa_audit_core::Role,
     pub time_ns: u64,
@@ -1293,7 +1292,6 @@ pub fn regional_acknowledge_quarantine_before_commit(
         expected_identity,
         audit_log,
         expected_checkpoint,
-        principal_registry,
         principal,
         role,
         time_ns,
@@ -1304,15 +1302,6 @@ pub fn regional_acknowledge_quarantine_before_commit(
     }
     if principal == 0 || time_ns == 0 {
         return Err("audit principal and timestamp must be positive".into());
-    }
-    let registry_role = oa_audit_core::authorize_principal(
-        principal_registry,
-        principal,
-        oa_audit_core::Action::QuarantineRelease,
-    )
-    .map_err(|error| format!("quarantine principal registry refused: {error:?}"))?;
-    if role != registry_role {
-        return Err("claimed quarantine role does not match pinned principal registry".into());
     }
     if manual_handoff_ref.is_empty()
         || manual_handoff_ref.len() > 256
@@ -1349,7 +1338,7 @@ pub fn regional_acknowledge_quarantine_before_commit(
         .map_err(|error| format!("quarantine audit details: {error:?}"))?;
     let event = oa_audit_core::Event {
         principal,
-        role: registry_role,
+        role,
         action: oa_audit_core::Action::QuarantineRelease,
         target,
         target_len,
@@ -2073,7 +2062,7 @@ mod transaction_tests {
         index
     }
 
-    // REQ: OA-AUDIT-002, OA-AUDIT-003, OA-AUDIT-005, OA-AUDIT-006, OA-AUDIT-007
+    // REQ: OA-QUAR-004, OA-AUDIT-002, OA-AUDIT-003, OA-AUDIT-005, OA-AUDIT-006
     #[test]
     fn quarantine_maintainer_appends_before_ack_and_refuses_audit_failure() {
         let model = synthetic_model().expect("public synthetic model");
@@ -2117,9 +2106,6 @@ mod transaction_tests {
         let before = queue_front(&runtime.quarantine_queue, source)
             .expect("read synthetic queue")
             .expect("queued event");
-        let registry =
-            oa_audit_core::parse_principal_registry(b"OACERT-LOCAL-PRINCIPALS-V1\n51\toperate\n")
-                .expect("synthetic principal registry");
         let serial = NEXT_QUARANTINE_AUDIT_TEST.fetch_add(1, Ordering::Relaxed);
         let root = std::env::temp_dir().join(format!(
             "oa-regional-quarantine-maintenance-{}-{serial}",
@@ -2139,7 +2125,6 @@ mod transaction_tests {
                 expected_identity: identity,
                 audit_log: &protected_alias,
                 expected_checkpoint: checkpoint,
-                principal_registry: &registry,
                 principal: 51,
                 role: oa_audit_core::Role::Operate,
                 time_ns: 100,
@@ -2161,7 +2146,6 @@ mod transaction_tests {
                 expected_identity: identity,
                 audit_log: &wrong_role_path,
                 expected_checkpoint: checkpoint,
-                principal_registry: &registry,
                 principal: 51,
                 role: oa_audit_core::Role::Monitor,
                 time_ns: 100,
@@ -2183,7 +2167,6 @@ mod transaction_tests {
                 expected_identity: identity,
                 audit_log: &audit_path,
                 expected_checkpoint: checkpoint,
-                principal_registry: &registry,
                 principal: 51,
                 role: oa_audit_core::Role::Operate,
                 time_ns: 101,

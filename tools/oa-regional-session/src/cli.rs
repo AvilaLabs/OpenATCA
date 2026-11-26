@@ -10,10 +10,7 @@ use crate::runtime::{
     DEFAULT_REGIONAL_RUN_PROFILE,
 };
 use crate::surveillance::{SurveillanceConfig, FRAME_HEIGHT, FRAME_WIDTH, MAX_FRAMES};
-use crate::{
-    flush_receipt_group, parse_event_line, push_event, row_version_conflicts_with_stream,
-    session_cursor_new_with_limit, stream_row_version,
-};
+use crate::{flush_receipt_group, parse_event_line, push_event, session_cursor_new_with_limit};
 use oa_airspace::core::model::{self, Model};
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
@@ -37,23 +34,22 @@ pub enum MsawSource {
 
 /// Explicit caller-supplied inputs for one in-process manual quarantine handoff.
 #[derive(Clone, Debug)]
+/// Independently pinned verified package supplying explicit runway-aid configuration.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RunwayAidPackageOptions {
+    pub root: PathBuf,
+    pub manifest_sha256: [u8; 32],
+}
+
 pub struct QuarantineReleaseOptions {
     pub source: oa_quarantine::InputSource,
     pub identity: oa_quarantine::InputIdentity,
     pub manual_handoff_ref: String,
     pub audit_log: PathBuf,
     pub audit_checkpoint: oa_audit_core::Checkpoint,
-    pub principal_registry: oa_audit_core::PrincipalRegistry,
     pub principal: u64,
     pub role: oa_audit_core::Role,
     pub time_ns: u64,
-}
-
-/// Independently pinned, manifest-bound terminal-aid package for one offline runtime.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RunwayAidPackageOptions {
-    pub root: PathBuf,
-    pub manifest_sha256: [u8; 32],
 }
 
 /// Persisted CLI profile selection. The absent/default option remains the historical 32-track
@@ -237,7 +233,7 @@ pub fn run_session_with_profile_options_and_quarantine_release(
     selected_profile: RegionalCliProfile,
     quarantine_release: Option<&QuarantineReleaseOptions>,
 ) -> Result<(), String> {
-    run_session_with_profile_options_and_authorities(
+    run_session_with_profile_options_and_runway_aids(
         bytes,
         output,
         source,
@@ -249,7 +245,8 @@ pub fn run_session_with_profile_options_and_quarantine_release(
     )
 }
 
-pub fn run_session_with_profile_options_and_authorities(
+/// Execute the same normal regional caller path with an optional independently pinned package.
+pub fn run_session_with_profile_options_and_runway_aids(
     bytes: &[u8],
     output: &Path,
     source: &ModelSource,
@@ -295,21 +292,18 @@ pub fn run_session_with_profile_options_and_authorities(
         None => regional_new_with_profile(model, snapshot_sha, *b"ZAU1", cfg, profile)?,
     };
     if let Some(options) = runway_aids {
-        let verified = oa_adapt::manifest::verify_current(&options.root, options.manifest_sha256)
+        let package = oa_adapt::manifest::verify_current(&options.root, options.manifest_sha256)
             .map_err(|error| format!("verified runway-aid package refused: {error}"))?;
-        regional_install_verified_runway_aids(&mut runtime, &verified)?;
+        regional_install_verified_runway_aids(&mut runtime, &package)?;
     }
     let text = std::str::from_utf8(bytes).map_err(|_| "input not UTF-8")?;
-    let mut rows = text.lines();
-    let header = rows.next().ok_or("missing OA-RS header")?;
-    let row_version = stream_row_version(header).ok_or("unsupported OA-RS header")?;
+    if text.lines().next() != Some("OA-RS\t1") {
+        return Err("expected OA-RS header".into());
+    }
     let mut cursor = session_cursor_new_with_limit(profile.max_total_events)
         .map_err(|error| format!("session profile event capacity: {error:?}"))?;
     let mut batches = Vec::with_capacity(MAX_FRAMES);
-    for row in rows.filter(|line| !line.is_empty()) {
-        if row_version_conflicts_with_stream(row, row_version) {
-            return Err("OA-RS row version does not match stream header".into());
-        }
+    for row in text.lines().skip(1).filter(|line| !line.is_empty()) {
         let event = parse_event_line(row).map_err(|e| format!("input: {e:?}"))?;
         if let Some(batch) =
             push_event(&mut cursor, event).map_err(|e| format!("input order: {e:?}"))?
@@ -450,7 +444,6 @@ pub fn run_session_with_profile_options_and_authorities(
                 expected_identity: request.identity,
                 audit_log: &request.audit_log,
                 expected_checkpoint: request.audit_checkpoint,
-                principal_registry: &request.principal_registry,
                 principal: request.principal,
                 role: request.role,
                 time_ns: request.time_ns,

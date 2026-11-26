@@ -129,25 +129,8 @@ pub fn icao_route_revision(
 fn valid_refusal_key(key: t::FlightKey) -> bool {
     key.gufi.iter().any(|&byte| byte != 0)
         && (1..=0x00ff_ffff).contains(&key.aircraft_address)
-        && valid_padded_centre(&key.centre)
+        && key.centre.iter().all(u8::is_ascii_alphanumeric)
         && key.plan_id.iter().any(|&byte| byte != 0)
-}
-
-fn valid_padded_centre(bytes: &[u8; 4]) -> bool {
-    if !bytes.is_ascii() {
-        return false;
-    }
-    let end = bytes
-        .iter()
-        .position(|&byte| byte == 0)
-        .unwrap_or(bytes.len());
-    let Some(prefix) = bytes.get(..end) else {
-        return false;
-    };
-    let Some(padding) = bytes.get(end..) else {
-        return false;
-    };
-    end > 0 && prefix.iter().all(u8::is_ascii_alphanumeric) && padding.iter().all(|&byte| byte == 0)
 }
 
 fn refusal_fence(
@@ -1239,14 +1222,6 @@ mod refusal_fence_tests {
             centre: *b"ZAU1",
             plan_id,
         }
-    }
-
-    #[test]
-    fn source_padded_artcc_is_valid_but_noncanonical_padding_is_not() {
-        assert!(valid_padded_centre(b"ZAU\0"));
-        assert!(valid_padded_centre(b"ZAU1"));
-        assert!(!valid_padded_centre(b"Z\0AU"));
-        assert!(!valid_padded_centre(b"\0\0\0\0"));
     }
 
     fn revision(key: t::FlightKey, source_ms: i64, available_ms: i64) -> t::RevisionEvidence {

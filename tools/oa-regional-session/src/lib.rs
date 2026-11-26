@@ -8,7 +8,6 @@ pub mod conflict_probe;
 pub mod flight;
 pub mod input;
 pub mod migration_amendment;
-pub mod migration_drill;
 pub mod migration_full_day;
 pub mod migration_full_day_runner;
 pub mod migration_g3;
@@ -31,9 +30,8 @@ pub mod session;
 pub mod surveillance;
 
 pub use input::{
-    parse_event_line, row_version_conflicts_with_stream, stream_row_version, EventKind,
-    FlightAltitude, FlightHandoff, FlightLifecycle, FlightOperation, HandoffOperation, Identity,
-    InputError, NormalizedEvent, RouteFixInput, SourceKind, MAX_EVENT_LINE_BYTES,
+    parse_event_line, EventKind, FlightOperation, HandoffOperation, Identity, InputError,
+    NormalizedEvent, RouteFixInput, SourceKind, MAX_EVENT_LINE_BYTES,
 };
 pub use runtime::{
     regional_new_with_profile, regional_profile_limits, RegionalRunProfile,

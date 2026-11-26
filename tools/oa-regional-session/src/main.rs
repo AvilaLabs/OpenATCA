@@ -7,10 +7,9 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 use oa_regional_session::{
-    flush_receipt_group, parse_event_line, push_event, row_version_conflicts_with_stream,
-    session_cursor_new_with_limit, session_total_events, stream_row_version, summarize_input_batch,
-    FrameEvidence, InputError, MAX_EVENT_LINE_BYTES, MAX_RECORDED_PROFILE_EVENTS,
-    MAX_SESSION_EVENTS,
+    flush_receipt_group, parse_event_line, push_event, session_cursor_new_with_limit,
+    session_total_events, summarize_input_batch, FrameEvidence, InputError, MAX_EVENT_LINE_BYTES,
+    MAX_RECORDED_PROFILE_EVENTS, MAX_SESSION_EVENTS,
 };
 
 const MAX_INPUT_BYTES: u64 = 16 * 1024 * 1024;
@@ -82,14 +81,12 @@ fn arguments() -> Result<Arguments, CliError> {
     let mut audit_principal = None;
     let mut audit_role = None;
     let mut audit_time_ns = None;
-    let mut principal_registry_path = None;
-    let mut principal_registry_sha256 = None;
     let mut runway_aid_package_root = None;
     let mut runway_aid_manifest_sha256 = None;
     let mut count = 0;
     while let Some(arg) = args.next() {
         count += 1;
-        if count > 56 {
+        if count > 44 {
             return Err(CliError::Usage);
         }
         match arg.to_str() {
@@ -105,6 +102,20 @@ fn arguments() -> Result<Arguments, CliError> {
             }
             Some("--synthetic-msaw") if execute && safety.is_none() => {
                 safety = Some(oa_regional_session::cli::MsawSource::Synthetic)
+            }
+            Some("--runway-aid-package-root") if execute && runway_aid_package_root.is_none() => {
+                runway_aid_package_root =
+                    Some(args.next().map(PathBuf::from).ok_or(CliError::Usage)?);
+            }
+            Some("--runway-aid-manifest-sha256")
+                if execute && runway_aid_manifest_sha256.is_none() =>
+            {
+                runway_aid_manifest_sha256 = Some(
+                    args.next()
+                        .and_then(|value| value.into_string().ok())
+                        .and_then(|value| parse_audit_digest(&value).ok())
+                        .ok_or(CliError::Usage)?,
+                );
             }
             Some("--msaw-inputs") if execute && safety.is_none() => {
                 safety = Some(oa_regional_session::cli::MsawSource::Manifest(
@@ -126,20 +137,6 @@ fn arguments() -> Result<Arguments, CliError> {
                         }
                         _ => return Err(CliError::Usage),
                     },
-                );
-            }
-            Some("--runway-aid-package-root") if execute && runway_aid_package_root.is_none() => {
-                runway_aid_package_root =
-                    Some(args.next().map(PathBuf::from).ok_or(CliError::Usage)?);
-            }
-            Some("--runway-aid-manifest-sha256")
-                if execute && runway_aid_manifest_sha256.is_none() =>
-            {
-                runway_aid_manifest_sha256 = Some(
-                    args.next()
-                        .and_then(|value| value.into_string().ok())
-                        .and_then(|value| parse_audit_digest(&value).ok())
-                        .ok_or(CliError::Usage)?,
                 );
             }
             Some("--quarantine-release-source") if execute && quarantine_source.is_none() => {
@@ -232,20 +229,6 @@ fn arguments() -> Result<Arguments, CliError> {
                         .ok_or(CliError::Usage)?,
                 );
             }
-            Some("--principal-registry") if execute && principal_registry_path.is_none() => {
-                principal_registry_path =
-                    Some(args.next().map(PathBuf::from).ok_or(CliError::Usage)?);
-            }
-            Some("--principal-registry-sha256")
-                if execute && principal_registry_sha256.is_none() =>
-            {
-                principal_registry_sha256 = Some(
-                    args.next()
-                        .and_then(|value| value.into_string().ok())
-                        .and_then(|value| parse_audit_digest(&value).ok())
-                        .ok_or(CliError::Usage)?,
-                );
-            }
             _ => return Err(CliError::Usage),
         }
     }
@@ -263,21 +246,11 @@ fn arguments() -> Result<Arguments, CliError> {
         || audit_tail.is_some()
         || audit_principal.is_some()
         || audit_role.is_some()
-        || audit_time_ns.is_some()
-        || principal_registry_path.is_some()
-        || principal_registry_sha256.is_some();
+        || audit_time_ns.is_some();
     let quarantine_release = if any_quarantine_release {
         let source = quarantine_source.ok_or(CliError::Usage)?;
         let source_instance = quarantine_instance.ok_or(CliError::Usage)?;
         let item_id = quarantine_item.ok_or(CliError::Usage)?;
-        let registry_path = principal_registry_path.ok_or(CliError::Usage)?;
-        let registry_pin = principal_registry_sha256.ok_or(CliError::Usage)?;
-        oa_sealed::Sealed::production()
-            .check(&registry_path)
-            .map_err(|_| CliError::Usage)?;
-        let principal_registry =
-            oa_audit_log::shell::load_principal_registry(&registry_path, registry_pin)
-                .map_err(|_| CliError::Usage)?;
         Some(oa_regional_session::cli::QuarantineReleaseOptions {
             source,
             identity: oa_quarantine::InputIdentity {
@@ -293,7 +266,6 @@ fn arguments() -> Result<Arguments, CliError> {
             },
             principal: audit_principal.ok_or(CliError::Usage)?,
             role: audit_role.ok_or(CliError::Usage)?,
-            principal_registry,
             time_ns: audit_time_ns.ok_or(CliError::Usage)?,
         })
     } else {
@@ -405,8 +377,11 @@ fn parse_input(bytes: &[u8]) -> Result<Vec<FrameEvidence>, CliError> {
 fn parse_input_with_limit(bytes: &[u8], max_events: usize) -> Result<Vec<FrameEvidence>, CliError> {
     let text = std::str::from_utf8(bytes).map_err(|_| CliError::InvalidUtf8)?;
     let mut lines = text.split('\n');
-    let header = lines.next().ok_or(CliError::MissingHeader)?;
-    let row_version = stream_row_version(header).ok_or(CliError::BadHeader)?;
+    match lines.next() {
+        Some("OA-RS\t1") => {}
+        Some(_) => return Err(CliError::BadHeader),
+        None => return Err(CliError::MissingHeader),
+    }
     let mut cursor =
         session_cursor_new_with_limit(max_events).map_err(|_| CliError::TooManyEvents)?;
     let mut evidence = Vec::new();
@@ -422,14 +397,6 @@ fn parse_input_with_limit(bytes: &[u8], max_events: usize) -> Result<Vec<FrameEv
             return Err(CliError::BadLine {
                 line: line_number,
                 error: InputError::RowTooLong,
-                accounting,
-            });
-        }
-        if row_version_conflicts_with_stream(line, row_version) {
-            let accounting = row_failure_accounting(&cursor, lines)?;
-            return Err(CliError::BadLine {
-                line: line_number,
-                error: InputError::BadVersion,
                 accounting,
             });
         }
@@ -583,7 +550,7 @@ fn run() -> Result<(), CliError> {
     };
     let frames = parse_input_with_limit(&bytes, max_events)?;
     match model {
-        Some(source) => oa_regional_session::cli::run_session_with_profile_options_and_authorities(
+        Some(source) => oa_regional_session::cli::run_session_with_profile_options_and_runway_aids(
             &bytes,
             &output,
             &source,
@@ -601,11 +568,11 @@ fn run() -> Result<(), CliError> {
 fn main() {
     if let Err(error) = run() {
         let message = match error {
-            CliError::Usage => "usage: oa-regional-session run --input FILE --out NEW_DIR (--snapshot FILE | --synthetic-model) [--msaw-inputs MANIFEST | --synthetic-msaw] [--performance MANIFEST] [--profile recorded-peak-rendered] [--runway-aid-package-root DIR --runway-aid-manifest-sha256 SHA256] [--quarantine-release-source flight-data|surveillance --quarantine-release-instance N --quarantine-release-item N --manual-handoff-ref TEXT --audit-log FILE --audit-count N --audit-tail SHA256 --audit-principal N --audit-role monitor|operate|configure --audit-time-ns N --principal-registry FILE --principal-registry-sha256 SHA256]; stage --input FILE --out NEW_DIR".to_owned(),
+            CliError::Usage => "usage: oa-regional-session run --input FILE --out NEW_DIR (--snapshot FILE | --synthetic-model) [--msaw-inputs MANIFEST | --synthetic-msaw] [--performance MANIFEST] [--profile recorded-peak-rendered] [--runway-aid-package-root DIR --runway-aid-manifest-sha256 SHA256] [--quarantine-release-source flight-data|surveillance --quarantine-release-instance N --quarantine-release-item N --manual-handoff-ref TEXT --audit-log FILE --audit-count N --audit-tail SHA256 --audit-principal N --audit-role monitor|operate|configure --audit-time-ns N]; stage --input FILE --out NEW_DIR".to_owned(),
             CliError::Io(error) => format!("I/O error: {error}"),
             CliError::InputTooLarge => "input exceeds the 16 MiB limit".to_owned(),
             CliError::InvalidUtf8 => "input is not UTF-8".to_owned(),
-            CliError::BadHeader => "expected header OA-RS<TAB>1 or OA-RS<TAB>2".to_owned(),
+            CliError::BadHeader => "expected header OA-RS<TAB>1".to_owned(),
             CliError::MissingHeader => "input header is missing".to_owned(),
             CliError::BadLine { line, error, accounting } => format!(
                 "invalid protocol row at line {line}: {error:?}; normalized_event_rows admitted={} refused={} unexamined={} denominator={}",
@@ -696,30 +663,6 @@ mod tests {
             }
         );
         assert!(parse_input(input.as_bytes()).is_ok());
-    }
-
-    #[test]
-    fn normalized_stream_header_and_rows_must_share_the_declared_version() {
-        let v1 = ROW.replace("{sequence}", "1");
-        let v2 = v1.replacen("v1\t", "v2\t", 1);
-        assert!(parse_input_with_limit(format!("OA-RS\t1\n{v1}\n").as_bytes(), 2).is_ok());
-        assert!(parse_input_with_limit(format!("OA-RS\t2\n{v2}\n").as_bytes(), 2).is_ok());
-        assert_eq!(
-            bad_line_accounting(
-                parse_input_with_limit(format!("OA-RS\t1\n{v2}\n").as_bytes(), 2),
-                InputError::BadVersion,
-            )
-            .admitted,
-            0
-        );
-        assert_eq!(
-            bad_line_accounting(
-                parse_input_with_limit(format!("OA-RS\t2\n{v1}\n").as_bytes(), 2),
-                InputError::BadVersion,
-            )
-            .admitted,
-            0
-        );
     }
 
     #[test]

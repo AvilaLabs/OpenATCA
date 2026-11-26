@@ -10,8 +10,7 @@ use oa_adsb::{
 };
 use oa_fixm::{new_events, Decoder, Field, Limits as FixmLimits};
 use oa_flight::{
-    Alt, ALT_AT_FIX, ALT_BLOCK, ALT_NIL, ALT_SIMPLE, ALT_VFR, ALT_VFR_ON_TOP_PLUS, OP_ADDRESS,
-    OP_ASSIGN, OP_CANCEL, OP_COMPLETE, OP_COUNT, OP_DEPART, OP_DROP, OP_HO_ACCEPT, OP_HO_FAIL,
+    Alt, ALT_NIL, ALT_SIMPLE, OP_ADDRESS, OP_ASSIGN, OP_COUNT, OP_HO_ACCEPT, OP_HO_FAIL,
     OP_HO_INITIATE, OP_HO_RETRACT, OP_HO_TAKE, OP_HO_UPDATE, OP_IDENTITY, OP_INTERIM, OP_OWNER,
     OP_REQUEST, OP_SET_PLAN,
 };
@@ -217,8 +216,6 @@ pub struct RecordedAdapterCounts {
     pub unsupported_operations: [u64; OP_COUNT],
     pub invalid_operation_time: u64,
     pub source_after_receipt: u64,
-    pub adsb_source_after_receipt: u64,
-    pub sfdps_source_after_receipt: u64,
     pub invalid_operation_identity: u64,
     pub invalid_operation_centre: u64,
     pub invalid_operation_address: u64,
@@ -235,7 +232,7 @@ pub struct RecordedAdapterCounts {
     pub events_emitted: u64,
 }
 
-pub(crate) fn zero_recorded_adapter_counts() -> RecordedAdapterCounts {
+fn zero_recorded_adapter_counts() -> RecordedAdapterCounts {
     RecordedAdapterCounts {
         frames_adsb: 0,
         frames_sfdps: 0,
@@ -284,8 +281,6 @@ pub(crate) fn zero_recorded_adapter_counts() -> RecordedAdapterCounts {
         unsupported_operations: [0; OP_COUNT],
         invalid_operation_time: 0,
         source_after_receipt: 0,
-        adsb_source_after_receipt: 0,
-        sfdps_source_after_receipt: 0,
         invalid_operation_identity: 0,
         invalid_operation_centre: 0,
         invalid_operation_address: 0,
@@ -1161,8 +1156,6 @@ fn adapt_adsb_frame(
         }
         if measurement.toa_ns > frame.receipt_ns {
             out.counts.source_after_receipt = out.counts.source_after_receipt.saturating_add(1);
-            out.counts.adsb_source_after_receipt =
-                out.counts.adsb_source_after_receipt.saturating_add(1);
             out.counts.invalid_position_rows = out.counts.invalid_position_rows.saturating_add(1);
             quarantine_item(
                 quarantine_queue,
@@ -1905,7 +1898,6 @@ fn adapt_sfdps_frame(
             match normalized_flight_operation(NormalizedFlightOperationInput {
                 kind: op.kind,
                 alt: op.alt,
-                fix: op.fix,
                 plan_id: op.plan_id,
                 state: op.state,
                 unit_a: op.unit_a,
@@ -1933,8 +1925,6 @@ fn adapt_sfdps_frame(
                     if source_ns > frame.receipt_ns {
                         out.counts.source_after_receipt =
                             out.counts.source_after_receipt.saturating_add(1);
-                        out.counts.sfdps_source_after_receipt =
-                            out.counts.sfdps_source_after_receipt.saturating_add(1);
                         unsupported = true;
                         refusal_reasons |= REASON_INPUT_INVALID;
                         continue;
@@ -1946,7 +1936,7 @@ fn adapt_sfdps_frame(
                         refusal_reasons |= REASON_IDENTITY_OR_LOCATION_CONFLICT;
                         continue;
                     }
-                    if !valid_padded_ascii(&op.centre) {
+                    if !op.centre.iter().all(u8::is_ascii_alphanumeric) {
                         out.counts.invalid_operation_centre =
                             out.counts.invalid_operation_centre.saturating_add(1);
                         unsupported = true;
@@ -2060,7 +2050,6 @@ fn adapt_sfdps_frame(
 struct NormalizedFlightOperationInput {
     kind: u8,
     alt: Alt,
-    fix: [u8; 12],
     plan_id: [u8; 12],
     state: u8,
     unit_a: [u8; 8],
@@ -2074,11 +2063,10 @@ struct NormalizedFlightOperationInput {
 fn normalized_flight_operation(
     input: NormalizedFlightOperationInput,
 ) -> Option<(crate::input::FlightOperation, u32)> {
-    use crate::input::{FlightHandoff, FlightLifecycle, FlightOperation};
+    use crate::input::{FlightOperation, HandoffOperation};
     let NormalizedFlightOperationInput {
         kind,
         alt,
-        fix,
         plan_id,
         state,
         unit_a,
@@ -2101,15 +2089,11 @@ fn normalized_flight_operation(
             altitude_ft: alt.a_ft,
         },
         OP_ASSIGN if alt.form == ALT_NIL => FlightOperation::ClearAssignedAltitude,
-        OP_ASSIGN => FlightOperation::AssignedAltitude(native_flight_altitude(alt, fix)?),
         OP_INTERIM if alt.form == ALT_SIMPLE => FlightOperation::SetInterimAltitude {
             altitude_ft: Some(alt.a_ft),
         },
         OP_INTERIM if alt.form == ALT_NIL => {
             FlightOperation::SetInterimAltitude { altitude_ft: None }
-        }
-        OP_REQUEST if matches!(alt.form, ALT_SIMPLE | ALT_VFR | ALT_VFR_ON_TOP_PLUS) => {
-            FlightOperation::RequestedAltitude(native_flight_altitude(alt, [0; 12])?)
         }
         OP_OWNER if valid_padded_ascii(&unit_a) => FlightOperation::SetOwner { unit: unit_a },
         OP_ADDRESS => FlightOperation::SetAddress,
@@ -2127,50 +2111,21 @@ fn normalized_flight_operation(
                 arrival: arr,
             }
         }
-        OP_DEPART => FlightOperation::Lifecycle(FlightLifecycle::Depart),
-        OP_COMPLETE => FlightOperation::Lifecycle(FlightLifecycle::Complete),
-        OP_CANCEL => FlightOperation::Lifecycle(FlightLifecycle::Cancel),
-        OP_DROP => FlightOperation::Lifecycle(FlightLifecycle::Drop),
-        OP_HO_INITIATE if valid_padded_ascii(&unit_a) && valid_padded_ascii(&unit_b) => {
-            FlightOperation::HandoffEvent(FlightHandoff::Initiate {
-                from: unit_a,
-                to: unit_b,
-            })
-        }
-        OP_HO_UPDATE if valid_padded_ascii(&unit_b) => {
-            FlightOperation::HandoffEvent(FlightHandoff::Update { to: unit_b })
-        }
-        OP_HO_ACCEPT if valid_padded_ascii(&unit_b) => {
-            FlightOperation::HandoffEvent(FlightHandoff::Accept { by: unit_b })
-        }
-        OP_HO_TAKE if valid_padded_ascii(&unit_b) => {
-            FlightOperation::HandoffEvent(FlightHandoff::Take { by: unit_b })
-        }
-        OP_HO_RETRACT => FlightOperation::HandoffEvent(FlightHandoff::Retract),
-        OP_HO_FAIL => FlightOperation::HandoffEvent(FlightHandoff::Fail),
+        OP_HO_ACCEPT if valid_padded_ascii(&unit_b) => FlightOperation::Handoff {
+            operation: HandoffOperation::Accept,
+            unit: unit_b,
+        },
+        OP_HO_TAKE if valid_padded_ascii(&unit_b) => FlightOperation::Handoff {
+            operation: HandoffOperation::Take,
+            unit: unit_b,
+        },
+        // The normalized model cannot represent the transferring unit, receiving-unit updates,
+        // retractions, requested altitudes, departures, or terminal plan events without loss.
+        OP_HO_INITIATE | OP_HO_UPDATE | OP_HO_RETRACT | OP_HO_FAIL | OP_REQUEST => return None,
+        2..=5 => return None,
         _ => return None,
     };
     Some((op, if kind == OP_ADDRESS { address } else { 0 }))
-}
-
-fn native_flight_altitude(altitude: Alt, fix: [u8; 12]) -> Option<crate::input::FlightAltitude> {
-    use crate::input::FlightAltitude as A;
-    Some(match altitude.form {
-        ALT_SIMPLE => A::Simple(altitude.a_ft),
-        ALT_VFR => A::Vfr,
-        ALT_VFR_ON_TOP_PLUS => A::VfrOnTopPlus(altitude.a_ft),
-        ALT_BLOCK => A::Block {
-            above_ft: altitude.a_ft,
-            below_ft: altitude.b_ft,
-        },
-        ALT_AT_FIX if valid_padded_ascii(&fix) && fix.iter().any(|byte| *byte != 0) => A::AtFix {
-            before_ft: altitude.a_ft,
-            after_ft: altitude.b_ft,
-            fix,
-        },
-        ALT_NIL => A::Nil,
-        _ => return None,
-    })
 }
 
 fn valid_padded_ascii(bytes: &[u8]) -> bool {
@@ -2182,18 +2137,6 @@ fn valid_padded_ascii(bytes: &[u8]) -> bool {
         && bytes
             .get(end..)
             .is_some_and(|tail| tail.iter().all(|&b| b == 0))
-}
-
-fn padded_ascii_text(bytes: &[u8]) -> Result<&str, AdapterError> {
-    if !valid_padded_ascii(bytes) {
-        return Err(AdapterError::InvalidCentre);
-    }
-    let end = bytes
-        .iter()
-        .position(|&byte| byte == 0)
-        .unwrap_or(bytes.len());
-    let prefix = bytes.get(..end).ok_or(AdapterError::InvalidCentre)?;
-    core::str::from_utf8(prefix).map_err(|_| AdapterError::InvalidCentre)
 }
 
 /// Converts a bounded prefix of decoded ADS-B positions. Oversize input emits no prefix: the
@@ -2263,7 +2206,7 @@ pub fn adapt_positions(
             counts.invalid_altitude += 1;
             continue;
         }
-        if !valid_padded_ascii(&row.centre) {
+        if !row.centre.iter().all(u8::is_ascii_alphanumeric) {
             counts.invalid_record += 1;
             counts.invalid_centre += 1;
             continue;
@@ -2311,7 +2254,7 @@ pub fn serialize_positions(events: &[NormalizedEvent]) -> Result<String, Adapter
         if event.source != SourceKind::Surveillance {
             return Err(AdapterError::UnsupportedEvent);
         }
-        if !valid_padded_ascii(&event.centre) {
+        if !event.centre.iter().all(u8::is_ascii_alphanumeric) {
             return Err(AdapterError::InvalidCentre);
         }
         use core::fmt::Write;
@@ -2323,7 +2266,7 @@ pub fn serialize_positions(events: &[NormalizedEvent]) -> Result<String, Adapter
             event.sequence,
             event.identity.flight_gufi,
             event.identity.aircraft_address,
-            padded_ascii_text(&event.centre)?,
+            core::str::from_utf8(&event.centre).map_err(|_| AdapterError::InvalidCentre)?,
             latitude_e7,
             longitude_e7,
             altitude_ft.map_or_else(|| "-".to_owned(), |v| v.to_string()),
@@ -2339,40 +2282,30 @@ pub fn serialize_positions(events: &[NormalizedEvent]) -> Result<String, Adapter
 /// Serializes the complete subset emitted by the recording adapter as the established OA-RS v1
 /// protocol. A row that cannot be represented within 768 bytes refuses the serialization whole.
 pub fn serialize_recorded_events(events: &[NormalizedEvent]) -> Result<String, AdapterError> {
-    use crate::input::{FlightOperation, MAX_EVENT_LINE_BYTES};
+    use crate::input::{FlightOperation, HandoffOperation, MAX_EVENT_LINE_BYTES};
     use core::fmt::Write;
-    let version = if events.iter().any(
-        |event| matches!(event.kind, EventKind::Flight(op) if flight_operation_requires_v2(op)),
-    ) {
-        "v2"
-    } else {
-        "v1"
-    };
-    let mut out = String::from(if version == "v2" {
-        "OA-RS\t2\n"
-    } else {
-        "OA-RS\t1\n"
-    });
+    let mut out = String::from("OA-RS\t1\n");
     for event in events {
         let (source_name, kind) = match event.source {
             SourceKind::Surveillance => ("SURVEILLANCE", "POS"),
             SourceKind::Flight => ("FLIGHT", "FLIGHT"),
             _ => return Err(AdapterError::UnsupportedEvent),
         };
-        if !valid_padded_ascii(&event.centre) || event.identity.aircraft_address > 0x01ff_ffff {
+        if !event.centre.iter().all(u8::is_ascii_alphanumeric)
+            || event.identity.aircraft_address > 0x01ff_ffff
+        {
             return Err(AdapterError::InvalidCentre);
         }
         write!(
             out,
-            "{}\t{}\t{}\t{}\t{}\t{:032X}\t{:06X}\t{}\t{}",
-            version,
+            "v1\t{}\t{}\t{}\t{}\t{:032X}\t{:06X}\t{}\t{}",
             event.receipt_ns,
             event.source_ns,
             event.sequence,
             source_name,
             event.identity.flight_gufi,
             event.identity.aircraft_address,
-            padded_ascii_text(&event.centre)?,
+            core::str::from_utf8(&event.centre).map_err(|_| AdapterError::InvalidCentre)?,
             kind
         )
         .map_err(|_| AdapterError::CountOverflow)?;
@@ -2404,14 +2337,56 @@ pub fn serialize_recorded_events(events: &[NormalizedEvent]) -> Result<String, A
                 match op {
                     FlightOperation::SetPlanByKey { .. }
                     | FlightOperation::CancelPlanByKey { .. }
-                    | FlightOperation::SetOwnerByKey { .. }
-                    | FlightOperation::HandoffByKey { .. } => {
-                        // OA-RS carries GUFI rather than the exact NAM key; refuse instead of
-                        // silently dropping identity binding while serializing.
+                    | FlightOperation::SetOwnerByKey { .. } => {
+                        // The normalized recording format carries GUFI only. A full key cannot
+                        // be serialized without changing the format, so refuse rather than drop it.
                         return Err(AdapterError::UnsupportedEvent);
                     }
-                    _ => write_serialized_flight_operation(&mut out, op, version)?,
+                    FlightOperation::SetPlan { plan_id, status } => {
+                        write!(out, "\tPLAN\t{}\t{}", ascii_field(&plan_id)?, status)
+                    }
+                    FlightOperation::AssignAltitude { altitude_ft } => {
+                        write!(out, "\tASSIGNED\t{altitude_ft}")
+                    }
+                    FlightOperation::ClearAssignedAltitude => write!(out, "\tUNASSIGNED"),
+                    FlightOperation::SetInterimAltitude { altitude_ft } => write!(
+                        out,
+                        "\tINTERIM\t{}",
+                        altitude_ft.map_or_else(|| "-".to_owned(), |v| v.to_string())
+                    ),
+                    FlightOperation::SetOwner { unit } => {
+                        write!(out, "\tOWNER\t{}", ascii_trimmed(&unit)?)
+                    }
+                    FlightOperation::SetAddress => write!(out, "\tADDRESS"),
+                    FlightOperation::SetIdentity {
+                        callsign,
+                        departure,
+                        arrival,
+                    } => write!(
+                        out,
+                        "\tIDENTITY\t{}\t{}\t{}",
+                        ascii_trimmed(&callsign)?,
+                        ascii_trimmed(&departure)?,
+                        ascii_trimmed(&arrival)?
+                    ),
+                    FlightOperation::Handoff { operation, unit } => {
+                        let name = match operation {
+                            HandoffOperation::Update => "HO_UPDATE",
+                            HandoffOperation::Offer => "HO_OFFER",
+                            HandoffOperation::Accept => "HO_ACCEPT",
+                            HandoffOperation::Take => "HO_TAKE",
+                            HandoffOperation::Retract => "HO_RETRACT",
+                            HandoffOperation::Fail => "HO_FAIL",
+                        };
+                        write!(out, "\t{name}\t{}", ascii_trimmed(&unit)?)
+                    }
+                    FlightOperation::HandoffByKey { .. } => {
+                        // The normalized text format has only GUFI identity; serializing a
+                        // full-key NAM event would silently lose its identity, so refuse it.
+                        return Err(AdapterError::UnsupportedEvent);
+                    }
                 }
+                .map_err(|_| AdapterError::CountOverflow)?;
             }
             _ => return Err(AdapterError::UnsupportedEvent),
         }
@@ -2425,127 +2400,6 @@ pub fn serialize_recorded_events(events: &[NormalizedEvent]) -> Result<String, A
         out.push('\n');
     }
     Ok(out)
-}
-
-fn write_serialized_flight_operation(
-    out: &mut String,
-    operation: crate::input::FlightOperation,
-    version: &str,
-) -> Result<(), AdapterError> {
-    use crate::input::{
-        FlightHandoff as H, FlightLifecycle as L, FlightOperation as O, HandoffOperation,
-    };
-    use core::fmt::Write;
-    macro_rules! emit {
-        ($($argument:tt)*) => {
-            write!(out, $($argument)*).map_err(|_| AdapterError::CountOverflow)
-        };
-    }
-    match operation {
-        O::SetPlanByKey { .. }
-        | O::CancelPlanByKey { .. }
-        | O::SetOwnerByKey { .. }
-        | O::HandoffByKey { .. } => Err(AdapterError::UnsupportedEvent),
-        O::SetPlan { plan_id, status } => {
-            emit!("\tPLAN\t{}\t{status}", ascii_field(&plan_id)?)
-        }
-        O::AssignAltitude { altitude_ft } => emit!("\tASSIGNED\t{altitude_ft}"),
-        O::ClearAssignedAltitude => emit!("\tUNASSIGNED"),
-        O::SetInterimAltitude { altitude_ft } => emit!(
-            "\tINTERIM\t{}",
-            altitude_ft.map_or_else(|| "-".to_owned(), |v| v.to_string())
-        ),
-        O::SetOwner { unit } => emit!("\tOWNER\t{}", ascii_trimmed(&unit)?),
-        O::SetAddress => emit!("\tADDRESS"),
-        O::SetIdentity {
-            callsign,
-            departure,
-            arrival,
-        } => emit!(
-            "\tIDENTITY\t{}\t{}\t{}",
-            ascii_trimmed(&callsign)?,
-            ascii_trimmed(&departure)?,
-            ascii_trimmed(&arrival)?
-        ),
-        O::Handoff { operation, unit } => {
-            let name = match operation {
-                HandoffOperation::Offer => "HO_OFFER",
-                HandoffOperation::Accept => "HO_ACCEPT",
-                HandoffOperation::Take => "HO_TAKE",
-                HandoffOperation::Fail => "HO_FAIL",
-                HandoffOperation::Update if version == "v2" => "HO_UPDATE_LEGACY",
-                HandoffOperation::Update => "HO_UPDATE",
-                HandoffOperation::Retract => "HO_RETRACT",
-            };
-            emit!("\t{name}\t{}", ascii_trimmed(&unit)?)
-        }
-        O::Lifecycle(transition) => {
-            let name = match transition {
-                L::Depart => "DEPART",
-                L::Complete => "COMPLETE",
-                L::Cancel => "CANCEL",
-                L::Drop => "DROP",
-            };
-            emit!("\t{name}")
-        }
-        O::AssignedAltitude(altitude) => write_v2_altitude(out, "ASSIGNED_ALT", altitude),
-        O::RequestedAltitude(altitude)
-            if matches!(
-                altitude,
-                crate::input::FlightAltitude::Simple(_)
-                    | crate::input::FlightAltitude::Vfr
-                    | crate::input::FlightAltitude::VfrOnTopPlus(_)
-            ) =>
-        {
-            write_v2_altitude(out, "REQUESTED_ALT", altitude)
-        }
-        O::RequestedAltitude(_) => Err(AdapterError::UnsupportedEvent),
-        O::HandoffEvent(event) => match event {
-            H::Initiate { from, to } => emit!(
-                "\tHO_INITIATE\t{}\t{}",
-                ascii_trimmed(&from)?,
-                ascii_trimmed(&to)?
-            ),
-            H::Update { to } => emit!("\tHO_UPDATE\t{}", ascii_trimmed(&to)?),
-            H::Accept { by } => emit!("\tHO_ACCEPT_NATIVE\t{}", ascii_trimmed(&by)?),
-            H::Take { by } => emit!("\tHO_TAKE_NATIVE\t{}", ascii_trimmed(&by)?),
-            H::Retract => emit!("\tHO_RETRACT"),
-            H::Fail => emit!("\tHO_FAIL_NATIVE"),
-        },
-    }
-}
-
-fn flight_operation_requires_v2(operation: crate::input::FlightOperation) -> bool {
-    use crate::input::FlightOperation as O;
-    matches!(
-        operation,
-        O::Lifecycle(_) | O::AssignedAltitude(_) | O::RequestedAltitude(_) | O::HandoffEvent(_)
-    )
-}
-
-fn write_v2_altitude(
-    out: &mut String,
-    operation: &str,
-    altitude: crate::input::FlightAltitude,
-) -> Result<(), AdapterError> {
-    use crate::input::FlightAltitude as A;
-    use core::fmt::Write;
-    let (form, a, b, fix) = match altitude {
-        A::Simple(a) => ("SIMPLE", a, 0, None),
-        A::Vfr => ("VFR", 0, 0, None),
-        A::VfrOnTopPlus(a) => ("VFR_PLUS", a, 0, None),
-        A::Block { above_ft, below_ft } => ("BLOCK", above_ft, below_ft, None),
-        A::AtFix {
-            before_ft,
-            after_ft,
-            fix,
-        } => ("AT_FIX", before_ft, after_ft, Some(fix)),
-        A::Nil => ("NIL", 0, 0, None),
-    };
-    // FIXM fixed-width identifiers are NUL-padded in memory. OA-RS v2 carries
-    // their trimmed printable value and the parser restores the fixed width.
-    let fix = fix.map_or_else(|| Ok("-".to_owned()), |value| ascii_trimmed(&value))?;
-    write!(out, "\t{operation}\t{form}\t{a}\t{b}\t{fix}").map_err(|_| AdapterError::CountOverflow)
 }
 
 /// Deterministic companion manifest binding each normalized line to its input recording frame.
@@ -2816,85 +2670,6 @@ mod tests {
         assert_eq!(got.quarantine_stats[2].accepted, 0);
     }
 
-    #[test]
-    fn sfdps_three_character_artcc_is_preserved_as_zero_padded_identity() {
-        const XML: &str = r#"<ns5:MessageCollection xmlns:ns5="http://www.faa.aero/nas/3.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><message xsi:type="ns5:FlightMessageType"><flight xsi:type="ns5:NasFlightType" centre="ZAU" source="TH" system="SLC" timestamp="2030-01-02T03:04:05.000Z"><gufi codeSpace="urn:uuid">11111111-2222-3333-4444-555555555555</gufi><assignedAltitude><simple uom="FEET">12000.0</simple></assignedAltitude></flight></message></ns5:MessageCollection>"#;
-        let receipt_ms = oa_fixm::parse_iso_ms(b"2030-01-02T03:04:05.000Z").unwrap();
-        let payload = XML.as_bytes().to_vec();
-        let frame = RecordedFrame {
-            source: RecordingSource::Sfdps,
-            stream_index: 0,
-            receipt_ns: receipt_ms.checked_mul(1_000_000).unwrap(),
-            sequence: 1,
-            jms_timestamp_ms: receipt_ms,
-            mono_ns: None,
-            oaf_flags: 0,
-            byte_offset: 0,
-            skipped_before: 0,
-            kind: oa_feed::Kind::Message,
-            payload: payload.clone(),
-        };
-        let got = adapt_recorded_frames(
-            &[frame],
-            RecordingCounts {
-                total_decoded_bytes: payload.len() as u64,
-                ..RecordingCounts::default()
-            },
-            8,
-            *b"ZAU1",
-        )
-        .unwrap();
-
-        assert_eq!(got.counts.sfdps_rows_decoded, 1);
-        assert_eq!(got.counts.invalid_operation_centre, 0);
-        assert_eq!(got.counts.sfdps_rows_refused, 0, "{:?}", got.counts);
-        assert_eq!(got.events.len(), 1);
-        assert!(got.events.iter().all(|event| event.centre == *b"ZAU\0"));
-        let serialized = serialize_recorded_events(&got.events).unwrap();
-        assert!(serialized.contains("\tZAU\tFLIGHT\tASSIGNED\t12000\n"));
-        for line in serialized.lines().skip(1) {
-            let round_trip = crate::input::parse_event_line(line).unwrap();
-            assert_eq!(round_trip.centre, *b"ZAU\0");
-        }
-    }
-
-    #[test]
-    fn mixed_native_sfdps_row_with_unrepresentable_plan_is_refused_atomically() {
-        const XML: &str = r#"<ns5:MessageCollection xmlns:ns5="http://www.faa.aero/nas/3.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><message xsi:type="ns5:FlightMessageType"><flight xsi:type="ns5:NasFlightType" centre="ZAU" source="TH" system="SLC" timestamp="2030-01-02T03:04:05.000Z"><gufi codeSpace="urn:uuid">11111111-2222-3333-4444-555555555555</gufi><flightStatus xsi:type="ns5:NasFlightStatusType" fdpsFlightStatus="ACTIVE"/><assignedAltitude><simple uom="FEET">12000</simple></assignedAltitude></flight></message></ns5:MessageCollection>"#;
-        let source_ns = oa_fixm::parse_iso_ms(b"2030-01-02T03:04:05.000Z")
-            .unwrap()
-            .checked_mul(1_000_000)
-            .unwrap();
-        let payload = XML.as_bytes().to_vec();
-        let frame = RecordedFrame {
-            source: RecordingSource::Sfdps,
-            stream_index: 0,
-            receipt_ns: source_ns,
-            sequence: 1,
-            jms_timestamp_ms: source_ns / 1_000_000,
-            mono_ns: None,
-            oaf_flags: 0,
-            byte_offset: 0,
-            skipped_before: 0,
-            kind: oa_feed::Kind::Message,
-            payload: payload.clone(),
-        };
-        let counts = RecordingCounts {
-            total_decoded_bytes: payload.len() as u64,
-            ..RecordingCounts::default()
-        };
-        let got = adapt_recorded_frames(&[frame], counts, 16, *b"ZAU1").unwrap();
-        assert_eq!(got.counts.sfdps_rows_decoded, 1);
-        assert_eq!(got.counts.sfdps_rows_refused, 1);
-        assert_eq!(
-            got.counts.unsupported_operations[usize::from(OP_SET_PLAN)],
-            1
-        );
-        assert_eq!(got.counts.events_emitted, 0);
-        assert!(got.events.is_empty());
-        assert_eq!(got.quarantine.len(), 1);
-    }
-
     // REQ: OA-REG-017
     #[test]
     fn fixm_capacity_and_receipt_group_losses_are_separate_and_later_frame_survives() {
@@ -3006,219 +2781,63 @@ mod tests {
     }
 
     #[test]
-    fn native_sfdps_operation_codes_map_without_field_or_transition_loss() {
-        use crate::input::{
-            FlightAltitude as A, FlightHandoff as H, FlightLifecycle as L, FlightOperation as O,
-        };
-
-        fn input(kind: u8, alt: Alt) -> NormalizedFlightOperationInput {
-            NormalizedFlightOperationInput {
-                kind,
-                alt,
-                fix: [0; 12],
-                plan_id: *b"PLAN00000001",
-                state: oa_flight::ST_ACTIVE,
-                unit_a: *b"FROM    ",
-                unit_b: *b"TO      ",
-                address: 0x00ab_cdef,
-                callsign: *b"CALL123 ",
-                dep: *b"KATL        ",
-                arr: *b"KORD        ",
-            }
-        }
-
-        let simple = Alt {
-            form: ALT_SIMPLE,
-            a_ft: 12_000,
-            b_ft: 0,
-        };
-        assert_eq!(
-            normalized_flight_operation(input(OP_SET_PLAN, Alt::default()))
-                .unwrap()
-                .0,
-            O::SetPlan {
-                plan_id: *b"PLAN00000001",
-                status: oa_flight::ST_ACTIVE
-            }
-        );
-        for (kind, expected) in [
-            (OP_DEPART, L::Depart),
-            (OP_COMPLETE, L::Complete),
-            (OP_CANCEL, L::Cancel),
-            (OP_DROP, L::Drop),
-        ] {
-            assert_eq!(
-                normalized_flight_operation(input(kind, Alt::default()))
-                    .unwrap()
-                    .0,
-                O::Lifecycle(expected)
-            );
-        }
-        assert_eq!(
-            normalized_flight_operation(input(OP_ASSIGN, simple))
-                .unwrap()
-                .0,
-            O::AssignAltitude {
-                altitude_ft: 12_000
-            }
-        );
-        assert_eq!(
-            normalized_flight_operation(input(
-                OP_ASSIGN,
-                Alt {
-                    form: ALT_BLOCK,
-                    a_ft: 10_000,
-                    b_ft: 14_000
-                }
-            ))
-            .unwrap()
-            .0,
-            O::AssignedAltitude(A::Block {
-                above_ft: 10_000,
-                below_ft: 14_000
-            })
-        );
-        assert_eq!(
-            normalized_flight_operation(input(
-                OP_ASSIGN,
-                Alt {
-                    form: ALT_VFR,
-                    a_ft: 0,
-                    b_ft: 0
-                }
-            ))
-            .unwrap()
-            .0,
-            O::AssignedAltitude(A::Vfr)
-        );
-        assert_eq!(
-            normalized_flight_operation(input(
-                OP_ASSIGN,
-                Alt {
-                    form: ALT_VFR_ON_TOP_PLUS,
-                    a_ft: 5_500,
-                    b_ft: 0
-                }
-            ))
-            .unwrap()
-            .0,
-            O::AssignedAltitude(A::VfrOnTopPlus(5_500))
-        );
-        let mut at_fix = input(
-            OP_ASSIGN,
-            Alt {
-                form: ALT_AT_FIX,
-                a_ft: 8_000,
-                b_ft: 7_000,
+    fn only_lossless_sfdps_operations_map_to_normalized_flight_events() {
+        use crate::input::FlightOperation;
+        let set = normalized_flight_operation(NormalizedFlightOperationInput {
+            kind: OP_ASSIGN,
+            alt: Alt {
+                form: ALT_SIMPLE,
+                a_ft: 12_000,
+                b_ft: 0,
             },
-        );
-        at_fix.fix = *b"FIX         ";
+            plan_id: [0; 12],
+            state: 0,
+            unit_a: [0; 8],
+            unit_b: [0; 8],
+            address: 0,
+            callsign: [0; 8],
+            dep: [0; 12],
+            arr: [0; 12],
+        });
         assert_eq!(
-            normalized_flight_operation(at_fix).unwrap().0,
-            O::AssignedAltitude(A::AtFix {
-                before_ft: 8_000,
-                after_ft: 7_000,
-                fix: *b"FIX         "
-            })
-        );
-        assert_eq!(
-            normalized_flight_operation(input(OP_INTERIM, simple))
-                .unwrap()
-                .0,
-            O::SetInterimAltitude {
-                altitude_ft: Some(12_000)
-            }
-        );
-        assert_eq!(
-            normalized_flight_operation(input(
-                OP_REQUEST,
-                Alt {
-                    form: ALT_VFR_ON_TOP_PLUS,
-                    a_ft: 5_500,
-                    b_ft: 0
-                }
-            ))
-            .unwrap()
-            .0,
-            O::RequestedAltitude(A::VfrOnTopPlus(5_500))
-        );
-        assert_eq!(
-            normalized_flight_operation(input(OP_OWNER, Alt::default()))
-                .unwrap()
-                .0,
-            O::SetOwner { unit: *b"FROM    " }
-        );
-        assert_eq!(
-            normalized_flight_operation(input(OP_ADDRESS, Alt::default())),
-            Some((O::SetAddress, 0x00ab_cdef))
-        );
-        assert_eq!(
-            normalized_flight_operation(input(OP_IDENTITY, Alt::default()))
-                .unwrap()
-                .0,
-            O::SetIdentity {
-                callsign: *b"CALL123 ",
-                departure: *b"KATL        ",
-                arrival: *b"KORD        "
-            }
-        );
-        for (kind, expected) in [
-            (
-                OP_HO_INITIATE,
-                H::Initiate {
-                    from: *b"FROM    ",
-                    to: *b"TO      ",
+            set,
+            Some((
+                FlightOperation::AssignAltitude {
+                    altitude_ft: 12_000
                 },
-            ),
-            (OP_HO_UPDATE, H::Update { to: *b"TO      " }),
-            (OP_HO_ACCEPT, H::Accept { by: *b"TO      " }),
-            (OP_HO_TAKE, H::Take { by: *b"TO      " }),
-            (OP_HO_RETRACT, H::Retract),
-            (OP_HO_FAIL, H::Fail),
-        ] {
-            assert_eq!(
-                normalized_flight_operation(input(kind, Alt::default()))
-                    .unwrap()
-                    .0,
-                O::HandoffEvent(expected)
-            );
-        }
-        assert_eq!(
-            normalized_flight_operation(input(
-                OP_ASSIGN,
-                Alt {
-                    form: ALT_AT_FIX,
-                    a_ft: 8_000,
-                    b_ft: 7_000
-                }
-            )),
-            None,
-            "an at-fix altitude without its source fix is not normalized"
+                0
+            ))
         );
-        assert_eq!(
-            normalized_flight_operation(input(
-                OP_INTERIM,
-                Alt {
-                    form: ALT_BLOCK,
-                    a_ft: 8_000,
-                    b_ft: 7_000
-                }
-            )),
-            None,
-            "the native core does not admit block interim values"
-        );
-        assert_eq!(
-            normalized_flight_operation(input(
-                OP_REQUEST,
-                Alt {
-                    form: ALT_BLOCK,
-                    a_ft: 8_000,
-                    b_ft: 7_000
-                }
-            )),
-            None,
-            "the native core does not admit block requested values"
-        );
+        let block = normalized_flight_operation(NormalizedFlightOperationInput {
+            kind: OP_ASSIGN,
+            alt: Alt {
+                form: oa_flight::ALT_BLOCK,
+                a_ft: 10_000,
+                b_ft: 14_000,
+            },
+            plan_id: [0; 12],
+            state: 0,
+            unit_a: [0; 8],
+            unit_b: [0; 8],
+            address: 0,
+            callsign: [0; 8],
+            dep: [0; 12],
+            arr: [0; 12],
+        });
+        assert_eq!(block, None);
+        let initiation = normalized_flight_operation(NormalizedFlightOperationInput {
+            kind: OP_HO_INITIATE,
+            alt: Alt::default(),
+            plan_id: [0; 12],
+            state: 0,
+            unit_a: *b"FROM    ",
+            unit_b: *b"TO      ",
+            address: 0,
+            callsign: [0; 8],
+            dep: [0; 12],
+            arr: [0; 12],
+        });
+        assert_eq!(initiation, None);
     }
 
     #[test]
@@ -3264,69 +2883,6 @@ mod tests {
         };
         let manifest = serialize_provenance(&[event], &[origin], &[stream]).unwrap();
         assert_eq!(manifest, format!("OA-RS-PROVENANCE\t1\nSTREAM\t1\tSFDPS\t{}\t80\t80\t0\nEVENT\t0\tFLIGHT\t3\tSFDPS\t1\t42\t1234567890\t1234\t9\t88\t02\t5\t7\t00000012\t5452\n", "ab".repeat(32)));
-    }
-
-    #[test]
-    fn native_flight_operations_use_explicit_oa_rs_v2_and_round_trip() {
-        use crate::input::{
-            FlightAltitude, FlightHandoff, FlightLifecycle, FlightOperation, HandoffOperation,
-            MAX_EVENT_LINE_BYTES,
-        };
-        let operations = [
-            FlightOperation::Lifecycle(FlightLifecycle::Depart),
-            FlightOperation::AssignedAltitude(FlightAltitude::AtFix {
-                before_ft: 8_000,
-                after_ft: 7_000,
-                fix: *b"FIX         ",
-            }),
-            FlightOperation::RequestedAltitude(FlightAltitude::VfrOnTopPlus(5_500)),
-            FlightOperation::HandoffEvent(FlightHandoff::Initiate {
-                from: *b"FROM\0\0\0\0",
-                to: *b"TO\0\0\0\0\0\0",
-            }),
-            FlightOperation::HandoffEvent(FlightHandoff::Update {
-                to: *b"NEXT\0\0\0\0",
-            }),
-            FlightOperation::HandoffEvent(FlightHandoff::Retract),
-            FlightOperation::Handoff {
-                operation: HandoffOperation::Update,
-                unit: *b"OLDUNIT\0",
-            },
-        ];
-        let events: Vec<_> = operations
-            .into_iter()
-            .enumerate()
-            .map(|(index, operation)| NormalizedEvent {
-                receipt_ns: 2_000_000_000 + index as i64 * 1_000_000,
-                source_ns: 1_000_000_000 + index as i64 * 1_000_000,
-                sequence: index as u64 + 1,
-                source: SourceKind::Flight,
-                identity: Identity {
-                    flight_gufi: 0x1234,
-                    aircraft_address: 0,
-                },
-                centre: *b"ZAU1",
-                kind: EventKind::Flight(operation),
-            })
-            .collect();
-        let serialized = serialize_recorded_events(&events).unwrap();
-        assert!(serialized.starts_with("OA-RS\t2\n"));
-        for (line, expected) in serialized.lines().skip(1).zip(&events) {
-            assert!(line.starts_with("v2\t"));
-            assert!(line.len() <= MAX_EVENT_LINE_BYTES);
-            assert_eq!(crate::input::parse_event_line(line).unwrap(), *expected);
-        }
-        let old_version_line = serialized
-            .lines()
-            .nth(1)
-            .unwrap()
-            .replacen("v2\t", "v1\t", 1);
-        assert_eq!(
-            crate::input::parse_event_line(&old_version_line),
-            Err(crate::input::InputError::InvalidOperation),
-            "OA-RS v1 must not silently accept the v2 lifecycle grammar"
-        );
-        assert_eq!(serialized.lines().count(), events.len() + 1);
     }
 
     #[test]

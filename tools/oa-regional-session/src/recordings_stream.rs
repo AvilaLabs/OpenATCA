@@ -4,7 +4,6 @@
 //! gzip and OAF buffers are fixed-size. At most one current frame plus bounded chunk output is
 //! retained per input file while a deterministic k-way merge feeds the caller.
 
-use crate::recordings::RecordedAdapterCounts;
 use crate::recordings_reader::{RecordedFrame, RecordingSource};
 use oa_feed::{FrameError, FrameReader, FrameWorkBudget, FrameWorkStats, Kind, MAX_FRAME_LEN};
 use oa_zip::{GzipReader, InflateLimits};
@@ -12,7 +11,6 @@ use std::collections::VecDeque;
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
 
 pub const MAX_H2_INPUT_STREAMS: usize = 32;
 pub const MAX_H2_PHYSICAL_INPUT_BYTES: u64 = 16 * 1024 * 1024 * 1024;
@@ -48,30 +46,6 @@ pub struct StreamCounts {
     pub frame_work_units: u64,
 }
 
-/// Partial aggregate-only progress for bounded offline diagnostics. Updated before each visitor
-/// call so a visitor refusal still leaves counts for every fully decoded and adapted frame.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct NormalizedStreamProgress {
-    pub reader: StreamCounts,
-    pub reader_decode_ns: u128,
-    pub downstream_callback_ns: u128,
-    pub adapter_ns: u128,
-    pub normalized_events: u64,
-    pub normalized_surveillance_events: u64,
-    pub normalized_flight_events: u64,
-    pub normalized_other_events: u64,
-    pub adapter_counts: AdapterLossCounts,
-    pub quarantine_rows: u64,
-    pub manual_handling_required: u64,
-    pub unprocessed_frames: u64,
-}
-
-struct ReaderProgress<'a> {
-    counts: &'a mut StreamCounts,
-    decode_ns: &'a mut u128,
-    callback_ns: &'a mut u128,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StreamDigest {
     pub source: RecordingSource,
@@ -96,119 +70,9 @@ pub struct StreamSummary {
 pub struct NormalizedStreamSummary {
     pub recording: StreamSummary,
     pub normalized_events: u64,
-    pub normalized_surveillance_events: u64,
-    pub normalized_flight_events: u64,
-    pub normalized_other_events: u64,
-    pub adapter_counts: AdapterLossCounts,
     pub quarantine_rows: u64,
     pub manual_handling_required: u64,
     pub unprocessed_frames: u64,
-}
-
-/// Aggregate-only counters copied from the existing per-frame adapter result. These expose
-/// source decode/refusal/quality losses without retaining rows, callsigns, or payloads.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct AdapterLossCounts {
-    pub adsb_frames: u64,
-    pub adsb_payload_refused: u64,
-    pub adsb_rows_in: u64,
-    pub adsb_rows_over_capacity: u64,
-    pub adsb_rows_dropped: u64,
-    pub adsb_ground_excluded: u64,
-    pub adsb_unknown_ground_refused: u64,
-    pub adsb_quality_removed: [u64; 13],
-    pub adsb_unknown_gufi_positions: u64,
-    pub adsb_velocity_unavailable: u64,
-    pub adsb_invalid_position_rows: u64,
-    pub adsb_output_capacity_refusals: u64,
-    pub sfdps_frames: u64,
-    pub sfdps_payload_refused: u64,
-    pub sfdps_timestamp_precision_refused: u64,
-    pub sfdps_rows_decoded: u64,
-    pub sfdps_rows_not_decoded_capacity: u64,
-    pub sfdps_rows_refused: u64,
-    pub sfdps_rows_no_operations: u64,
-    pub sfdps_no_status: u64,
-    pub sfdps_operations_unusable: u64,
-    pub sfdps_unsupported_operations: u64,
-    pub sfdps_field_errors: u64,
-    pub sfdps_rejected_messages: u64,
-    pub sfdps_unknown_elements: u64,
-    pub sfdps_unknown_attributes: u64,
-    pub sfdps_unbound_flight_updates: u64,
-    pub sfdps_invalid_operation_time: u64,
-    pub adsb_source_after_receipt: u64,
-    pub sfdps_source_after_receipt: u64,
-    pub sfdps_invalid_operation_identity: u64,
-    pub sfdps_invalid_operation_centre: u64,
-    pub sfdps_invalid_operation_address: u64,
-    pub sfdps_output_capacity_refusals: u64,
-    pub adapter_events_emitted: u64,
-}
-
-fn add_adapter_loss_counts(
-    total: &mut AdapterLossCounts,
-    counts: &RecordedAdapterCounts,
-) -> Result<(), String> {
-    macro_rules! add_fields {
-        ($($field:ident : $source:ident),+ $(,)?) => {
-            $(
-                total.$field = total.$field.checked_add(counts.$source)
-                    .ok_or(concat!("adapter counter overflow: ", stringify!($field)))?;
-            )+
-        };
-    }
-    add_fields!(
-        adsb_frames: frames_adsb,
-        adsb_payload_refused: adsb_payload_refused,
-        adsb_rows_in: adsb_rows_in,
-        adsb_rows_over_capacity: adsb_rows_over_capacity,
-        adsb_rows_dropped: adsb_rows_dropped,
-        adsb_ground_excluded: adsb_ground_excluded,
-        adsb_unknown_ground_refused: adsb_unknown_ground_refused,
-        adsb_unknown_gufi_positions: adsb_unknown_gufi_positions,
-        adsb_velocity_unavailable: adsb_velocity_unavailable,
-        adsb_invalid_position_rows: invalid_position_rows,
-        adsb_output_capacity_refusals: output_capacity_refusals,
-        sfdps_frames: frames_sfdps,
-        sfdps_payload_refused: sfdps_payload_refused,
-        sfdps_timestamp_precision_refused: sfdps_timestamp_precision_refused,
-        sfdps_rows_decoded: sfdps_rows_decoded,
-        sfdps_rows_not_decoded_capacity: sfdps_rows_not_decoded_capacity,
-        sfdps_rows_refused: sfdps_rows_refused,
-        sfdps_rows_no_operations: sfdps_rows_no_operations,
-        sfdps_no_status: sfdps_no_status,
-        sfdps_operations_unusable: sfdps_operations_unusable,
-        sfdps_field_errors: sfdps_field_errors,
-        sfdps_rejected_messages: sfdps_rejected_messages,
-        sfdps_unknown_elements: sfdps_unknown_elements,
-        sfdps_unknown_attributes: sfdps_unknown_attributes,
-        sfdps_unbound_flight_updates: unbound_flight_updates,
-        sfdps_invalid_operation_time: invalid_operation_time,
-        adsb_source_after_receipt: adsb_source_after_receipt,
-        sfdps_source_after_receipt: sfdps_source_after_receipt,
-        sfdps_invalid_operation_identity: invalid_operation_identity,
-        sfdps_invalid_operation_centre: invalid_operation_centre,
-        sfdps_invalid_operation_address: invalid_operation_address,
-        sfdps_output_capacity_refusals: output_capacity_refusals,
-        adapter_events_emitted: events_emitted,
-    );
-    for (total, count) in total
-        .adsb_quality_removed
-        .iter_mut()
-        .zip(counts.adsb_quality_removed)
-    {
-        *total = total
-            .checked_add(count)
-            .ok_or("adapter counter overflow: adsb_quality_removed")?;
-    }
-    for count in counts.unsupported_operations {
-        total.sfdps_unsupported_operations = total
-            .sfdps_unsupported_operations
-            .checked_add(count)
-            .ok_or("adapter counter overflow: sfdps_unsupported_operations")?;
-    }
-    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -821,16 +685,7 @@ pub fn stream_oaf_segments(
 pub fn stream_oaf_segments_in_window(
     inputs: &[StreamInput],
     receive_window_ns: Option<(i64, i64)>,
-    visit: impl FnMut(RecordedFrame) -> Result<(), String>,
-) -> Result<StreamSummary, String> {
-    stream_oaf_segments_in_window_with_progress(inputs, receive_window_ns, visit, None)
-}
-
-fn stream_oaf_segments_in_window_with_progress(
-    inputs: &[StreamInput],
-    receive_window_ns: Option<(i64, i64)>,
     mut visit: impl FnMut(RecordedFrame) -> Result<(), String>,
-    mut progress: Option<ReaderProgress<'_>>,
 ) -> Result<StreamSummary, String> {
     if inputs.is_empty() || inputs.len() > MAX_H2_INPUT_STREAMS {
         return Err("H2 input stream count outside fixed bounds".into());
@@ -910,16 +765,7 @@ fn stream_oaf_segments_in_window_with_progress(
         for (index, stream) in streams.iter_mut().enumerate() {
             let head = heads.get_mut(index).ok_or("stream head invariant")?;
             if head.is_none() {
-                let started = Instant::now();
-                let result = stream.next_message(&mut budget);
-                if let Some(progress) = progress.as_mut() {
-                    *progress.decode_ns = progress
-                        .decode_ns
-                        .checked_add(started.elapsed().as_nanos())
-                        .ok_or("reader/decode timer overflow")?;
-                    *progress.counts = budget.counts;
-                }
-                *head = result?;
+                *head = stream.next_message(&mut budget)?;
             }
         }
         let mut selected: SelectedStream = None;
@@ -935,24 +781,12 @@ fn stream_oaf_segments_in_window_with_progress(
             .get_mut(index)
             .and_then(Option::take)
             .ok_or("selected stream head disappeared")?;
+        visit(frame)?;
         budget.counts.messages = budget
             .counts
             .messages
             .checked_add(1)
             .ok_or("aggregate message frame count overflow")?;
-        if let Some(progress) = progress.as_mut() {
-            *progress.counts = budget.counts;
-        }
-        let visitor_started = Instant::now();
-        let visitor_result = visit(frame);
-        if let Some(progress) = progress.as_mut() {
-            *progress.callback_ns = progress
-                .callback_ns
-                .checked_add(visitor_started.elapsed().as_nanos())
-                .ok_or("downstream callback timer overflow")?;
-            *progress.counts = budget.counts;
-        }
-        visitor_result?;
     }
     let mut digests = Vec::new();
     digests
@@ -975,23 +809,6 @@ pub fn stream_normalized_events(
     inputs: &[StreamInput],
     receive_window_ns: Option<(i64, i64)>,
     centre: [u8; 4],
-    visit: impl FnMut(
-        crate::input::NormalizedEvent,
-        crate::recordings::EventProvenance,
-    ) -> Result<(), String>,
-) -> Result<NormalizedStreamSummary, String> {
-    let mut progress = NormalizedStreamProgress::default();
-    stream_normalized_events_with_progress(inputs, receive_window_ns, centre, &mut progress, visit)
-}
-
-/// Progress-reporting form used by the H5 engineering runner. The progress object is updated
-/// frame-by-frame and remains useful if normalization, downstream processing, or a resource cap
-/// refuses the pass. It contains counts/timings only, never source rows or identifiers.
-pub fn stream_normalized_events_with_progress(
-    inputs: &[StreamInput],
-    receive_window_ns: Option<(i64, i64)>,
-    centre: [u8; 4],
-    progress: &mut NormalizedStreamProgress,
     mut visit: impl FnMut(
         crate::input::NormalizedEvent,
         crate::recordings::EventProvenance,
@@ -1000,20 +817,6 @@ pub fn stream_normalized_events_with_progress(
     if !centre.iter().all(u8::is_ascii_alphanumeric) {
         return Err("normalization centre must be four ASCII alphanumeric bytes".into());
     }
-    let NormalizedStreamProgress {
-        reader,
-        reader_decode_ns,
-        downstream_callback_ns,
-        adapter_ns,
-        normalized_events: progress_normalized_events,
-        normalized_surveillance_events: progress_surveillance_events,
-        normalized_flight_events: progress_flight_events,
-        normalized_other_events: progress_other_events,
-        adapter_counts: progress_adapter_counts,
-        quarantine_rows: progress_quarantine_rows,
-        manual_handling_required: progress_manual_handling,
-        unprocessed_frames: progress_unprocessed_frames,
-    } = progress;
     let mut sequence_starts = [0u64; 2];
     let mut pending: Vec<(
         crate::input::NormalizedEvent,
@@ -1024,150 +827,91 @@ pub fn stream_normalized_events_with_progress(
         .map_err(|_| "normalized event group allocation refused")?;
     let mut pending_receipt = None;
     let mut counts = NormalizedAdapterCounts::default();
-    let mut adapter_counts = AdapterLossCounts::default();
-    let recording = stream_oaf_segments_in_window_with_progress(
-        inputs,
-        receive_window_ns,
-        |frame| {
-            let adapter_started = Instant::now();
-            let mut input_counts = crate::recordings_reader::RecordingCounts::default();
-            input_counts.total_frames = 1;
-            input_counts.total_decoded_bytes = u64::try_from(frame.payload.len())
-                .map_err(|_| "message payload byte count overflow")?;
-            input_counts.total_bytes = input_counts.total_decoded_bytes;
-            let adapted = crate::recordings::adapt_recorded_frames_with_sequence_starts(
-                std::slice::from_ref(&frame),
-                input_counts,
-                100_000,
-                centre,
-                sequence_starts,
+    let recording = stream_oaf_segments_in_window(inputs, receive_window_ns, |frame| {
+        let mut input_counts = crate::recordings_reader::RecordingCounts::default();
+        input_counts.total_frames = 1;
+        input_counts.total_decoded_bytes = u64::try_from(frame.payload.len())
+            .map_err(|_| "message payload byte count overflow")?;
+        input_counts.total_bytes = input_counts.total_decoded_bytes;
+        let adapted = crate::recordings::adapt_recorded_frames_with_sequence_starts(
+            std::slice::from_ref(&frame),
+            input_counts,
+            100_000,
+            centre,
+            sequence_starts,
+        )
+        .map_err(|error| format!("normalized adapter refused message: {error:?}"))?;
+        counts.quarantine_rows = counts
+            .quarantine_rows
+            .checked_add(
+                u64::try_from(adapted.quarantine.len())
+                    .map_err(|_| "quarantine row count overflow")?,
             )
-            .map_err(|error| format!("normalized adapter refused message: {error:?}"))?;
-            add_adapter_loss_counts(&mut adapter_counts, &adapted.counts)?;
-            *adapter_ns = adapter_ns
-                .checked_add(adapter_started.elapsed().as_nanos())
-                .ok_or("adapter timer overflow")?;
-            counts.quarantine_rows = counts
-                .quarantine_rows
-                .checked_add(
-                    u64::try_from(adapted.quarantine.len())
-                        .map_err(|_| "quarantine row count overflow")?,
+            .ok_or("quarantine row count overflow")?;
+        counts.manual_handling_required = counts
+            .manual_handling_required
+            .checked_add(
+                u64::try_from(
+                    adapted
+                        .quarantine
+                        .iter()
+                        .filter(|row| row.manual_handling_required)
+                        .count(),
                 )
-                .ok_or("quarantine row count overflow")?;
-            counts.manual_handling_required = counts
-                .manual_handling_required
-                .checked_add(
-                    u64::try_from(
-                        adapted
-                            .quarantine
-                            .iter()
-                            .filter(|row| row.manual_handling_required)
-                            .count(),
-                    )
-                    .map_err(|_| "manual-handling count overflow")?,
-                )
-                .ok_or("manual-handling count overflow")?;
-            counts.unprocessed_frames = counts
-                .unprocessed_frames
-                .checked_add(adapted.counts.unprocessed_frames)
-                .ok_or("unprocessed frame count overflow")?;
-            *progress_adapter_counts = adapter_counts;
-            *progress_quarantine_rows = counts.quarantine_rows;
-            *progress_manual_handling = counts.manual_handling_required;
-            *progress_unprocessed_frames = counts.unprocessed_frames;
-            let new_count = u64::try_from(adapted.events.len())
-                .map_err(|_| "normalized event count overflow")?;
-            counts.normalized_events = counts
-                .normalized_events
-                .checked_add(new_count)
-                .ok_or("normalized event count overflow")?;
-            *progress_normalized_events = counts.normalized_events;
-            if counts.normalized_events > 10_000_000 {
-                return Err("normalized event full-day cap exceeded".into());
+                .map_err(|_| "manual-handling count overflow")?,
+            )
+            .ok_or("manual-handling count overflow")?;
+        counts.unprocessed_frames = counts
+            .unprocessed_frames
+            .checked_add(adapted.counts.unprocessed_frames)
+            .ok_or("unprocessed frame count overflow")?;
+        let new_count =
+            u64::try_from(adapted.events.len()).map_err(|_| "normalized event count overflow")?;
+        counts.normalized_events = counts
+            .normalized_events
+            .checked_add(new_count)
+            .ok_or("normalized event count overflow")?;
+        if counts.normalized_events > 10_000_000 {
+            return Err("normalized event full-day cap exceeded".into());
+        }
+        for (event, provenance) in adapted.events.into_iter().zip(adapted.provenance) {
+            if pending_receipt.is_some_and(|prior| event.receipt_ns < prior) {
+                return Err("normalized issue-time order regressed".into());
             }
-            for (event, provenance) in adapted.events.into_iter().zip(adapted.provenance) {
-                match event.source {
-                    crate::input::SourceKind::Surveillance => {
-                        counts.normalized_surveillance_events = counts
-                            .normalized_surveillance_events
-                            .checked_add(1)
-                            .ok_or("normalized surveillance count overflow")?;
-                        *progress_surveillance_events = counts.normalized_surveillance_events;
-                    }
-                    crate::input::SourceKind::Flight | crate::input::SourceKind::Route => {
-                        counts.normalized_flight_events = counts
-                            .normalized_flight_events
-                            .checked_add(1)
-                            .ok_or("normalized flight count overflow")?;
-                        *progress_flight_events = counts.normalized_flight_events;
-                    }
-                    crate::input::SourceKind::Weather | crate::input::SourceKind::Adaptation => {
-                        counts.normalized_other_events = counts
-                            .normalized_other_events
-                            .checked_add(1)
-                            .ok_or("normalized other-event count overflow")?;
-                        *progress_other_events = counts.normalized_other_events;
-                    }
-                }
-                if pending_receipt.is_some_and(|prior| event.receipt_ns < prior) {
-                    return Err("normalized issue-time order regressed".into());
-                }
-                if pending_receipt.is_some_and(|prior| event.receipt_ns > prior) {
-                    flush_normalized_group(&mut pending, &mut pending_receipt, &mut visit)?;
-                }
-                if pending.len() >= crate::session::MAX_EVENTS_PER_RECEIPT {
-                    return Err("normalized issue-time group exceeds 256-event capacity".into());
-                }
-                let sequence_index = match event.source {
-                    crate::input::SourceKind::Surveillance => Some(0),
-                    crate::input::SourceKind::Flight | crate::input::SourceKind::Route => Some(1),
-                    crate::input::SourceKind::Weather | crate::input::SourceKind::Adaptation => {
-                        None
-                    }
-                };
-                if let Some(index) = sequence_index {
-                    let sequence_start = sequence_starts
-                        .get_mut(index)
-                        .ok_or("normalized sequence source index invariant")?;
-                    *sequence_start = (*sequence_start).max(
-                        event
-                            .sequence
-                            .checked_add(1)
-                            .ok_or("normalized sequence overflow")?,
-                    );
-                }
-                pending_receipt = Some(event.receipt_ns);
-                pending
-                    .try_reserve(1)
-                    .map_err(|_| "normalized event allocation refused")?;
-                pending.push((event, provenance));
+            if pending_receipt.is_some_and(|prior| event.receipt_ns > prior) {
+                flush_normalized_group(&mut pending, &mut pending_receipt, &mut visit)?;
             }
-            Ok(())
-        },
-        Some(ReaderProgress {
-            counts: reader,
-            decode_ns: reader_decode_ns,
-            callback_ns: downstream_callback_ns,
-        }),
-    )?;
+            if pending.len() >= crate::session::MAX_EVENTS_PER_RECEIPT {
+                return Err("normalized issue-time group exceeds 256-event capacity".into());
+            }
+            let sequence_index = match event.source {
+                crate::input::SourceKind::Surveillance => Some(0),
+                crate::input::SourceKind::Flight | crate::input::SourceKind::Route => Some(1),
+                crate::input::SourceKind::Weather | crate::input::SourceKind::Adaptation => None,
+            };
+            if let Some(index) = sequence_index {
+                let sequence_start = sequence_starts
+                    .get_mut(index)
+                    .ok_or("normalized sequence source index invariant")?;
+                *sequence_start = (*sequence_start).max(
+                    event
+                        .sequence
+                        .checked_add(1)
+                        .ok_or("normalized sequence overflow")?,
+                );
+            }
+            pending_receipt = Some(event.receipt_ns);
+            pending
+                .try_reserve(1)
+                .map_err(|_| "normalized event allocation refused")?;
+            pending.push((event, provenance));
+        }
+        Ok(())
+    })?;
     flush_normalized_group(&mut pending, &mut pending_receipt, &mut visit)?;
-    let source_event_total = counts
-        .normalized_surveillance_events
-        .checked_add(counts.normalized_flight_events)
-        .and_then(|value| value.checked_add(counts.normalized_other_events))
-        .ok_or("normalized source-kind count overflow")?;
-    if source_event_total != counts.normalized_events
-        || adapter_counts.adapter_events_emitted != counts.normalized_events
-    {
-        return Err("normalized and adapter source counters do not reconcile".into());
-    }
     Ok(NormalizedStreamSummary {
         recording,
         normalized_events: counts.normalized_events,
-        normalized_surveillance_events: counts.normalized_surveillance_events,
-        normalized_flight_events: counts.normalized_flight_events,
-        normalized_other_events: counts.normalized_other_events,
-        adapter_counts,
         quarantine_rows: counts.quarantine_rows,
         manual_handling_required: counts.manual_handling_required,
         unprocessed_frames: counts.unprocessed_frames,
@@ -1177,9 +921,6 @@ pub fn stream_normalized_events_with_progress(
 #[derive(Clone, Copy, Debug, Default)]
 struct NormalizedAdapterCounts {
     normalized_events: u64,
-    normalized_surveillance_events: u64,
-    normalized_flight_events: u64,
-    normalized_other_events: u64,
     quarantine_rows: u64,
     manual_handling_required: u64,
     unprocessed_frames: u64,
@@ -1206,11 +947,7 @@ fn flush_normalized_group(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        add_adapter_loss_counts, stream_normalized_events_with_progress, stream_oaf_segments,
-        stream_oaf_segments_in_window, AdapterLossCounts, NormalizedStreamProgress,
-        RecordingSource, StreamInput,
-    };
+    use super::{stream_oaf_segments, stream_oaf_segments_in_window, RecordingSource, StreamInput};
     use std::error::Error;
     use std::fs::{self, OpenOptions};
     use std::io::Write;
@@ -1218,40 +955,6 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT: AtomicU64 = AtomicU64::new(1);
-
-    // REQ: OA-MIG-415
-    #[test]
-    fn adapter_loss_aggregation_handles_recorded_hour_message_scale_and_overflow() {
-        let mut aggregate = AdapterLossCounts::default();
-        let mut adsb_frame = crate::recordings::zero_recorded_adapter_counts();
-        adsb_frame.frames_adsb = 1;
-        adsb_frame.adsb_rows_in = 1_228;
-        adsb_frame.adsb_rows_dropped = 3;
-        adsb_frame.adsb_quality_removed = [1; 13];
-        for _ in 0..4_200 {
-            assert!(add_adapter_loss_counts(&mut aggregate, &adsb_frame).is_ok());
-        }
-        let mut sfdps_frame = crate::recordings::zero_recorded_adapter_counts();
-        sfdps_frame.frames_sfdps = 1;
-        sfdps_frame.sfdps_rows_decoded = 2;
-        sfdps_frame.sfdps_rows_no_operations = 1;
-        sfdps_frame.unsupported_operations.fill(1);
-        for _ in 0..66_475 {
-            assert!(add_adapter_loss_counts(&mut aggregate, &sfdps_frame).is_ok());
-        }
-        assert_eq!(aggregate.adsb_frames, 4_200);
-        assert_eq!(aggregate.adsb_rows_in, 5_157_600);
-        assert_eq!(aggregate.adsb_rows_dropped, 12_600);
-        assert_eq!(aggregate.adsb_quality_removed, [4_200; 13]);
-        assert_eq!(aggregate.sfdps_frames, 66_475);
-        assert_eq!(aggregate.sfdps_rows_decoded, 132_950);
-        assert_eq!(aggregate.sfdps_rows_no_operations, 66_475);
-        assert_eq!(aggregate.sfdps_unsupported_operations, 1_196_550);
-
-        let mut overflowing = crate::recordings::zero_recorded_adapter_counts();
-        overflowing.adsb_rows_in = u64::MAX;
-        assert!(add_adapter_loss_counts(&mut aggregate, &overflowing).is_err());
-    }
 
     fn temporary_path(label: &str) -> Result<PathBuf, Box<dyn Error>> {
         let id = NEXT.fetch_add(1, Ordering::Relaxed);
@@ -1468,49 +1171,6 @@ mod tests {
         assert!(first.0 < second.0);
         assert!(events.iter().all(|row| row.1 == receive_ns));
         assert!(events.iter().all(|row| row.2 == receive_ns));
-        Ok(())
-    }
-
-    // REQ: OA-MIG-415
-    #[test]
-    fn normalized_progress_survives_downstream_refusal_without_rows_or_ids(
-    ) -> Result<(), Box<dyn Error>> {
-        use std::fs::OpenOptions;
-
-        let path = temporary_path("progress_abort")?;
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)?;
-        let source_ns = 1_893_456_780_000_000_000i64;
-        let receive_ns = source_ns + 2_000_000_000;
-        for sequence in 1..=16 {
-            write_adsb_message(&mut file, sequence, source_ns, receive_ns)?;
-        }
-        file.sync_all()?;
-        drop(file);
-        let inputs = [StreamInput {
-            source: RecordingSource::Adsb,
-            path: path.clone(),
-        }];
-        let mut progress = NormalizedStreamProgress::default();
-        let result = stream_normalized_events_with_progress(
-            &inputs,
-            None,
-            *b"ZAU1",
-            &mut progress,
-            |_, _| Err("synthetic bounded downstream refusal".into()),
-        );
-        let _ = fs::remove_file(&path);
-        assert!(result.is_err());
-        assert_eq!(progress.reader.frames, 16);
-        assert_eq!(progress.reader.messages, 16);
-        assert_eq!(progress.normalized_events, 16);
-        assert_eq!(progress.normalized_surveillance_events, 16);
-        assert_eq!(progress.adapter_counts.adsb_rows_in, 16);
-        assert!(progress.reader_decode_ns > 0);
-        assert!(progress.adapter_ns > 0);
-        assert!(progress.downstream_callback_ns > 0);
         Ok(())
     }
 
