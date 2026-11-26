@@ -1407,19 +1407,18 @@ mod transaction_tests {
         sta_ms: Option<i64>,
         eta_ms: Option<i64>,
     ) -> MeteringScanRow {
-        MeteringScanRow::with_verified_binding(
+        let row = MeteringScanRow::unbound(
             *b"ZAU1",
             METER_TEST_KEY,
             [digest_byte; 32],
             Some(scan_ns - 200_000_000),
             scan_ns - 100_000_000,
-            METER_TEST_GUFI,
-            METER_TEST_ADDRESS,
             oa_display::core::metering::TargetMetering {
                 mfx: oa_display::core::metering::MeterPointTimes { sta_ms, eta_ms },
                 sfx: oa_display::core::metering::MeterPointTimes::default(),
             },
-        )
+        );
+        MeteringScanRow::with_verified_binding(row, METER_TEST_GUFI, METER_TEST_ADDRESS)
     }
 
     fn first_meter_test_frame(engine: &mut RegionalRuntime) -> RegionalFrame {
@@ -1503,8 +1502,9 @@ mod transaction_tests {
         let first = first_meter_test_frame(&mut engine);
         assert_meter_attached(&first);
         assert_eq!(first.flights.len(), 1);
+        let first_flight = first.flights.first().expect("one admitted test flight");
         assert_eq!(
-            first.flights[0].view.as_ref().map(|view| view.plan_state),
+            first_flight.view.as_ref().map(|view| view.plan_state),
             Some(oa_flight::ST_ACTIVE)
         );
         let first_texts = surveillance::rendered_scope_texts(&engine.surveillance);
@@ -1659,16 +1659,15 @@ mod transaction_tests {
     #[test]
     fn caller_supplied_full_key_and_address_do_not_bind_without_current_flight_table_match() {
         let mut engine = runtime();
-        let row = MeteringScanRow::with_verified_binding(
+        let row = MeteringScanRow::unbound(
             *b"ZAU1",
             *b"N123456789\0\0",
             [2; 32],
             Some(900_000_000),
             1_000_000_000,
-            77,
-            0x00ab_cdef,
             oa_display::core::metering::TargetMetering::default(),
         );
+        let row = MeteringScanRow::with_verified_binding(row, 77, 0x00ab_cdef);
         let frame = regional_step_with_metering(
             &mut engine,
             &ReceiptBatch {

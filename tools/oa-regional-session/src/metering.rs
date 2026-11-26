@@ -73,27 +73,15 @@ impl MeteringScanRow {
     /// is intentionally no current production caller for this constructor.
     #[cfg(test)]
     pub(crate) const fn with_verified_binding(
-        centre: [u8; 4],
-        feed_gufi: [u8; 12],
-        feed_row_sha256: [u8; 32],
-        source_time_ns: Option<i64>,
-        received_time_ns: i64,
+        mut row: Self,
         flight_gufi: u128,
         address: u32,
-        values: TargetMetering,
     ) -> Self {
-        Self {
-            centre,
-            feed_gufi,
-            feed_row_sha256,
-            source_time_ns,
-            received_time_ns,
-            binding: Some(RegionalFlightBinding {
-                flight_gufi,
-                address,
-            }),
-            values,
-        }
+        row.binding = Some(RegionalFlightBinding {
+            flight_gufi,
+            address,
+        });
+        row
     }
 }
 
@@ -193,9 +181,11 @@ pub fn resolve_metering_scan(
             .position(|byte| *byte == 0)
             .unwrap_or(12);
         if name_len != 10
-            || row.feed_gufi[name_len..].iter().any(|byte| *byte != 0)
-            || !row.feed_gufi[..name_len]
+            || row.feed_gufi.iter().skip(name_len).any(|byte| *byte != 0)
+            || !row
+                .feed_gufi
                 .iter()
+                .take(name_len)
                 .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
             || row.feed_row_sha256.iter().all(|byte| *byte == 0)
         {
@@ -337,7 +327,9 @@ pub fn resolve_metering_scan(
     Ok((resolved, report))
 }
 
+// Deterministic fixtures have fixed valid inputs; test-only panic assertions report fixture bugs.
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
 
