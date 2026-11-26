@@ -848,7 +848,6 @@ fn flight_apply_validated_event(
             FlightHandoff::Take { by } => (OP_HO_TAKE, 0, [0; 12], None, [0; 8], by, None, None),
             FlightHandoff::Retract => (OP_HO_RETRACT, 0, [0; 12], None, [0; 8], [0; 8], None, None),
             FlightHandoff::Fail => (OP_HO_FAIL, 0, [0; 12], None, [0; 8], [0; 8], None, None),
-
         },
     };
     let mut op = op_new(

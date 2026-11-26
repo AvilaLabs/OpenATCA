@@ -149,8 +149,15 @@ pub enum FlightAltitude {
     Simple(i32),
     Vfr,
     VfrOnTopPlus(i32),
-    Block { above_ft: i32, below_ft: i32 },
-    AtFix { before_ft: i32, after_ft: i32, fix: [u8; 12] },
+    Block {
+        above_ft: i32,
+        below_ft: i32,
+    },
+    AtFix {
+        before_ft: i32,
+        after_ft: i32,
+        fix: [u8; 12],
+    },
     Nil,
 }
 
