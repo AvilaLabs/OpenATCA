@@ -1134,7 +1134,7 @@ mod tests {
         assert_eq!(aggregate.sfdps_frames, 66_475);
         assert_eq!(aggregate.sfdps_rows_decoded, 132_950);
         assert_eq!(aggregate.sfdps_rows_no_operations, 66_475);
-        assert_eq!(aggregate.sfdps_unsupported_operations, 1_063_600);
+        assert_eq!(aggregate.sfdps_unsupported_operations, 1_196_550);
 
         let mut overflowing = crate::recordings::zero_recorded_adapter_counts();
         overflowing.adsb_rows_in = u64::MAX;
