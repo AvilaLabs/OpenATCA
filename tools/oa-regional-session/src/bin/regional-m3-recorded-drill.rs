@@ -91,8 +91,21 @@ fn emit(report: &RecordedDrillReport) {
         .flat_map(|cycles| cycles.iter())
         .map(|cycle| cycle.active_ca_alerts)
         .sum::<u64>();
+    let handoff_state_rows = report
+        .replica_cycles
+        .iter()
+        .flat_map(|cycles| cycles.iter())
+        .map(|cycle| cycle.handoff_views)
+        .sum::<u64>();
+    let renderer_target_rows = report
+        .replica_cycles
+        .iter()
+        .flat_map(|cycles| cycles.iter())
+        .map(|cycle| cycle.display_target_rows)
+        .sum::<u64>();
+    let paired_runtime_frame_denominator = report.per_update_consumer.updates * 2;
     println!(
-        "H5RECORDED\tversion=7\tmode=paired_single_pass_two_independent_same_implementation_runtimes\tprivileged_action_audit=UNAVAILABLE_PUBLISHED_M2_API\tauthority_mode={}\tqualification={}\tcentre={}\tendpoint_class={}\tmeasurement_start_ns={}\tmeasurement_end_ns={}\tcapture_start_ns={}\twarmup_events={}\tupdate_interval_ns={}\tdecision_limit_ns={}\tcycles_defined=100\tm2_ingest_attempts={}\tm2_cycles_refused={}\tflip_rollback_cycles_attempted={}\tflip_rollback_cycles_completed={}\taudit_events_written=0\tmax_retained_snapshot_bytes_per_replica={}\tdrill_runtime_cap_s=300\tphysical_input_byte_cap={}\tinput_frame_cap={}\tinput_stream_cap={}\tnormalized_event_cap={}\tconsumer_event_frame_cap_bytes={}\tnormalized_events={}\tposition_inputs={}\tflight_inputs={}\thandoff_operations={}\tactive_ca_alert_frame_rows={}\tactive_ca_alert_frame_denominator={}\thandoff_state_frame_denominator={}\tquarantine_records={}\tmanual_handling_required={}\tinput_delivery=single_stream_callback_to_two_independent_runtimes\tselected_state_apply_ack_rows={}\treplay_projection_equal_cycles={}\tmodel_sha256={}\tmap_centre_lat_e7={}\tmap_centre_lon_e7={}\tmap_range_nm={}\tprofile_max_frames={}\tprofile_max_tracks={}\tprofile_max_flights={}\tprofile_max_total_events={}\tprofile_max_baro_evidence={}\tprofile_max_drain_rows={}\tprofile_max_ca_candidates={}\tprofile_max_open_alerts={}\tprofile_max_ca_work_per_frame={}\tconsumer_output_order=monotonic_generation_checked\tconsumer_scope=local_worker_applies_each_selected_typed_snapshot_and_ACKs_its_exact_digest_no_external_endpoint_or_source_completeness_claim\ttrack_output_integrity=typed_snapshot_digest_ACK\tactive_alert_projection=typed_CA_rows_ACK_ack_suppression_unknown\tdisplay_block_projection=existing_renderer_Target_rows_joined_to_track_state\thandoff_projection=typed_flight_handoff_rows_ACK\tstate_families_available={},{},{},{}",
+        "H5RECORDED\tversion=7\tmode=paired_single_pass_two_independent_same_implementation_runtimes\tprivileged_action_audit=UNAVAILABLE_PUBLISHED_M2_API\tauthority_mode={}\tqualification={}\tcentre={}\tendpoint_class={}\tmeasurement_start_ns={}\tmeasurement_end_ns={}\tcapture_start_ns={}\twarmup_events={}\tupdate_interval_ns={}\tdecision_limit_ns={}\tcycles_defined=100\tm2_ingest_attempts={}\tm2_cycles_refused={}\tflip_rollback_cycles_attempted={}\tflip_rollback_cycles_completed={}\taudit_events_written=0\tmax_retained_snapshot_bytes_per_replica={}\tdrill_runtime_cap_s=300\tphysical_input_byte_cap={}\tinput_frame_cap={}\tinput_stream_cap={}\tnormalized_event_cap={}\tconsumer_event_frame_cap_bytes={}\tnormalized_events={}\tposition_inputs={}\tflight_inputs={}\thandoff_operations={}\tactive_ca_alert_frame_rows={}\thandoff_state_frame_rows={}\trenderer_target_frame_rows={}\tpaired_runtime_frame_denominator={}\tquarantine_records={}\tmanual_handling_required={}\tinput_delivery=single_stream_callback_to_two_independent_runtimes\tselected_state_apply_ack_rows={}\treplay_projection_equal_cycles={}\tmodel_sha256={}\tmap_centre_lat_e7={}\tmap_centre_lon_e7={}\tmap_range_nm={}\tprofile_max_frames={}\tprofile_max_tracks={}\tprofile_max_flights={}\tprofile_max_total_events={}\tprofile_max_baro_evidence={}\tprofile_max_drain_rows={}\tprofile_max_ca_candidates={}\tprofile_max_open_alerts={}\tprofile_max_ca_work_per_frame={}\tconsumer_output_order=monotonic_generation_checked\tconsumer_scope=local_worker_applies_each_selected_typed_snapshot_and_ACKs_its_exact_digest_no_external_endpoint_or_source_completeness_claim\ttrack_output_integrity=typed_snapshot_digest_ACK\tactive_alert_projection=typed_CA_rows_ACK_ack_suppression_unknown\tdisplay_block_projection=existing_renderer_Target_rows_joined_to_track_state\thandoff_projection=typed_flight_handoff_rows_ACK\tstate_families_available={},{},{},{}",
         report.authority_mode,
         report.qualification,
         report.centre,
@@ -118,8 +131,9 @@ fn emit(report: &RecordedDrillReport) {
         report.flight_input_count,
         report.handoff_operation_count,
         alert_rows,
-        report.per_update_consumer.updates,
-        report.per_update_consumer.updates,
+        handoff_state_rows,
+        renderer_target_rows,
+        paired_runtime_frame_denominator,
         report.quarantine_record_count,
         report.manual_handling_required_count,
         report.replay_output_ack_count,
