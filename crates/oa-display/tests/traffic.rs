@@ -677,7 +677,7 @@ fn an_invalid_target_is_refused_counted_and_said_on_the_frame_never_defaulted() 
     bad_history.trail_len = 1;
     bad_history.trail[0] = (0, 1_800_000_001);
     let mut bad_flags = plain(ORD.0, ORD.1);
-    bad_flags.flags = 8;
+    bad_flags.flags = 32;
     for t in [off_globe, long_trail, bad_history, bad_flags] {
         assert!(matches!(
             targets_push(&mut set, &t),

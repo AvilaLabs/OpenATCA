@@ -308,7 +308,9 @@ pub fn targets_apply_mode_flags(
     modes: &[(u32, u8)],
 ) -> Result<u32, TrafficError> {
     const MODE_FLAGS: u8 = T_FUSION | T_ISR;
-    if modes.len() > s.capacity
+    // Mode evidence can include valid tracks outside the visible target set, so bound it by the
+    // same fixed crate-wide maximum rather than the number of display slots allocated here.
+    if modes.len() > MAX_TARGETS
         || modes.iter().any(|(_, flags)| flags & !MODE_FLAGS != 0)
         || modes.windows(2).any(|pair| match pair {
             [first, second] => first.0 >= second.0,
