@@ -3982,9 +3982,9 @@ pub fn run_recorded(
         map_centre_lon_e7,
         map_range_nm,
         source_state_families_available: [
-            counts.positions > 0,
-            counts.flights > 0,
-            counts.handoffs > 0,
+            positions > 0,
+            flights > 0,
+            handoffs > 0,
             false,
         ],
         qualification: "INCOMPLETE_RECORDED_REPLAY_STATE",
