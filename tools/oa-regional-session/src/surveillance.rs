@@ -775,7 +775,9 @@ mod display_target_capture_tests {
     {
         use oa_display::core::traffic::{self, Target, MAX_TRAIL};
         let mut trail = [(0, 0); MAX_TRAIL];
-        *trail.first_mut().ok_or("synthetic trail capacity missing")? = (1, 2);
+        *trail
+            .first_mut()
+            .ok_or("synthetic trail capacity missing")? = (1, 2);
         let target = Target {
             lat_e7: 385_000_000,
             lon_e7: -935_000_000,
