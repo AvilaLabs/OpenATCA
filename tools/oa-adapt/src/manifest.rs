@@ -1036,7 +1036,7 @@ mod tests {
     // REQ: OA-ADAPT-003
     #[test]
     fn issue_chains_exactly_one_version_and_records_field_change_approval_claims() {
-        let (_, bytes) = sample();
+        let (baseline_model, bytes) = sample();
         let previous_root = temp_root("issue-previous");
         let previous_pin = write_new_package(&previous_root, &bytes, "legacy", "ZAU", "BASE-1")
             .expect("legacy baseline package writes");
@@ -1075,10 +1075,19 @@ mod tests {
             Some(previous_pin)
         );
 
+        // A real adaptation field changes: the selected NASR/CIFP buffer is one metre larger.
+        // Keep this synthetic value within the ordinary valid model range and encode it through
+        // the same snapshot codec used by package verification.
+        let mut changed_model = baseline_model.clone();
+        changed_model.meta.buffer_m += 1;
+        assert_ne!(changed_model, baseline_model);
+        let changed_bytes = encode(&changed_model).expect("field-changed model encodes");
+        assert_ne!(changed_bytes, bytes);
+
         let second_root = temp_root("issue-second");
         let (second_version, second_pin) = issue_new_package(
             &second_root,
-            &bytes,
+            &changed_bytes,
             "adapt-2",
             "ZAU",
             "FIELD-1",
@@ -1104,6 +1113,16 @@ mod tests {
         assert_eq!(metadata.approver_principal_id, "approver-4");
         assert_eq!(metadata.reason, "sector field correction");
         assert_eq!(metadata.previous_manifest_sha256, first_pin);
+        assert_ne!(
+            second.identity().snapshot_sha256,
+            first.identity().snapshot_sha256
+        );
+        assert_eq!(second.identity().snapshot_sha256, sha256(&changed_bytes));
+        assert_eq!(second.model(), &changed_model);
+        assert!(matches!(
+            verify_current(&second_root, first_pin),
+            Err(VerifyError::ManifestIdentityMismatch { .. })
+        ));
         let _ = fs::remove_dir_all(previous_root);
         let _ = fs::remove_dir_all(first_root);
         let _ = fs::remove_dir_all(second_root);
