@@ -316,6 +316,9 @@ version = "0.0.1"
 [[package]]
 name = "oa-migration-switch"
 version = "0.0.1"
+dependencies = [
+ "oa-migration",
+]
 
 [[package]]
 name = "oa-modes"

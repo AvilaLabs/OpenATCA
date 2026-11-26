@@ -3,12 +3,17 @@
 //! snapshot producer and bounded input contract are available.
 #![forbid(unsafe_code)]
 
+use oa_migration::{
+    self as m1, AuthorityApproval, AuthorityRole, Comparison, EvidenceQuality, MetricCriterion,
+    MetricEvidence, RollbackRule, RollbackTriggerPolicy, Stage, SwapUnitKey as M1Key,
+    TransitionInput, TransitionPolicy,
+};
 use oa_migration_switch::{
     ingest, new_selector, observe_delivery, prepare_candidate, rollback, select_candidate,
-    AlertState, AuthorityReceipt, BusinessKey, EndpointClass, EntityFamily, EvidenceKind,
-    FamilyCoverage, FieldStatus, FlightState, HandoffState, Health, Output, Refusal, RollbackKind,
-    RollbackReceipt, Side, Snapshot, SourceIdentity, SwapUnitKey, TrackState, UnitPolicy,
-    MAX_ALERTS, MAX_FLIGHTS, MAX_HANDOFFS, MAX_TRACE, MAX_TRACKS,
+    AlertState, BusinessKey, EndpointClass, EntityFamily, EvidenceKind, FamilyCoverage,
+    FieldStatus, FlightState, HandoffState, Health, Output, Refusal, RollbackKind, RollbackReceipt,
+    Side, Snapshot, SourceIdentity, SwapUnitKey, TrackState, UnitPolicy, MAX_ALERTS, MAX_FLIGHTS,
+    MAX_HANDOFFS, MAX_TRACE, MAX_TRACKS,
 };
 use std::time::Instant;
 
@@ -211,34 +216,211 @@ fn snapshot(
 fn authority(
     unit: SwapUnitKey,
     policy: UnitPolicy,
-    authority_sequence: u64,
-    legacy_sequence: u64,
-    candidate_sequence: u64,
+    _authority_sequence: u64,
+    _legacy_sequence: u64,
+    _candidate_sequence: u64,
     evaluated_ns: i64,
-) -> AuthorityReceipt {
-    AuthorityReceipt {
-        unit,
-        sequence: authority_sequence,
-        evaluated_at_ns: evaluated_ns,
-        from_stage: 1,
-        to_stage: 2,
-        principal_role_id: 1,
-        refusal_code: 0,
+) -> Result<m1::TransitionResult, Refusal> {
+    let key = M1Key {
+        function_id: unit.function_id,
+        scope_id: unit.scope_id,
+        window_start_ns: unit.window_start_ns,
+        window_end_ns: unit.window_end_ns,
+    };
+    let unit_m1 = m1::new_unit(
+        key,
+        policy.policy_version,
+        policy.policy_digest,
+        policy.source_epoch_digest,
+        unit.window_start_ns,
+    )
+    .map_err(|_| Refusal::Unauthorized)?;
+    let mut audit = m1::empty_audit_log();
+    let criteria = [MetricCriterion {
+        metric_id: 4,
+        comparison: Comparison::AtMost,
+        threshold: 3,
+        minimum_samples: 1,
+        minimum_denominator: 1,
+        minimum_exposure_ns: 1,
+    }; m1::MAX_CRITERIA];
+    let dependencies = [m1::DependencyRequirement {
+        key,
+        minimum_stage: Stage::S0Shadow,
         policy_version: policy.policy_version,
         policy_digest: policy.policy_digest,
         source_epoch_digest: policy.source_epoch_digest,
-        event_key: [5; 32],
-        principal_id: [8; 32],
-        assessor_principal_id: [9; 32],
-        evidence_set_handle: policy.evidence_set_handle,
-        approval_set_handle: policy.approval_set_handle,
-        legacy_epoch: 11,
-        candidate_epoch: 12,
-        legacy_state_version: 1,
-        candidate_state_version: 1,
-        legacy_sequence,
-        candidate_sequence,
+    }; m1::MAX_DEPENDENCIES];
+    let rollback_policy = RollbackTriggerPolicy {
+        blocking_difference: RollbackRule {
+            enabled: true,
+            maximum_response_ns: 1_000_000_000,
+            required_role_mask: m1::ROLE_SUPERVISOR,
+        },
+        controller_request: RollbackRule {
+            enabled: true,
+            maximum_response_ns: 1_000_000_000,
+            required_role_mask: m1::ROLE_CONTROLLER_ON_POSITION,
+        },
+        health_fault: RollbackRule {
+            enabled: true,
+            maximum_response_ns: 1_000_000_000,
+            required_role_mask: m1::ROLE_TECH_OPS,
+        },
+    };
+    let build_policy = |from, to| TransitionPolicy {
+        key,
+        from,
+        to,
+        policy_version: policy.policy_version,
+        policy_digest: policy.policy_digest,
+        source_epoch_digest: policy.source_epoch_digest,
+        maximum_evidence_age_ns: 10_000_000_000,
+        required_role_mask: m1::ROLE_SUPERVISOR | m1::ROLE_ASSESSOR,
+        criterion_count: 1,
+        criteria,
+        dependency_count: 0,
+        dependencies,
+        rollback_policy,
+    };
+    let build_evidence =
+        |stage: Stage, start_ns: i64, end_ns: i64| -> Result<[MetricEvidence; 1], Refusal> {
+            let span = end_ns.checked_sub(start_ns).ok_or(Refusal::TimeOverflow)?;
+            let exposure_ns = u64::try_from(span).map_err(|_| Refusal::TimeOverflow)?;
+            Ok([MetricEvidence {
+                key,
+                measured_stage: stage,
+                metric_id: 4,
+                quality: EvidenceQuality::Complete,
+                policy_version: policy.policy_version,
+                samples: 5,
+                denominator: 8,
+                observed: 2,
+                exposure_ns,
+                observation_start_ns: start_ns,
+                observation_end_ns: end_ns,
+                observed_at_ns: end_ns,
+                policy_digest: policy.policy_digest,
+                source_epoch_digest: policy.source_epoch_digest,
+                artifact_handle: [20; 32],
+                evidence_set_handle: policy.evidence_set_handle,
+                observation_origin_key: key,
+                origin_stage_activation_ns: 0,
+                origin_receipt_handle: [0; 32],
+            }])
+        };
+    let build_approvals = |from, to, at_ns| {
+        [
+            AuthorityApproval {
+                key,
+                from,
+                to,
+                role: AuthorityRole::FacilitySupervisor,
+                approved: true,
+                principal_id: 8,
+                approved_at_ns: at_ns,
+                policy_version: policy.policy_version,
+                policy_digest: policy.policy_digest,
+                source_epoch_digest: policy.source_epoch_digest,
+                evidence_set_handle: policy.evidence_set_handle,
+                approval_set_handle: policy.approval_set_handle,
+                authority_record_handle: [21; 32],
+            },
+            AuthorityApproval {
+                key,
+                from,
+                to,
+                role: AuthorityRole::IndependentAssessor,
+                approved: true,
+                principal_id: 9,
+                approved_at_ns: at_ns,
+                policy_version: policy.policy_version,
+                policy_digest: policy.policy_digest,
+                source_epoch_digest: policy.source_epoch_digest,
+                evidence_set_handle: policy.evidence_set_handle,
+                approval_set_handle: policy.approval_set_handle,
+                authority_record_handle: [22; 32],
+            },
+        ]
+    };
+    let first_at = unit
+        .window_start_ns
+        .checked_add(5)
+        .ok_or(Refusal::TimeOverflow)?;
+    let first_policy = build_policy(Stage::S0Shadow, Stage::S1Advisory);
+    let first_metrics = build_evidence(Stage::S0Shadow, unit.window_start_ns, first_at - 1)?;
+    let first_approvals = build_approvals(Stage::S0Shadow, Stage::S1Advisory, first_at);
+    let first = m1::evaluate_transition(
+        &unit_m1,
+        TransitionInput {
+            policy: &first_policy,
+            metrics: &first_metrics,
+            dependencies: &[],
+            approvals: &first_approvals,
+            evidence_set_handle: policy.evidence_set_handle,
+            approval_set_handle: policy.approval_set_handle,
+            now_ns: first_at,
+        },
+        &mut audit,
+    );
+    if m1::transition_event(&first).refusal != m1::Refusal::None {
+        return Err(Refusal::Unauthorized);
     }
+    let second_policy = build_policy(Stage::S1Advisory, Stage::S2Window);
+    let second_metrics = build_evidence(Stage::S1Advisory, first_at, evaluated_ns - 1)?;
+    let second_approvals = build_approvals(Stage::S1Advisory, Stage::S2Window, evaluated_ns);
+    let second = m1::evaluate_transition(
+        &m1::transition_unit(&first),
+        TransitionInput {
+            policy: &second_policy,
+            metrics: &second_metrics,
+            dependencies: &[],
+            approvals: &second_approvals,
+            evidence_set_handle: policy.evidence_set_handle,
+            approval_set_handle: policy.approval_set_handle,
+            now_ns: evaluated_ns,
+        },
+        &mut audit,
+    );
+    if m1::transition_event(&second).refusal != m1::Refusal::None {
+        return Err(Refusal::Unauthorized);
+    }
+    Ok(second)
+}
+
+fn window_authorization(
+    selector: &oa_migration_switch::Selector,
+    unit: SwapUnitKey,
+    policy: UnitPolicy,
+    evaluated_ns: i64,
+) -> Result<oa_migration_switch::WindowAuthorization, Refusal> {
+    let m1_result = authority(unit, policy, 1, 1, 1, evaluated_ns)?;
+    oa_migration_switch::authorize_window(selector, &m1_result)
+}
+
+fn promotion_intent(
+    selector: &oa_migration_switch::Selector,
+    readiness: &oa_migration_switch::CandidateReadiness,
+    authorization: &oa_migration_switch::WindowAuthorization,
+    sequence: u64,
+    evaluated_ns: i64,
+) -> Result<oa_migration_switch::PromotionIntent, Refusal> {
+    let event_byte = u8::try_from(sequence).map_err(|_| Refusal::TimeOverflow)?;
+    if event_byte == 0 {
+        return Err(Refusal::Unauthorized);
+    }
+    oa_migration_switch::new_promotion_intent(
+        selector,
+        readiness,
+        authorization,
+        oa_migration_switch::PromotionIntentRequest {
+            sequence,
+            evaluated_at_ns: evaluated_ns,
+            principal_role_id: 1,
+            principal_id: 8,
+            event_key: [event_byte; 32],
+        },
+    )
 }
 
 fn rollback_receipt(
@@ -250,6 +432,8 @@ fn rollback_receipt(
     observed_ns: i64,
     health_observed_ns: i64,
 ) -> RollbackReceipt {
+    let mut event_id = [7; 32];
+    event_id[..8].copy_from_slice(&authority_sequence.to_le_bytes());
     RollbackReceipt {
         unit,
         kind: RollbackKind::ControllerRequest,
@@ -270,7 +454,7 @@ fn rollback_receipt(
         legacy_health: Health::Healthy,
         legacy_source_available: true,
         legacy_health_observed_ns: health_observed_ns,
-        event_id: [7; 32],
+        event_id,
         observed_ns,
     }
 }
@@ -324,11 +508,14 @@ fn run_cycle(index: u32) -> Result<(u128, u128, u128, u128, u128), Refusal> {
         return Err(Refusal::Incomplete);
     }
     let readiness_ns = decision_started.elapsed().as_nanos();
+    let authorization = window_authorization(&selector, unit, policy, now_ns)?;
+    let intent = promotion_intent(&selector, &readiness, &authorization, 1, now_ns)?;
     let promotion_started = Instant::now();
     select_candidate(
         &mut selector,
         &readiness,
-        authority(unit, policy, 1, 1, 1, now_ns),
+        &authorization,
+        &intent,
         now_ns,
         MAX_AGE_NS,
     )?;
@@ -372,6 +559,18 @@ fn run_cycle(index: u32) -> Result<(u128, u128, u128, u128, u128), Refusal> {
     if count != 2
         || records.first().copied().flatten().map(|r| r.to) != Some(Output::Candidate)
         || records.get(1).copied().flatten().map(|r| r.to) != Some(Output::Legacy)
+        || records
+            .first()
+            .copied()
+            .flatten()
+            .map(|r| r.m1_window_sequence)
+            != Some(2)
+        || records
+            .get(1)
+            .copied()
+            .flatten()
+            .map(|r| r.m1_window_sequence)
+            != Some(0)
     {
         return Err(Refusal::OutputGap);
     }
@@ -402,10 +601,13 @@ fn fault_suite() -> Result<u32, Refusal> {
     }
     cases = cases.checked_add(1).ok_or(Refusal::TimeOverflow)?;
     let epoch_attempt_at = now_ns.checked_add(20).ok_or(Refusal::TimeOverflow)?;
+    let authorization = window_authorization(&selector, unit, policy, now_ns)?;
+    let intent = promotion_intent(&selector, &readiness, &authorization, 1, epoch_attempt_at)?;
     select_candidate(
         &mut selector,
         &readiness,
-        authority(unit, policy, 1, 1, 1, epoch_attempt_at),
+        &authorization,
+        &intent,
         epoch_attempt_at,
         MAX_AGE_NS,
     )?;
@@ -469,10 +671,20 @@ fn fault_suite() -> Result<u32, Refusal> {
     if !pending_report.ready {
         return Err(Refusal::StateMismatch);
     }
+    let pending_authorization =
+        window_authorization(&pending, pending_unit, pending_policy, pending_now)?;
+    let pending_intent = promotion_intent(
+        &pending,
+        &pending_ready,
+        &pending_authorization,
+        1,
+        pending_now,
+    )?;
     select_candidate(
         &mut pending,
         &pending_ready,
-        authority(pending_unit, pending_policy, 1, 1, 1, pending_now),
+        &pending_authorization,
+        &pending_intent,
         pending_now,
         MAX_AGE_NS,
     )?;
@@ -542,7 +754,9 @@ fn fault_suite() -> Result<u32, Refusal> {
         return Err(Refusal::StateMismatch);
     }
     cases = cases.checked_add(1).ok_or(Refusal::TimeOverflow)?;
-    println!("FAULT\tversion=1\tcases={cases}\texpected_refusals=8\texpected_delivery_gap_refusals=2\texpected_delivery_duplicates=1\texpected_out_of_order=Stale\tepoch_change_after_reconcile=WrongUnit\tduplicate_delivery=OutputDuplicate\tsequence_gap=OutputGap\tstale_legacy_health=Stale\tpromotion_pending_rollback=accepted_then_delivery_gap\tpending_fault_delivery_offered=1\tpending_fault_delivery_delivered=0\tpending_fault_delivery_lost=1\texpired_mirror=Stale\tincomplete_family=Incomplete\tfault_injections=synthetic_only\tlosses_preserved=1");
+    println!(
+        "FAULT\tversion=1\tcases={cases}\texpected_refusals=8\texpected_delivery_gap_refusals=2\texpected_delivery_duplicates=1\texpected_out_of_order=Stale\tepoch_change_after_reconcile=WrongUnit\tduplicate_delivery=OutputDuplicate\tsequence_gap=OutputGap\tstale_legacy_health=Stale\tpromotion_pending_rollback=accepted_then_delivery_gap\tpending_fault_delivery_offered=1\tpending_fault_delivery_delivered=0\tpending_fault_delivery_lost=1\texpired_mirror=Stale\tincomplete_family=Incomplete\tfault_injections=synthetic_only\tlosses_preserved=1"
+    );
     Ok(cases)
 }
 
@@ -565,6 +779,7 @@ fn sustained_trace_capacity_case() -> Result<(), Refusal> {
     };
     let policy = drill_policy();
     let mut selector = new_selector(unit, policy, EvidenceKind::Synthetic, start_ns)?;
+    let window_grant = window_authorization(&selector, unit, policy, start_ns + 10)?;
     let mut cycle = 0u32;
     while cycle < 65 {
         let step = i64::from(cycle)
@@ -596,18 +811,19 @@ fn sustained_trace_capacity_case() -> Result<(), Refusal> {
         let rollback_authority = promote_authority
             .checked_add(1)
             .ok_or(Refusal::TimeOverflow)?;
+        let intent = promotion_intent(
+            &selector,
+            &readiness,
+            &window_grant,
+            promote_authority,
+            now_ns,
+        )?;
         if cycle == 64 {
             if select_candidate(
                 &mut selector,
                 &readiness,
-                authority(
-                    unit,
-                    policy,
-                    promote_authority,
-                    source_sequence,
-                    source_sequence,
-                    now_ns,
-                ),
+                &window_grant,
+                &intent,
                 now_ns,
                 MAX_AGE_NS,
             ) != Err(Refusal::TraceFull)
@@ -626,23 +842,16 @@ fn sustained_trace_capacity_case() -> Result<(), Refusal> {
             {
                 return Err(Refusal::StateMismatch);
             }
-            println!("SUSTAINED\tversion=1\tcompleted_flip_rollback_cycles=64\tconsumer_deliveries=128\ttrace_records={count}\ttrace_capacity={MAX_TRACE}\tfinal_rollback_slot_preserved=1\tfinal_record_sequence=128\tfinal_record_from=Candidate\tfinal_record_to=Legacy\tnext_promotion=TraceFull\tselected_after_refusal=Legacy\tfallback_not_blocked=1\trecorded=0");
+            println!(
+                "SUSTAINED\tversion=1\tcompleted_flip_rollback_cycles=64\tconsumer_deliveries=128\ttrace_records={count}\ttrace_capacity={MAX_TRACE}\tfinal_rollback_slot_preserved=1\tfinal_record_sequence=128\tfinal_record_from=Candidate\tfinal_record_to=Legacy\tnext_promotion=TraceFull\tselected_after_refusal=Legacy\tfallback_not_blocked=1\trecorded=0"
+            );
             return Ok(());
         }
-        let mut promotion_receipt = authority(
-            unit,
-            policy,
-            promote_authority,
-            source_sequence,
-            source_sequence,
-            now_ns,
-        );
-        promotion_receipt.legacy_state_version = source_sequence;
-        promotion_receipt.candidate_state_version = source_sequence;
         select_candidate(
             &mut selector,
             &readiness,
-            promotion_receipt,
+            &window_grant,
+            &intent,
             now_ns,
             MAX_AGE_NS,
         )?;
@@ -693,6 +902,7 @@ fn sustained_trace_capacity_case() -> Result<(), Refusal> {
                 || last.from != Output::Candidate
                 || last.to != Output::Legacy
                 || last.reason != 2
+                || last.m1_window_sequence != 0
             {
                 return Err(Refusal::StateMismatch);
             }
@@ -713,12 +923,16 @@ fn sustained_trace_capacity_case() -> Result<(), Refusal> {
 }
 
 fn report_header() -> String {
-    format!("M3DRILL\tversion=1\tmode=synthetic_capacity\trecorded_mode={RECORDED_MODE_STATUS}\tqualification={QUALIFICATION_STATUS}\tcycles={CYCLES}\tseed=0x4d335f53594e5448\ttracks_per_side={MAX_TRACKS}\tflights_per_side={MAX_FLIGHTS}\thandoffs_per_side={MAX_HANDOFFS}\talerts_per_side={MAX_ALERTS}\tterminal_interval_ns=4800000000\tmax_decision_delay_ns=1000000000\tmodeled_delivery_delay_ns={DECISION_TO_DELIVERY_NS}\tdelivery_timing_scope=selector_api_only\tconsumer_wire_adapter=NOT_BUILT")
+    format!(
+        "M3DRILL\tversion=1\tmode=synthetic_capacity\trecorded_mode={RECORDED_MODE_STATUS}\tqualification={QUALIFICATION_STATUS}\tcycles={CYCLES}\tseed=0x4d335f53594e5448\ttracks_per_side={MAX_TRACKS}\tflights_per_side={MAX_FLIGHTS}\thandoffs_per_side={MAX_HANDOFFS}\talerts_per_side={MAX_ALERTS}\tterminal_interval_ns=4800000000\tmax_decision_delay_ns=1000000000\tmodeled_delivery_delay_ns={DECISION_TO_DELIVERY_NS}\tdelivery_timing_scope=selector_api_only\tconsumer_wire_adapter=NOT_BUILT"
+    )
 }
 
 fn main() -> Result<(), Refusal> {
     println!("{}", report_header());
-    println!("CYCLE_FIELDS\tindex\tready_ns\tpromotion_ns\trollback_ns\tcandidate_delivery_api_ns\tlegacy_delivery_api_ns\tdelivery_delay_ns\ttracks\tflights\thandoffs\talerts\toutput_sequences\tlosses\terror");
+    println!(
+        "CYCLE_FIELDS\tindex\tready_ns\tpromotion_ns\trollback_ns\tcandidate_delivery_api_ns\tlegacy_delivery_api_ns\tdelivery_delay_ns\ttracks\tflights\thandoffs\talerts\toutput_sequences\tlosses\terror"
+    );
     let mut completed = 0u32;
     let mut failures = 0u32;
     let mut index = 0u32;
@@ -731,7 +945,9 @@ fn main() -> Result<(), Refusal> {
                 candidate_delivery_ns,
                 legacy_delivery_ns,
             )) => {
-                println!("CYCLE\t{index}\t{ready_ns}\t{promotion_ns}\t{rollback_ns}\t{candidate_delivery_ns}\t{legacy_delivery_ns}\t{DECISION_TO_DELIVERY_NS}\t{MAX_TRACKS}\t{MAX_FLIGHTS}\t{MAX_HANDOFFS}\t{MAX_ALERTS}\t1,2\t0\tNONE");
+                println!(
+                    "CYCLE\t{index}\t{ready_ns}\t{promotion_ns}\t{rollback_ns}\t{candidate_delivery_ns}\t{legacy_delivery_ns}\t{DECISION_TO_DELIVERY_NS}\t{MAX_TRACKS}\t{MAX_FLIGHTS}\t{MAX_HANDOFFS}\t{MAX_ALERTS}\t1,2\t0\tNONE"
+                );
                 completed = completed.checked_add(1).ok_or(Refusal::TimeOverflow)?;
             }
             Err(error) => {
@@ -745,7 +961,9 @@ fn main() -> Result<(), Refusal> {
     if failures == 0 {
         sustained_trace_capacity_case()?;
     }
-    println!("SUMMARY\tcycles_expected={CYCLES}\tcycles_completed={completed}\tcycles_failed={failures}\tclean_cycle_delivery_expected=200\tclean_cycle_delivery_observed=200\tclean_cycle_lost=0\tfault_cases={fault_count}\tsustained_same_selector_cycles=64\tsustained_trace_capacity={MAX_TRACE}\tsustained_next_promotion=TraceFull\tsustained_fallback=Legacy\tclean_cycle_consumer_gaps=0\tclean_cycle_consumer_duplicates=0\tclean_cycle_consumer_out_of_order=0\tactive_alerts_preserved=1\tack_suppression_fields_compared=1\thandoff_rows_compared={MAX_HANDOFFS}\tdecision_and_delivery_timings_separate=1\trecorded_replay=NOT_BUILT\tqualification=INCOMPLETE");
+    println!(
+        "SUMMARY\tcycles_expected={CYCLES}\tcycles_completed={completed}\tcycles_failed={failures}\tclean_cycle_delivery_expected=200\tclean_cycle_delivery_observed=200\tclean_cycle_lost=0\tfault_cases={fault_count}\tsustained_same_selector_cycles=64\tsustained_trace_capacity={MAX_TRACE}\tsustained_next_promotion=TraceFull\tsustained_fallback=Legacy\tclean_cycle_consumer_gaps=0\tclean_cycle_consumer_duplicates=0\tclean_cycle_consumer_out_of_order=0\tactive_alerts_preserved=1\tack_suppression_fields_compared=1\thandoff_rows_compared={MAX_HANDOFFS}\tdecision_and_delivery_timings_separate=1\trecorded_replay=NOT_BUILT\tqualification=INCOMPLETE"
+    );
     if failures != 0 {
         return Err(Refusal::Incomplete);
     }
@@ -766,15 +984,6 @@ mod tests {
             assert!(run_cycle(index).is_ok());
         }
         assert_eq!(fault_suite(), Ok(8));
-    }
-
-    // REQ: OA-MIG-302
-    #[test]
-    fn sustained_selector_reaches_reserved_final_rollback_slot() {
-        assert_eq!(
-            sustained_trace_capacity_case(),
-            Ok(()),
-            "the same sustained case used by the executable must complete"
-        );
+        assert!(sustained_trace_capacity_case().is_ok());
     }
 }

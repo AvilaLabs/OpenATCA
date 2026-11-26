@@ -4,6 +4,8 @@
 //! Recorded/synthetic model of output selection and state reconciliation.
 //! It does not connect to or certify the health of an operational system.
 
+// User approved the typed M1-to-M2 authority edge on 2026-11-26 (private F1 decision).
+
 #[cfg(not(target_pointer_width = "64"))]
 compile_error!("oa-migration-switch core supports 64-bit targets only");
 
@@ -14,8 +16,10 @@ pub const MAX_ALERTS: usize = 64;
 pub const MAX_TRACE: usize = 128;
 pub const MAX_DIFFS: usize = (MAX_TRACKS + MAX_FLIGHTS + MAX_HANDOFFS + MAX_ALERTS) * 2;
 
-const AUTHORITY_STAGE_PARALLEL_READY: u8 = 1;
-const AUTHORITY_STAGE_PROMOTION_APPROVED: u8 = 2;
+// M1's accepted S1->S2 transition requires FacilitySupervisor and IndependentAssessor.
+// M2's role mask encodes the supervisor role as ID 1. These are declared IDs, not
+// authentication claims; M1 and M2 both consume caller-supplied records.
+const M1_PROMOTION_SUPERVISOR_ROLE_ID: u8 = 1;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(C)]
@@ -54,33 +58,6 @@ pub struct UnitPolicy {
 pub enum EndpointClass {
     Terminal,
     EnrouteLongRange,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(C)]
-pub struct AuthorityReceipt {
-    pub unit: SwapUnitKey,
-    pub sequence: u64,
-    pub evaluated_at_ns: i64,
-    /// M1 transition must be the declared parallel-ready (1) to promotion-approved (2) edge.
-    pub from_stage: u8,
-    pub to_stage: u8,
-    pub principal_role_id: u8,
-    pub refusal_code: u16,
-    pub policy_version: u32,
-    pub policy_digest: [u8; 32],
-    pub source_epoch_digest: [u8; 32],
-    pub event_key: [u8; 32],
-    pub principal_id: [u8; 32],
-    pub assessor_principal_id: [u8; 32],
-    pub evidence_set_handle: [u8; 32],
-    pub approval_set_handle: [u8; 32],
-    pub legacy_epoch: u64,
-    pub candidate_epoch: u64,
-    pub legacy_state_version: u64,
-    pub candidate_state_version: u64,
-    pub legacy_sequence: u64,
-    pub candidate_sequence: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -371,13 +348,66 @@ pub struct CandidateReadiness {
     token: ReconcileToken,
 }
 
+/// Opaque accepted M1 lifecycle grant for this exact window and policy. It can authorize
+/// multiple distinct M2 switch intents in the window; it is not a per-switch intent or an
+/// authentication credential.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WindowAuthorization {
+    unit: SwapUnitKey,
+    m1_sequence: u32,
+    evaluated_at_ns: i64,
+    policy_version: u32,
+    policy_digest: [u8; 32],
+    source_epoch_digest: [u8; 32],
+    evidence_set_handle: [u8; 32],
+    approval_set_handle: [u8; 32],
+    principal_id: u32,
+    assessor_principal_id: u32,
+}
+
+/// Opaque M2 per-switch intent bound to one exact current reconciliation generation.
+/// Its identifiers are declared input records, not authenticated principals.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PromotionIntent {
+    unit: SwapUnitKey,
+    sequence: u64,
+    evaluated_at_ns: i64,
+    principal_role_id: u8,
+    principal_id: u32,
+    event_key: [u8; 32],
+    readiness: ReconcileToken,
+    window_authorization: WindowAuthorization,
+    m1_sequence: u32,
+    policy_version: u32,
+    policy_digest: [u8; 32],
+    source_epoch_digest: [u8; 32],
+    evidence_set_handle: [u8; 32],
+    approval_set_handle: [u8; 32],
+}
+
+/// Caller-declared M2 intent fields. The selector validates these before producing an opaque
+/// `PromotionIntent`; the values are not authenticated authority.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
+pub struct PromotionIntentRequest {
+    pub sequence: u64,
+    pub evaluated_at_ns: i64,
+    pub principal_role_id: u8,
+    pub principal_id: u32,
+    pub event_key: [u8; 32],
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(C)]
 pub struct TraceRecord {
     pub sequence: u64,
+    /// M2 per-switch intent sequence; rollback actions use their rollback receipt sequence.
     pub authority_sequence: u64,
+    /// M2 intent or rollback event key. It is not an authenticated identifier.
     pub event_key: [u8; 32],
     pub at_ns: i64,
+    /// Reused M1 window grant sequence for promotions; zero for rollback records.
+    pub m1_window_sequence: u32,
     pub from: Output,
     pub to: Output,
     pub reason: u8,
@@ -404,7 +434,6 @@ pub struct Selector {
 
 const _: () = assert!(core::mem::size_of::<SwapUnitKey>() == 24);
 const _: () = assert!(core::mem::size_of::<UnitPolicy>() == 256);
-const _: () = assert!(core::mem::size_of::<AuthorityReceipt>() == 328);
 const _: () = assert!(core::mem::size_of::<RollbackReceipt>() == 304);
 const _: () = assert!(core::mem::size_of::<SourceIdentity>() == 24);
 const _: () = assert!(core::mem::size_of::<BusinessKey>() == 48);
@@ -417,6 +446,7 @@ const _: () = assert!(core::mem::size_of::<Diff>() == 64);
 const _: () = assert!(core::mem::size_of::<ReconcileReport>() == 32_808);
 const _: () = assert!(core::mem::size_of::<CandidateReadiness>() == 336);
 const _: () = assert!(core::mem::size_of::<TraceRecord>() == 64);
+const _: () = assert!(core::mem::size_of::<PromotionIntentRequest>() == 56);
 const _: () = assert!(core::mem::size_of::<Selector>() == 90_104);
 
 pub const fn valid_unit(unit: SwapUnitKey) -> bool {
@@ -1024,10 +1054,172 @@ pub fn prepare_candidate(
     Ok((report, CandidateReadiness { token }))
 }
 
+/// Converts an opaque accepted M1 S1 Advisory → S2 Window transition into a reusable
+/// authorization for M2 intents within the exact same half-open unit window.
+/// M1 principal IDs and external handles are declared input records, not authentication.
+///
+/// M1 result fields are private, so a caller cannot manufacture a successful result:
+/// ```compile_fail
+/// use oa_migration::{AuditEvent, Refusal, Stage, SwapUnitKey, TransitionResult};
+/// let key = SwapUnitKey { function_id: 1, scope_id: 1, window_start_ns: 1, window_end_ns: 10 };
+/// let unit = oa_migration::new_unit(key, 1, [1; 32], [2; 32], 1).unwrap();
+/// let event = AuditEvent {
+///     key, sequence: 1, evaluated_at_ns: 2, from: Stage::S1Advisory,
+///     to: Stage::S2Window, refusal: Refusal::None, policy_version: 1,
+///     principal_id: 3, assessor_principal_id: 4, policy_digest: [1; 32],
+///     source_epoch_digest: [2; 32], evidence_set_handle: [5; 32], approval_set_handle: [6; 32],
+/// };
+/// let _forged = TransitionResult { unit, event };
+/// ```
+pub fn authorize_window(
+    selector: &Selector,
+    result: &oa_migration::TransitionResult,
+) -> Result<WindowAuthorization, Refusal> {
+    let unit = oa_migration::transition_unit(result);
+    let event = oa_migration::transition_event(result);
+    let m1_key = oa_migration::swap_unit_key(&unit);
+    let key_matches = m1_key.function_id == selector.unit.function_id
+        && m1_key.scope_id == selector.unit.scope_id
+        && m1_key.window_start_ns == selector.unit.window_start_ns
+        && m1_key.window_end_ns == selector.unit.window_end_ns;
+    if event.refusal != oa_migration::Refusal::None
+        || event.from != oa_migration::Stage::S1Advisory
+        || event.to != oa_migration::Stage::S2Window
+        || oa_migration::swap_unit_stage(&unit) != oa_migration::Stage::S2Window
+        || event.key != m1_key
+        || !key_matches
+        || event.sequence == 0
+        || event.sequence != oa_migration::swap_unit_audit_sequence(&unit)
+        || event.policy_version != selector.policy.policy_version
+        || event.policy_version != oa_migration::swap_unit_policy_version(&unit)
+        || event.policy_digest != selector.policy.policy_digest
+        || event.policy_digest != oa_migration::swap_unit_policy_digest(&unit)
+        || event.source_epoch_digest != selector.policy.source_epoch_digest
+        || event.source_epoch_digest != oa_migration::swap_unit_source_epoch_digest(&unit)
+        || event.principal_id == 0
+        || event.assessor_principal_id == 0
+        || event.principal_id == event.assessor_principal_id
+        || event.evidence_set_handle != selector.policy.evidence_set_handle
+        || event.approval_set_handle != selector.policy.approval_set_handle
+        || !role_allowed(
+            selector.policy.promotion_role_mask,
+            M1_PROMOTION_SUPERVISOR_ROLE_ID,
+        )
+        || !in_window(selector.unit, event.evaluated_at_ns)
+    {
+        return Err(Refusal::Unauthorized);
+    }
+    Ok(WindowAuthorization {
+        unit: selector.unit,
+        m1_sequence: event.sequence,
+        evaluated_at_ns: event.evaluated_at_ns,
+        policy_version: event.policy_version,
+        policy_digest: event.policy_digest,
+        source_epoch_digest: event.source_epoch_digest,
+        evidence_set_handle: event.evidence_set_handle,
+        approval_set_handle: event.approval_set_handle,
+        principal_id: event.principal_id,
+        assessor_principal_id: event.assessor_principal_id,
+    })
+}
+
+/// Creates an opaque M2 intent from current readiness plus caller-declared intent fields.
+/// This is a modeled intent record, not authenticated authority; selection rechecks all bindings.
+pub fn new_promotion_intent(
+    selector: &Selector,
+    readiness: &CandidateReadiness,
+    authorization: &WindowAuthorization,
+    request: PromotionIntentRequest,
+) -> Result<PromotionIntent, Refusal> {
+    let PromotionIntentRequest {
+        sequence,
+        evaluated_at_ns,
+        principal_role_id,
+        principal_id,
+        event_key,
+    } = request;
+    if !window_authorization_matches(selector, authorization)
+        || !token_matches(selector, readiness.token)
+        || sequence == 0
+        || sequence <= selector.last_authority_sequence
+        || principal_id != authorization.principal_id
+        || principal_role_id != M1_PROMOTION_SUPERVISOR_ROLE_ID
+        || event_key == [0; 32]
+        || intent_event_key_used(selector, event_key)
+        || !role_allowed(selector.policy.promotion_role_mask, principal_role_id)
+        || !in_window(selector.unit, evaluated_at_ns)
+        || evaluated_at_ns < authorization.evaluated_at_ns
+    {
+        return Err(Refusal::Unauthorized);
+    }
+    Ok(PromotionIntent {
+        unit: selector.unit,
+        sequence,
+        evaluated_at_ns,
+        principal_role_id,
+        principal_id,
+        event_key,
+        readiness: readiness.token,
+        window_authorization: authorization.clone(),
+        m1_sequence: authorization.m1_sequence,
+        policy_version: selector.policy.policy_version,
+        policy_digest: selector.policy.policy_digest,
+        source_epoch_digest: selector.policy.source_epoch_digest,
+        evidence_set_handle: selector.policy.evidence_set_handle,
+        approval_set_handle: selector.policy.approval_set_handle,
+    })
+}
+
+fn window_authorization_matches(selector: &Selector, authorization: &WindowAuthorization) -> bool {
+    authorization.unit == selector.unit
+        && authorization.m1_sequence > 0
+        && authorization.policy_version == selector.policy.policy_version
+        && authorization.policy_digest == selector.policy.policy_digest
+        && authorization.source_epoch_digest == selector.policy.source_epoch_digest
+        && authorization.evidence_set_handle == selector.policy.evidence_set_handle
+        && authorization.approval_set_handle == selector.policy.approval_set_handle
+        && authorization.principal_id != 0
+        && authorization.assessor_principal_id != 0
+        && authorization.principal_id != authorization.assessor_principal_id
+        && in_window(selector.unit, authorization.evaluated_at_ns)
+}
+
+fn intent_event_key_used(selector: &Selector, event_key: [u8; 32]) -> bool {
+    for record in selector
+        .trace
+        .iter()
+        .take(usize::from(selector.trace_len))
+        .flatten()
+    {
+        if record.reason == 1 && record.event_key == event_key {
+            return true;
+        }
+    }
+    false
+}
+
+fn rollback_event_key_used(selector: &Selector, event_key: [u8; 32]) -> bool {
+    for record in selector
+        .trace
+        .iter()
+        .take(usize::from(selector.trace_len))
+        .flatten()
+    {
+        if matches!(record.reason, 2 | 3) && record.event_key == event_key {
+            return true;
+        }
+    }
+    false
+}
+
+/// Selects the candidate for one fresh M2 intent under an accepted M1 window grant.
+/// M1 authorization can be reused within its window; each M2 intent has its own replay-checked
+/// sequence and readiness generation.
 pub fn select_candidate(
     selector: &mut Selector,
     readiness: &CandidateReadiness,
-    authority: AuthorityReceipt,
+    authorization: &WindowAuthorization,
+    intent: &PromotionIntent,
     now_ns: i64,
     max_age_ns: i64,
 ) -> Result<(), Refusal> {
@@ -1041,39 +1233,37 @@ pub fn select_candidate(
     if max_age_ns != selector.policy.max_snapshot_age_ns {
         return Err(Refusal::BadSnapshot);
     }
-    if authority.unit != selector.unit
-        || authority.sequence == 0
-        || authority.from_stage != AUTHORITY_STAGE_PARALLEL_READY
-        || authority.to_stage != AUTHORITY_STAGE_PROMOTION_APPROVED
-        || authority.principal_role_id == 0
+    if !window_authorization_matches(selector, authorization)
+        || !in_window(selector.unit, now_ns)
+        || authorization.evaluated_at_ns > now_ns
+        || intent.unit != selector.unit
+        || intent.sequence == 0
+        || intent.sequence <= selector.last_authority_sequence
+        || intent.principal_id == 0
+        || intent.principal_id != authorization.principal_id
+        || intent.principal_role_id != M1_PROMOTION_SUPERVISOR_ROLE_ID
+        || intent.event_key == [0; 32]
+        || intent_event_key_used(selector, intent.event_key)
         || !role_allowed(
             selector.policy.promotion_role_mask,
-            authority.principal_role_id,
+            intent.principal_role_id,
         )
-        || authority.refusal_code != 0
-        || authority.policy_version != selector.policy.policy_version
-        || authority.policy_digest != selector.policy.policy_digest
-        || authority.source_epoch_digest != selector.policy.source_epoch_digest
-        || authority.principal_id == [0; 32]
-        || authority.assessor_principal_id == [0; 32]
-        || authority.evidence_set_handle != selector.policy.evidence_set_handle
-        || authority.approval_set_handle != selector.policy.approval_set_handle
-        || authority.event_key == [0; 32]
-        || authority.sequence <= selector.last_authority_sequence
-        || authority.legacy_epoch != readiness.token.legacy_epoch
-        || authority.candidate_epoch != readiness.token.candidate_epoch
-        || authority.legacy_state_version != readiness.token.legacy_version
-        || authority.candidate_state_version != readiness.token.candidate_version
-        || authority.legacy_sequence != readiness.token.legacy_sequence
-        || authority.candidate_sequence != readiness.token.candidate_sequence
-        || !in_window(selector.unit, authority.evaluated_at_ns)
-        || authority.evaluated_at_ns > now_ns
-        || !in_window(selector.unit, now_ns)
+        || intent.readiness != readiness.token
+        || intent.window_authorization != *authorization
+        || intent.m1_sequence != authorization.m1_sequence
+        || intent.policy_version != selector.policy.policy_version
+        || intent.policy_digest != selector.policy.policy_digest
+        || intent.source_epoch_digest != selector.policy.source_epoch_digest
+        || intent.evidence_set_handle != selector.policy.evidence_set_handle
+        || intent.approval_set_handle != selector.policy.approval_set_handle
+        || !in_window(selector.unit, intent.evaluated_at_ns)
+        || intent.evaluated_at_ns < authorization.evaluated_at_ns
+        || intent.evaluated_at_ns > now_ns
     {
         return Err(Refusal::Unauthorized);
     }
     if now_ns
-        .checked_sub(authority.evaluated_at_ns)
+        .checked_sub(intent.evaluated_at_ns)
         .ok_or(Refusal::TimeOverflow)?
         > selector.policy.max_decision_delay_ns
     {
@@ -1091,14 +1281,17 @@ pub fn select_candidate(
     let _ = selector.candidate.as_ref().ok_or(Refusal::Incomplete)?;
     record_switch(
         selector,
-        Output::Candidate,
-        now_ns,
-        1,
-        false,
-        authority.sequence,
-        authority.event_key,
+        SwitchRecord {
+            to: Output::Candidate,
+            at_ns: now_ns,
+            reason: 1,
+            allow_pending_delivery: false,
+            authority_sequence: intent.sequence,
+            m1_window_sequence: intent.m1_sequence,
+            event_key: intent.event_key,
+        },
     )?;
-    selector.last_authority_sequence = authority.sequence;
+    selector.last_authority_sequence = intent.sequence;
     Ok(())
 }
 
@@ -1115,6 +1308,7 @@ pub fn rollback(
         return Err(Refusal::BadSnapshot);
     }
     if cause.event_id == [0; 32]
+        || rollback_event_key_used(selector, cause.event_id)
         || cause.unit != selector.unit
         || cause.principal_id == [0; 32]
         || cause.principal_role_id == 0
@@ -1183,26 +1377,40 @@ pub fn rollback(
     };
     record_switch(
         selector,
-        Output::Legacy,
-        now_ns,
-        reason,
-        true,
-        cause.sequence,
-        cause.event_id,
+        SwitchRecord {
+            to: Output::Legacy,
+            at_ns: now_ns,
+            reason,
+            allow_pending_delivery: true,
+            authority_sequence: cause.sequence,
+            m1_window_sequence: 0,
+            event_key: cause.event_id,
+        },
     )?;
     selector.last_authority_sequence = cause.sequence;
     Ok(())
 }
 
-fn record_switch(
-    selector: &mut Selector,
+struct SwitchRecord {
     to: Output,
     at_ns: i64,
     reason: u8,
     allow_pending_delivery: bool,
     authority_sequence: u64,
+    m1_window_sequence: u32,
     event_key: [u8; 32],
-) -> Result<(), Refusal> {
+}
+
+fn record_switch(selector: &mut Selector, switch: SwitchRecord) -> Result<(), Refusal> {
+    let SwitchRecord {
+        to,
+        at_ns,
+        reason,
+        allow_pending_delivery,
+        authority_sequence,
+        m1_window_sequence,
+        event_key,
+    } = switch;
     if selector.pending_delivery && !allow_pending_delivery {
         return Err(Refusal::ContinuityExceeded);
     }
@@ -1223,6 +1431,7 @@ fn record_switch(
     *selector.trace.get_mut(i).ok_or(Refusal::TraceFull)? = Some(TraceRecord {
         sequence,
         authority_sequence,
+        m1_window_sequence,
         event_key,
         at_ns,
         from: selector.selected,
@@ -1305,6 +1514,286 @@ pub fn observe_delivery(
 )]
 mod tests {
     use super::*;
+    use oa_migration::{
+        AuthorityApproval as M1Approval, AuthorityRole as M1Role, Comparison as M1Comparison,
+        EvidenceQuality as M1Quality, MetricCriterion as M1Criterion, MetricEvidence as M1Metric,
+        RollbackRule as M1RollbackRule, RollbackTriggerPolicy as M1RollbackPolicy,
+        Stage as M1Stage, SwapUnitKey as M1Key, TransitionInput as M1Input,
+        TransitionPolicy as M1Policy,
+    };
+
+    fn m1_key(key: SwapUnitKey) -> M1Key {
+        M1Key {
+            function_id: key.function_id,
+            scope_id: key.scope_id,
+            window_start_ns: key.window_start_ns,
+            window_end_ns: key.window_end_ns,
+        }
+    }
+
+    fn m1_policy(key: M1Key, from: M1Stage, to: M1Stage, policy: UnitPolicy) -> M1Policy {
+        M1Policy {
+            key,
+            from,
+            to,
+            policy_version: policy.policy_version,
+            policy_digest: policy.policy_digest,
+            source_epoch_digest: policy.source_epoch_digest,
+            maximum_evidence_age_ns: 10_000,
+            required_role_mask: oa_migration::ROLE_SUPERVISOR | oa_migration::ROLE_ASSESSOR,
+            criterion_count: 1,
+            criteria: [M1Criterion {
+                metric_id: 4,
+                comparison: M1Comparison::AtMost,
+                threshold: 3,
+                minimum_samples: 1,
+                minimum_denominator: 1,
+                minimum_exposure_ns: 1,
+            }; oa_migration::MAX_CRITERIA],
+            dependency_count: 0,
+            dependencies: [oa_migration::DependencyRequirement {
+                key,
+                minimum_stage: M1Stage::S0Shadow,
+                policy_version: 1,
+                policy_digest: policy.policy_digest,
+                source_epoch_digest: policy.source_epoch_digest,
+            }; oa_migration::MAX_DEPENDENCIES],
+            rollback_policy: M1RollbackPolicy {
+                blocking_difference: M1RollbackRule {
+                    enabled: true,
+                    maximum_response_ns: 1_000,
+                    required_role_mask: oa_migration::ROLE_SUPERVISOR,
+                },
+                controller_request: M1RollbackRule {
+                    enabled: true,
+                    maximum_response_ns: 1_000,
+                    required_role_mask: oa_migration::ROLE_CONTROLLER_ON_POSITION,
+                },
+                health_fault: M1RollbackRule {
+                    enabled: true,
+                    maximum_response_ns: 1_000,
+                    required_role_mask: oa_migration::ROLE_TECH_OPS,
+                },
+            },
+        }
+    }
+
+    fn m1_evidence(
+        key: M1Key,
+        policy: UnitPolicy,
+        stage: M1Stage,
+        start: i64,
+        end: i64,
+        observed: i64,
+    ) -> [M1Metric; 1] {
+        [M1Metric {
+            key,
+            measured_stage: stage,
+            metric_id: 4,
+            quality: M1Quality::Complete,
+            policy_version: policy.policy_version,
+            samples: 5,
+            denominator: 8,
+            observed,
+            exposure_ns: u64::try_from(end - start).unwrap(),
+            observation_start_ns: start,
+            observation_end_ns: end,
+            observed_at_ns: end,
+            policy_digest: policy.policy_digest,
+            source_epoch_digest: policy.source_epoch_digest,
+            artifact_handle: [20; 32],
+            evidence_set_handle: policy.evidence_set_handle,
+            observation_origin_key: key,
+            origin_stage_activation_ns: 0,
+            origin_receipt_handle: [0; 32],
+        }]
+    }
+
+    fn m1_approvals(
+        key: M1Key,
+        policy: UnitPolicy,
+        from: M1Stage,
+        to: M1Stage,
+        now: i64,
+    ) -> [M1Approval; 2] {
+        [
+            M1Approval {
+                key,
+                from,
+                to,
+                role: M1Role::FacilitySupervisor,
+                approved: true,
+                principal_id: 8,
+                approved_at_ns: now,
+                policy_version: policy.policy_version,
+                policy_digest: policy.policy_digest,
+                source_epoch_digest: policy.source_epoch_digest,
+                evidence_set_handle: policy.evidence_set_handle,
+                approval_set_handle: policy.approval_set_handle,
+                authority_record_handle: [21; 32],
+            },
+            M1Approval {
+                key,
+                from,
+                to,
+                role: M1Role::IndependentAssessor,
+                approved: true,
+                principal_id: 9,
+                approved_at_ns: now,
+                policy_version: policy.policy_version,
+                policy_digest: policy.policy_digest,
+                source_epoch_digest: policy.source_epoch_digest,
+                evidence_set_handle: policy.evidence_set_handle,
+                approval_set_handle: policy.approval_set_handle,
+                authority_record_handle: [22; 32],
+            },
+        ]
+    }
+
+    fn m1_transition(
+        selector: &Selector,
+        evaluated_at_ns: i64,
+        key: Option<SwapUnitKey>,
+        digest: Option<[u8; 32]>,
+        source_epoch_digest: Option<[u8; 32]>,
+        force_refusal: bool,
+    ) -> oa_migration::TransitionResult {
+        let mut policy = selector.policy;
+        let key = m1_key(key.unwrap_or(selector.unit));
+        if let Some(value) = digest {
+            policy.policy_digest = value;
+        }
+        if let Some(value) = source_epoch_digest {
+            policy.source_epoch_digest = value;
+        }
+        let source_epoch_digest = policy.source_epoch_digest;
+        let mut audit = oa_migration::empty_audit_log();
+        let unit = oa_migration::new_unit(
+            key,
+            policy.policy_version,
+            policy.policy_digest,
+            source_epoch_digest,
+            key.window_start_ns,
+        )
+        .unwrap();
+        let first_policy = m1_policy(key, M1Stage::S0Shadow, M1Stage::S1Advisory, policy);
+        let first_metrics = m1_evidence(
+            key,
+            policy,
+            M1Stage::S0Shadow,
+            key.window_start_ns,
+            key.window_start_ns + 9,
+            2,
+        );
+        let first_approvals = m1_approvals(
+            key,
+            policy,
+            M1Stage::S0Shadow,
+            M1Stage::S1Advisory,
+            key.window_start_ns + 10,
+        );
+        let first = oa_migration::evaluate_transition(
+            &unit,
+            M1Input {
+                policy: &first_policy,
+                metrics: &first_metrics,
+                dependencies: &[],
+                approvals: &first_approvals,
+                evidence_set_handle: policy.evidence_set_handle,
+                approval_set_handle: policy.approval_set_handle,
+                now_ns: key.window_start_ns + 10,
+            },
+            &mut audit,
+        );
+        assert_eq!(
+            oa_migration::transition_event(&first).refusal,
+            oa_migration::Refusal::None
+        );
+        let second_policy = m1_policy(key, M1Stage::S1Advisory, M1Stage::S2Window, policy);
+        let second_metrics = m1_evidence(
+            key,
+            policy,
+            M1Stage::S1Advisory,
+            key.window_start_ns + 10,
+            evaluated_at_ns - 1,
+            if force_refusal { 4 } else { 2 },
+        );
+        let second_approvals = m1_approvals(
+            key,
+            policy,
+            M1Stage::S1Advisory,
+            M1Stage::S2Window,
+            evaluated_at_ns,
+        );
+        oa_migration::evaluate_transition(
+            &oa_migration::transition_unit(&first),
+            M1Input {
+                policy: &second_policy,
+                metrics: &second_metrics,
+                dependencies: &[],
+                approvals: &second_approvals,
+                evidence_set_handle: policy.evidence_set_handle,
+                approval_set_handle: policy.approval_set_handle,
+                now_ns: evaluated_at_ns,
+            },
+            &mut audit,
+        )
+    }
+
+    fn promotion(selector: &Selector, evaluated_at_ns: i64) -> WindowAuthorization {
+        let result = m1_transition(selector, evaluated_at_ns, None, None, None, false);
+        authorize_window(selector, &result).unwrap()
+    }
+
+    fn promotion_with_window(
+        selector: &Selector,
+        evaluated_at_ns: i64,
+        start_ns: i64,
+    ) -> Result<WindowAuthorization, Refusal> {
+        let mut key = selector.unit;
+        key.window_start_ns = start_ns;
+        let result = m1_transition(selector, evaluated_at_ns, Some(key), None, None, false);
+        authorize_window(selector, &result)
+    }
+
+    fn promotion_with_wrong_policy(
+        selector: &Selector,
+        evaluated_at_ns: i64,
+    ) -> Result<WindowAuthorization, Refusal> {
+        let result = m1_transition(selector, evaluated_at_ns, None, Some([99; 32]), None, false);
+        authorize_window(selector, &result)
+    }
+
+    fn promotion_with_wrong_source(
+        selector: &Selector,
+        evaluated_at_ns: i64,
+    ) -> Result<WindowAuthorization, Refusal> {
+        let result = m1_transition(selector, evaluated_at_ns, None, None, Some([98; 32]), false);
+        authorize_window(selector, &result)
+    }
+
+    fn intent(
+        selector: &Selector,
+        readiness: &CandidateReadiness,
+        authorization: &WindowAuthorization,
+        sequence: u64,
+        evaluated_at_ns: i64,
+    ) -> PromotionIntent {
+        let event_key = [u8::try_from(sequence).unwrap_or(1); 32];
+        new_promotion_intent(
+            selector,
+            readiness,
+            authorization,
+            PromotionIntentRequest {
+                sequence,
+                evaluated_at_ns,
+                principal_role_id: 1,
+                principal_id: 8,
+                event_key,
+            },
+        )
+        .unwrap()
+    }
 
     fn fixture() -> (Selector, Snapshot, Snapshot) {
         let unit = SwapUnitKey {
@@ -1444,30 +1933,9 @@ mod tests {
         ingest(&mut s, l, 25, 100).unwrap();
         ingest(&mut s, c, 25, 100).unwrap();
         let (_, ready) = prepare_candidate(&s, 25, 100).unwrap();
-        let approval = AuthorityReceipt {
-            unit: s.unit,
-            sequence: 1,
-            evaluated_at_ns: 24,
-            from_stage: 1,
-            to_stage: 2,
-            principal_role_id: 1,
-            refusal_code: 0,
-            policy_version: 1,
-            policy_digest: [3; 32],
-            source_epoch_digest: [4; 32],
-            event_key: [5; 32],
-            principal_id: [8; 32],
-            assessor_principal_id: [9; 32],
-            evidence_set_handle: [10; 32],
-            approval_set_handle: [11; 32],
-            legacy_epoch: 11,
-            candidate_epoch: 12,
-            legacy_state_version: 1,
-            candidate_state_version: 1,
-            legacy_sequence: 1,
-            candidate_sequence: 1,
-        };
-        select_candidate(&mut s, &ready, approval, 25, 100).unwrap();
+        let authorization = promotion(&s, 24);
+        let intent = intent(&s, &ready, &authorization, 1, 24);
+        select_candidate(&mut s, &ready, &authorization, &intent, 25, 100).unwrap();
         assert_eq!(selected(&s), Output::Candidate);
         observe_delivery(&mut s, 1, Output::Candidate, 1, 26).unwrap();
         let unit = s.unit;
@@ -1502,11 +1970,11 @@ mod tests {
         .unwrap();
         assert_eq!(selected(&s), Output::Legacy);
         assert_eq!(
-            select_candidate(&mut s, &ready, approval, 28, 100),
+            select_candidate(&mut s, &ready, &authorization, &intent, 28, 100),
             Err(Refusal::Unauthorized)
         );
         assert_eq!(
-            select_candidate(&mut s, &ready, approval, 28, 100),
+            select_candidate(&mut s, &ready, &authorization, &intent, 28, 100),
             Err(Refusal::Unauthorized)
         );
         let (records, count) = trace(&s);
@@ -1560,34 +2028,9 @@ mod tests {
         assert_eq!(ingest(&mut s, l, 25, 100), Err(Refusal::SequenceGap));
         ingest(&mut s, fixture().1, 25, 100).unwrap();
         ingest(&mut s, c, 25, 100).unwrap();
-        let (_, ready) = prepare_candidate(&s, 25, 100).unwrap();
-        let denied = AuthorityReceipt {
-            unit: s.unit,
-            sequence: 1,
-            evaluated_at_ns: 24,
-            from_stage: 1,
-            to_stage: 2,
-            principal_role_id: 1,
-            refusal_code: 1,
-            policy_version: 1,
-            policy_digest: [3; 32],
-            source_epoch_digest: [4; 32],
-            event_key: [5; 32],
-            principal_id: [8; 32],
-            assessor_principal_id: [9; 32],
-            evidence_set_handle: [10; 32],
-            approval_set_handle: [11; 32],
-            legacy_epoch: 11,
-            candidate_epoch: 12,
-            legacy_state_version: 1,
-            candidate_state_version: 1,
-            legacy_sequence: 1,
-            candidate_sequence: 1,
-        };
-        assert_eq!(
-            select_candidate(&mut s, &ready, denied, 25, 100),
-            Err(Refusal::Unauthorized)
-        );
+        let _ = prepare_candidate(&s, 25, 100).unwrap();
+        let denied = m1_transition(&s, 25, None, None, None, true);
+        assert_eq!(authorize_window(&s, &denied), Err(Refusal::Unauthorized));
     }
 
     // REQ: OA-MIG-204
@@ -1597,6 +2040,8 @@ mod tests {
         ingest(&mut s, l.clone(), 25, 100).unwrap();
         ingest(&mut s, c.clone(), 25, 100).unwrap();
         let (_, ready) = prepare_candidate(&s, 25, 100).unwrap();
+        let authorization = promotion(&s, 24);
+        let stale_intent = intent(&s, &ready, &authorization, 1, 29);
         let mut l_next = l;
         l_next.sequence = 2;
         l_next.state_version = 2;
@@ -1609,33 +2054,134 @@ mod tests {
         c_next.observed_time_ns = 30;
         ingest(&mut s, l_next, 30, 100).unwrap();
         ingest(&mut s, c_next, 30, 100).unwrap();
-        let approval = AuthorityReceipt {
+        assert_eq!(
+            select_candidate(&mut s, &ready, &authorization, &stale_intent, 30, 100),
+            Err(Refusal::TokenStale)
+        );
+    }
+
+    // REQ: OA-MIG-206
+    #[test]
+    fn readiness_intent_refuses_a_changed_source_epoch() {
+        let (mut s, l, c) = fixture();
+        ingest(&mut s, l, 25, 100).unwrap();
+        ingest(&mut s, c, 25, 100).unwrap();
+        let (_, ready) = prepare_candidate(&s, 25, 100).unwrap();
+        let authorization = promotion(&s, 24);
+        let intent = intent(&s, &ready, &authorization, 1, 24);
+        let mut changed = s.candidate.as_ref().unwrap().clone();
+        changed.source_epoch = 99;
+        s.candidate = Some(changed);
+        assert_eq!(
+            select_candidate(&mut s, &ready, &authorization, &intent, 25, 100),
+            Err(Refusal::TokenStale)
+        );
+    }
+
+    // REQ: OA-MIG-204, OA-MIG-206
+    #[test]
+    fn one_m1_window_grant_supports_fresh_m2_intents() {
+        let (mut s, l, c) = fixture();
+        ingest(&mut s, l, 25, 100).unwrap();
+        ingest(&mut s, c, 25, 100).unwrap();
+        let (_, first_ready) = prepare_candidate(&s, 25, 100).unwrap();
+        let authorization = promotion(&s, 24);
+        let first_intent = intent(&s, &first_ready, &authorization, 1, 24);
+        select_candidate(&mut s, &first_ready, &authorization, &first_intent, 25, 100).unwrap();
+        observe_delivery(&mut s, 1, Output::Candidate, 1, 26).unwrap();
+        let unit = s.unit;
+        rollback(
+            &mut s,
+            RollbackReceipt {
+                unit,
+                kind: RollbackKind::HealthFault,
+                principal_id: [8; 32],
+                principal_role_id: 1,
+                policy_version: 1,
+                policy_digest: [3; 32],
+                source_epoch_digest: [4; 32],
+                evidence_set_handle: [10; 32],
+                approval_set_handle: [11; 32],
+                sequence: 2,
+                legacy_epoch: 11,
+                candidate_epoch: 12,
+                legacy_state_version: 1,
+                candidate_state_version: 1,
+                legacy_sequence: 1,
+                candidate_sequence: 1,
+                legacy_health: Health::Healthy,
+                legacy_source_available: true,
+                legacy_health_observed_ns: 25,
+                event_id: [7; 32],
+                observed_ns: 27,
+            },
+            27,
+            100,
+        )
+        .unwrap();
+        observe_delivery(&mut s, 1, Output::Legacy, 2, 28).unwrap();
+        let (_, second_ready) = prepare_candidate(&s, 28, 100).unwrap();
+        assert_eq!(
+            new_promotion_intent(
+                &s,
+                &second_ready,
+                &authorization,
+                PromotionIntentRequest {
+                    sequence: 3,
+                    evaluated_at_ns: 28,
+                    principal_role_id: 1,
+                    principal_id: 8,
+                    event_key: [1; 32],
+                },
+            ),
+            Err(Refusal::Unauthorized)
+        );
+        let second_intent = intent(&s, &second_ready, &authorization, 3, 28);
+        select_candidate(
+            &mut s,
+            &second_ready,
+            &authorization,
+            &second_intent,
+            28,
+            100,
+        )
+        .unwrap();
+        observe_delivery(&mut s, 1, Output::Candidate, 3, 29).unwrap();
+        let mut repeated_rollback = RollbackReceipt {
             unit: s.unit,
-            sequence: 1,
-            evaluated_at_ns: 29,
-            from_stage: 1,
-            to_stage: 2,
+            kind: RollbackKind::HealthFault,
+            principal_id: [8; 32],
             principal_role_id: 1,
-            refusal_code: 0,
             policy_version: 1,
             policy_digest: [3; 32],
             source_epoch_digest: [4; 32],
-            event_key: [5; 32],
-            principal_id: [8; 32],
-            assessor_principal_id: [9; 32],
             evidence_set_handle: [10; 32],
             approval_set_handle: [11; 32],
+            sequence: 4,
             legacy_epoch: 11,
             candidate_epoch: 12,
             legacy_state_version: 1,
             candidate_state_version: 1,
             legacy_sequence: 1,
             candidate_sequence: 1,
+            legacy_health: Health::Healthy,
+            legacy_source_available: true,
+            legacy_health_observed_ns: 29,
+            event_id: [7; 32],
+            observed_ns: 30,
         };
         assert_eq!(
-            select_candidate(&mut s, &ready, approval, 30, 100),
-            Err(Refusal::TokenStale)
+            rollback(&mut s, repeated_rollback, 30, 100),
+            Err(Refusal::Unauthorized)
         );
+        repeated_rollback.event_id = [9; 32];
+        rollback(&mut s, repeated_rollback, 30, 100).unwrap();
+        let (records, count) = trace(&s);
+        assert_eq!(count, 4);
+        assert_eq!(records[0].map(|record| record.m1_window_sequence), Some(2));
+        assert_eq!(records[1].map(|record| record.m1_window_sequence), Some(0));
+        assert_eq!(records[2].map(|record| record.m1_window_sequence), Some(2));
+        assert_eq!(records[3].map(|record| record.m1_window_sequence), Some(0));
     }
 
     // REQ: OA-MIG-202, OA-MIG-204, OA-MIG-205
@@ -1645,30 +2191,9 @@ mod tests {
         ingest(&mut s, l, 25, 100).unwrap();
         ingest(&mut s, c, 25, 100).unwrap();
         let (_, ready) = prepare_candidate(&s, 25, 100).unwrap();
-        let approval = AuthorityReceipt {
-            unit: s.unit,
-            sequence: 1,
-            evaluated_at_ns: 24,
-            from_stage: 1,
-            to_stage: 2,
-            principal_role_id: 1,
-            refusal_code: 0,
-            policy_version: 1,
-            policy_digest: [3; 32],
-            source_epoch_digest: [4; 32],
-            event_key: [5; 32],
-            principal_id: [8; 32],
-            assessor_principal_id: [9; 32],
-            evidence_set_handle: [10; 32],
-            approval_set_handle: [11; 32],
-            legacy_epoch: 11,
-            candidate_epoch: 12,
-            legacy_state_version: 1,
-            candidate_state_version: 1,
-            legacy_sequence: 1,
-            candidate_sequence: 1,
-        };
-        select_candidate(&mut s, &ready, approval, 25, 100).unwrap();
+        let authorization = promotion(&s, 24);
+        let intent = intent(&s, &ready, &authorization, 1, 24);
+        select_candidate(&mut s, &ready, &authorization, &intent, 25, 100).unwrap();
         let unit = s.unit;
         let cause = RollbackReceipt {
             unit,
@@ -1710,61 +2235,107 @@ mod tests {
         assert_eq!(observe_delivery(&mut s, 1, Output::Legacy, 1, 26), Ok(()));
     }
 
-    // REQ: OA-MIG-201, OA-MIG-204
+    // REQ: OA-MIG-206, OA-MIG-207
     #[test]
-    fn promotion_requires_the_declared_m1_transition_and_half_open_window() {
+    fn typed_m1_result_rejects_wrong_window_policy_refusal_and_replay() {
         let (mut s, l, c) = fixture();
-        assert_eq!(
-            new_selector(s.unit, s.policy, s.evidence, 10_000),
-            Err(Refusal::InvalidUnit)
-        );
         ingest(&mut s, l, 25, 100).unwrap();
         ingest(&mut s, c, 25, 100).unwrap();
         let (_, ready) = prepare_candidate(&s, 25, 100).unwrap();
-        let mut approval = AuthorityReceipt {
-            unit: s.unit,
-            sequence: 1,
-            evaluated_at_ns: 24,
-            from_stage: AUTHORITY_STAGE_PARALLEL_READY,
-            to_stage: AUTHORITY_STAGE_PROMOTION_APPROVED,
-            principal_role_id: 1,
-            refusal_code: 0,
-            policy_version: 1,
-            policy_digest: [3; 32],
-            source_epoch_digest: [4; 32],
-            event_key: [5; 32],
-            principal_id: [8; 32],
-            assessor_principal_id: [9; 32],
-            evidence_set_handle: [10; 32],
-            approval_set_handle: [11; 32],
-            legacy_epoch: 11,
-            candidate_epoch: 12,
-            legacy_state_version: 1,
-            candidate_state_version: 1,
-            legacy_sequence: 1,
-            candidate_sequence: 1,
-        };
-        approval.from_stage = 40;
-        approval.to_stage = 41;
+        let wrong_window = promotion_with_window(&s, 24, 11);
+        assert_eq!(wrong_window, Err(Refusal::Unauthorized));
+        let wrong_policy = promotion_with_wrong_policy(&s, 24);
+        assert_eq!(wrong_policy, Err(Refusal::Unauthorized));
         assert_eq!(
-            select_candidate(&mut s, &ready, approval, 25, 100),
+            promotion_with_wrong_source(&s, 24),
             Err(Refusal::Unauthorized)
         );
-        approval.from_stage = AUTHORITY_STAGE_PARALLEL_READY;
-        approval.to_stage = AUTHORITY_STAGE_PROMOTION_APPROVED;
+        let valid = promotion(&s, 24);
+        let valid_intent = intent(&s, &ready, &valid, 1, 24);
+        let other_grant = promotion(&s, 23);
+        assert_eq!(
+            select_candidate(&mut s, &ready, &other_grant, &valid_intent, 25, 100),
+            Err(Refusal::Unauthorized)
+        );
+        assert_eq!(
+            new_promotion_intent(
+                &s,
+                &ready,
+                &valid,
+                PromotionIntentRequest {
+                    sequence: 1,
+                    evaluated_at_ns: 24,
+                    principal_role_id: 2,
+                    principal_id: 8,
+                    event_key: [44; 32],
+                },
+            ),
+            Err(Refusal::Unauthorized)
+        );
+        assert_eq!(
+            new_promotion_intent(
+                &s,
+                &ready,
+                &valid,
+                PromotionIntentRequest {
+                    sequence: 1,
+                    evaluated_at_ns: 24,
+                    principal_role_id: 1,
+                    principal_id: 99,
+                    event_key: [44; 32],
+                },
+            ),
+            Err(Refusal::Unauthorized)
+        );
         let window_end_ns = s.unit.window_end_ns;
         assert_eq!(
-            select_candidate(&mut s, &ready, approval, window_end_ns, 100),
+            select_candidate(&mut s, &ready, &valid, &valid_intent, window_end_ns, 100),
             Err(Refusal::Unauthorized)
         );
-        let (mut at_end, _, _) = fixture();
-        let mut legacy = fixture().1;
-        legacy.observed_time_ns = at_end.unit.window_end_ns;
-        legacy.source_time_ns = legacy.observed_time_ns;
-        let snapshot_now = at_end.unit.window_end_ns - 1;
+        let refused_m1 = m1_transition(&s, 24, None, None, None, true);
         assert_eq!(
-            ingest(&mut at_end, legacy, snapshot_now, 100),
-            Err(Refusal::BadSnapshot)
+            oa_migration::transition_event(&refused_m1).refusal,
+            oa_migration::Refusal::MetricFailed
+        );
+        assert_eq!(
+            authorize_window(&s, &refused_m1),
+            Err(Refusal::Unauthorized)
+        );
+        select_candidate(&mut s, &ready, &valid, &valid_intent, 25, 100).unwrap();
+        observe_delivery(&mut s, 1, Output::Candidate, 1, 26).unwrap();
+        let unit = s.unit;
+        rollback(
+            &mut s,
+            RollbackReceipt {
+                unit,
+                kind: RollbackKind::HealthFault,
+                principal_id: [8; 32],
+                principal_role_id: 1,
+                policy_version: 1,
+                policy_digest: [3; 32],
+                source_epoch_digest: [4; 32],
+                evidence_set_handle: [10; 32],
+                approval_set_handle: [11; 32],
+                sequence: 2,
+                legacy_epoch: 11,
+                candidate_epoch: 12,
+                legacy_state_version: 1,
+                candidate_state_version: 1,
+                legacy_sequence: 1,
+                candidate_sequence: 1,
+                legacy_health: Health::Healthy,
+                legacy_source_available: true,
+                legacy_health_observed_ns: 25,
+                event_id: [7; 32],
+                observed_ns: 27,
+            },
+            27,
+            100,
+        )
+        .unwrap();
+        assert_eq!(
+            select_candidate(&mut s, &ready, &valid, &valid_intent, 28, 100),
+            Err(Refusal::Unauthorized)
         );
     }
 
@@ -1779,6 +2350,7 @@ mod tests {
             s.trace[slot] = Some(TraceRecord {
                 sequence: u64::try_from(slot + 1).unwrap(),
                 authority_sequence: 0,
+                m1_window_sequence: 0,
                 event_key: [1; 32],
                 at_ns: 10,
                 from: Output::Legacy,
@@ -1787,31 +2359,14 @@ mod tests {
             });
         }
         s.trace_len = u16::try_from(MAX_TRACE - 2).unwrap();
-        let mut approval = AuthorityReceipt {
-            unit: s.unit,
-            sequence: 1,
-            evaluated_at_ns: 24,
-            from_stage: AUTHORITY_STAGE_PARALLEL_READY,
-            to_stage: AUTHORITY_STAGE_PROMOTION_APPROVED,
-            principal_role_id: 1,
-            refusal_code: 0,
-            policy_version: 1,
-            policy_digest: [3; 32],
-            source_epoch_digest: [4; 32],
-            event_key: [5; 32],
-            principal_id: [8; 32],
-            assessor_principal_id: [9; 32],
-            evidence_set_handle: [10; 32],
-            approval_set_handle: [11; 32],
-            legacy_epoch: 11,
-            candidate_epoch: 12,
-            legacy_state_version: 1,
-            candidate_state_version: 1,
-            legacy_sequence: 1,
-            candidate_sequence: 1,
-        };
-        select_candidate(&mut s, &ready, approval, 25, 100).unwrap();
+        let authorization = promotion(&s, 24);
+        let intent = intent(&s, &ready, &authorization, 1, 24);
+        select_candidate(&mut s, &ready, &authorization, &intent, 25, 100).unwrap();
         assert_eq!(usize::from(s.trace_len), MAX_TRACE - 1);
+        assert_eq!(
+            s.trace[MAX_TRACE - 2].map(|r| r.m1_window_sequence),
+            Some(2)
+        );
         let rollback_receipt = RollbackReceipt {
             unit: s.unit,
             kind: RollbackKind::HealthFault,
@@ -1842,9 +2397,12 @@ mod tests {
             s.trace[MAX_TRACE - 1].map(|r| (r.to, r.reason)),
             Some((Output::Legacy, 3))
         );
-        approval.sequence = 3;
         assert_eq!(
-            select_candidate(&mut s, &ready, approval, 26, 100),
+            s.trace[MAX_TRACE - 1].map(|r| r.m1_window_sequence),
+            Some(0)
+        );
+        assert_eq!(
+            select_candidate(&mut s, &ready, &authorization, &intent, 26, 100),
             Err(Refusal::TraceFull)
         );
     }
@@ -1859,30 +2417,9 @@ mod tests {
         c.alerts[0].as_mut().unwrap().field_mask = 1;
         ingest(&mut s, c, 25, 100).unwrap();
         let (_, ready) = prepare_candidate(&s, 25, 100).unwrap();
-        let authority = AuthorityReceipt {
-            unit: s.unit,
-            sequence: 1,
-            evaluated_at_ns: 24,
-            from_stage: 1,
-            to_stage: 2,
-            principal_role_id: 1,
-            refusal_code: 0,
-            policy_version: 1,
-            policy_digest: [3; 32],
-            source_epoch_digest: [4; 32],
-            event_key: [5; 32],
-            principal_id: [8; 32],
-            assessor_principal_id: [9; 32],
-            evidence_set_handle: [10; 32],
-            approval_set_handle: [11; 32],
-            legacy_epoch: 11,
-            candidate_epoch: 12,
-            legacy_state_version: 1,
-            candidate_state_version: 1,
-            legacy_sequence: 1,
-            candidate_sequence: 1,
-        };
-        select_candidate(&mut s, &ready, authority, 25, 100).unwrap();
+        let authorization = promotion(&s, 24);
+        let intent = intent(&s, &ready, &authorization, 1, 24);
+        select_candidate(&mut s, &ready, &authorization, &intent, 25, 100).unwrap();
         assert_eq!(
             observe_delivery(&mut s, 9, Output::Candidate, 1, 26),
             Err(Refusal::WrongUnit)

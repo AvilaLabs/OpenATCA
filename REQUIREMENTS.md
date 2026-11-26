@@ -7646,17 +7646,33 @@ claims; a match is explicitly unverified.
   identities are retained as provenance and are not cross-side matching keys. This compares only
   the declared operational projection; it does not claim identical internal filters or algorithms.
 - **OA-MIG-204** A readiness token binds the exact unit/policy, both source epochs, state versions
-  and sequences. Candidate selection also requires a recent accepted M1-style authority receipt
-  bound to the same readiness tuple, policy, evidence handles and allowed role. The selector
-  rejects replayed receipt sequence numbers, stale tokens or stale mirrors; rollback requires a
+  and sequences. An accepted opaque M1 S1 Advisory → S2 Window result creates one reusable window
+  grant bound to the same unit, policy/source digests and evidence/approval handles. Every candidate
+  re-entry requires a new replay-checked M2 intent bound to a current readiness generation; the M1
+  lifecycle transition is not repeated for each switch. Rollback requires a
   fresh legacy mirror and typed, role-allowed rollback event with an explicit current legacy-health
   and source-availability observation bound to the mirrored epoch/version/sequence. These supplied
   observations are not authenticated by the core and do not certify live source health; no caller
   Boolean or count alone certifies readiness.
+- **OA-MIG-206** `authorize_window` consumes `oa-migration::TransitionResult` directly and refuses a
+  refusal, wrong stage edge, wrong unit/window, policy/source/evidence mismatch, or invalid declared
+  principal identifiers. A distinct opaque M2 `PromotionIntent` is created for each re-entry from
+  the current readiness token, increasing action sequence, event key, and the same supervisor ID
+  bound by the M1 grant; role must be allowed by M2 policy. Selection rechecks the exact grant,
+  readiness epochs/versions/sequences, policy handles, intent sequence and time. The trace records
+  the M2 intent event key/action sequence and the reused M1 window sequence separately.
+- **OA-MIG-207** Caller-built M2 promotion receipts are removed. Synthetic regressions exercise
+  wrong-window/policy/source M1 results, refused M1 results, wrong or mismatched M2 intents, stale
+  readiness epochs, replay after rollback, and the compile-time opacity of M1 `TransitionResult`.
+  Numeric principal IDs and external record handles are declared inputs, not cryptographic
+  authentication; neither layer proves live approval, evidence contents, or operational authority.
 - **OA-MIG-205** The trace records deterministic decision timestamps and selected-output transitions.
   The endpoint class binds the terminal/en-route update interval and the model records consumer
-  route identity and sequence/timing observations. Promotion reserves the final trace slot for
-  immediate rollback; once the fixed trace is exhausted, further promotion refuses. These are
+  route identity and sequence/timing observations. Each promotion trace record preserves the M2
+  intent sequence/event key and M1 window-grant sequence independently; rollback records have no
+  M1 grant sequence, and rollback event keys cannot be reused within one selector. Promotion
+  reserves the final trace slot for immediate rollback; once the fixed trace is exhausted, further
+  promotion refuses. These are
   recorded inputs; the core does not route payload bytes or prove a downstream system received
   them. This does not prove availability, controller authorization, or operational cutover. H5
   continuity requires separate measured drill evidence from source-backed consumer observations.
@@ -7668,11 +7684,11 @@ claims; a match is explicitly unverified.
   maximum 64 tracks, flights, handoffs and alerts; reconciliation compares all rows, including
   active, acknowledged and suppressed alert fields. Every clean cycle records both ordered
   selector delivery observations and a zero-loss denominator.
-- **OA-MIG-302** A sustained single-selector case retains its full transition ledger across 64
-  flip-and-rollback cycles. The 64th rollback succeeds into the final trace slot, with the exact
-  `Candidate`→`Legacy` record checked. The next promotion reports `TraceFull` while the selected
-  output stays Legacy; the drill reports this per-unit trace-capacity limit instead of resetting
-  the ledger.
+- **OA-MIG-302** A sustained single-selector case retains its full trace across 64 distinct M2
+  promotion intents and rollback events under one reusable accepted M1 S2-window grant. The 64th
+  rollback succeeds into the final trace slot, with the exact `Candidate`→`Legacy` record checked.
+  The next promotion reports `TraceFull` while the selected output stays Legacy; the drill reports
+  this per-unit trace-capacity limit instead of resetting the ledger.
 - **OA-MIG-303** Synthetic fault cases record refusal reasons for an epoch change after
   reconciliation, duplicate/gapped/out-of-order delivery observations, stale legacy health,
   expiry and incomplete family coverage. A rollback during pending promotion is exercised; any
