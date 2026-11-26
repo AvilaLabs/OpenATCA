@@ -872,6 +872,92 @@ mod tests {
         assert!(later.synthetic);
     }
 
+    // REQ: OA-MSAW-083
+    #[test]
+    fn regional_aural_area_latches_one_request_per_alert_instance() {
+        let mut service = regional_msaw_synthetic(32).unwrap();
+        service.settings.aural_areas.push(crate::config::AuralArea {
+            id: "TOWER".into(),
+            polygon: oa_safety::geom::polygon_new(&[
+                Vertex {
+                    lat_e7: 400_000_000,
+                    lon_e7: -880_000_000,
+                },
+                Vertex {
+                    lat_e7: 420_000_000,
+                    lon_e7: -880_000_000,
+                },
+                Vertex {
+                    lat_e7: 420_000_000,
+                    lon_e7: -860_000_000,
+                },
+                Vertex {
+                    lat_e7: 400_000_000,
+                    lon_e7: -860_000_000,
+                },
+            ])
+            .unwrap(),
+        });
+        let mut states = oa_safety::net::state_table_new(10_000_000_000, 0).unwrap();
+        let mut inhibits = oa_safety::inhibit::inhibits_new();
+        let first = regional_msaw_cycle(
+            &mut service,
+            2_000_000_000,
+            &[track(1500.0, -600.0)],
+            &mut states,
+            &mut inhibits,
+        )
+        .unwrap();
+        assert_eq!(first.open.len(), 1);
+        assert_eq!(first.aural.sink, AuralSinkStatus::Unavailable);
+        assert_eq!(first.aural.states.len(), 1);
+        assert_eq!(first.aural.states[0].alert_start_ns, first.open[0].start_ns);
+        assert_eq!(first.aural.states[0].area_id_len, 5);
+        assert_eq!(first.aural.states[0].area_id[..5], *b"TOWER");
+        assert_eq!(first.aural.events.len(), 1);
+        assert_eq!(first.aural.events[0].kind, AuralEventKind::Requested);
+
+        let ongoing = regional_msaw_cycle(
+            &mut service,
+            3_000_000_000,
+            &[track(1490.0, -600.0)],
+            &mut states,
+            &mut inhibits,
+        )
+        .unwrap();
+        assert_eq!(ongoing.open.len(), 1);
+        assert_eq!(ongoing.aural.events.len(), 0, "ordinary scans do not replay request");
+
+        regional_msaw_acknowledge_aural(
+            &mut service,
+            0xabc101,
+            first.open[0].start_ns,
+            3_000_000_000,
+        )
+        .unwrap();
+        assert!(regional_msaw_acknowledge_aural(
+            &mut service,
+            0xabc101,
+            first.open[0].start_ns,
+            3_000_000_000,
+        )
+        .is_err());
+        let acknowledged = regional_msaw_cycle(
+            &mut service,
+            4_000_000_000,
+            &[track(1480.0, -600.0)],
+            &mut states,
+            &mut inhibits,
+        )
+        .unwrap();
+        assert_eq!(acknowledged.open.len(), 1, "acknowledgement does not clear visual alert");
+        assert!(acknowledged
+            .aural
+            .events
+            .iter()
+            .any(|event| event.kind == AuralEventKind::Acknowledged));
+    }
+
     // REQ: OA-MSAW-007
     #[test]
     fn configured_msaw_area_inhibit_is_applied_and_expires_in_the_regional_caller() {

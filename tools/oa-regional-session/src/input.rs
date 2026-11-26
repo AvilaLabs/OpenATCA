@@ -641,6 +641,13 @@ pub fn parse_event_line(line: &str) -> Result<NormalizedEvent, InputError> {
                         .parse()
                         .map_err(|_| InputError::InvalidInteger)?,
                 ),
+                ("ACK_MSAW", 15) => {
+                    let alert_start_ns = parse_i64(part(&parts, 14)?)?;
+                    if alert_start_ns <= 0 {
+                        return Err(InputError::InvalidInteger);
+                    }
+                    Intent::AcknowledgeMsaw { alert_start_ns }
+                }
                 _ => return Err(InputError::InvalidOperation),
             };
             EventKind::Operator(OperatorCommand {
@@ -706,4 +713,36 @@ pub fn parse_event_line(line: &str) -> Result<NormalizedEvent, InputError> {
         centre,
         kind,
     })
+}
+
+#[cfg(test)]
+mod aural_ack_tests {
+    use super::*;
+
+    fn ack_line(start_ns: &str) -> String {
+        format!(
+            "v1\t2000000000\t1000000000\t1\tFLIGHT\t000000000000000000000001\t00ABCDEF\tZAU\tCOMMAND\tPLAN00000001\t1\t1\t42\tACK_MSAW\t{start_ns}"
+        )
+    }
+
+    #[test]
+    fn ack_msaw_parser_retains_positive_alert_instance_start() {
+        let parsed = parse_event_line(&ack_line("1500000000")).expect("valid typed ACK");
+        let EventKind::Operator(command) = parsed.kind else {
+            panic!("operator intent expected");
+        };
+        assert_eq!(
+            command.intent,
+            oa_display::interaction::Intent::AcknowledgeMsaw {
+                alert_start_ns: 1_500_000_000
+            }
+        );
+    }
+
+    #[test]
+    fn ack_msaw_parser_rejects_missing_or_nonpositive_instance_start() {
+        assert!(parse_event_line(&ack_line("0")).is_err());
+        assert!(parse_event_line(&ack_line("-1")).is_err());
+        assert!(parse_event_line(&ack_line("not-a-time")).is_err());
+    }
 }
