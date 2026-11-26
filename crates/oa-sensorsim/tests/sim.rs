@@ -526,11 +526,23 @@ fn same_seed_same_bytes_and_streams_are_per_aircraft() {
     let src = oa_asterix::SourceId { sac: 1, sic: 2 };
     let encoded = to_cat048(&a, src).unwrap();
     assert_eq!(encoded, to_cat048(&b, src).unwrap());
-    let hex = encoded
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    println!("OA-D1-SIM-CAT048-BYTES={} HEX={hex}", encoded.len());
+    let expected_hex = include_str!("fixtures/cat048_seed77.hex").trim();
+    assert_eq!(
+        expected_hex.len() % 2,
+        0,
+        "synthetic CAT048 fixture has odd hex length"
+    );
+    let expected = expected_hex
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        expected.len(),
+        7_491,
+        "synthetic CAT048 fixture length changed"
+    );
+    assert_eq!(encoded, expected, "complete seeded CAT048 output changed");
     let (c, _) = run(&truth, &s, 78);
     assert_ne!(a, c);
     // Dropping the other aircraft does not change one aircraft's plots.
