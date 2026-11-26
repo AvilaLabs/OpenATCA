@@ -164,6 +164,33 @@ class ReleaseStageTests(unittest.TestCase):
         self.assertEqual(release_manifest["staged_files_sha256"]["crates/openatca-mini/src/lib.rs"],
                          hashlib.sha256((first / "crates/openatca-mini/src/lib.rs").read_bytes()).hexdigest())
 
+    def test_airspace_fixture_allowlist_is_exact_and_hash_pinned(self) -> None:
+        repository = TOOL.resolve().parents[1]
+        fixture_root = repository / "crates" / "oa-airspace" / "tests" / "fixtures"
+        pinned = stage_tool.TEST_ASSETS["oa-airspace"]
+        actual = {
+            path.relative_to(fixture_root).as_posix()
+            for path in fixture_root.rglob("*")
+            if path.is_file()
+        }
+        expected = {path.removeprefix("tests/fixtures/") for path in pinned}
+        self.assertEqual(actual, expected)
+        self.assertEqual(len(pinned), 41)
+        for relative, expected_hash in pinned.items():
+            source = fixture_root / relative.removeprefix("tests/fixtures/")
+            self.assertEqual(hashlib.sha256(source.read_bytes()).hexdigest(), expected_hash, relative)
+        revision = stage_tool.git(repository, "rev-parse", "HEAD").strip()
+        files, omitted = stage_tool.git_files(repository, revision, "crates/oa-airspace")
+        self.assertEqual(omitted, [])
+        staged_fixture_paths = {
+            path.removeprefix("crates/oa-airspace/")
+            for path, _mode in files
+            if "/tests/fixtures/" in path
+        }
+        self.assertEqual(staged_fixture_paths, set(pinned))
+        provenance = stage_tool.INPUT_PROVENANCE["oa-airspace"]
+        self.assertEqual(set(provenance), set(pinned))
+
     def test_repeat_to_distinct_output_is_deterministic(self) -> None:
         self._stage("first")
         self._stage("second")
