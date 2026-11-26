@@ -56,6 +56,8 @@ pub struct InterimAltitude {
 pub struct SfdpsRowFacts<'a> {
     pub identity: RowIdentity,
     pub gufi: u128,
+    /// Reporting-centre identity used to compare a status/plan snapshot with the matching OA view.
+    pub centre: [u8; 4],
     pub source_time_ms: i64,
     pub observed_time_ms: i64,
     pub message_sequence: SourceField<u64>,
@@ -224,6 +226,10 @@ pub fn row_facts<'a>(
         .gufi
         .get(row)
         .ok_or_else(|| io::Error::other("SFDPS GUFI column missing; INCOMPLETE"))?;
+    let centre = *events
+        .centre
+        .get(row)
+        .ok_or_else(|| io::Error::other("SFDPS centre column missing; INCOMPLETE"))?;
     let source_time_ms = *events
         .ts_ms
         .get(row)
@@ -306,6 +312,7 @@ pub fn row_facts<'a>(
     Ok(SfdpsRowFacts {
         identity,
         gufi,
+        centre,
         source_time_ms,
         observed_time_ms,
         message_sequence: field(events, row, Field::MsgSeq, events.msg_seq.get(row).copied())?,

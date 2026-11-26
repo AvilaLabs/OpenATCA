@@ -592,6 +592,25 @@ pub fn adapt_recorded_frames(
     max_events: usize,
     adsb_centre: [u8; 4],
 ) -> Result<RecordedAdaptation, AdapterError> {
+    adapt_recorded_frames_with_sequence_starts(
+        frames,
+        recording_counts,
+        max_events,
+        adsb_centre,
+        [0, 0],
+    )
+}
+
+/// Bounded streaming counterpart for one ordered chunk. The caller carries the two sequence
+/// starts across chunks and retains only one chunk's output. Default conversion continues to use
+/// [`adapt_recorded_frames`] and its original behavior.
+pub fn adapt_recorded_frames_with_sequence_starts(
+    frames: &[RecordedFrame],
+    recording_counts: RecordingCounts,
+    max_events: usize,
+    adsb_centre: [u8; 4],
+    sequence_starts: [u64; 2],
+) -> Result<RecordedAdaptation, AdapterError> {
     if max_events == 0 {
         return Err(AdapterError::ZeroCapacity);
     }
@@ -666,8 +685,8 @@ pub fn adapt_recorded_frames(
     let mut sfdps_decoder = Decoder::new(fixm_limits);
     let mut quarantine_queue = queue_new();
     let conversion_started = Instant::now();
-    let mut next_surveillance_sequence = 0u64;
-    let mut next_flight_sequence = 0u64;
+    let mut next_surveillance_sequence = sequence_starts[0];
+    let mut next_flight_sequence = sequence_starts[1];
     for frame in frames {
         let frame_started = Instant::now();
         if frame.kind != oa_feed::Kind::Message {
