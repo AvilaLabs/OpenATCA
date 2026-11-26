@@ -148,7 +148,10 @@ fn one_hundred_synthetic_m2_flip_rollbacks_reach_independent_consumer() {
         )
         .expect("M2 candidate selection");
         assert_eq!(oa_migration_switch::selected(&selector), Output::Candidate);
-        consumer.send(1, b"synthetic candidate projection");
+        consumer.send(
+            1,
+            &normalized_position_row(H5_MEASUREMENT_START_NS, 1),
+        );
         max_flip_decision_to_ack = max_flip_decision_to_ack.max(flip_started.elapsed().as_nanos());
         acknowledged += 1;
         observe_delivery(
@@ -171,7 +174,10 @@ fn one_hundred_synthetic_m2_flip_rollbacks_reach_independent_consumer() {
         )
         .expect("M2 rollback");
         assert_eq!(oa_migration_switch::selected(&selector), Output::Legacy);
-        consumer.send(2, b"synthetic legacy projection");
+        consumer.send(
+            2,
+            &normalized_position_row(H5_MEASUREMENT_START_NS + 1, 2),
+        );
         max_rollback_decision_to_ack =
             max_rollback_decision_to_ack.max(rollback_started.elapsed().as_nanos());
         acknowledged += 1;
@@ -195,25 +201,47 @@ fn one_hundred_synthetic_m2_flip_rollbacks_reach_independent_consumer() {
 fn independent_consumer_refuses_duplicate_and_gap_sequences() {
     for invalid_sequence in [1u64, 3u64] {
         let mut consumer = Consumer::new();
-        let first_bytes = b"synthetic output one";
-        consumer.send(1, first_bytes);
-        let second_bytes = b"synthetic output two";
-        let digest = oa_sha256::to_hex(&oa_sha256::sha256(second_bytes));
-        let hex = second_bytes
-            .iter()
-            .map(|value| format!("{value:02x}"))
-            .collect::<String>();
-        writeln!(
-            consumer.input,
-            "H5CONSUMER\t1\tDATA\t{invalid_sequence}\t{digest}\t{hex}"
-        )
-        .unwrap();
+        let first_bytes = normalized_position_row(H5_MEASUREMENT_START_NS, 1);
+        consumer.send(1, &first_bytes);
+        let second_bytes = normalized_position_row(H5_MEASUREMENT_START_NS + 1, 2);
+        consumer
+            .input
+            .write_all(&worker_data_frame(invalid_sequence, &second_bytes))
+            .unwrap();
         consumer.input.flush().unwrap();
         let mut response = String::new();
         let _ = consumer.output.read_line(&mut response);
         assert!(response.is_empty(), "invalid sequence must not be ACKed");
         assert!(!consumer.child.wait().unwrap().success());
     }
+}
+
+fn normalized_position_row(receipt_ns: i64, sequence: u64) -> Vec<u8> {
+    format!(
+        "v1\t{receipt_ns}\t{receipt_ns}\t{sequence}\tSURVEILLANCE\t00000000000000000000000000000000\tABCDEF\tZAU1\tPOS\t385000000\t-935000000\t1000\t0\t0\t0"
+    )
+    .into_bytes()
+}
+
+fn worker_data_frame(sequence: u64, payload: &[u8]) -> Vec<u8> {
+    let digest = oa_sha256::to_hex(&oa_sha256::sha256(payload));
+    let hex = payload
+        .iter()
+        .map(|value| format!("{value:02x}"))
+        .collect::<String>();
+    format!("H5CONSUMER\t1\tDATA\t{sequence}\t{digest}\t{hex}\n").into_bytes()
+}
+
+#[test]
+fn worker_refuses_a_hash_valid_normalized_row_with_a_sealed_timestamp() {
+    let mut consumer = Consumer::new();
+    let sealed_row = normalized_position_row(1_795_132_800_000_000_000, 1);
+    consumer
+        .input
+        .write_all(&worker_data_frame(1, &sealed_row))
+        .unwrap();
+    consumer.input.flush().unwrap();
+    consumer.expect_failed_without_ack();
 }
 
 fn valid_track_state() -> Vec<u8> {

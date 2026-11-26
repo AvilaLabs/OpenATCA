@@ -2201,6 +2201,13 @@ pub fn consumer_worker() -> Result<(), String> {
         if actual_hash != declared_hash {
             return Err("payload digest mismatch".into());
         }
+        let normalized_row = std::str::from_utf8(&payload)
+            .map_err(|_| "normalized input payload is not UTF-8")?;
+        let event = crate::input::parse_event_line(normalized_row)
+            .map_err(|error| format!("normalized input row refused: {error:?}"))?;
+        if !matches!(event.source, SourceKind::Surveillance | SourceKind::Flight) {
+            return Err("consumer accepts only normalized surveillance/flight rows".into());
+        }
         writeln!(output, "H5CONSUMER\t1\tACK\t{sequence}\t{actual_hash}")
             .map_err(|error| error.to_string())?;
         output.flush().map_err(|error| error.to_string())?;

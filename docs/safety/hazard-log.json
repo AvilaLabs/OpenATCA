@@ -10363,6 +10363,11 @@
           "requirement_id": "OA-MIG-414",
           "file": "tools/oa-regional-session/tests/migration_drill_consumer.rs",
           "test_name": "worker_does_not_apply_duplicate_family_business_keys"
+        },
+        {
+          "requirement_id": "OA-MIG-414",
+          "file": "tools/oa-regional-session/tests/migration_drill_consumer.rs",
+          "test_name": "worker_refuses_a_hash_valid_normalized_row_with_a_sealed_timestamp"
         }
       ],
       "proof_refs": []
