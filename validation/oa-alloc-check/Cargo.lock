@@ -41,9 +41,11 @@ name = "oa-alloc-check"
 version = "0.0.0"
 dependencies = [
  "oa-airspace",
+ "oa-ca",
  "oa-display",
  "oa-geo",
  "oa-nam",
+ "oa-runway",
  "oa-safety",
  "oa-scope-replay",
  "oa-track",
@@ -86,6 +88,16 @@ dependencies = [
  "oa-time-window",
  "oa-truth",
  "oa-xml",
+]
+
+[[package]]
+name = "oa-ca"
+version = "0.0.1"
+dependencies = [
+ "oa-geo",
+ "oa-ieee",
+ "oa-math",
+ "oa-safety",
 ]
 
 [[package]]
@@ -192,6 +204,15 @@ dependencies = [
  "oa-tfms",
  "oa-xml",
  "oa-zip",
+]
+
+[[package]]
+name = "oa-runway"
+version = "0.0.1"
+dependencies = [
+ "oa-geo",
+ "oa-ieee",
+ "oa-math",
 ]
 
 [[package]]

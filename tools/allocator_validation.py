@@ -31,8 +31,9 @@ HARNESS_DEPS = {
     "oa-display": "../../crates/oa-display", "oa-scope-replay": "../../crates/oa-scope-replay",
     "oa-airspace": "../../crates/oa-airspace", "oa-geo": "../../crates/oa-geo",
     "oa-safety": "../../crates/oa-safety",
+    "oa-ca": "../../crates/oa-ca", "oa-runway": "../../crates/oa-runway",
 }
-HELPER_MODULES = ("pending_windows.rs", "nam_window.rs", "display_window.rs", "safety_window.rs", "route_window.rs")
+HELPER_MODULES = ("pending_windows.rs", "nam_window.rs", "display_window.rs", "safety_window.rs", "route_window.rs", "advanced_windows.rs")
 FIXTURE_IDS = {
     "tracker_update_ooo_refusal_capacity_advance_flush",
     "tracker_default_4096_capacity_recovery",
@@ -49,6 +50,9 @@ FIXTURE_IDS = {
     "display_controller_interaction_queue",
     "safety_state_inhibit_display",
     "airspace_route_direct_airway_procedure_atomic_refusal",
+    "ca_cycle_shared_probe_degraded_overload",
+    "sua_probe_schedule_and_capacity_refusal",
+    "runway_final_monitor_arv_degraded_capacity",
 }
 TRACKER_FIELDS = {
     "applied": 4, "refiltered": 1, "refused": 1, "capacity_refused": 1,
@@ -177,6 +181,11 @@ ROUTE_LEDGER = {
     "route_airway_expansion": ("crates/oa-airspace/src/core/route.rs", "route_conversion.airway_points"),
     "route_procedure_transition": ("crates/oa-airspace/src/core/route.rs", "route_conversion.procedure_points"),
     "route_atomic_refusal": ("crates/oa-airspace/src/core/route.rs", "route_conversion.refusals"),
+    "ca_cycle": ("crates/oa-ca/src/cycle.rs", "ca_cycle_probe.normal"),
+    "ca_shared_probe": ("crates/oa-ca/src/probe.rs", "ca_cycle_probe.normal"),
+    "sua_probe": ("crates/oa-airspace/src/core/conflict_probe.rs", "sua_probe.normal"),
+    "final_monitor_update": ("crates/oa-runway/src/final_monitor.rs", "runway_final_arv.normal"),
+    "arv_evaluate": ("crates/oa-runway/src/arv.rs", "runway_final_arv.normal"),
 }
 
 ROUTE_SYMBOLS = {
@@ -269,6 +278,8 @@ ROUTE_SYMBOLS = {
     "route_airway_expansion": "convert_route",
     "route_procedure_transition": "convert_route",
     "route_atomic_refusal": "convert_route",
+    "ca_cycle": "ca_cycle", "ca_shared_probe": "probe_pair",
+    "sua_probe": "probe_sua", "final_monitor_update": "update", "arv_evaluate": "evaluate",
 }
 
 
@@ -1027,7 +1038,7 @@ def evaluate_allocator_result(text: str, expect_injected: bool = False) -> list[
     required_keys = {"status", "injection_requested", "fixture_ids", "route_ids", "controls",
                      "tracker", "default_capacity", "output_log", "clock_gate",
                      "bucket_capacity", "adsb_pending", "plot_pending", "fusion", "nam_session",
-                     "display_frame", "safety", "route_conversion"}
+                     "display_frame", "safety", "route_conversion", "ca_cycle_probe", "sua_probe", "runway_final_arv"}
     if set(result) != required_keys:
         errors.append("result must contain exactly the required allocator evidence fields")
     expected_status = "FAIL_M3_ALLOCATION" if expect_injected else "PASS_M3_EXERCISED"
@@ -1118,6 +1129,9 @@ def evaluate_allocator_result(text: str, expect_injected: bool = False) -> list[
         "route_conversion": {"iterations": 10, "direct_points": 2, "airway_points": 2,
                              "procedure_points": 2, "connected_links": 4, "refusals": 1,
                              "recoveries": 1, "work_used": 1, "work_limit": ROUTE_CONVERSION_WORK_LIMIT},
+        "ca_cycle_probe": {"normal": 1, "degraded": 1, "overload": 1},
+        "sua_probe": {"normal": 1, "degraded": 1, "overload": 1},
+        "runway_final_arv": {"normal": 1, "degraded": 1, "overload": 1},
         "default_capacity": {"occupied": 4096, "confirmed": 4096, "refused": 1, "recovered": 1,
                              "history_refiltered": 1, "history_replayed": 1, "late_ring": 1},
         "output_log": {"output_overflow": 1, "output_rows_after_reuse": 1,
@@ -1168,17 +1182,21 @@ def evaluate_allocator_result(text: str, expect_injected: bool = False) -> list[
     for group, minima in extra_fields.items():
         evidence = result.get(group)
         required = set(minima) | {"overflow", "alloc", "zeroed", "realloc"}
+        if group in {"ca_cycle_probe", "sua_probe", "runway_final_arv"}:
+            required.add("injected")
         if group == "nam_session":
             required |= {"final_inactive"}
         if group == "output_log":
             required |= {"output_aligned", "output_preserved_addr", "output_payload_unchanged", "log_aligned"}
         if group == "route_conversion":
-            required |= {"atomic_empty", "injected"}
+            required |= {"atomic_empty", "injection_check_passed"}
         if not _object(evidence) or set(evidence) != required:
             errors.append(f"{group} must contain exactly its declared route evidence and allocator counters")
             evidence = {}
         if evidence.get("overflow") is not False:
             errors.append(f"{group}.overflow must be false")
+        if group in {"ca_cycle_probe", "sua_probe", "runway_final_arv"} and evidence.get("injected") is not expect_injected:
+            errors.append(f"{group}.injected must match injection_requested")
         for counter in control_names:
             value = evidence.get(counter)
             if not _nonnegative_int(value):
@@ -1197,7 +1215,7 @@ def evaluate_allocator_result(text: str, expect_injected: bool = False) -> list[
         "route_conversion": {"iterations": 10, "direct_points": 2, "airway_points": 2,
                              "procedure_points": 2, "connected_links": 4, "refusals": 1,
                              "atomic_empty": True, "recoveries": 1, "work_limit": ROUTE_CONVERSION_WORK_LIMIT,
-                             "injected": True},
+                             "injection_check_passed": True},
         "default_capacity": {"occupied": 4096, "confirmed": 4096, "refused": 1,
                              "history_refiltered": 1, "history_replayed": 1, "late_ring": 1},
         "output_log": {"log_overflow": 1, "log_rows": 1},

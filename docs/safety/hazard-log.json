@@ -5045,7 +5045,7 @@
       "id": "OA-TRK-327",
       "function": "tracker_diagnostics_and_bounded_work_evidence",
       "rationale": "This measures or accounts for storage, work, timing, or diagnostics, rather than which aircraft state is selected or whether an alert is issued.",
-      "register_clause": "A standalone, isolated allocation check runs real tracker and fusion entry points after initialization with an observing global allocator. Its three allocation API controls must be observed, every claimed route has explicit exercise evidence, and any observed allocation, counter overflow, failed control or missing route fails the check. Results name the exercised scope and do not imply coverage of every possible input or real-time crate."
+      "register_clause": "A standalone, isolated allocation check runs selected real tracker and fusion, conflict-alert cycle and shared-predictor probe, SUA probe, runway final-monitor and assigned-runway-verification entry points after initialization with an observing global allocator. Its three allocation API controls must be observed; each claimed route and normal, degraded or explicit-overload outcome has exercise evidence; and any observed allocation, counter overflow, failed control or missing route fails the check. Results name the exercised synthetic scope and do not imply coverage of every possible input or real-time crate."
     },
     {
       "id": "OA-TRK-328",

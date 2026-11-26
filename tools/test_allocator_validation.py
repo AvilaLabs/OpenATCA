@@ -34,6 +34,9 @@ def result(injected=False):
             "display_controller_interaction_queue",
             "safety_state_inhibit_display",
             "airspace_route_direct_airway_procedure_atomic_refusal",
+            "ca_cycle_shared_probe_degraded_overload",
+            "sua_probe_schedule_and_capacity_refusal",
+            "runway_final_monitor_arv_degraded_capacity",
         ],
         "route_ids": [
             'safety_banner_clamp', 'safety_banner_draw', 'safety_build_error',
@@ -127,6 +130,7 @@ def result(injected=False):
             'route_airway_expansion',
             'route_procedure_transition',
             'route_atomic_refusal',
+            'ca_cycle', 'ca_shared_probe', 'sua_probe', 'final_monitor_update', 'arv_evaluate',
         ],
         "controls": {"alloc": 2, "zeroed": 1, "realloc": 1, "overflow": False},
         "tracker": {
@@ -221,8 +225,14 @@ def result(injected=False):
             "alloc": 1 if injected else 0, "zeroed": 0, "realloc": 0, "overflow": False,
             "iterations": 10, "direct_points": 2, "airway_points": 2, "procedure_points": 2,
             "connected_links": 4, "refusals": 1, "atomic_empty": True, "recoveries": 1,
-            "work_used": 100, "work_limit": 1_048_576, "injected": True,
+            "work_used": 100, "work_limit": 1_048_576, "injection_check_passed": True,
         },
+        "ca_cycle_probe": {"alloc": 1 if injected else 0, "zeroed": 0, "realloc": 0,
+                           "overflow": False, "normal": 2, "degraded": 1, "overload": 1, "injected": injected},
+        "sua_probe": {"alloc": 1 if injected else 0, "zeroed": 0, "realloc": 0,
+                      "overflow": False, "normal": 1, "degraded": 1, "overload": 1, "injected": injected},
+        "runway_final_arv": {"alloc": 1 if injected else 0, "zeroed": 0, "realloc": 0,
+                             "overflow": False, "normal": 2, "degraded": 1, "overload": 1, "injected": injected},
     }
 
 
@@ -278,6 +288,8 @@ oa-scope-replay = { path = "../../crates/oa-scope-replay" }
 oa-airspace = { path = "../../crates/oa-airspace" }
 oa-geo = { path = "../../crates/oa-geo" }
 oa-safety = { path = "../../crates/oa-safety" }
+oa-ca = { path = "../../crates/oa-ca" }
+oa-runway = { path = "../../crates/oa-runway" }
 ''')
     write(root / "validation/oa-alloc-check/src/main.rs", '''
 #![deny(unsafe_code)]
@@ -412,6 +424,17 @@ class AllocatorResultTests(unittest.TestCase):
     def test_exercised_and_injected_results_pass(self):
         self.assertEqual(gate.evaluate_allocator_result(json.dumps(result())), [])
         self.assertEqual(gate.evaluate_allocator_result(json.dumps(result(True)), True), [])
+
+    def test_normal_mode_cannot_claim_allocation_injection(self):
+        value = result()
+        value["sua_probe"]["injected"] = True
+        self.assertTrue(any("sua_probe.injected must match injection_requested" in error
+                            for error in gate.evaluate_allocator_result(json.dumps(value))))
+
+        value = result()
+        value["route_conversion"]["injected"] = True
+        self.assertTrue(any("route_conversion must contain exactly" in error
+                            for error in gate.evaluate_allocator_result(json.dumps(value))))
 
     def test_injected_mode_needs_alloc_activity_and_matching_status(self):
         value = result(True)
