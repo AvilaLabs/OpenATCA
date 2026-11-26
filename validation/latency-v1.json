@@ -1,0 +1,79 @@
+{
+  "checks": {
+    "alert_in_creating_scan": true,
+    "all_pass": true,
+    "amendment_p99_under_10ms": true,
+    "display_p99_under_100ms": true,
+    "handoff_p99_under_10ms": true
+  },
+  "counts": {
+    "alerts_rendered_in_creating_scan": 100,
+    "expected_plan_change_conflicts": 10000,
+    "flight_operations": 60000,
+    "flight_operations_applied": 60000,
+    "normal_push_arrivals_completed": 60,
+    "normal_push_frames": 721,
+    "normal_push_reports_processed": 19470,
+    "normal_push_reports_supplied": 19470,
+    "refused_operations": 0,
+    "synthetic_alert_trials": 100
+  },
+  "measurement_utc": "2026-11-26T09:42:57Z",
+  "metrics": {
+    "converging_pair_alert_scan_to_frame_packet": {
+      "max": 30924606,
+      "n": 100,
+      "p50": 28668917,
+      "p95": 29123981,
+      "p99": 29634510,
+      "unit": "ns"
+    },
+    "flight_plan_amendment": {
+      "max": 52215,
+      "n": 10000,
+      "p50": 72,
+      "p95": 98,
+      "p99": 1639,
+      "unit": "ns"
+    },
+    "handoff_initiate_accept_take": {
+      "max": 5124,
+      "n": 10000,
+      "p50": 150,
+      "p95": 175,
+      "p99": 250,
+      "unit": "ns"
+    },
+    "scan_input_to_frame_packet": {
+      "max": 32297735,
+      "n": 720,
+      "p50": 28927607,
+      "p95": 29440546,
+      "p99": 31358682,
+      "unit": "ns"
+    }
+  },
+  "predeclared_targets_sha256": "e05b4cf55ce865d3f0afe6a24c545d25a419cdeb7d27ecd95d28d9a5b0ebcbae",
+  "raw_evidence_sha256": {
+    "context.json": "d260a516583d1fb94cfde7f535dbfa9fcf117047c4449d0916a662389491065e",
+    "demo.json": "194abd41a5f175ae457b696eba2666bf98e1688af1e7576c841e59761c2bae76",
+    "flight.json": "d478667f7eb1ed812283f2cef1d8be45842329cae66ef7d7a34b1805112a2d34"
+  },
+  "scenario_asset_sha256": "487157be621d883bb381fc30e809e1e1a507cf92f98f3b01606831554f8a216f",
+  "schema": "openatca-latency-v1",
+  "scope": {
+    "alert_trials": "100 identical independent synthetic converging-pair engines; not scenario diversity",
+    "display": "720 native scan intervals for scenario1 from 5000 to 3600000ms inclusive; each timer includes due report ingestion from the prepared, hashed OASD rows, advance_to, frame render and canonical packet encoding. Asset read/validation and engine preparation are outside timing. Scenario2 uses 100 identical independent engines; setup and one no-alert warmup frame are outside each timer.",
+    "flight": "Engineering targets for direct in-process oa-flight core operations; no FAA or published external latency target is claimed. Message receipt and end-to-end flight propagation are outside this timer.",
+    "host": "native development laptop; not a network, facility or FAA comparison",
+    "normal_push": "one synthetic 60-minute scenario; warmup frame excluded; unchanged tracker/alert thresholds"
+  },
+  "source_commit": "be97e34d6914644be6c5539a6b5ee0801274444a",
+  "targets": {
+    "alert_same_scan": true,
+    "amendment_p99_limit_ms": 10,
+    "display_p99_limit_ms": 100,
+    "display_p99_pass": true,
+    "handoff_p99_limit_ms": 10
+  }
+}
