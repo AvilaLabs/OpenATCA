@@ -238,6 +238,7 @@ dependencies = [
  "oa-feed",
  "oa-fixm",
  "oa-flight",
+ "oa-migration-shadow",
  "oa-replay",
  "oa-sealed",
  "oa-time-window",

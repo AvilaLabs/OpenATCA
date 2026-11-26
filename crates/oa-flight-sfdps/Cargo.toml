@@ -14,6 +14,10 @@ workspace = true
 oa-feed = { path = "../oa-feed" }
 oa-fixm = { path = "../oa-fixm" }
 oa-flight = { path = "../oa-flight" }
+# RULESET F1: Connor Avila approved this workspace link on 2026-11-26 for bounded, offline
+# conversion of validated SFDPS source facts into the existing M4 normalized-record schema.
+# The adapter does not run the comparator or provide a legacy reference.
+oa-migration-shadow = { path = "../oa-migration-shadow" }
 oa-replay = { path = "../oa-replay" }
 oa-sealed = { path = "../oa-sealed" }
 oa-xml = { path = "../oa-xml" }

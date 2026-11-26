@@ -5,6 +5,7 @@
 pub mod adapter;
 pub mod audit;
 pub mod compat;
+pub mod migration_adapter;
 pub mod migration_projection;
 pub mod replay;
 pub mod timing;
