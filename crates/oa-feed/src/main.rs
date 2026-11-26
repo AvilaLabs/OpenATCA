@@ -485,10 +485,12 @@ fn live(cfg: &Live) -> Result<ExitCode, String> {
                     &mut recorder,
                     &cfg.feed,
                     deferred_mono,
-                    &mut stamped,
-                    &mut work,
-                    cfg.stop_on_recording_failure,
-                    &mut recording_stop_reason,
+                    DrainOptions {
+                        stamped: &mut stamped,
+                        work: &mut work,
+                        stop_on_recording_failure: cfg.stop_on_recording_failure,
+                        recording_stop_reason: &mut recording_stop_reason,
+                    },
                 ) {
                     Ok(()) => {
                         deferred_drain = false;
@@ -585,10 +587,12 @@ fn live(cfg: &Live) -> Result<ExitCode, String> {
                         &mut recorder,
                         &cfg.feed,
                         *mono,
-                        &mut stamped,
-                        &mut work,
-                        cfg.stop_on_recording_failure,
-                        &mut recording_stop_reason,
+                        DrainOptions {
+                            stamped: &mut stamped,
+                            work: &mut work,
+                            stop_on_recording_failure: cfg.stop_on_recording_failure,
+                            recording_stop_reason: &mut recording_stop_reason,
+                        },
                     ) {
                         Ok(()) => {
                             if let Some(reason) = recording_stop_reason.take() {
@@ -888,17 +892,27 @@ fn finalize_reader(
     error
 }
 
+struct DrainOptions<'a> {
+    stamped: &'a mut Vec<u8>,
+    work: &'a mut FrameWorkBudget,
+    stop_on_recording_failure: bool,
+    recording_stop_reason: &'a mut Option<String>,
+}
+
 fn drain(
     reader: &mut FrameReader<'_>,
     health: &mut FeedHealth,
     recorder: &mut Option<Recorder>,
     feed: &str,
     mono: u64,
-    stamped: &mut Vec<u8>,
-    work: &mut FrameWorkBudget,
-    stop_on_recording_failure: bool,
-    recording_stop_reason: &mut Option<String>,
+    options: DrainOptions<'_>,
 ) -> Result<(), oa_feed::FrameWorkRefusal> {
+    let DrainOptions {
+        stamped,
+        work,
+        stop_on_recording_failure,
+        recording_stop_reason,
+    } = options;
     loop {
         let event = match reader.next_with_remaining_budget(work) {
             Ok(event) => event,
@@ -1083,10 +1097,12 @@ mod tests {
             &mut recorder,
             "feed",
             0,
-            &mut stamped,
-            &mut work,
-            true,
-            &mut stop_reason,
+            DrainOptions {
+                stamped: &mut stamped,
+                work: &mut work,
+                stop_on_recording_failure: true,
+                recording_stop_reason: &mut stop_reason,
+            },
         )
         .expect("recording stop is not a frame-work refusal");
         assert!(stop_reason.is_some());

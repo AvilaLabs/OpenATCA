@@ -32,6 +32,10 @@ GAP_SECONDS = 60
 STOP = False
 
 
+class CaptureSpanLimitError(RuntimeError):
+    pass
+
+
 def stop(_signum: int, _frame: object) -> None:
     global STOP
     STOP = True
@@ -275,7 +279,8 @@ def parse_cursor(directory: Path, feed: str, cursor_path: Path, gap_seconds: int
                         spans[-1]["frames"] += 1
                     else:
                         if capture["span_count"] >= MAX_CAPTURE_SPANS:
-                            raise RuntimeError("capture manifest span limit exceeded; refusing truncation")
+                            raise CaptureSpanLimitError(
+                                "capture manifest span limit exceeded; refusing truncation")
                         spans.append({"start_offset": start, "end_offset": end, "frames": 1})
                         capture["span_count"] += 1
                     rows["frames"] += 1
@@ -338,6 +343,33 @@ def ns_iso(value: int | None) -> str | None:
     return dt.datetime.fromtimestamp(value / 1_000_000_000, dt.timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def load_capture_failure(path: Path, capture: dict | None) -> dict | None:
+    if capture is None:
+        return None
+    failure = read_json(path, {})
+    if not failure:
+        return None
+    if (failure.get("from_ns") != capture["from_ns"]
+            or failure.get("to_ns") != capture["to_ns"]):
+        raise ValueError("capture failure latch bounds differ; preserve failed archive and use a new state directory")
+    return failure
+
+
+def capture_processing_allowed(capture: dict | None, failure: dict | None) -> bool:
+    return capture is not None and failure is None
+
+
+def latch_capture_failure(path: Path, capture: dict, feed: str, reason: str) -> dict:
+    failure = {"schema": "openatca-capture-failure-v1", "status": "FAILED_INCOMPLETE",
+               "from_ns": capture["from_ns"], "to_ns": capture["to_ns"],
+               "from_utc": capture["from_utc"], "to_utc": capture["to_utc"],
+               "feed": feed, "reason": reason,
+               "failed_utc": dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z"),
+               "operator_action": "preserve this failure record and partial manifest; do not resume or claim completion"}
+    atomic_json(path, failure)
+    return failure
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--journal-root", type=Path, required=True)
@@ -370,6 +402,10 @@ def main() -> int:
             parser.error("capture bounds differ from existing manifest; use a new archive state")
 
     args.state_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        capture_failure = load_capture_failure(args.state_root / "capture-failed.json", capture)
+    except ValueError as exc:
+        parser.error(str(exc))
     lock_path = args.state_root / "observer.lock"
     lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
     try:
@@ -426,7 +462,7 @@ def main() -> int:
                     "outage_note": "STATUS disconnected/reconnect counts indicate adapter-reported interruption; silence alone is not proof of broker/feed outage",
             "availability_note": "counts are OAF frame availability at this recorder; source-event availability and message semantics are not decoded",
                 }
-            if capture is not None:
+            if capture_processing_allowed(capture, capture_failure):
                 capture_progress = {}
                 captured_files = {}
                 span_count = 0
@@ -438,8 +474,23 @@ def main() -> int:
                         "span_count": prior.get("capture_span_count", 0)}
                     if prior.get("capture_from_ns", capture["from_ns"]) != capture["from_ns"] or prior.get("capture_to_ns", capture["to_ns"]) != capture["to_ns"]:
                         raise RuntimeError(f"{feed}: capture cursor bounds changed; use a new capture state directory")
-                    state, feed_capture, _ = parse_cursor(args.journal_root / feed, feed, path,
-                                                          args.gap_seconds, feed_capture)
+                    try:
+                        state, feed_capture, _ = parse_cursor(args.journal_root / feed, feed, path,
+                                                              args.gap_seconds, feed_capture)
+                    except CaptureSpanLimitError as exc:
+                        capture_failure = latch_capture_failure(
+                            args.state_root / "capture-failed.json", capture, feed, str(exc))
+                        previous_manifest = read_json(args.capture_manifest, {})
+                        previous_manifest.update({"schema": "openatca-capture-window-manifest-v1",
+                            "from_utc": capture["from_utc"], "to_utc": capture["to_utc"],
+                            "from_ns": capture["from_ns"], "to_ns": capture["to_ns"],
+                            "status": "FAILED_INCOMPLETE; no completeness claim",
+                            "failure": capture_failure,
+                            "updated_utc": capture_failure["failed_utc"]})
+                        atomic_json(args.capture_manifest, previous_manifest)
+                        print(f"capture failed and latched: feed={feed}; {exc}",
+                              file=sys.stderr, flush=True)
+                        break
                     state["capture_from_ns"] = capture["from_ns"]
                     state["capture_to_ns"] = capture["to_ns"]
                     state["capture_files"] = feed_capture["files"]
@@ -460,7 +511,8 @@ def main() -> int:
                         "last_file": state.get("file"), "last_offset": state.get("offset"),
                         "last_receive_utc": ns_iso(state["stats"].get("last_receive_ns")),
                         "unread_journal_bytes_at_poll": backlog}
-                manifest = {"schema": "openatca-capture-window-manifest-v1",
+                if capture_failure is None:
+                    manifest = {"schema": "openatca-capture-window-manifest-v1",
                     "from_utc": capture["from_utc"], "to_utc": capture["to_utc"],
                     "from_ns": capture["from_ns"], "to_ns": capture["to_ns"],
                     "selection": "complete original OAF2 frames with recorder receive timestamp in [from,to); all frame kinds; payload bytes are not copied or changed",
@@ -473,13 +525,17 @@ def main() -> int:
                     "cursor_progress": capture_progress, "span_count": span_count,
                     "files_by_feed": captured_files,
                     "updated_utc": dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z")}
-                atomic_json(args.capture_manifest, manifest)
-                atomic_json(args.capture_pin, {"schema": "openatca-journal-retention-pin-v1",
+                    atomic_json(args.capture_manifest, manifest)
+                    atomic_json(args.capture_pin, {"schema": "openatca-journal-retention-pin-v1",
                     "from_utc": capture["from_utc"], "to_utc": capture["to_utc"],
                     "manifest": str(args.capture_manifest),
                     "files_by_feed": {feed: sorted(captured_files[feed]) for feed in FEEDS},
                     "policy": "do not delete referenced source segments until this capture is separately acknowledged/released"})
-            report["capture_cursor"] = "active" if capture is not None else "not-configured; install a systemd drop-in with explicit UTC bounds"
+            if capture_failure is not None:
+                report["capture_cursor"] = "FAILED_INCOMPLETE; operator action required; observer continues without capture retries"
+                report["capture_failure"] = capture_failure
+            else:
+                report["capture_cursor"] = "active" if capture is not None else "not-configured; install a systemd drop-in with explicit UTC bounds"
             atomic_json(args.report, report)
             print(json.dumps({"observer_uptime_seconds": report["observer_uptime_seconds"],
                               "feed_frames": {f: report["feeds"][f]["frames"] for f in FEEDS},

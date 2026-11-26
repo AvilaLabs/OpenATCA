@@ -83,12 +83,25 @@ class ObserverTests(unittest.TestCase):
                 (journal / feed).mkdir(parents=True)
             state.mkdir()
             env = {**os.environ, "OA_JOURNAL_ROOT": str(journal),
-                   "OA_STATE_ROOT": str(state), "OA_JOURNAL_MAX_BYTES": "1024",
+                   "OA_STATE_ROOT": str(state), "OA_JOURNAL_MAX_BYTES": "50000",
                    "OA_DISK_RESERVE_BYTES": "0"}
+            missing_rate = subprocess.run([sys.executable, str(DISK_CHECK), "SFDPS"], env=env,
+                                          capture_output=True, text=True, check=False)
+            self.assertNotEqual(missing_rate.returncode, 0)
+            self.assertIn("positive measured integer", missing_rate.stderr)
+            env.update({f"OA_EXPECTED_BYTES_PER_HOUR_{feed}": "1" for feed in observer.FEEDS})
             good = subprocess.run([sys.executable, str(DISK_CHECK), "SFDPS"], env=env,
                                   capture_output=True, text=True, check=False)
             self.assertEqual(good.returncode, 0, good.stderr)
-            (journal / "TBFM" / "TBFM-test.oaf").write_bytes(b"x" * 1024)
+            self.assertIn("safety_percent=200", good.stdout)
+            self.assertIn("feed_30day_budget=1440", good.stdout)
+            # Rate evidence that projects beyond the per-feed cap must refuse admission.
+            too_fast = {**env, "OA_EXPECTED_BYTES_PER_HOUR_TBFM": "100"}
+            insufficient = subprocess.run([sys.executable, str(DISK_CHECK), "TBFM"], env=too_fast,
+                                           capture_output=True, text=True, check=False)
+            self.assertNotEqual(insufficient.returncode, 0)
+            self.assertIn("cannot hold its measured 30-day budget", insufficient.stderr)
+            (journal / "TBFM" / "TBFM-test.oaf").write_bytes(b"x" * 50000)
             capped = subprocess.run([sys.executable, str(DISK_CHECK), "TBFM"], env=env,
                                     capture_output=True, text=True, check=False)
             self.assertNotEqual(capped.returncode, 0)
@@ -98,6 +111,68 @@ class ObserverTests(unittest.TestCase):
                                      capture_output=True, text=True, check=False)
             self.assertNotEqual(latched.returncode, 0)
             self.assertIn("latched", latched.stderr)
+
+    def test_cursor_continues_across_immutable_rotated_segments(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            journal = Path(tmp) / "SFDPS"
+            journal.mkdir()
+            first = journal / "SFDPS-20261130T000000Z-0001.oaf"
+            second = journal / "SFDPS-20261130T000001Z-0001.oaf"
+            first_bytes = frame(0, 100_000_000_000)
+            second_bytes = frame(1, 101_000_000_000)
+            first.write_bytes(first_bytes)
+            first.chmod(0o400)
+            cursor = Path(tmp) / "cursor.json"
+            state, _, count = observer.parse_cursor(journal, "SFDPS", cursor, 60)
+            self.assertEqual(count, 1)
+            observer.atomic_json(cursor, state)
+            capture_cursor = Path(tmp) / "capture.json"
+            capture = {"from_ns": 100_000_000_000, "to_ns": 200_000_000_000,
+                       "from_utc": "start", "to_utc": "end", "files": {}, "span_count": 0}
+            archive, capture, _ = observer.parse_cursor(journal, "SFDPS", capture_cursor, 60, capture)
+            observer.atomic_json(capture_cursor, {**archive,
+                "capture_from_ns": capture["from_ns"], "capture_to_ns": capture["to_ns"],
+                "capture_files": capture["files"], "capture_span_count": capture["span_count"]})
+            # Rotation closes the prior file; future writes go to a new segment.
+            second.write_bytes(second_bytes)
+            second.chmod(0o400)
+            state, _, count = observer.parse_cursor(journal, "SFDPS", cursor, 60)
+            self.assertEqual(count, 1)
+            self.assertEqual(state["stats"]["frames"], 2)
+            self.assertEqual(state["file"], second.name)
+            self.assertEqual(state["offset"], len(second_bytes))
+            self.assertEqual(first.read_bytes(), first_bytes)
+            previous = observer.read_json(capture_cursor, {})
+            resumed_capture = {**capture, "files": previous["capture_files"],
+                               "span_count": previous["capture_span_count"]}
+            archive, resumed_capture, count = observer.parse_cursor(
+                journal, "SFDPS", capture_cursor, 60, resumed_capture)
+            self.assertEqual(count, 1)
+            self.assertEqual(archive["stats"]["frames"], 2)
+            self.assertEqual(resumed_capture["files"][second.name]["frames"], 1)
+
+    def test_capture_span_overflow_is_durably_latched_and_not_retried_on_restart(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            journal = root / "journal" / "STDDS"
+            journal.mkdir(parents=True)
+            (journal / "STDDS-20261130T000000Z-0001.oaf").write_bytes(
+                frame(0, 150, payload=b"in-window"))
+            latch = root / "capture-failed.json"
+            capture = {"from_ns": 100, "to_ns": 200,
+                       "from_utc": "start", "to_utc": "end"}
+            full_capture = {**capture, "files": {}, "span_count": observer.MAX_CAPTURE_SPANS}
+            with self.assertRaises(observer.CaptureSpanLimitError):
+                observer.parse_cursor(journal, "STDDS", root / "cursor.json", 60, full_capture)
+            failure = observer.latch_capture_failure(
+                latch, capture, "STDDS", "capture manifest span limit exceeded")
+            restarted = observer.load_capture_failure(latch, capture)
+            self.assertEqual(restarted, failure)
+            self.assertEqual(restarted["status"], "FAILED_INCOMPLETE")
+            self.assertFalse(observer.capture_processing_allowed(capture, restarted))
+            self.assertIn("do not resume", restarted["operator_action"])
+            with self.assertRaisesRegex(ValueError, "bounds differ"):
+                observer.load_capture_failure(latch, {**capture, "to_ns": 201})
 
     def test_partial_tail_is_not_consumed_until_rotation_then_counted_as_truncated(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -9,8 +9,11 @@ the existing SCDS bridge JAR, and the already approved per-feed subscription fil
 The bridge is one consumer per SCDS queue. The three `openatca-collector@FEED` services each run
 one `oa-feed`/bridge pair for the existing `SFDPS`, `STDDS`, or `TBFM` subscription. Each collector
 writes the consumed OAF2 frames once, uncompressed, into its own size-capped journal directory.
-There is no second broker consumer for the observer or Nov 30 capture. The observer cursor and the
-capture cursor keep independent offsets over the same local segment journal. The capture manifest
+There is no second broker consumer for the observer or Nov 30 capture. Journal segments are
+created with unique names and never rewritten or removed by this package; only the active segment
+is appended. The observer cursor and the capture cursor keep independent offsets over the same
+local segment journal and advance across ordinary rotation. A missing cursor segment is counted
+and reported, never silently treated as a continuous history. The capture manifest
 references byte ranges of complete original frames; it does not rewrite timestamps, re-encode
 payloads, or widen the declared `[from,to)` receive-time interval. The pin names every referenced
 segment. No cleanup job is installed, and the recorder never deletes journal files; hitting its
@@ -51,19 +54,30 @@ diagnostics only; the observer does not decode source payloads, source event tim
 message-level late availability. Its frame availability is the availability of OAF frames in the
 local journal.
 
-Each collector has a 2 GiB default per-feed recording cap and 256 MiB file rotation; the disk
-preflight checks space for the total three-feed cap plus a 512 MiB reserve and refuses a feed
-already at its cap before it opens the bridge. Segment rotation does not delete old segments, so
-observer and capture cursors continue across ordinary file boundaries. If the process stops abruptly during
-an active file, the next segment and cursor report allow the partial tail to be counted as
-truncation; only closed segments request sync. Change these values in a systemd drop-in only after
-measuring available disk and expected frame rate. Journals are
-uncompressed and not automatically pruned. A 30-day schedule alone does not prove that the default
-2 GiB per-feed cap holds 30 days of each feed; use local rate evidence to size the cap, and treat a
-75 exit/latch as an incomplete capture rather than restarting past it. Systemd limits each collector to 1 GiB RAM and the
+Each collector has a 2 GiB default per-feed recording cap and 256 MiB file rotation. Before the
+bridge opens, `ExecStartPre` requires positive measured uncompressed journal growth rates in
+`~/.config/openatca-observer/storage-budget.env` for all three feeds. It applies an explicit 200%
+safety factor over 720 hours (30 days), refuses if the target feed's remaining cap cannot hold
+that budget, and requires free disk for the sum of all three 30-day budgets plus a 512 MiB reserve.
+The example file is copied as `storage-budget.env.example`; the operator must measure local rates,
+copy it to `~/.config/openatca-observer/storage-budget.env`, then set the three integer bytes/hour
+values. Zero or absent
+measurements fail closed before subscription consumption. Thus the default cap is accepted only
+when those measured inputs prove it fits. Journals are uncompressed and not automatically pruned.
+If the process stops abruptly during an active file, the next segment and cursor report allow the
+partial tail to be counted as truncation; only closed segments request sync. Treat a 75 exit/latch
+as an incomplete capture rather than restarting past it. Systemd limits each collector to 1 GiB RAM and the
 observer to 512 MiB. The sleep inhibitor blocks suspend while each service runs. The 30-day
 observer deadline persists across service restarts; a restarted service resumes its original
 window rather than starting another 30 days.
+
+If the capture cursor reaches its bounded span limit, it writes `state/capture-failed.json` and
+marks the manifest `FAILED_INCOMPLETE`. The observer keeps updating frame availability but disables
+capture retries, so systemd does not loop on the same overflow and the manifest cannot look complete.
+Preserve the failure record and partial manifest. To retry, first make a reviewed change that raises
+the bounded span capacity, save the old failure/manifest/cursors, then explicitly remove only
+`state/capture-failed.json` and restart `openatca-observer.service`. If the revised capacity is still
+insufficient, the failure is latched again. Never edit `status` to claim completion.
 
 The package unit pins the capture acquisition range to `[2026-11-30T05:00:00Z,
 2026-12-01T06:00:00Z)`. The manifest separately records P010 warm-up `[05:00,06:00)` on Nov 30
@@ -85,5 +99,6 @@ Copy this `tools/oa-observer` directory to the Debian user's home, then run:
 The script copies only package code and unit templates, creates private data directories, and runs
 `systemctl --user daemon-reload`. It does not enable or start units. After providing the existing
 binary, JAR, and external subscription files, review the preconfigured capture bounds and start
-using the commands printed by the installer. For unattended service survival, the Debian administrator
+using the commands printed by the installer. The collector unit requires the explicit measured
+rate file before it can start. For unattended service survival, the Debian administrator
 must enable user lingering for that account.

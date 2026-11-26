@@ -10,6 +10,7 @@ Environment=OA_SOURCE_CONFIG_DIR=%h/.config/openatca/sources
 Environment=OA_JOURNAL_ROOT=%h/.local/share/openatca-observer/journal
 Environment=OA_JOURNAL_MAX_BYTES=2147483648
 Environment=OA_ROTATE_BYTES=268435456
+EnvironmentFile=%h/.config/openatca-observer/storage-budget.env
 ExecStartPre=/usr/bin/python3 %h/.local/libexec/openatca-observer/check-disk.py %I
 ExecStart=/usr/bin/systemd-inhibit --what=sleep --mode=block "--why=OpenATCA bounded local feed capture %I" "%h/.local/libexec/openatca-observer/collect-one.sh" %I
 Restart=on-failure
