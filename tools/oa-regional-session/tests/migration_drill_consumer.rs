@@ -148,10 +148,7 @@ fn one_hundred_synthetic_m2_flip_rollbacks_reach_independent_consumer() {
         )
         .expect("M2 candidate selection");
         assert_eq!(oa_migration_switch::selected(&selector), Output::Candidate);
-        consumer.send(
-            1,
-            &normalized_position_row(H5_MEASUREMENT_START_NS, 1),
-        );
+        consumer.send(1, &normalized_position_row(H5_MEASUREMENT_START_NS, 1));
         max_flip_decision_to_ack = max_flip_decision_to_ack.max(flip_started.elapsed().as_nanos());
         acknowledged += 1;
         observe_delivery(
@@ -174,10 +171,7 @@ fn one_hundred_synthetic_m2_flip_rollbacks_reach_independent_consumer() {
         )
         .expect("M2 rollback");
         assert_eq!(oa_migration_switch::selected(&selector), Output::Legacy);
-        consumer.send(
-            2,
-            &normalized_position_row(H5_MEASUREMENT_START_NS + 1, 2),
-        );
+        consumer.send(2, &normalized_position_row(H5_MEASUREMENT_START_NS + 1, 2));
         max_rollback_decision_to_ack =
             max_rollback_decision_to_ack.max(rollback_started.elapsed().as_nanos());
         acknowledged += 1;

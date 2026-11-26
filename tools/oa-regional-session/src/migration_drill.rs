@@ -2201,8 +2201,8 @@ pub fn consumer_worker() -> Result<(), String> {
         if actual_hash != declared_hash {
             return Err("payload digest mismatch".into());
         }
-        let normalized_row = std::str::from_utf8(&payload)
-            .map_err(|_| "normalized input payload is not UTF-8")?;
+        let normalized_row =
+            std::str::from_utf8(&payload).map_err(|_| "normalized input payload is not UTF-8")?;
         let event = crate::input::parse_event_line(normalized_row)
             .map_err(|error| format!("normalized input row refused: {error:?}"))?;
         if !matches!(event.source, SourceKind::Surveillance | SourceKind::Flight) {
