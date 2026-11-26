@@ -7,8 +7,7 @@ use oa_flight::{
     op_new, Alt, Flight, FlightConfig, FlightTable, Outcome, Stamp, ALT_NIL, ALT_NONE, ALT_SIMPLE,
     C_COUNT, HO_NONE, MAX_VIEWS, OP_ADDRESS, OP_ASSIGN, OP_CANCEL, OP_COUNT, OP_HO_ACCEPT,
     OP_HO_FAIL, OP_HO_INITIATE, OP_HO_RETRACT, OP_HO_TAKE, OP_HO_UPDATE, OP_IDENTITY, OP_INTERIM,
-    OP_OWNER,
-    OP_SET_PLAN, R_COUNT, ST_ACTIVE, ST_PROPOSED,
+    OP_OWNER, OP_SET_PLAN, R_COUNT, ST_ACTIVE, ST_PROPOSED,
 };
 
 use crate::input::{EventKind, FlightOperation, HandoffOperation, NormalizedEvent, SourceKind};
