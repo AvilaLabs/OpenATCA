@@ -715,7 +715,7 @@ def cold_portability_drill(source_repo: Path, bundle: Path, clone_out: Path, car
     env["CARGO_HOME"] = str(cargo_home)
     env["CARGO_TARGET_DIR"] = str(target_dir)
     env["CARGO_NET_OFFLINE"] = "true"
-    env["CARGO_BUILD_JOBS"] = "1"
+    env["CARGO_BUILD_JOBS"] = "2"
     env["RUSTUP_TOOLCHAIN"] = RUST_TOOLCHAIN
     rustup_home = Path(env.get("RUSTUP_HOME", str(Path(env.get("HOME", "")) / ".rustup")))
     env["RUSTUP_HOME"] = str(rustup_home)
