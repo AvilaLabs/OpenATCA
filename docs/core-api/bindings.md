@@ -33,6 +33,9 @@ loads a native library.
 | `oa-geo` rhumb | `oa_geo_wgs84_rhumb_inverse/direct`, `oa_geo_wgs84_rhumb_point_at_fraction` | `Geodesy.rhumb_*` | Stateless; fraction is validated by core in `[0,1]`; no invented fallback |
 | `oa-geo` separation | `oa_geo_wgs84_geodesic_rhumb_separation` | `Geodesy.geodesic_rhumb_separation` | Sample count is core-bounded to `2..=100000`; `at_fraction` is a maximizing fraction, and any finite fraction in `[0,1]` is valid when the maximum has tied locations (including identically zero separation) |
 | `oa-geo::Polygon` | `oa_geo_polygon_new_wgs84`, `contains_wgs84`, `edge_count`, `free` | `Polygon` context manager | Constructor borrows coordinate arrays only for the call; opaque immutable handle owns prepared polygon; at most 100001 input vertices; free exactly once |
+| `oa-json` | `oa_json_parse` | `TextBindings.parse_json` | One-shot default parser limits; flat preorder node table and decoded string/exact lexical-number pool; capacity query then all-or-nothing fill; 256 MiB Python output ceiling |
+| `oa-xml` | `oa_xml_parse`, `oa_xml_decode_span` | `TextBindings.parse_xml`, `decode_xml_span` | One-shot default parser limits; spans reference immutable input; namespace URIs copied to a pool; DTD refused; exact parser offsets preserved |
+| `oa-csv` | `oa_csv_parse` | `TextBindings.parse_csv` | One-shot default reader limits; header is row zero; quoted fields decoded into a byte pool; physical starting line retained; input capped at 32 MiB by the adapter |
 
 The polygon handle is the only retained native allocation in this slice. Python's context
 manager releases it with `oa_geo_polygon_free`; callers must not use a handle after closing it.
@@ -58,7 +61,7 @@ approval conditions are met. No Stable designation is made here.
 
 ## Planned module expansion
 
-The §10 inventory also requires container, XML/JSON/CSV, CAT021/CAT048/CAT062, CIFP, NASR,
+The §10 inventory also requires container, CAT021/CAT048/CAT062, CIFP, NASR,
 FNS-AIXM/NOTAM, and bounded GRIB2 APIs with Python wrappers. Each parser API must disclose its
 accepted edition/profile and explicit byte, record, nesting, and work bounds before it is exposed.
 Those modules are staged separately; this first source slice does not imply those bindings exist.

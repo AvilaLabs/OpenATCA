@@ -512,13 +512,17 @@ impl Ws {
         ws.put(BUDGET, "");
         ws.put(
             "crates/openatca-core-ffi/Cargo.toml",
-            "[package]\nname = \"openatca-core-ffi\"\n\n[package.metadata.openatca]\nclass = \"shell\"\n\n[dependencies]\noa-geo = { path = \"../oa-geo\" }\noa-ieee = { path = \"../oa-ieee\" }\noa-math = { path = \"../oa-math\" }\noa-sha256 = { path = \"../oa-sha256\" }\n\n[lints.rust]\nunsafe_code = \"deny\"\n\n[lints.clippy]\nunwrap_used = \"deny\"\nexpect_used = \"deny\"\npanic = \"deny\"\nindexing_slicing = \"deny\"\n",
+            "[package]\nname = \"openatca-core-ffi\"\n\n[package.metadata.openatca]\nclass = \"shell\"\n\n[dependencies]\noa-geo = { path = \"../oa-geo\" }\noa-ieee = { path = \"../oa-ieee\" }\noa-math = { path = \"../oa-math\" }\noa-sha256 = { path = \"../oa-sha256\" }\noa-csv = { path = \"../oa-csv\" }\noa-json = { path = \"../oa-json\" }\noa-xml = { path = \"../oa-xml\" }\n\n[lints.rust]\nunsafe_code = \"deny\"\n\n[lints.clippy]\nunwrap_used = \"deny\"\nexpect_used = \"deny\"\npanic = \"deny\"\nindexing_slicing = \"deny\"\n",
         );
         ws.put(
             "crates/openatca-core-ffi/src/lib.rs",
-            "#![deny(unsafe_code)]\nmod ffi;\n",
+            "#![deny(unsafe_code)]\nmod ffi;\nmod text;\n",
         );
         ws.put("crates/openatca-core-ffi/src/ffi.rs", &ffi_fixture_source());
+        ws.put(
+            "crates/openatca-core-ffi/src/text.rs",
+            "#![forbid(unsafe_code)]\n",
+        );
         for (path, source) in extra_src {
             ws.put(&format!("crates/openatca-core-ffi/src/{path}"), source);
         }
@@ -646,6 +650,10 @@ fn ffi_fixture_source() -> String {
         "oa_geo_polygon_contains_wgs84",
         "oa_geo_polygon_edge_count",
         "oa_geo_polygon_free",
+        "oa_json_parse",
+        "oa_xml_parse",
+        "oa_xml_decode_span",
+        "oa_csv_parse",
     ];
     let mut source = String::from("#![allow(unsafe_code)]\n");
     for name in EXPORTS {
@@ -2101,7 +2109,7 @@ fn the_provisional_ffi_unsafe_exception_is_exact_and_auditable() {
         "[package]\nname = \"openatca-core-ffi\"\n\n[package.metadata.openatca]\nclass = \"shell\"\n\n[dependencies]\noa-geo = { path = \"../oa-geo\" }\noa-ieee = { path = \"../oa-ieee\" }\noa-math = { path = \"../oa-math\" }\noa-sha256 = { path = \"../oa-sha256\" }\noa-extra = { path = \"../oa-extra\" }\n\n[lints.rust]\nunsafe_code = \"deny\"\n\n[lints.clippy]\nunwrap_used = \"deny\"\nexpect_used = \"deny\"\npanic = \"deny\"\nindexing_slicing = \"deny\"\n",
     );
     assert!(
-        has(&ws.failures(), "depends only on the four named core crates"),
+        has(&ws.failures(), "exactly the reviewed direct dependencies"),
         "{:#?}",
         ws.failures()
     );

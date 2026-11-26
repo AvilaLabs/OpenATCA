@@ -791,8 +791,11 @@ dependencies = [
 name = "openatca-core-ffi"
 version = "0.0.1"
 dependencies = [
+ "oa-csv",
  "oa-geo",
  "oa-ieee",
+ "oa-json",
  "oa-math",
  "oa-sha256",
+ "oa-xml",
 ]

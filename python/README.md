@@ -1,7 +1,7 @@
 # OpenATCA Core FFI for Python
 
-This distribution contains the provisional `openatca` ctypes wrapper only. It covers the
-currently implemented scalar math, SHA-256 integrity digest, and selected WGS-84 geodesy
+This distribution contains the provisional `openatca` ctypes wrapper only. It covers selected
+scalar math, SHA-256 integrity digest, WGS-84 geodesy, and bounded XML, JSON, and CSV parsing
 operations from `openatca-core-ffi`. It does not provide the full 0.1 format decoder set or a
 Python binding for the ASTERIX, CIFP, NASR, AIXM, FIXM, or GRIB2 crates.
 
@@ -22,9 +22,11 @@ The binding tests and their synthetic CSV vectors remain in the source tree:
 
 - `crates/openatca-core-ffi/tests/test_ctypes_l0.py`
 - `crates/openatca-core-ffi/tests/test_ctypes_vectors.py`
+- `crates/openatca-core-ffi/tests/test_ctypes_text.py` with `tests/fixtures/text-v1.tsv`
 - `crates/openatca-core-ffi/tests/fixtures/l0.csv`
 - `crates/openatca-core-ffi/tests/fixtures/wgs84.csv`
 - `crates/openatca-core-ffi/tests/fixtures/polygon.csv`
+- `crates/openatca-core-ffi/tests/fixtures/text-v1.tsv`
 
 Those fixtures are not copied into this wheel. Their licensing and provenance must be reviewed
 before they are distributed separately.

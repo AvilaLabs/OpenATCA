@@ -24,7 +24,7 @@ an Experimental feature included in a release.
 | L1 FIXM/SFDPS | FIXM/SFDPS messages | Narrow to FIXM 3.0 core plus FAA NAS 3.0 `MessageCollection` profile. | Preview decode. No encoder or ACK/REJ publisher; the current crate depends on internal `oa-sealed`, so a public package boundary is not ready. |
 | L1 GRIB2 winds | GRIB2 winds | Name the current decoder subset: grid 3.0/3.30, product 4.0/4.8 and representations 5.0/5.2/5.3/5.40 with documented bitmap reuse. | Preview subset. No general encoder; general GRIB2 and representation 5.41 are unsupported. |
 | L0 WGS-84 geodesy | distance, azimuth, intersections, point-in-polygon | Include implemented inverse/direct/rhumb operations and bounded polygon containment only. | Preview by operation. Geodesic line/segment intersection API is absent. |
-| Rust/Python | “from Rust and Python” | State binding availability per module and operation. Current reviewed surfaces are Rust; matching Python parser bindings are not established. | Bindings are future work and have their own API and §8 gates. |
+| Rust/Python | “from Rust and Python” | Preview C/`ctypes` source now covers selected L0 scalar math, integrity, geodesy, XML, JSON, and CSV operations; L1 parser bindings are not present. | Binding API review, independent ABI review, and §8 evidence remain open; no Stable claim. |
 | Test vectors | vectors for each listed item | Provide vectors only for implemented, scoped profiles; use synthetic or redistributable material with provenance. | A public vector corpus is not established by these pages. |
 
 ## L0 source surfaces

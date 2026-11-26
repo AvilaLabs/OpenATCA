@@ -6,7 +6,7 @@ backend-path = ["."]
 [project]
 name = "openatca"
 version = "0.1.0"
-description = "Provisional ctypes binding for selected L0 math, SHA-256, and WGS-84 geodesy operations"
+description = "Provisional ctypes binding for selected L0 math, integrity, geodesy, XML, JSON, and CSV operations"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"

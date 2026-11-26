@@ -36,12 +36,14 @@ the rule unless an exception is recorded at the site as a comment naming the rul
   comment stating its invariant, and is reviewed line by line. No other source file in that crate
   may use `unsafe`, `extern`, link/name/export attributes, `include!` or `#[path]`; its source
   inventory is exactly `src/lib.rs` and `src/linux.rs`.
-  The binding package is also classified `shell`, depends only on the exact core crates `oa-geo`,
-  `oa-ieee`, `oa-math` and `oa-sha256`, and sets
+  The binding package is also classified `shell`, depends only on the exact reviewed workspace
+  crates `oa-geo`, `oa-ieee`, `oa-math`, `oa-sha256`, `oa-csv`, `oa-json` and `oa-xml`, and sets
   `[lints.rust] unsafe_code = "deny"` plus explicit denials for the four workspace runtime Clippy
-  lints. Its crate root uses `#![deny(unsafe_code)]`; exactly `src/ffi.rs` has the module-local
-  `#![allow(unsafe_code)]`, and its Rust `src/` inventory is exactly `src/lib.rs` and `src/ffi.rs`.
-  Raw pointers, `extern "C"`, symbol exports and every unsafe operation stay in that module. Each
+  lints. Its crate root uses `#![deny(unsafe_code)]`; `src/text.rs` is the safe bounded-parser
+  adapter and uses `#![forbid(unsafe_code)]`; exactly `src/ffi.rs` has the module-local
+  `#![allow(unsafe_code)]`. The Rust `src/` inventory is exactly `src/lib.rs`, `src/ffi.rs` and
+  `src/text.rs`. Raw pointers, `extern "C"`, symbol exports and every unsafe operation stay in
+  `ffi.rs`; `text.rs` contains no ABI declarations, pointer adaptation, or unsafe code. Each
   unsafe block is minimal, has a local `// SAFETY:` justification, and receives independent
   line-by-line review. `oa-trace` pins the reviewed unsafe-block counts by owning function in
   addition to the named export inventory. Pointer validity, alignment, writable extent and

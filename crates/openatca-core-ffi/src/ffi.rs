@@ -1,6 +1,7 @@
 //! Raw-pointer adaptation and exported C symbols. Product operations call existing safe `oa-*` APIs.
 #![allow(unsafe_code)] // RULESET A0: the sole unsafe module of openatca-core-ffi.
 
+use crate::text;
 use oa_geo::{wgs84, GeoError, LatLon, Polygon, RhumbInverse, Separation};
 use oa_sha256::{sha256, to_hex_into, MAX_MESSAGE_BYTES};
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -19,6 +20,7 @@ pub const OA_STATUS_BAD_PARAMETER: u32 = 8;
 pub const OA_STATUS_LENGTH_TOO_LARGE: u32 = 9;
 pub const OA_STATUS_BAD_OPERATION: u32 = 10;
 pub const OA_STATUS_ALLOCATION_FAILED: u32 = 11;
+pub const OA_STATUS_PARSE_ERROR: u32 = 12;
 
 pub const OA_LOCATION_NONE: u32 = 0;
 pub const OA_LOCATION_ARGUMENT: u32 = 1;
@@ -999,6 +1001,455 @@ pub unsafe extern "C" fn oa_geo_polygon_free(polygon: *mut OaPolygon) {
     }
 }
 
+fn map_text_failure(failure: text::AdapterFailure) -> Failure {
+    match failure.kind {
+        text::FailureKind::Parser => Failure::general(OA_STATUS_PARSE_ERROR),
+        text::FailureKind::ResourceLimit => Failure::general(OA_STATUS_LENGTH_TOO_LARGE),
+        text::FailureKind::Allocation => Failure::general(OA_STATUS_ALLOCATION_FAILED),
+        text::FailureKind::Internal => Failure::general(OA_STATUS_INTERNAL_PANIC),
+        text::FailureKind::InvalidArgument => Failure::general(OA_STATUS_INVALID_ARGUMENT),
+    }
+}
+
+fn text_count(index: usize, counts: &[u64; 5]) -> u64 {
+    counts.get(index).copied().unwrap_or(0)
+}
+
+/// Parses JSON into caller-owned preorder nodes and a UTF-8/lexical-value pool. All provided
+/// input/output regions must be valid, aligned as required, and pairwise non-overlapping.
+/// Capacities are measured in elements for arrays and bytes for the value pool. A zero-capacity
+/// query returns required counts with `BUFFER_TOO_SMALL` and writes no arrays.
+///
+/// # Safety
+/// Every non-null pointer must refer to valid storage for its claimed extent; the caller must keep
+/// input immutable for this call and must not overlap any input/output or output/output regions.
+#[no_mangle]
+pub unsafe extern "C" fn oa_json_parse(
+    input: *const u8,
+    input_length: u64,
+    nodes: *mut text::OaJsonNode,
+    node_capacity: u64,
+    value_pool: *mut u8,
+    value_capacity: u64,
+    counts: *mut text::OaJsonCounts,
+    parse_error: *mut text::OaTextError,
+    error: *mut OaErrorInfo,
+) -> u32 {
+    if error.is_null() {
+        return OA_STATUS_INVALID_ARGUMENT;
+    }
+    dispatch(error, || {
+        if counts.is_null()
+            || parse_error.is_null()
+            || (input.is_null() && input_length != 0)
+            || (nodes.is_null() && node_capacity != 0)
+            || (value_pool.is_null() && value_capacity != 0)
+        {
+            return Err(Failure::general(OA_STATUS_INVALID_ARGUMENT));
+        }
+        if input_length > isize::MAX as u64 {
+            return Err(Failure::general(OA_STATUS_LENGTH_TOO_LARGE));
+        }
+        let length = usize::try_from(input_length)
+            .map_err(|_| Failure::general(OA_STATUS_LENGTH_TOO_LARGE))?;
+        // SAFETY: the C contract requires a readable `input_length` region; null is accepted only
+        // for an empty slice, which is constructed without dereferencing the pointer.
+        let bytes = unsafe {
+            if length == 0 {
+                &[]
+            } else {
+                core::slice::from_raw_parts(input, length)
+            }
+        };
+        let required = match text::json_counts(bytes) {
+            Ok(required) => required,
+            Err(failure) => {
+                let reported = text::OaJsonCounts {
+                    node_count: text_count(0, &failure.counts),
+                    value_bytes: text_count(1, &failure.counts),
+                };
+                // SAFETY: required output pointers were checked above; caller guarantees writable,
+                // aligned, non-overlapping output records for the duration of this call.
+                unsafe {
+                    counts.write(reported);
+                    parse_error.write(failure.parser);
+                }
+                return Err(map_text_failure(failure));
+            }
+        };
+        // SAFETY: required output pointers were checked above; caller guarantees writable,
+        // aligned, non-overlapping output records for the duration of this call.
+        unsafe {
+            counts.write(required);
+            parse_error.write(text::OaTextError::default());
+        }
+        if node_capacity < required.node_count || value_capacity < required.value_bytes {
+            return Err(Failure::general(OA_STATUS_BUFFER_TOO_SMALL));
+        }
+        if required.node_count != 0 && nodes.is_null()
+            || required.value_bytes != 0 && value_pool.is_null()
+        {
+            return Err(Failure::general(OA_STATUS_INVALID_ARGUMENT));
+        }
+        let flat = match text::parse_json(bytes) {
+            Ok(flat) => flat,
+            Err(failure) => {
+                // SAFETY: output records were validated above; C memory regions must not overlap.
+                unsafe {
+                    parse_error.write(failure.parser);
+                }
+                return Err(map_text_failure(failure));
+            }
+        };
+        // SAFETY: prior capacity and null checks establish valid destination extents by contract;
+        // source vectors remain live, and the ABI requires all regions to be non-overlapping.
+        unsafe {
+            if !flat.nodes.is_empty() {
+                core::ptr::copy_nonoverlapping(flat.nodes.as_ptr(), nodes, flat.nodes.len());
+            }
+            if !flat.pool.is_empty() {
+                core::ptr::copy_nonoverlapping(flat.pool.as_ptr(), value_pool, flat.pool.len());
+            }
+        }
+        Ok(())
+    })
+    .0
+}
+
+/// Parses one bounded XML document into flat element, attribute, text and namespace arrays.
+/// Names, prefixes and raw values are spans into the immutable input; namespace URIs are copied
+/// into their pool. All output regions must be pairwise non-overlapping. A zero-capacity query
+/// returns required counts with `BUFFER_TOO_SMALL` and writes no arrays.
+///
+/// # Safety
+/// Every non-null pointer must refer to valid storage for its claimed extent; input must remain
+/// immutable for this call and no input/output or output/output regions may overlap.
+#[no_mangle]
+pub unsafe extern "C" fn oa_xml_parse(
+    input: *const u8,
+    input_length: u64,
+    elements: *mut text::OaXmlElement,
+    element_capacity: u64,
+    attributes: *mut text::OaXmlAttribute,
+    attribute_capacity: u64,
+    texts: *mut text::OaXmlText,
+    text_capacity: u64,
+    namespaces: *mut text::OaXmlNamespace,
+    namespace_capacity: u64,
+    namespace_uri_pool: *mut u8,
+    namespace_uri_capacity: u64,
+    counts: *mut text::OaXmlCounts,
+    parse_error: *mut text::OaTextError,
+    error: *mut OaErrorInfo,
+) -> u32 {
+    if error.is_null() {
+        return OA_STATUS_INVALID_ARGUMENT;
+    }
+    dispatch(error, || {
+        if counts.is_null()
+            || parse_error.is_null()
+            || (input.is_null() && input_length != 0)
+            || (elements.is_null() && element_capacity != 0)
+            || (attributes.is_null() && attribute_capacity != 0)
+            || (texts.is_null() && text_capacity != 0)
+            || (namespaces.is_null() && namespace_capacity != 0)
+            || (namespace_uri_pool.is_null() && namespace_uri_capacity != 0)
+        {
+            return Err(Failure::general(OA_STATUS_INVALID_ARGUMENT));
+        }
+        if input_length > isize::MAX as u64 {
+            return Err(Failure::general(OA_STATUS_LENGTH_TOO_LARGE));
+        }
+        let length = usize::try_from(input_length)
+            .map_err(|_| Failure::general(OA_STATUS_LENGTH_TOO_LARGE))?;
+        // SAFETY: the C contract requires a readable `input_length` region; null is accepted only
+        // for an empty slice, which is constructed without dereferencing the pointer.
+        let bytes = unsafe {
+            if length == 0 {
+                &[]
+            } else {
+                core::slice::from_raw_parts(input, length)
+            }
+        };
+        let required = match text::xml_counts(bytes) {
+            Ok(required) => required,
+            Err(failure) => {
+                let reported = text::OaXmlCounts {
+                    elements: text_count(0, &failure.counts),
+                    attributes: text_count(1, &failure.counts),
+                    text_nodes: text_count(2, &failure.counts),
+                    namespaces: text_count(3, &failure.counts),
+                    namespace_uri_bytes: text_count(4, &failure.counts),
+                };
+                // SAFETY: required output pointers were checked above; caller guarantees writable,
+                // aligned, non-overlapping output records for the duration of this call.
+                unsafe {
+                    counts.write(reported);
+                    parse_error.write(failure.parser);
+                }
+                return Err(map_text_failure(failure));
+            }
+        };
+        // SAFETY: required output pointers were checked above; caller guarantees writable,
+        // aligned, non-overlapping output records for the duration of this call.
+        unsafe {
+            counts.write(required);
+            parse_error.write(text::OaTextError::default());
+        }
+        if element_capacity < required.elements
+            || attribute_capacity < required.attributes
+            || text_capacity < required.text_nodes
+            || namespace_capacity < required.namespaces
+            || namespace_uri_capacity < required.namespace_uri_bytes
+        {
+            return Err(Failure::general(OA_STATUS_BUFFER_TOO_SMALL));
+        }
+        if (required.elements != 0 && elements.is_null())
+            || (required.attributes != 0 && attributes.is_null())
+            || (required.text_nodes != 0 && texts.is_null())
+            || (required.namespaces != 0 && namespaces.is_null())
+            || (required.namespace_uri_bytes != 0 && namespace_uri_pool.is_null())
+        {
+            return Err(Failure::general(OA_STATUS_INVALID_ARGUMENT));
+        }
+        let flat = match text::parse_xml(bytes) {
+            Ok(flat) => flat,
+            Err(failure) => {
+                // SAFETY: output records were validated above; C memory regions must not overlap.
+                unsafe {
+                    parse_error.write(failure.parser);
+                }
+                return Err(map_text_failure(failure));
+            }
+        };
+        // SAFETY: capacities and null conditions were checked; vector allocations remain live;
+        // caller guarantees valid aligned extents and pairwise non-overlap for all destinations.
+        unsafe {
+            if !flat.elements.is_empty() {
+                core::ptr::copy_nonoverlapping(
+                    flat.elements.as_ptr(),
+                    elements,
+                    flat.elements.len(),
+                );
+            }
+            if !flat.attributes.is_empty() {
+                core::ptr::copy_nonoverlapping(
+                    flat.attributes.as_ptr(),
+                    attributes,
+                    flat.attributes.len(),
+                );
+            }
+            if !flat.texts.is_empty() {
+                core::ptr::copy_nonoverlapping(flat.texts.as_ptr(), texts, flat.texts.len());
+            }
+            if !flat.namespaces.is_empty() {
+                core::ptr::copy_nonoverlapping(
+                    flat.namespaces.as_ptr(),
+                    namespaces,
+                    flat.namespaces.len(),
+                );
+            }
+            if !flat.namespace_uris.is_empty() {
+                core::ptr::copy_nonoverlapping(
+                    flat.namespace_uris.as_ptr(),
+                    namespace_uri_pool,
+                    flat.namespace_uris.len(),
+                );
+            }
+        }
+        Ok(())
+    })
+    .0
+}
+
+/// Decodes one XML text or attribute span into a caller-owned output buffer.
+///
+/// # Safety
+/// The input/output regions and all scalar output pointers must be valid and non-overlapping for
+/// this call. `output` may be null only when `output_capacity` is zero.
+#[no_mangle]
+pub unsafe extern "C" fn oa_xml_decode_span(
+    input: *const u8,
+    input_length: u64,
+    start: u32,
+    length: u32,
+    span_kind: u32,
+    output: *mut u8,
+    output_capacity: u64,
+    written: *mut u64,
+    parse_error: *mut text::OaTextError,
+    error: *mut OaErrorInfo,
+) -> u32 {
+    if error.is_null() {
+        return OA_STATUS_INVALID_ARGUMENT;
+    }
+    dispatch(error, || {
+        if written.is_null()
+            || parse_error.is_null()
+            || (input.is_null() && input_length != 0)
+            || (output.is_null() && output_capacity != 0)
+        {
+            return Err(Failure::general(OA_STATUS_INVALID_ARGUMENT));
+        }
+        // SAFETY: scalar outputs were checked non-null; caller guarantees writable, aligned,
+        // non-overlapping records; initialize even if conversion refuses the request.
+        unsafe {
+            written.write(0);
+            parse_error.write(text::OaTextError::default());
+        }
+        if input_length > isize::MAX as u64 || output_capacity > isize::MAX as u64 {
+            return Err(Failure::general(OA_STATUS_LENGTH_TOO_LARGE));
+        }
+        let input_len = usize::try_from(input_length)
+            .map_err(|_| Failure::general(OA_STATUS_LENGTH_TOO_LARGE))?;
+        let output_len = usize::try_from(output_capacity)
+            .map_err(|_| Failure::general(OA_STATUS_LENGTH_TOO_LARGE))?;
+        // SAFETY: both regions are valid for their caller-supplied extents, null only accompanies
+        // zero length, and the ABI requires input, output, written, parse_error and error not overlap.
+        let (input_bytes, output_bytes) = unsafe {
+            let input_bytes = if input_len == 0 {
+                &[]
+            } else {
+                core::slice::from_raw_parts(input, input_len)
+            };
+            let output_bytes = if output_len == 0 {
+                &mut []
+            } else {
+                core::slice::from_raw_parts_mut(output, output_len)
+            };
+            (input_bytes, output_bytes)
+        };
+        match text::decode_xml_span(input_bytes, start, length, span_kind, output_bytes) {
+            Ok(size) => {
+                // SAFETY: `written` was checked and does not overlap output per the ABI contract.
+                unsafe {
+                    written.write(size as u64);
+                }
+                Ok(())
+            }
+            Err(failure) => {
+                // SAFETY: `parse_error` was checked and does not overlap any other output.
+                unsafe {
+                    parse_error.write(failure.parser);
+                }
+                Err(map_text_failure(failure))
+            }
+        }
+    })
+    .0
+}
+
+/// Parses bounded CSV bytes into row/field tables and one UTF-8 byte pool. Row zero is the
+/// required header. The caller owns every output; all regions must be pairwise non-overlapping.
+/// A zero-capacity query returns required counts with `BUFFER_TOO_SMALL` and writes no arrays.
+///
+/// # Safety
+/// Every non-null pointer must refer to valid storage for its claimed extent; input must remain
+/// immutable for this call and no input/output or output/output regions may overlap.
+#[no_mangle]
+pub unsafe extern "C" fn oa_csv_parse(
+    input: *const u8,
+    input_length: u64,
+    rows: *mut text::OaCsvRow,
+    row_capacity: u64,
+    fields: *mut text::OaCsvField,
+    field_capacity: u64,
+    value_pool: *mut u8,
+    value_capacity: u64,
+    counts: *mut text::OaCsvCounts,
+    parse_error: *mut text::OaTextError,
+    error: *mut OaErrorInfo,
+) -> u32 {
+    if error.is_null() {
+        return OA_STATUS_INVALID_ARGUMENT;
+    }
+    dispatch(error, || {
+        if counts.is_null()
+            || parse_error.is_null()
+            || (input.is_null() && input_length != 0)
+            || (rows.is_null() && row_capacity != 0)
+            || (fields.is_null() && field_capacity != 0)
+            || (value_pool.is_null() && value_capacity != 0)
+        {
+            return Err(Failure::general(OA_STATUS_INVALID_ARGUMENT));
+        }
+        if input_length > isize::MAX as u64 {
+            return Err(Failure::general(OA_STATUS_LENGTH_TOO_LARGE));
+        }
+        let length = usize::try_from(input_length)
+            .map_err(|_| Failure::general(OA_STATUS_LENGTH_TOO_LARGE))?;
+        // SAFETY: the C contract requires a readable `input_length` region; null is accepted only
+        // for an empty slice, which is constructed without dereferencing the pointer.
+        let bytes = unsafe {
+            if length == 0 {
+                &[]
+            } else {
+                core::slice::from_raw_parts(input, length)
+            }
+        };
+        let required = match text::csv_counts_for_input(bytes) {
+            Ok(required) => required,
+            Err(failure) => {
+                let reported = text::OaCsvCounts {
+                    rows: text_count(0, &failure.counts),
+                    fields: text_count(1, &failure.counts),
+                    value_bytes: text_count(2, &failure.counts),
+                };
+                // SAFETY: required output pointers were checked above; caller guarantees writable,
+                // aligned, non-overlapping output records for the duration of this call.
+                unsafe {
+                    counts.write(reported);
+                    parse_error.write(failure.parser);
+                }
+                return Err(map_text_failure(failure));
+            }
+        };
+        // SAFETY: required output pointers were checked above; caller guarantees writable,
+        // aligned, non-overlapping output records for the duration of this call.
+        unsafe {
+            counts.write(required);
+            parse_error.write(text::OaTextError::default());
+        }
+        if row_capacity < required.rows
+            || field_capacity < required.fields
+            || value_capacity < required.value_bytes
+        {
+            return Err(Failure::general(OA_STATUS_BUFFER_TOO_SMALL));
+        }
+        if (required.rows != 0 && rows.is_null())
+            || (required.fields != 0 && fields.is_null())
+            || (required.value_bytes != 0 && value_pool.is_null())
+        {
+            return Err(Failure::general(OA_STATUS_INVALID_ARGUMENT));
+        }
+        let flat = match text::parse_csv(bytes) {
+            Ok(flat) => flat,
+            Err(failure) => {
+                // SAFETY: output records were validated above; C memory regions must not overlap.
+                unsafe {
+                    parse_error.write(failure.parser);
+                }
+                return Err(map_text_failure(failure));
+            }
+        };
+        // SAFETY: capacities and null conditions were checked; vector allocations remain live;
+        // caller guarantees valid aligned extents and pairwise non-overlap for all destinations.
+        unsafe {
+            if !flat.rows.is_empty() {
+                core::ptr::copy_nonoverlapping(flat.rows.as_ptr(), rows, flat.rows.len());
+            }
+            if !flat.fields.is_empty() {
+                core::ptr::copy_nonoverlapping(flat.fields.as_ptr(), fields, flat.fields.len());
+            }
+            if !flat.pool.is_empty() {
+                core::ptr::copy_nonoverlapping(flat.pool.as_ptr(), value_pool, flat.pool.len());
+            }
+        }
+        Ok(())
+    })
+    .0
+}
+
 fn coordinate_argument(error: &GeoError, base: u64) -> u64 {
     match error {
         GeoError::NonFinite("longitude") | GeoError::LongitudeOutOfRange(_) => base + 1,
@@ -1020,6 +1471,7 @@ fn message(code: u32) -> &'static [u8] {
         OA_STATUS_LENGTH_TOO_LARGE => b"input length exceeds the supported limit\0",
         OA_STATUS_BAD_OPERATION => b"operation code is not supported\0",
         OA_STATUS_ALLOCATION_FAILED => b"bounded allocation could not be reserved\0",
+        OA_STATUS_PARSE_ERROR => b"bounded text parser refused input\0",
         _ => b"unknown status\0",
     }
 }

@@ -668,9 +668,9 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
   value; a field named `capacity` and `with_capacity` do not, and `try_reserve`-style probes are left alone. The
   allocation probe of the display tests is in a shell module.
 - **OA-TRC-262** The only C ABI unsafe exception is the exact `crates/openatca-core-ffi` package classified `shell`,
-  with local `unsafe_code = "deny"`, explicit runtime Clippy denials, exact core dependencies `oa-geo`,
-  `oa-ieee`, `oa-math`, and `oa-sha256`, an exact named provisional export inventory enforced by `oa-trace`, and
-  exactly `src/lib.rs` plus `src/ffi.rs` in its Rust source inventory. The root denies unsafe; only `ffi.rs` has one
+  with local `unsafe_code = "deny"`, explicit runtime Clippy denials, exact direct dependencies `oa-geo`,
+  `oa-ieee`, `oa-math`, `oa-sha256`, `oa-csv`, `oa-json`, and `oa-xml`, an exact named provisional export inventory enforced by `oa-trace`, and
+  exactly `src/lib.rs`, unsafe boundary `src/ffi.rs`, and safe adapter `src/text.rs` in its Rust source inventory. The root denies unsafe; `text.rs` forbids unsafe; only `ffi.rs` has one
   module-level unsafe allowance, and each unsafe block has an immediately preceding `// SAFETY:` comment. The
   checker also pins the reviewed unsafe-block counts by owning function. A
   different package name/path/class, extra source file, dependency, allowance, or unexplained unsafe block fails.
@@ -7534,17 +7534,19 @@ FAA value.
 ## Provisional OpenATCA Core bindings
 
 - **OA-FFI-001** The experimental C ABI exports the version query, WGS-84 geodesic/rhumb/separation and
-  polygon operations, source-defined scalar math helpers, one-shot SHA-256, and bounded status-message copy over
-  existing safe `oa-*` APIs. Message queries and short buffers report the NUL-inclusive required size and never
-  partially overwrite the destination. Fixed-width status/error shapes, argument
+  polygon operations, source-defined scalar math helpers, one-shot SHA-256, bounded status-message copy,
+  and bounded one-shot XML, JSON, and CSV operations over existing `oa-*` APIs. Text parser errors retain
+  their typed kind and source position; count queries and short capacities do not write output arrays. Message
+  queries report the NUL-inclusive required size and never partially overwrite the destination. Fixed-width status/error shapes, argument
   locations (including the raw `location` field when `location_kind` is none), and all-or-nothing scalar outputs match the hand-written header; pointer validity, alignment,
   extent and non-overlap are documented caller preconditions, never arbitrary-address validation claims.
 - **OA-FFI-002** Rust, C and pure-Python `ctypes` source tests consume the same committed synthetic
-  geodesic, rhumb, polygon, scalar-math, and SHA-256 vectors. Importing Python loads no library; native loading
+  geodesic, rhumb, polygon, scalar-math, SHA-256, XML, JSON, and CSV vectors. Importing Python loads no library; native loading
   requires an explicit absolute path. The ABI remains Preview and unvalidated until independent review and
   cross-platform gates pass.
 - **OA-FFI-003** The C and Python L0 source runners cover every exported L0 operation family against the
-  shared committed vectors, including polygon handle lifetime operations and bounded one-shot hashing. Source
+  shared committed vectors, including polygon handle lifetime operations, bounded one-shot hashing, and the
+  text parser capacity/error contract. Source
   runner presence does not establish that a native build or run succeeded; the coordinator records those gates.
 
 ## Reproducible ZAU comparison package (p002 `--export-eram`, `--eram-export`, tools/reproduce_zau.sh)

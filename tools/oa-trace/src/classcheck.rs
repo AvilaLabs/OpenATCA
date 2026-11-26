@@ -42,12 +42,19 @@ const FFI_EXPORTS: &[&str] = &[
     "oa_geo_polygon_contains_wgs84",
     "oa_geo_polygon_edge_count",
     "oa_geo_polygon_free",
+    "oa_json_parse",
+    "oa_xml_parse",
+    "oa_xml_decode_span",
+    "oa_csv_parse",
 ];
 const FFI_DEPENDENCIES: &[(&str, &str)] = &[
     ("oa-geo", "../oa-geo"),
     ("oa-ieee", "../oa-ieee"),
     ("oa-math", "../oa-math"),
     ("oa-sha256", "../oa-sha256"),
+    ("oa-csv", "../oa-csv"),
+    ("oa-json", "../oa-json"),
+    ("oa-xml", "../oa-xml"),
 ];
 
 /// Reviewed unsafe blocks in the provisional FFI module, grouped by their owning function.
@@ -81,6 +88,10 @@ pub const FFI_UNSAFE_BLOCKS: &[(&str, usize)] = &[
     ("oa_geo_polygon_edge_count", 2),
     ("oa_geo_polygon_free", 1),
     ("oa_core_error_message", 2),
+    ("oa_json_parse", 5),
+    ("oa_xml_parse", 5),
+    ("oa_xml_decode_span", 4),
+    ("oa_csv_parse", 5),
     ("ffi_l0_matches_the_shared_synthetic_vectors", 3),
     ("ffi_polygon_matches_the_shared_synthetic_vectors", 4),
     ("ffi_matches_the_shared_synthetic_geodesy_vectors", 1),
@@ -2647,7 +2658,7 @@ fn check_ffi_a0(root: &Path, members: &[Member], fails: &mut Vec<String>) {
         });
     if !dependencies_match {
         fails.push(format!(
-            "{FFI_PACKAGE_DIR}: A0/F1: the binding shell depends only on the four named core crates"
+            "{FFI_PACKAGE_DIR}: A0/F1: the binding shell has exactly the reviewed direct dependencies"
         ));
     }
 
@@ -2707,15 +2718,20 @@ fn check_ffi_a0(root: &Path, members: &[Member], fails: &mut Vec<String>) {
         names.push(entry.file_name().to_string_lossy().into_owned());
     }
     names.sort();
-    if names.len() != 2
+    if names.len() != 3
         || names.first().map(String::as_str) != Some("ffi.rs")
         || names.get(1).map(String::as_str) != Some("lib.rs")
+        || names.get(2).map(String::as_str) != Some("text.rs")
     {
         fails.push(format!(
-            "{FFI_PACKAGE_DIR}/src: A0: Rust source inventory is exactly `lib.rs` and `ffi.rs`"
+            "{FFI_PACKAGE_DIR}/src: A0: Rust source inventory is exactly `lib.rs`, `ffi.rs`, and safe adapter `text.rs`"
         ));
     }
-    for (file, expected_level) in [("lib.rs", "deny"), ("ffi.rs", "allow")] {
+    for (file, expected_level) in [
+        ("lib.rs", "deny"),
+        ("ffi.rs", "allow"),
+        ("text.rs", "forbid"),
+    ] {
         let path = source_dir.join(file);
         let source = match fs::read_to_string(&path) {
             Ok(source) => source,
@@ -2735,7 +2751,7 @@ fn check_ffi_a0(root: &Path, members: &[Member], fails: &mut Vec<String>) {
         }) || tokenized.iter().any(|token| token.s == "path");
         if source_injection {
             fails.push(format!(
-                "{}: A0: `include!`, `#[path]`, and source-injecting macros are refused in the two allowed source files",
+                "{}: A0: `include!`, `#[path]`, and source-injecting macros are refused in the fixed binding source inventory",
                 rel(root, &path)
             ));
         }
@@ -2763,13 +2779,21 @@ fn check_ffi_a0(root: &Path, members: &[Member], fails: &mut Vec<String>) {
                     rel(root, &path)
                 ));
             }
+            let has_text_module = tokenized
+                .windows(3)
+                .any(|window| token_triple_is(window, "mod", "text", &[";"]));
+            if !has_text_module {
+                fails.push(format!(
+                    "{FFI_PACKAGE_DIR}: A0: crate root declares the audited safe `text` adapter module"
+                ));
+            }
             if tokenized.iter().any(|token| token.s == "unsafe") {
                 fails.push(format!(
                     "{}: A0: unsafe operations and declarations stay out of the crate root",
                     rel(root, &path)
                 ));
             }
-        } else {
+        } else if file == "ffi.rs" {
             let raw_lines: Vec<&str> = source.lines().collect();
             let expected_exports: BTreeSet<String> =
                 FFI_EXPORTS.iter().map(|name| (*name).to_string()).collect();
@@ -2898,6 +2922,22 @@ fn check_ffi_a0(root: &Path, members: &[Member], fails: &mut Vec<String>) {
                     rel(root, &path)
                 ));
             }
+        } else if tokenized.iter().any(|token| {
+            matches!(
+                token.s.as_str(),
+                "unsafe"
+                    | "extern"
+                    | "GlobalAlloc"
+                    | "no_mangle"
+                    | "export_name"
+                    | "link_name"
+                    | "link_section"
+            )
+        }) {
+            fails.push(format!(
+                "{}: A0: safe text adapter contains no unsafe, ABI, allocator, or linker tokens",
+                rel(root, &path)
+            ));
         }
     }
 }

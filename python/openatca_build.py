@@ -106,7 +106,7 @@ def _metadata(readme: bytes) -> bytes:
         "Metadata-Version: 2.4",
         f"Name: {NAME}",
         f"Version: {VERSION}",
-        "Summary: Provisional pure-Python ctypes wrapper for selected OpenATCA L0 C ABI operations",
+        "Summary: Provisional ctypes wrapper for selected OpenATCA L0 C ABI operations",
         "Requires-Python: >=3.10",
         "License-Expression: Apache-2.0",
         "License-File: LICENSE",

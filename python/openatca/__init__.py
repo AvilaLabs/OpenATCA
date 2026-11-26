@@ -17,6 +17,7 @@ from typing import Final, Iterable, Sequence
 ABI_VERSION_PROVISIONAL: Final[int] = 1
 _MAX_MESSAGE_BYTES: Final[int] = 4096
 _MAX_POLYGON_VERTICES: Final[int] = 100_001
+_MAX_TEXT_OUTPUT_BYTES: Final[int] = 256 * 1024 * 1024
 
 
 class _ErrorInfo(ctypes.Structure):
@@ -40,6 +41,7 @@ _STATUS_NAMES: Final[dict[int, str]] = {
     9: "LENGTH_TOO_LARGE",
     10: "BAD_OPERATION",
     11: "ALLOCATION_FAILED",
+    12: "PARSE_ERROR",
 }
 
 
@@ -47,12 +49,19 @@ class OpenAtcaError(Exception):
     """A nonzero status returned by the provisional native ABI."""
 
     def __init__(self, code: int, location_kind: int = 0, location: int = 0,
-                 message: str | None = None) -> None:
+                 message: str | None = None, *, parser_module: int | None = None,
+                 parser_kind: int | None = None, parser_position: int | None = None,
+                 parser_detail_a: int = 0, parser_detail_b: int = 0) -> None:
         self.code = int(code)
         self.status = _STATUS_NAMES.get(self.code, "UNKNOWN_STATUS")
         self.location_kind = int(location_kind)
         self.location = int(location)
         self.native_message = message
+        self.parser_module = parser_module
+        self.parser_kind = parser_kind
+        self.parser_position = parser_position
+        self.parser_detail_a = parser_detail_a
+        self.parser_detail_b = parser_detail_b
         detail = f"OpenATCA status {self.status} ({self.code})"
         if self.location_kind == 1:
             detail += f" at argument {self.location}"
@@ -60,6 +69,9 @@ class OpenAtcaError(Exception):
             detail += f" at element {self.location}"
         if message:
             detail += f": {message}"
+        if parser_module is not None:
+            detail += (f" (parser module {parser_module}, kind {parser_kind}, "
+                       f"position {parser_position})")
         super().__init__(detail)
 
 
@@ -97,6 +109,157 @@ class SeparationResult:
     at_fraction: float
     geodesic_m: float
     rhumb_m: float
+
+
+@dataclass(frozen=True, slots=True)
+class JsonNode:
+    kind: int
+    first_child: int | None
+    child_count: int
+    subtree_end: int
+    value_offset: int
+    value_length: int
+
+
+@dataclass(frozen=True, slots=True)
+class JsonResult:
+    nodes: tuple[JsonNode, ...]
+    value_pool: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class XmlSpan:
+    start: int
+    length: int
+
+
+@dataclass(frozen=True, slots=True)
+class XmlElement:
+    name: XmlSpan
+    prefix: XmlSpan
+    parent: int
+    first_attribute: int
+    attribute_count: int
+    first_child: int
+    next_sibling: int
+    namespace_head: int
+
+
+@dataclass(frozen=True, slots=True)
+class XmlAttribute:
+    name: XmlSpan
+    prefix: XmlSpan
+    raw_value: XmlSpan
+    owner_element: int
+    flags: int
+
+
+@dataclass(frozen=True, slots=True)
+class XmlText:
+    raw_value: XmlSpan
+    owner_element: int
+    flags: int
+
+
+@dataclass(frozen=True, slots=True)
+class XmlNamespace:
+    owner_element: int
+    prefix: XmlSpan
+    uri_offset: int
+    uri_length: int
+    next_for_element: int
+
+
+@dataclass(frozen=True, slots=True)
+class XmlResult:
+    elements: tuple[XmlElement, ...]
+    attributes: tuple[XmlAttribute, ...]
+    texts: tuple[XmlText, ...]
+    namespaces: tuple[XmlNamespace, ...]
+    namespace_uri_pool: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class CsvRow:
+    physical_line: int
+    first_field: int
+    field_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class CsvField:
+    value_offset: int
+    value_length: int
+
+
+@dataclass(frozen=True, slots=True)
+class CsvResult:
+    rows: tuple[CsvRow, ...]
+    fields: tuple[CsvField, ...]
+    value_pool: bytes
+
+
+class _TextError(ctypes.Structure):
+    _fields_ = [("module", ctypes.c_uint32), ("kind", ctypes.c_uint32),
+                ("position", ctypes.c_uint64), ("detail_a", ctypes.c_uint64),
+                ("detail_b", ctypes.c_uint64)]
+
+
+class _JsonNode(ctypes.Structure):
+    _fields_ = [("kind", ctypes.c_uint32), ("first_child", ctypes.c_uint32),
+                ("child_count", ctypes.c_uint32), ("subtree_end", ctypes.c_uint32),
+                ("value_offset", ctypes.c_uint32), ("value_length", ctypes.c_uint32)]
+
+
+class _JsonCounts(ctypes.Structure):
+    _fields_ = [("node_count", ctypes.c_uint64), ("value_bytes", ctypes.c_uint64)]
+
+
+class _XmlSpan(ctypes.Structure):
+    _fields_ = [("start", ctypes.c_uint32), ("length", ctypes.c_uint32)]
+
+
+class _XmlElement(ctypes.Structure):
+    _fields_ = [("name", _XmlSpan), ("prefix", _XmlSpan), ("parent", ctypes.c_uint32),
+                ("first_attribute", ctypes.c_uint32), ("attribute_count", ctypes.c_uint32),
+                ("first_child", ctypes.c_uint32), ("next_sibling", ctypes.c_uint32),
+                ("namespace_head", ctypes.c_uint32)]
+
+
+class _XmlAttribute(ctypes.Structure):
+    _fields_ = [("name", _XmlSpan), ("prefix", _XmlSpan), ("raw_value", _XmlSpan),
+                ("owner_element", ctypes.c_uint32), ("flags", ctypes.c_uint32)]
+
+
+class _XmlText(ctypes.Structure):
+    _fields_ = [("raw_value", _XmlSpan), ("owner_element", ctypes.c_uint32),
+                ("flags", ctypes.c_uint32)]
+
+
+class _XmlNamespace(ctypes.Structure):
+    _fields_ = [("owner_element", ctypes.c_uint32), ("prefix", _XmlSpan),
+                ("uri_offset", ctypes.c_uint32), ("uri_length", ctypes.c_uint32),
+                ("next_for_element", ctypes.c_uint32)]
+
+
+class _XmlCounts(ctypes.Structure):
+    _fields_ = [("elements", ctypes.c_uint64), ("attributes", ctypes.c_uint64),
+                ("text_nodes", ctypes.c_uint64), ("namespaces", ctypes.c_uint64),
+                ("namespace_uri_bytes", ctypes.c_uint64)]
+
+
+class _CsvRow(ctypes.Structure):
+    _fields_ = [("physical_line", ctypes.c_uint64), ("first_field", ctypes.c_uint32),
+                ("field_count", ctypes.c_uint32)]
+
+
+class _CsvField(ctypes.Structure):
+    _fields_ = [("value_offset", ctypes.c_uint32), ("value_length", ctypes.c_uint32)]
+
+
+class _CsvCounts(ctypes.Structure):
+    _fields_ = [("rows", ctypes.c_uint64), ("fields", ctypes.c_uint64),
+                ("value_bytes", ctypes.c_uint64)]
 
 
 class _PolygonOpaque(ctypes.Structure):
@@ -371,6 +534,161 @@ def _native_message(library: ctypes.CDLL, status: int) -> str | None:
         return None
 
 
+class TextBindings:
+    """Bounded one-shot XML, JSON, and CSV parses through the native parsers."""
+
+    def __init__(self, library: ctypes.CDLL) -> None:
+        self._library = library
+        error_p = ctypes.POINTER(_ErrorInfo)
+        text_error_p = ctypes.POINTER(_TextError)
+        byte_p = ctypes.POINTER(ctypes.c_uint8)
+        library.oa_json_parse.argtypes = [byte_p, ctypes.c_uint64,
+            ctypes.POINTER(_JsonNode), ctypes.c_uint64, byte_p, ctypes.c_uint64,
+            ctypes.POINTER(_JsonCounts), text_error_p, error_p]
+        library.oa_json_parse.restype = ctypes.c_uint32
+        library.oa_xml_parse.argtypes = [byte_p, ctypes.c_uint64,
+            ctypes.POINTER(_XmlElement), ctypes.c_uint64,
+            ctypes.POINTER(_XmlAttribute), ctypes.c_uint64,
+            ctypes.POINTER(_XmlText), ctypes.c_uint64,
+            ctypes.POINTER(_XmlNamespace), ctypes.c_uint64, byte_p, ctypes.c_uint64,
+            ctypes.POINTER(_XmlCounts), text_error_p, error_p]
+        library.oa_xml_parse.restype = ctypes.c_uint32
+        library.oa_xml_decode_span.argtypes = [byte_p, ctypes.c_uint64, ctypes.c_uint32,
+            ctypes.c_uint32, ctypes.c_uint32, byte_p, ctypes.c_uint64,
+            ctypes.POINTER(ctypes.c_uint64), text_error_p, error_p]
+        library.oa_xml_decode_span.restype = ctypes.c_uint32
+        library.oa_csv_parse.argtypes = [byte_p, ctypes.c_uint64,
+            ctypes.POINTER(_CsvRow), ctypes.c_uint64,
+            ctypes.POINTER(_CsvField), ctypes.c_uint64, byte_p, ctypes.c_uint64,
+            ctypes.POINTER(_CsvCounts), text_error_p, error_p]
+        library.oa_csv_parse.restype = ctypes.c_uint32
+
+    def _input(self, data: bytes) -> tuple[object | None, int]:
+        if not isinstance(data, bytes):
+            raise TypeError("text parser input must be immutable bytes")
+        source = ctypes.c_char_p(data) if data else None
+        return source, len(data)
+
+    def _raise_text(self, status: int, error: _ErrorInfo, parser: _TextError) -> None:
+        if status == 0:
+            return
+        if int(error.code) != status:
+            raise RuntimeError("native ABI violated its provisional status/error-code contract")
+        message = _native_message(self._library, status)
+        if status == 12:
+            raise OpenAtcaError(status, error.location_kind, int(error.location), message,
+                parser_module=int(parser.module), parser_kind=int(parser.kind),
+                parser_position=int(parser.position), parser_detail_a=int(parser.detail_a),
+                parser_detail_b=int(parser.detail_b))
+        raise OpenAtcaError(status, error.location_kind, int(error.location), message)
+
+    def parse_json(self, data: bytes) -> JsonResult:
+        source, length = self._input(data)
+        pointer = ctypes.cast(source, ctypes.POINTER(ctypes.c_uint8)) if source is not None else None
+        counts, parser, error = _JsonCounts(), _TextError(), _ErrorInfo()
+        status = int(self._library.oa_json_parse(pointer, length, None, 0, None, 0,
+            ctypes.byref(counts), ctypes.byref(parser), ctypes.byref(error)))
+        if status not in (0, 6):
+            self._raise_text(status, error, parser)
+        node_bytes = int(counts.node_count) * ctypes.sizeof(_JsonNode)
+        total = node_bytes + int(counts.value_bytes)
+        if total > _MAX_TEXT_OUTPUT_BYTES:
+            raise MemoryError("JSON output exceeds the Python wrapper's 256 MiB bound")
+        nodes = (_JsonNode * int(counts.node_count))()
+        pool = (ctypes.c_uint8 * int(counts.value_bytes))()
+        status = int(self._library.oa_json_parse(pointer, length, nodes if counts.node_count else None,
+            counts.node_count, pool if counts.value_bytes else None, counts.value_bytes,
+            ctypes.byref(counts), ctypes.byref(parser), ctypes.byref(error)))
+        self._raise_text(status, error, parser)
+        result_nodes = tuple(JsonNode(int(node.kind),
+            None if node.first_child == 0xFFFFFFFF else int(node.first_child),
+            int(node.child_count), int(node.subtree_end), int(node.value_offset),
+            int(node.value_length)) for node in nodes)
+        return JsonResult(result_nodes, bytes(pool))
+
+    def parse_xml(self, data: bytes) -> XmlResult:
+        source, length = self._input(data)
+        pointer = ctypes.cast(source, ctypes.POINTER(ctypes.c_uint8)) if source is not None else None
+        counts, parser, error = _XmlCounts(), _TextError(), _ErrorInfo()
+        status = int(self._library.oa_xml_parse(pointer, length, None, 0, None, 0, None, 0,
+            None, 0, None, 0, ctypes.byref(counts), ctypes.byref(parser), ctypes.byref(error)))
+        if status not in (0, 6):
+            self._raise_text(status, error, parser)
+        sizes = ((int(counts.elements), ctypes.sizeof(_XmlElement)),
+                 (int(counts.attributes), ctypes.sizeof(_XmlAttribute)),
+                 (int(counts.text_nodes), ctypes.sizeof(_XmlText)),
+                 (int(counts.namespaces), ctypes.sizeof(_XmlNamespace)))
+        total = sum(count * width for count, width in sizes) + int(counts.namespace_uri_bytes)
+        if total > _MAX_TEXT_OUTPUT_BYTES:
+            raise MemoryError("XML output exceeds the Python wrapper's 256 MiB bound")
+        elements = (_XmlElement * counts.elements)()
+        attributes = (_XmlAttribute * counts.attributes)()
+        texts = (_XmlText * counts.text_nodes)()
+        namespaces = (_XmlNamespace * counts.namespaces)()
+        uri_pool = (ctypes.c_uint8 * counts.namespace_uri_bytes)()
+        status = int(self._library.oa_xml_parse(pointer, length,
+            elements if counts.elements else None, counts.elements,
+            attributes if counts.attributes else None, counts.attributes,
+            texts if counts.text_nodes else None, counts.text_nodes,
+            namespaces if counts.namespaces else None, counts.namespaces,
+            uri_pool if counts.namespace_uri_bytes else None, counts.namespace_uri_bytes,
+            ctypes.byref(counts), ctypes.byref(parser), ctypes.byref(error)))
+        self._raise_text(status, error, parser)
+        span = lambda value: XmlSpan(int(value.start), int(value.length))
+        return XmlResult(
+            tuple(XmlElement(span(row.name), span(row.prefix), int(row.parent),
+                int(row.first_attribute), int(row.attribute_count), int(row.first_child),
+                int(row.next_sibling), int(row.namespace_head)) for row in elements),
+            tuple(XmlAttribute(span(row.name), span(row.prefix), span(row.raw_value),
+                int(row.owner_element), int(row.flags)) for row in attributes),
+            tuple(XmlText(span(row.raw_value), int(row.owner_element), int(row.flags)) for row in texts),
+            tuple(XmlNamespace(int(row.owner_element), span(row.prefix), int(row.uri_offset),
+                int(row.uri_length), int(row.next_for_element)) for row in namespaces),
+            bytes(uri_pool))
+
+    def decode_xml_span(self, data: bytes, start: int, length: int, kind: int) -> bytes:
+        source, input_length = self._input(data)
+        for value, name in ((start, "start"), (length, "length"), (kind, "kind")):
+            if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value < (1 << 32):
+                raise ValueError(f"{name} must fit an unsigned 32-bit integer")
+        if length > _MAX_TEXT_OUTPUT_BYTES:
+            raise MemoryError("XML span output exceeds the Python wrapper's 256 MiB bound")
+        output = (ctypes.c_uint8 * length)()
+        written, parser, error = ctypes.c_uint64(), _TextError(), _ErrorInfo()
+        pointer = ctypes.cast(source, ctypes.POINTER(ctypes.c_uint8)) if source is not None else None
+        status = int(self._library.oa_xml_decode_span(pointer, input_length, start, length, kind,
+            output if length else None, length, ctypes.byref(written), ctypes.byref(parser), ctypes.byref(error)))
+        self._raise_text(status, error, parser)
+        if written.value > length:
+            raise RuntimeError("native XML span decoder exceeded its caller buffer")
+        return bytes(output[:written.value])
+
+    def parse_csv(self, data: bytes) -> CsvResult:
+        source, length = self._input(data)
+        pointer = ctypes.cast(source, ctypes.POINTER(ctypes.c_uint8)) if source is not None else None
+        counts, parser, error = _CsvCounts(), _TextError(), _ErrorInfo()
+        status = int(self._library.oa_csv_parse(pointer, length, None, 0, None, 0, None, 0,
+            ctypes.byref(counts), ctypes.byref(parser), ctypes.byref(error)))
+        if status not in (0, 6):
+            self._raise_text(status, error, parser)
+        total = (int(counts.rows) * ctypes.sizeof(_CsvRow) +
+                 int(counts.fields) * ctypes.sizeof(_CsvField) + int(counts.value_bytes))
+        if total > _MAX_TEXT_OUTPUT_BYTES:
+            raise MemoryError("CSV output exceeds the Python wrapper's 256 MiB bound")
+        rows = (_CsvRow * counts.rows)()
+        fields = (_CsvField * counts.fields)()
+        pool = (ctypes.c_uint8 * counts.value_bytes)()
+        status = int(self._library.oa_csv_parse(pointer, length,
+            rows if counts.rows else None, counts.rows,
+            fields if counts.fields else None, counts.fields,
+            pool if counts.value_bytes else None, counts.value_bytes,
+            ctypes.byref(counts), ctypes.byref(parser), ctypes.byref(error)))
+        self._raise_text(status, error, parser)
+        return CsvResult(tuple(CsvRow(int(row.physical_line), int(row.first_field), int(row.field_count))
+            for row in rows), tuple(CsvField(int(field.value_offset), int(field.value_length))
+            for field in fields), bytes(pool))
+
+
 class Geodesy:
     """Calls the provisional stateless WGS-84 symbols in an explicitly loaded library."""
 
@@ -385,6 +703,7 @@ class Geodesy:
             )
         self.math = ScalarMath(library)
         self.integrity = Integrity(library)
+        self.text = TextBindings(library)
 
     def _bind(self) -> None:
         lib = self._library
@@ -523,8 +842,13 @@ def load(library_path: os.PathLike[str] | str) -> Geodesy:
 
 
 __all__ = [
+    "CsvField",
+    "CsvResult",
+    "CsvRow",
     "DirectResult",
     "Integrity",
+    "JsonNode",
+    "JsonResult",
     "Polygon",
     "Geodesy",
     "InverseResult",
@@ -532,5 +856,12 @@ __all__ = [
     "RhumbInverseResult",
     "ScalarMath",
     "SeparationResult",
+    "TextBindings",
+    "XmlAttribute",
+    "XmlElement",
+    "XmlNamespace",
+    "XmlResult",
+    "XmlSpan",
+    "XmlText",
     "load",
 ]

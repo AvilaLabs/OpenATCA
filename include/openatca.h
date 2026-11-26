@@ -25,7 +25,7 @@ extern "C" {
 
 #define OA_CORE_ABI_VERSION_PROVISIONAL UINT32_C(1)
 
-/* Provisional values. Reserved values are not yet allocated. */
+/* Provisional values; status 12 is the bounded text-parser refusal. */
 typedef uint32_t OaStatus;
 enum {
     OA_STATUS_OK = 0,
@@ -39,7 +39,8 @@ enum {
     OA_STATUS_BAD_PARAMETER = 8,
     OA_STATUS_LENGTH_TOO_LARGE = 9,
     OA_STATUS_BAD_OPERATION = 10,
-    OA_STATUS_ALLOCATION_FAILED = 11
+    OA_STATUS_ALLOCATION_FAILED = 11,
+    OA_STATUS_PARSE_ERROR = 12
 };
 
 typedef uint32_t OaLocationKind;
@@ -55,6 +56,47 @@ typedef struct OaErrorInfo {
     uint32_t location_kind; /* NONE, ARGUMENT, or ELEMENT. */
     uint64_t location;      /* Zero-based argument/element index; raw value is preserved. */
 } OaErrorInfo;
+
+enum { OA_TEXT_XML = 1, OA_TEXT_JSON = 2, OA_TEXT_CSV = 3 };
+/* Parser kind is module-specific; offsets are byte positions except CSV's physical line. */
+typedef struct OaTextError {
+    uint32_t module;
+    uint32_t kind;
+    uint64_t position;
+    uint64_t detail_a;
+    uint64_t detail_b;
+} OaTextError;
+typedef struct OaJsonNode {
+    uint32_t kind, first_child, child_count, subtree_end, value_offset, value_length;
+} OaJsonNode;
+typedef struct OaJsonCounts { uint64_t node_count, value_bytes; } OaJsonCounts;
+typedef struct OaXmlSpan { uint32_t start, length; } OaXmlSpan;
+typedef struct OaXmlElement {
+    OaXmlSpan name, prefix;
+    uint32_t parent, first_attribute, attribute_count, first_child, next_sibling, namespace_head;
+} OaXmlElement;
+typedef struct OaXmlAttribute {
+    OaXmlSpan name, prefix, raw_value;
+    uint32_t owner_element, flags;
+} OaXmlAttribute;
+typedef struct OaXmlText { OaXmlSpan raw_value; uint32_t owner_element, flags; } OaXmlText;
+typedef struct OaXmlNamespace {
+    uint32_t owner_element;
+    OaXmlSpan prefix;
+    uint32_t uri_offset, uri_length, next_for_element;
+} OaXmlNamespace;
+typedef struct OaXmlCounts {
+    uint64_t elements, attributes, text_nodes, namespaces, namespace_uri_bytes;
+} OaXmlCounts;
+typedef struct OaCsvRow { uint64_t physical_line; uint32_t first_field, field_count; } OaCsvRow;
+typedef struct OaCsvField { uint32_t value_offset, value_length; } OaCsvField;
+typedef struct OaCsvCounts { uint64_t rows, fields, value_bytes; } OaCsvCounts;
+
+enum {
+    OA_JSON_NULL = 1, OA_JSON_FALSE = 2, OA_JSON_TRUE = 3, OA_JSON_NUMBER = 4,
+    OA_JSON_STRING = 5, OA_JSON_ARRAY = 6, OA_JSON_OBJECT = 7
+};
+enum { OA_XML_SPAN_TEXT = 1, OA_XML_SPAN_ATTRIBUTE_VALUE = 2 };
 
 /*
  * Stateless WGS-84 operations. Angles are degrees; distance is metres. Azimuth is clockwise
@@ -145,6 +187,34 @@ void oa_geo_polygon_free(OaPolygon *polygon);
 /* One-shot integrity digest. Empty input permits a NULL pointer; other pointers have fixed extents. */
 uint32_t oa_sha256_digest(const uint8_t *input, uint64_t length, uint8_t digest[32], OaErrorInfo *error);
 uint32_t oa_sha256_hex(const uint8_t digest[32], uint8_t output[64], OaErrorInfo *error);
+
+/*
+ * Bounded text parsers. Call once with zero capacities to query exact counts; this returns
+ * BUFFER_TOO_SMALL without writing arrays. Retry with those capacities. Parser refusal is
+ * PARSE_ERROR and reports the source-specific kind/position. Output rows and pools are caller-owned.
+ * XML spans point into immutable input; CSV rows include the required header at index zero.
+ * Inputs and every output region, including count/error records, must be pairwise non-overlapping.
+ */
+uint32_t oa_json_parse(const uint8_t *input, uint64_t input_length,
+                       OaJsonNode *nodes, uint64_t node_capacity,
+                       uint8_t *value_pool, uint64_t value_capacity,
+                       OaJsonCounts *counts, OaTextError *parse_error, OaErrorInfo *error);
+uint32_t oa_xml_parse(const uint8_t *input, uint64_t input_length,
+                      OaXmlElement *elements, uint64_t element_capacity,
+                      OaXmlAttribute *attributes, uint64_t attribute_capacity,
+                      OaXmlText *texts, uint64_t text_capacity,
+                      OaXmlNamespace *namespaces, uint64_t namespace_capacity,
+                      uint8_t *namespace_uri_pool, uint64_t namespace_uri_capacity,
+                      OaXmlCounts *counts, OaTextError *parse_error, OaErrorInfo *error);
+uint32_t oa_xml_decode_span(const uint8_t *input, uint64_t input_length,
+                            uint32_t start, uint32_t length, uint32_t span_kind,
+                            uint8_t *output, uint64_t output_capacity, uint64_t *written,
+                            OaTextError *parse_error, OaErrorInfo *error);
+uint32_t oa_csv_parse(const uint8_t *input, uint64_t input_length,
+                      OaCsvRow *rows, uint64_t row_capacity,
+                      OaCsvField *fields, uint64_t field_capacity,
+                      uint8_t *value_pool, uint64_t value_capacity,
+                      OaCsvCounts *counts, OaTextError *parse_error, OaErrorInfo *error);
 
 /*
  * Copies a deterministic UTF-8 status message into caller storage. `required` is mandatory and
