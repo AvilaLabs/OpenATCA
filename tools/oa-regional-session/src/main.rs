@@ -738,7 +738,7 @@ mod tests {
         let last = ROW.replace("{sequence}", "2");
         let input = format!("OA-RS\t1\n{first}\nbad\n{last}\n");
         assert_eq!(
-            bad_line_accounting(parse_input(input.as_bytes()), InputError::BadFieldCount),
+            bad_line_accounting(parse_input(input.as_bytes()), InputError::BadVersion),
             RowAccounting {
                 admitted: 1,
                 refused: 1,
