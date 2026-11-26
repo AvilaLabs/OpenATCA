@@ -6,6 +6,7 @@ pub mod cli;
 pub mod commands;
 pub mod flight;
 pub mod input;
+pub mod migration_amendment;
 pub mod migration_full_day;
 pub mod migration_full_day_runner;
 pub mod migration_g3;

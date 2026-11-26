@@ -573,6 +573,32 @@ fn compare_published_row_inner(
         RowIdentityState::MatchedGufi
     };
     report.identity_state = identity_state;
+    if identity_state == RowIdentityState::CandidateDifferentGufi {
+        // Preserve the independently decoded source fields while refusing to compare them with
+        // another GUFI's candidate values. Amendment-propagation accounting needs the source
+        // before/after values even when candidate identity is wrong.
+        let source_only = compare_published_row_inner(
+            source,
+            &oa_flight::FLIGHT_FREE,
+            requested_not_modeled,
+            assigned_fix_not_modeled,
+            true,
+        )?;
+        for original in source_only
+            .fields
+            .iter()
+            .take(usize::from(source_only.field_count))
+        {
+            let mut field = *original;
+            if field.outcome == FieldOutcome::CandidateUnavailable {
+                field.outcome = FieldOutcome::IdentityMismatch;
+            }
+            field.review_class = ReviewClass::NotComparable;
+            field.candidate_value = CanonicalValue::default();
+            push(&mut report, field)?;
+        }
+        return Ok(report);
+    }
     if identity_state != RowIdentityState::MatchedGufi
         && identity_state != RowIdentityState::CandidateUnavailable
     {
@@ -1128,6 +1154,17 @@ mod tests {
         assert_eq!(
             mismatch.fields.first().map(|field| field.outcome),
             Some(FieldOutcome::IdentityMismatch)
+        );
+        assert_eq!(
+            mismatch.fields.first().map(|field| field.source_state),
+            Some(SourceFieldState::Present)
+        );
+        assert_eq!(
+            mismatch
+                .fields
+                .first()
+                .map(|field| field.source_value.present),
+            Some(1)
         );
 
         let mut candidate = flight();

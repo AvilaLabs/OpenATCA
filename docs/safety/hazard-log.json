@@ -479,6 +479,14 @@
     "OA-MIG-404",
     "OA-MIG-405",
     "OA-MIG-406",
+    "OA-MIG-408",
+    "OA-MIG-409",
+    "OA-MIG-410",
+    "OA-MIG-411",
+    "OA-MIG-412",
+    "OA-MIG-413",
+    "OA-MIG-415",
+    "OA-MIG-416",
     "OA-MIG-601",
     "OA-MIG-602",
     "OA-MSAW-001",
@@ -10383,6 +10391,14 @@
         "OA-MIG-404",
         "OA-MIG-405",
         "OA-MIG-406",
+        "OA-MIG-408",
+        "OA-MIG-409",
+        "OA-MIG-410",
+        "OA-MIG-411",
+        "OA-MIG-412",
+        "OA-MIG-413",
+        "OA-MIG-415",
+        "OA-MIG-416",
         "OA-MIG-601",
         "OA-MIG-602",
         "OA-REG-019",
@@ -10395,7 +10411,7 @@
         },
         {
           "document": "REQUIREMENTS.md",
-          "locator": "OA-REG-019 through OA-REG-020"
+          "locator": "OA-MIG-408 through OA-MIG-413 and OA-MIG-415 through OA-MIG-416; OA-REG-019 through OA-REG-020"
         }
       ],
       "verification_refs": [
@@ -10428,6 +10444,156 @@
           "requirement_id": "OA-MIG-406",
           "file": "tools/oa-regional-session/tests/migration_shadow_projection.rs",
           "test_name": "candidate_conflict_alert_preserves_source_and_missing_availability_without_claiming_ack"
+        },
+        {
+          "requirement_id": "OA-MIG-408",
+          "file": "tools/oa-regional-session/src/migration_snapshot.rs",
+          "test_name": "differences_are_unresolved_and_malformed_absent_and_unmodeled_fields_remain_visible"
+        },
+        {
+          "requirement_id": "OA-MIG-408",
+          "file": "tools/oa-regional-session/src/migration_snapshot.rs",
+          "test_name": "published_center_status_and_plan_id_compare_only_with_that_center_view"
+        },
+        {
+          "requirement_id": "OA-MIG-408",
+          "file": "tools/oa-regional-session/src/migration_snapshot.rs",
+          "test_name": "sector_and_flight_fields_match_without_collapsing_their_clocks"
+        },
+        {
+          "requirement_id": "OA-MIG-408",
+          "file": "tools/oa-regional-session/src/migration_snapshot.rs",
+          "test_name": "unknown_published_owner_is_not_compared_as_a_concrete_sector"
+        },
+        {
+          "requirement_id": "OA-MIG-408",
+          "file": "tools/oa-regional-session/src/migration_snapshot.rs",
+          "test_name": "wrong_identity_and_future_model_value_are_not_counted_as_agreement"
+        },
+        {
+          "requirement_id": "OA-MIG-409",
+          "file": "tools/oa-regional-session/src/migration_g3.rs",
+          "test_name": "contested_cells_never_produce_a_supported_match"
+        },
+        {
+          "requirement_id": "OA-MIG-409",
+          "file": "tools/oa-regional-session/src/migration_g3.rs",
+          "test_name": "every_row_disposition_reconciles_in_the_shared_denominator"
+        },
+        {
+          "requirement_id": "OA-MIG-409",
+          "file": "tools/oa-regional-session/src/migration_g3.rs",
+          "test_name": "g3_model_parser_binds_the_full_artifact_and_fixed_development_split"
+        },
+        {
+          "requirement_id": "OA-MIG-409",
+          "file": "tools/oa-regional-session/src/migration_g3.rs",
+          "test_name": "g3_result_is_explicitly_occupancy_proxy_with_support_denominators"
+        },
+        {
+          "requirement_id": "OA-MIG-409",
+          "file": "tools/oa-regional-session/src/migration_g3.rs",
+          "test_name": "wrong_identity_unavailable_clock_and_missing_altitude_are_not_agreements"
+        },
+        {
+          "requirement_id": "OA-MIG-410",
+          "file": "tools/oa-regional-session/src/migration_snapshot.rs",
+          "test_name": "flight_data_values_are_row_scoped_propagation_not_amendment_events"
+        },
+        {
+          "requirement_id": "OA-MIG-411",
+          "file": "tools/oa-regional-session/src/migration_full_day.rs",
+          "test_name": "counts_conserve_g3_and_snapshot_denominators"
+        },
+        {
+          "requirement_id": "OA-MIG-411",
+          "file": "tools/oa-regional-session/src/migration_full_day.rs",
+          "test_name": "denominator_overflow_fails_instead_of_wrapping"
+        },
+        {
+          "requirement_id": "OA-MIG-411",
+          "file": "tools/oa-regional-session/src/migration_full_day.rs",
+          "test_name": "missing_candidate_counts_every_declared_snapshot_field"
+        },
+        {
+          "requirement_id": "OA-MIG-411",
+          "file": "tools/oa-regional-session/src/migration_full_day_runner.rs",
+          "test_name": "rejected_and_unemitted_fixm_messages_cannot_disappear_from_denominator"
+        },
+        {
+          "requirement_id": "OA-MIG-412",
+          "file": "tools/oa-regional-session/src/migration_g3.rs",
+          "test_name": "v2_asof_uses_only_pre_receive_state_and_enforces_one_second_age"
+        },
+        {
+          "requirement_id": "OA-MIG-413",
+          "file": "tools/oa-regional-session/src/migration_snapshot.rs",
+          "test_name": "missing_candidate_view_preserves_source_absence_and_present_field_unavailability"
+        },
+        {
+          "requirement_id": "OA-MIG-413",
+          "file": "tools/oa-regional-session/src/migration_snapshot.rs",
+          "test_name": "runtime_view_comparison_marks_unexported_fields_not_modeled"
+        },
+        {
+          "requirement_id": "OA-MIG-415",
+          "file": "tools/oa-regional-session/src/recordings_stream.rs",
+          "test_name": "bounded_segment_merge_streams_messages_in_receipt_order"
+        },
+        {
+          "requirement_id": "OA-MIG-415",
+          "file": "tools/oa-regional-session/src/recordings_stream.rs",
+          "test_name": "declared_window_counts_and_skips_physical_prefix_and_suffix"
+        },
+        {
+          "requirement_id": "OA-MIG-415",
+          "file": "tools/oa-regional-session/src/recordings_stream.rs",
+          "test_name": "nonmonotone_segment_refuses_before_claiming_full_stream"
+        },
+        {
+          "requirement_id": "OA-MIG-415",
+          "file": "tools/oa-regional-session/src/recordings_stream.rs",
+          "test_name": "normalized_stream_carries_sequences_and_exact_receive_provenance"
+        },
+        {
+          "requirement_id": "OA-MIG-415",
+          "file": "tools/oa-regional-session/src/recordings_stream.rs",
+          "test_name": "source_coverage_reports_unobserved_prefix_without_erasing_available_rows"
+        },
+        {
+          "requirement_id": "OA-MIG-416",
+          "file": "tools/oa-regional-session/src/migration_amendment.rs",
+          "test_name": "mismatched_candidate_identity_never_becomes_equivalent"
+        },
+        {
+          "requirement_id": "OA-MIG-416",
+          "file": "tools/oa-regional-session/src/migration_amendment.rs",
+          "test_name": "route_change_is_detected_without_exporting_text_or_claiming_candidate_support"
+        },
+        {
+          "requirement_id": "OA-MIG-416",
+          "file": "tools/oa-regional-session/src/migration_amendment.rs",
+          "test_name": "separate_gufi_argument_must_match_decoded_row_identity"
+        },
+        {
+          "requirement_id": "OA-MIG-416",
+          "file": "tools/oa-regional-session/src/migration_amendment.rs",
+          "test_name": "source_absent_malformed_and_unsupported_fields_reconcile_separately"
+        },
+        {
+          "requirement_id": "OA-MIG-416",
+          "file": "tools/oa-regional-session/src/migration_amendment.rs",
+          "test_name": "source_changes_compare_exact_candidate_before_and_after_values"
+        },
+        {
+          "requirement_id": "OA-MIG-416",
+          "file": "tools/oa-regional-session/src/migration_amendment.rs",
+          "test_name": "source_clock_regression_is_counted_and_never_scored_as_propagated"
+        },
+        {
+          "requirement_id": "OA-MIG-416",
+          "file": "tools/oa-regional-session/src/migration_amendment.rs",
+          "test_name": "unavailable_identity_and_missing_key_stay_in_explicit_denominators"
         },
         {
           "requirement_id": "OA-MIG-601",
@@ -15979,6 +16145,54 @@
       "function": "geodetic_and_navigation_geometry",
       "hazard_id": "HZ-GEOMETRY-001",
       "rationale": "Engineering safety candidate: this register clause constrains geodetic_and_navigation_geometry; failure can contribute to the stated hazard. Register clause: Proved (Kani, `root::proofs`), for finite `x` and `y` with `|x|, |y| <= 5e7`, the parts of `hypot` that do not depend on an exact product: the ordering (`hypot-operands-ordered`), the first step of the slow path (`hypot-slow-operands`), the scaling of the operands (`hypot-dd-operands`), the sum of two squares given bounds on their parts (`hypot-dd-sum`) and the scaling back (`hypot-scale-round`). Not proved, each over 10 minutes in CBMC (registered disabled): the exact square of a scaled operand (`hypot-dd-square`), the double-double root (`hypot-dd-root`), the plain fast path (`hypot-fast-plain`) and the scaled fast path (`hypot-fast-scaled`); all four need the exactness of the Veltkamp-split products, which is a multiplier-equivalence problem for the SAT solver. So `hypot` finite and not negative on that domain is not proved."
+    },
+    {
+      "id": "OA-MIG-408",
+      "function": "migration_comparison_and_safety_evidence",
+      "hazard_id": "HZ-EVIDENCE-001",
+      "rationale": "Engineering safety candidate: comparing published SFDPS row facts with the candidate state after that same row can expose propagation mismatches or incorrect field interpretation. It is not an independent controller decision or legacy-correctness oracle; clocks remain separately reported, and future, unavailable, malformed, or unmodeled values are not agreements."
+    },
+    {
+      "id": "OA-MIG-409",
+      "function": "migration_comparison_and_safety_evidence",
+      "hazard_id": "HZ-EVIDENCE-001",
+      "rationale": "Engineering safety candidate: an empirical occupancy proxy can misstate support or agreement if the model, split, identity, clock, altitude, or denominator is wrong. The declared training/evaluation days and per-row dispositions constrain that evidence risk. It is not official sector geometry, controller intent, a probability, or physical boundary accuracy."
+    },
+    {
+      "id": "OA-MIG-410",
+      "function": "migration_comparison_and_safety_evidence",
+      "hazard_id": "HZ-EVIDENCE-001",
+      "rationale": "Engineering safety candidate: same-input field propagation may be mistaken for independent amendment detection if its denominator or observability limits are hidden. The clause explicitly reports a row-scoped diagnostic and forbids inferring independent events or converting unavailable values into agreement."
+    },
+    {
+      "id": "OA-MIG-411",
+      "function": "migration_comparison_and_safety_evidence",
+      "hazard_id": "HZ-EVIDENCE-001",
+      "rationale": "Engineering safety candidate: a partial, lossy, gapped, reordered, or capacity-exhausted day could otherwise appear to support a full-day comparison. The bounded runner requires reconciled complete-window evidence and binds inputs, executable, airspace, model, policy, and profile digests. A complete runner contract does not establish results for data that could not be read or qualified."
+    },
+    {
+      "id": "OA-MIG-412",
+      "function": "migration_comparison_and_safety_evidence",
+      "hazard_id": "HZ-EVIDENCE-001",
+      "rationale": "Engineering safety candidate: comparing against a future or stale candidate state can create false apparent agreement. The as-of rule requires an already-emitted state no more than one second old and preserves future/unavailable cases as non-comparable. This remains an occupancy-transfer proxy, not physical boundary truth or controller intent."
+    },
+    {
+      "id": "OA-MIG-413",
+      "function": "migration_comparison_and_safety_evidence",
+      "hazard_id": "HZ-EVIDENCE-001",
+      "rationale": "Engineering safety candidate: comparing source facts against hidden or unexported candidate state can falsely imply support for unavailable fields. Restricting comparisons to immutable SharedFlightView fields and marking absent fields CandidateNotModeled limits that evidence risk; it does not make those unmodeled values available."
+    },
+    {
+      "id": "OA-MIG-415",
+      "function": "migration_comparison_and_safety_evidence",
+      "hazard_id": "HZ-EVIDENCE-001",
+      "rationale": "Engineering safety candidate: ordering, truncation, or coverage loss in bounded OAF segment reading can undermine full-window evidence. Per-source hashes/counts, deterministic receive-time merge, explicit frame-activity versus message coverage, and refusal of malformed/non-monotone/capped inputs constrain that risk. The adapter is synthetic infrastructure and does not authenticate source completeness."
+    },
+    {
+      "id": "OA-MIG-416",
+      "function": "migration_comparison_and_safety_evidence",
+      "hazard_id": "HZ-EVIDENCE-001",
+      "rationale": "Engineering safety candidate: source-field changes can be missed or falsely called propagated if comparisons lose identity, clock, availability, or absent/malformed distinctions. The nine-field same-input diagnostic reconciles these dispositions but is not an independently keyed amendment event or an ERAM correctness oracle."
     },
     {
       "id": "OA-NASR-001",

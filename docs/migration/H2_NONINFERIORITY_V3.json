@@ -1,0 +1,126 @@
+{
+  "schema": "openatca.h2-noninferiority.v3",
+  "profile_id": "M4-H2-DEV-COMPARISON-V4-CAUSAL-ASOF-TRAIN1H",
+  "status": "preregistered-before-nov15-training-audit-and-nov19-evaluation-run",
+  "scope": {
+    "environment": "development-only",
+    "facility_scope": "ZAU",
+    "evaluation_window": "the complete 2026-11-19 UTC development partition; no window selection after inspecting results",
+    "evaluation_interval": "[2026-11-19T00:00:00Z, 2026-11-20T00:00:00Z) by OAF recorder receive time; valid monotone OAF frames outside this interval are counted and skipped before payload normalization",
+    "training_window": "[2026-11-15T12:00:00Z, 2026-11-15T13:00:00Z) by OAF recorder receive time; distinct development data used only to create the frozen G3 occupancy artifact",
+    "training_interval_ns": [1794744000000000000, 1794747600000000000],
+    "training_window_selection": "fixed engineering interval selected before the new training audit and evaluation; not selected from observed scores, agreement, or traffic",
+    "training_cap_policy": "strict existing G3 input limits; an audit or train cap refusal is INCOMPLETE and creates no model; no partial training or raised-cap retry",
+    "comparison_unit": "each decoded 2026-11-19 SFDPS row, plus an exact-receive-time candidate track state when available",
+    "independent_candidate_decision": false,
+    "interpretation": "G3 empirical-occupancy transfer proxy and separate same-input flight-state propagation diagnostic; neither establishes controller intent or legal geometry",
+    "input_selection": "predeclared one-hour distinct Nov 15 training interval and complete Nov 19 evaluation day; no post hoc window selection, model refit, or threshold search",
+    "timing_limit": "source, receive, candidate state, candidate source, and candidate input-availability clocks remain distinct; no physical output-publication latency is claimed",
+    "run_profile": "recorded-peak-v1; one 24-hour day, no raster rendering",
+    "resource_caps": {
+      "physical_input_bytes_aggregate": 17179869184,
+      "expanded_input_bytes_aggregate": 68719476736,
+      "input_frames_aggregate": 20000000,
+      "input_streams": 32,
+      "oaf_frame_work_units": 137438953472,
+      "pending_messages_per_stream": 4096,
+      "pending_payload_bytes_per_stream": 4194304,
+      "normalized_events_aggregate": 10000000,
+      "runtime_frames": 86400,
+      "tracks": 4096,
+      "flights": 8192,
+      "drain_rows_per_frame": 262144,
+      "open_alert_slots": 1048576,
+      "candidate_pairs": 8388608,
+      "events_per_receipt": 256,
+      "frame_gap_ns_max": 60000000000
+    },
+    "memory_bound": "at most 32 stream readers with one OAF frame buffer and 4 KiB input chunk each; per stream at most 4096 pending messages or 4 MiB payload; one adapted OAF message at a time; one runtime frame at a time; runtime state is bounded by the listed profile caps; aggregate output retains only fixed-size counters and at most 32 input digests",
+    "exhaustion": "any cap, parser refusal, gap, or capacity error prevents a complete marker; processed prefixes are never a complete-day result"
+  },
+  "identity": {
+    "match_key": "exact positive GUFI carried by both the decoded row and candidate FlightKey",
+    "source_locator": "stream, decoded byte offset, recorder sequence, and row index are provenance only",
+    "event_ordinal": "none",
+    "missing_or_conflicting_identity": "count as not comparable; never infer a key from time, order, owner, or address"
+  },
+  "time": {
+    "source_time": "SFDPS message timestamp",
+    "source_receive_time": "recorded SFDPS receive timestamp",
+    "candidate_time": "candidate state timestamp, newest source timestamp, and newest input-availability timestamp are separate required values",
+    "candidate_state_rule": "latest already-produced state with state_ns <= SFDPS receive_ns; state age must be <= 1 second; compare before processing the next issue tick",
+    "future_candidate_state": "not comparable when candidate state or input availability is later than SFDPS receive time; no ceil/future tick or predicted position is used",
+    "stale_candidate_position": "not comparable when the newest candidate position source timestamp predates the SFDPS message source timestamp",
+    "candidate_position_state": "latest causal state at or before SFDPS receive timestamp, at most 1 second old",
+    "output_availability": "not available from the current track output type; no physical publication delay is estimated",
+    "tolerance_ns": 0,
+    "clock_equality_scored": false
+  },
+  "families": {
+    "sector_assignment": {
+      "profile": "M4-H2-G3-OCCUPANCY-TRANSFER-V2",
+      "source": "SFDPS controllingUnit published owner",
+      "prediction": "the unique supported owner label for the latest causal candidate track state at or before SFDPS receive time, no more than 1 second old, using WGS-84 position and reported altitude in the frozen 2026-11-15 G3 model",
+      "grid": {"latitude_longitude_e7": 500000, "altitude_slab_ft": 2000, "time_bin_ms": 900000},
+      "support": {"minimum_distinct_gufis": 3, "minimum_distinct_time_bins": 2, "support_is_probability": false},
+      "model_artifact_required_metadata": ["OA-G3-OCCUPANCY-1", "complete=true", "completion_scope=selected-window", "training_partition=2026-11-15", "training_sha256", "binary_sha256", "policy_sha256", "source_revision", "global_wgs84_no_official_coverage_mask"],
+      "eligible_evaluation_partition": "2026-11-19 only",
+      "contested_unknown_missing_stale_future_or_identity_mismatch": "explicit non-agreement disposition; never excluded from row denominator",
+      "value_tolerance": 0,
+      "interpretation": "held-out empirical occupancy transfer proxy only; not official boundary accuracy, physical sector geometry, probability, or controller decision"
+    },
+    "flight_data_state": {
+      "profile": "M4-H2-SFDPS-PUBLISHED-STATE-V1",
+      "source_fields": ["flightStatus", "flightPlanId", "callsign", "departure", "arrival", "assignedAltitude", "interimAltitude", "requestedAltitude", "route"],
+      "value_tolerance": 0,
+      "altitude_tolerance_ft": 0,
+      "unsupported_candidate_fields": ["route"],
+      "interpretation": "same-input message-scoped propagation diagnostic; no independent amendment event or controller action is generated"
+    },
+    "flight_data_amendments": {
+      "coverage": "Unobservable as an independent amendment comparison: current SFDPS rows provide published values, while no independently keyed candidate amendment event stream is supplied",
+      "rule": "value snapshots must not be relabeled as amendment events"
+    },
+    "handoff": {
+      "profile": "existing M4-H2-EXACT-1 event comparator",
+      "only_explicit_source_events": true
+    },
+    "alerts": {
+      "legacy_source": "not present in SFDPS migration projection",
+      "coverage": "Missing unless a separately validated legacy alert feed is supplied"
+    },
+    "point_outs": {
+      "coverage": "Unsupported"
+    },
+    "interface_messages": {
+      "coverage": "Unsupported until an observable ICD-backed encoder/output stream exists"
+    }
+  },
+  "classification": {
+    "exact_match": "Equivalent",
+    "difference_without_review": "Unresolved",
+    "better_requires": "attached independent review evidence tied to the exact pair and this profile version",
+    "worse_requires": "attached independent review evidence tied to the exact pair and this profile version",
+    "missing_unknown_invalid_unsupported_stale_or_future_state": "NotComparable and blocks qualification; never counted as agreement",
+    "g3_supported_owner_mismatch": "Unresolved pending exact-pair independent review; never excluded or counted as equivalent"
+  },
+  "noninferiority_limits": {
+    "g3_supported_owner_mismatches_max": 0,
+    "propagation_unit_value_differences_max": 0,
+    "propagation_sector_identifier_differences_max": 0,
+    "flight_data_value_differences_max": 0,
+    "unresolved_differences_allowed_for_pass": 0,
+    "unobservable_or_unavailable_fraction_max": 0,
+    "coverage_gaps_allowed_for_pass": 0,
+    "meaning": "strict engineering screening limits, not FAA acceptance thresholds"
+  },
+  "denominator_rules": {
+    "every_decoded_row": "accounted as matched-GUFI, missing-GUFI, identity-mismatch, or invalid-clock",
+    "every_compared_source_field": "accounted as present, absent, malformed, unsupported, candidate-unavailable, candidate-not-yet-available, candidate-not-modeled, equivalent, or unresolved-different",
+    "candidate_output_absence": "unavailable, never an excluded truth/event",
+    "g3_occupancy_rows": "every SFDPS row is classified as supported-match, supported-mismatch, contested, unknown-support, no-training-cell, candidate-unavailable, identity-mismatch, invalid-time, future-state, stale-state, unknown-availability, invalid-position, missing-altitude, invalid-altitude, stale-position, or unknown-source-owner; counts must sum to the evaluation row total",
+    "flight_data_amendments": "unobservable coverage is reported explicitly and cannot qualify as a pass",
+    "missing_legacy_observation": "not comparable, never agreement",
+    "report_must_reconcile_counts": true
+  }
+}

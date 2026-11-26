@@ -5,10 +5,11 @@
 //! into exactly one G3 disposition and each independently comparable published-state row into
 //! the field buckets below; unsupported event families stay explicitly unobservable.
 
+use crate::migration_amendment::{AmendmentSummary, AMENDMENT_FIELD_COUNT};
 use crate::migration_g3::{ModelError, OutcomeCounts, RowResult};
 use crate::migration_snapshot::{FieldOutcome, RowComparison, RowIdentityState};
 
-pub const PROFILE_ID: &str = "M4-H2-DEV-COMPARISON-V3-CAUSAL-ASOF";
+pub const PROFILE_ID: &str = "M4-H2-DEV-COMPARISON-V5-CAUSAL-ASOF-TRAIN1H-AMENDPROP";
 pub const MAX_REPORT_BYTES: usize = 64 * 1024;
 
 #[repr(C)]
@@ -138,7 +139,7 @@ pub struct FullDayCounts {
     pub adapted_events: u64,
     pub runtime_frames: u64,
     pub unobservable_handoff_rows: u64,
-    pub unobservable_amendment_rows: u64,
+    pub unobservable_amendment_decision_rows: u64,
     pub unobservable_legacy_alerts: u64,
     pub unsupported_point_out_rows: u64,
     pub unsupported_interface_rows: u64,
@@ -151,8 +152,9 @@ pub struct FullDayCounts {
     pub spatial_positions_seen: u64,
     pub spatial_positions_inside: u64,
     pub spatial_positions_outside: u64,
+    pub amendment_propagation: AmendmentSummary,
 }
-const _: () = assert!(core::mem::size_of::<FullDayCounts>() == 424);
+const _: () = assert!(core::mem::size_of::<FullDayCounts>() == 1544);
 
 pub struct ReportMetadata<'a> {
     pub input_bytes: u64,
@@ -182,6 +184,8 @@ impl FullDayCounts {
             && self.g3.total == self.source_sfdps_rows
             && self.flight_state.reconciles()
             && self.flight_state.total_rows == self.source_sfdps_rows
+            && self.amendment_propagation.reconciles()
+            && self.amendment_propagation.source_rows_seen == self.source_sfdps_rows
     }
 }
 
@@ -214,7 +218,7 @@ pub fn render_report(
         return Err("aggregate or digest reconciliation failed");
     }
     let mut report = format!(
-        "OA-M4-H2-FULL-DAY\t2\nprofile\t{PROFILE_ID}\nevaluation_start_ns\t{}\nevaluation_end_ns_exclusive\t{}\ninput_bytes\t{input_bytes}\ninput_sha256\t{input_sha256}\nexecutable_sha256\t{executable_sha256}\nairspace_sha256\t{airspace_sha256}\ng3_artifact_sha256\t{g3_artifact_sha256}\npolicy_sha256\t{policy_sha256}\ninput_frames\t{}\ninput_status_frames\t{}\ninput_reject_frames\t{}\nadapted_events\t{}\nadaptation_quarantine_rows\t{}\nadapter_unprocessed_frames\t{}\nsource_projection_refusals\t{}\nsource_clock_regressions\t{}\nspatial_filter\tOA_ADSB_ZAU_BOX_V1\nspatial_positions_seen\t{}\nspatial_positions_inside\t{}\nspatial_positions_outside\t{}\nruntime_frames\t{}\nsfdps_rows\t{}\n",
+        "OA-M4-H2-FULL-DAY\t3\nprofile\t{PROFILE_ID}\nevaluation_start_ns\t{}\nevaluation_end_ns_exclusive\t{}\ninput_bytes\t{input_bytes}\ninput_sha256\t{input_sha256}\nexecutable_sha256\t{executable_sha256}\nairspace_sha256\t{airspace_sha256}\ng3_artifact_sha256\t{g3_artifact_sha256}\npolicy_sha256\t{policy_sha256}\ninput_frames\t{}\ninput_status_frames\t{}\ninput_reject_frames\t{}\nadapted_events\t{}\nadaptation_quarantine_rows\t{}\nadapter_unprocessed_frames\t{}\nsource_projection_refusals\t{}\nsource_clock_regressions\t{}\nspatial_filter\tOA_ADSB_ZAU_BOX_V1\nspatial_positions_seen\t{}\nspatial_positions_inside\t{}\nspatial_positions_outside\t{}\nruntime_frames\t{}\nsfdps_rows\t{}\n",
         crate::migration_full_day_runner::DAY_START_NS, crate::migration_full_day_runner::DAY_END_NS,
         counts.input_frames, counts.input_status_frames, counts.input_reject_frames,
         counts.adapted_events, counts.adaptation_quarantine_rows,
@@ -240,7 +244,7 @@ pub fn render_report(
             crate::recordings_reader::RecordingSource::Adsb => "ADSB",
             crate::recordings_reader::RecordingSource::Sfdps => "SFDPS",
         };
-        writeln!(report, "input_stream\t{index}\t{source}\tbytes={}\tmessages={}\tfirst_frame_ns={}\tlast_frame_ns={}\tmax_gap_ns={}\tsha256={}",
+        writeln!(report, "input_stream\t{index}\t{source}\tbytes={}\tmessage_frames={}\tfirst_oaf_frame_ns={}\tlast_oaf_frame_ns={}\tmax_oaf_frame_gap_ns={}\tsha256={}",
             stream.bytes,
             stream.messages,
             stream.first_frame_receive_ns.map_or_else(|| "NONE".to_owned(), |value| value.to_string()),
@@ -250,6 +254,11 @@ pub fn render_report(
         )
             .map_err(|_| "report formatting failed")?;
     }
+    writeln!(
+        report,
+        "coverage_semantics\tOAF recorder-frame activity only; Message, Status, and Reject frames count; not message-data coverage"
+    )
+    .map_err(|_| "coverage semantics formatting failed")?;
     let state = counts.flight_state;
     let f = state.fields;
     writeln!(
@@ -261,6 +270,47 @@ pub fn render_report(
         f.candidate_not_yet_available, f.candidate_not_modeled, f.identity_mismatch
     )
     .map_err(|_| "report formatting failed")?;
+    if !counts.amendment_propagation.reconciles() {
+        return Err("amendment propagation denominators do not reconcile");
+    }
+    let amendments = counts.amendment_propagation;
+    writeln!(
+        report,
+        "flight_data_amendment_propagation\tprofile=M4-H2-SFDPS-PUBLISHED-AMENDMENT-PROPAGATION-V1\trows_seen={}\trows_with_source_changes={}\tmissing_gufi_rows={}\tsource_clock_regression_rows={}\tbaseline_gufis={}\tdecision_generation=UNOBSERVABLE",
+        amendments.source_rows_seen,
+        amendments.source_rows_with_changes,
+        amendments.missing_gufi_rows,
+        amendments.source_clock_regression_rows,
+        amendments.baseline_entries,
+    )
+    .map_err(|_| "amendment report formatting failed")?;
+    let names = [
+        "flight_status",
+        "flight_plan_id",
+        "callsign",
+        "departure",
+        "arrival",
+        "assigned_altitude",
+        "interim_altitude",
+        "requested_altitude",
+        "route",
+    ];
+    for (index, name) in names.iter().enumerate().take(AMENDMENT_FIELD_COUNT) {
+        let field = amendments
+            .fields
+            .get(index)
+            .ok_or("amendment field count invariant")?;
+        writeln!(
+            report,
+            "flight_data_amendment_field\t{name}\trows_seen={}\tsource_present={}\tsource_absent={}\tsource_malformed={}\tsource_unsupported={}\tfirst_present_value={}\tsource_unchanged={}\tsource_changed={}\tpropagated_equivalent={}\tdifferent_unresolved={}\tcandidate_unavailable={}\tcandidate_not_yet_available={}\tcandidate_not_modeled={}\tidentity_mismatch={}\tclock_ambiguous={}",
+            field.rows_seen, field.source_present, field.source_absent, field.source_malformed,
+            field.source_unsupported, field.first_present_value, field.source_unchanged,
+            field.source_changed, field.propagated_equivalent, field.different_unresolved,
+            field.candidate_unavailable, field.candidate_not_yet_available,
+            field.candidate_not_modeled, field.identity_mismatch, field.clock_ambiguous,
+        )
+        .map_err(|_| "amendment field report formatting failed")?;
+    }
     for (family, coverage, rows) in [
         (
             "handoff",
@@ -268,9 +318,9 @@ pub fn render_report(
             counts.unobservable_handoff_rows,
         ),
         (
-            "flight_data_amendment",
-            "UNOBSERVABLE_SNAPSHOT_IS_NOT_AN_AMENDMENT_EVENT",
-            counts.unobservable_amendment_rows,
+            "flight_data_amendment_decision",
+            "UNOBSERVABLE_NO_INDEPENDENT_CONTROLLER_DECISION_STREAM",
+            counts.unobservable_amendment_decision_rows,
         ),
         (
             "legacy_alert",
@@ -379,6 +429,14 @@ mod tests {
         assert_eq!(counts.g3.total, 2);
         assert_eq!(counts.flight_state.total_rows, 2);
         assert_eq!(counts.flight_state.fields.equivalent, 2);
+        counts.amendment_propagation.source_rows_seen = 2;
+        counts.amendment_propagation.baseline_entries = 1;
+        for field in &mut counts.amendment_propagation.fields {
+            field.rows_seen = 2;
+            field.source_present = 2;
+            field.first_present_value = 1;
+            field.source_unchanged = 1;
+        }
         assert!(counts.reconciles());
         Ok(())
     }

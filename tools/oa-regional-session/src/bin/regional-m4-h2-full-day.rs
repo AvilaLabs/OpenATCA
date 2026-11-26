@@ -19,7 +19,7 @@ const MAX_SNAPSHOT_BYTES: usize = 64 * 1024 * 1024;
 const MAX_EXECUTABLE_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_REPORT_BYTES: usize = 64 * 1024;
 const HASH_CHUNK_BYTES: usize = 64 * 1024;
-const POLICY_BYTES: &[u8] = include_bytes!("../../../../docs/migration/H2_NONINFERIORITY_V2.json");
+const POLICY_BYTES: &[u8] = include_bytes!("../../../../docs/migration/H2_NONINFERIORITY_V4.json");
 
 struct Arguments {
     inputs: Vec<StreamInput>,
@@ -260,7 +260,7 @@ fn run() -> Result<(), String> {
             oa_regional_session::migration_full_day_runner::DAY_START_NS,
             oa_regional_session::migration_full_day_runner::DAY_END_NS,
         ),
-        oa_regional_session::surveillance::MAX_FRAME_GAP_NS,
+        oa_regional_session::recordings_stream::H2_RECORDER_ACTIVITY_MAX_GAP_NS,
     )?;
     let sfdps_coverage = oa_regional_session::recordings_stream::source_coverage(
         &summary.streams,
@@ -269,9 +269,10 @@ fn run() -> Result<(), String> {
             oa_regional_session::migration_full_day_runner::DAY_START_NS,
             oa_regional_session::migration_full_day_runner::DAY_END_NS,
         ),
-        oa_regional_session::surveillance::MAX_FRAME_GAP_NS,
+        oa_regional_session::recordings_stream::H2_RECORDER_ACTIVITY_MAX_GAP_NS,
     )?;
-    let full_coverage = adsb_coverage.full_window_covered && sfdps_coverage.full_window_covered;
+    let full_recorder_activity_coverage =
+        adsb_coverage.full_window_covered && sfdps_coverage.full_window_covered;
     let input_sha = aggregate_input_sha256(&summary)?;
     let policy_sha = oa_sha256::to_hex(&oa_sha256::sha256(POLICY_BYTES));
     let metadata = ReportMetadata {
@@ -285,10 +286,23 @@ fn run() -> Result<(), String> {
     };
     let mut report = render_report(&counts, &metadata).map_err(str::to_owned)?;
     use std::fmt::Write as FmtWrite;
+    writeln!(
+        report,
+        "input_window_disposition\tall_frames={}\tin_window_messages={}\tin_window_status_frames={}\tin_window_reject_frames={}\toutside_window_frames={}\toutside_window_messages={}\toutside_window_status_frames={}\toutside_window_reject_frames={}",
+        summary.counts.frames,
+        summary.counts.messages,
+        summary.counts.status_frames - summary.counts.outside_window_status_frames,
+        summary.counts.reject_frames - summary.counts.outside_window_reject_frames,
+        summary.counts.outside_window_frames,
+        summary.counts.outside_window_messages,
+        summary.counts.outside_window_status_frames,
+        summary.counts.outside_window_reject_frames,
+    )
+    .map_err(|_| "input window disposition formatting failed")?;
     let runtime_caps = oa_regional_session::runtime::RegionalRunProfile::recorded_peak();
     writeln!(
         report,
-        "caps\tphysical_bytes={}\texpanded_bytes={}\tinput_frames={}\tinput_streams={}\toaf_work_units={}\tpending_frames_per_stream={}\tpending_bytes_per_stream={}\tnormalized_events={}\truntime_frames={}\ttracks={}\tflights={}\tdrain_rows={}\topen_alerts={}\tcandidate_pairs={}\tca_work_per_frame={}\tevents_per_receipt={}\tframe_gap_ns={}",
+        "caps\tphysical_bytes={}\texpanded_bytes={}\tinput_frames={}\tinput_streams={}\toaf_work_units={}\tpending_frames_per_stream={}\tpending_bytes_per_stream={}\tnormalized_events={}\truntime_frames={}\ttracks={}\tflights={}\tdrain_rows={}\topen_alerts={}\tcandidate_pairs={}\tca_work_per_frame={}\tevents_per_receipt={}\truntime_frame_gap_ns={}\tamendment_baselines={}\tamendment_baseline_bytes={}\tamendment_baseline_total_bytes={}\tamendment_index_slots={}\tamendment_index_bytes={}\tamendment_max_lookup_probes={}",
         oa_regional_session::recordings_stream::MAX_H2_PHYSICAL_INPUT_BYTES,
         oa_regional_session::recordings_stream::MAX_H2_EXPANDED_INPUT_BYTES,
         oa_regional_session::recordings_stream::MAX_H2_INPUT_FRAMES,
@@ -306,7 +320,27 @@ fn run() -> Result<(), String> {
         runtime_caps.surveillance.max_ca_work_per_frame,
         oa_regional_session::session::MAX_EVENTS_PER_RECEIPT,
         oa_regional_session::surveillance::MAX_FRAME_GAP_NS,
+        oa_regional_session::migration_amendment::MAX_AMENDMENT_BASELINES,
+        oa_regional_session::migration_amendment::AMENDMENT_BASELINE_BYTES,
+        oa_regional_session::migration_amendment::MAX_AMENDMENT_BASELINES
+            * oa_regional_session::migration_amendment::AMENDMENT_BASELINE_BYTES,
+        oa_regional_session::migration_amendment::MAX_AMENDMENT_BASELINES
+            .checked_mul(2)
+            .and_then(usize::checked_next_power_of_two)
+            .ok_or("amendment index size overflow")?,
+        oa_regional_session::migration_amendment::MAX_AMENDMENT_BASELINES
+            .checked_mul(2)
+            .and_then(usize::checked_next_power_of_two)
+            .and_then(|slots| slots.checked_mul(core::mem::size_of::<u32>()))
+            .ok_or("amendment index byte size overflow")?,
+        oa_regional_session::migration_amendment::MAX_LOOKUP_PROBES,
     ).map_err(|_| "profile report formatting failed")?;
+    writeln!(
+        report,
+        "recorder_frame_activity_max_gap_ns\t{}\ncandidate_asof_max_state_age_ns\t1000000000",
+        oa_regional_session::recordings_stream::H2_RECORDER_ACTIVITY_MAX_GAP_NS,
+    )
+    .map_err(|_| "time threshold report formatting failed")?;
     writeln!(report, "g3_training_sha256\t{}\ng3_source_revision\t{}\ng3_binary_sha256\t{}\ng3_policy_sha256\t{}", args.g3_training_sha256, args.g3_source_revision, args.g3_binary_sha256, args.g3_policy_sha256)
         .map_err(|_| "G3 provenance formatting failed")?;
     for coverage in [adsb_coverage, sfdps_coverage] {
@@ -314,7 +348,7 @@ fn run() -> Result<(), String> {
             RecordingSource::Adsb => "ADSB",
             RecordingSource::Sfdps => "SFDPS",
         };
-        writeln!(report, "source_coverage\t{source}\tfirst_frame_ns={}\tlast_frame_ns={}\tlargest_gap_ns={}\tfull_window_covered={}",
+        writeln!(report, "source_recorder_frame_activity\t{source}\tfirst_frame_ns={}\tlast_frame_ns={}\tlargest_frame_activity_gap_ns={}\tfull_activity_window_covered={}",
             coverage.first_frame_receive_ns.map_or_else(|| "NONE".to_owned(), |value| value.to_string()),
             coverage.last_frame_receive_ns.map_or_else(|| "NONE".to_owned(), |value| value.to_string()),
             coverage.largest_gap_ns,
@@ -323,8 +357,8 @@ fn run() -> Result<(), String> {
     }
     writeln!(
         report,
-        "full_24h_input_coverage\t{}",
-        u8::from(full_coverage)
+        "full_24h_recorder_frame_activity_coverage\t{}",
+        u8::from(full_recorder_activity_coverage)
     )
     .map_err(|_| "coverage report formatting failed")?;
     if report.len() > MAX_REPORT_BYTES {
@@ -349,10 +383,10 @@ fn run() -> Result<(), String> {
     let report_path = args.output.join("h2-full-day-report.tsv");
     write_new(&report_path, report.as_bytes())?;
     let complete_path = args.output.join("COMPLETE");
-    let completion: &[u8] = if full_coverage {
-        b"RUN_FINISHED\tFULL_24H_INPUT_COVERAGE=true\tQUALIFICATION_NOT_ASSESSED\n"
+    let completion: &[u8] = if full_recorder_activity_coverage {
+        b"RUN_FINISHED\tFULL_24H_RECORDER_FRAME_ACTIVITY=true\tQUALIFICATION_NOT_ASSESSED\n"
     } else {
-        b"RUN_FINISHED\tFULL_24H_INPUT_COVERAGE=false\tQUALIFICATION_NOT_ASSESSED\n"
+        b"RUN_FINISHED\tFULL_24H_RECORDER_FRAME_ACTIVITY=false\tQUALIFICATION_NOT_ASSESSED\n"
     };
     write_new(&complete_path, completion)?;
     Ok(())

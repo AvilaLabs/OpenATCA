@@ -2,6 +2,9 @@
 #![forbid(unsafe_code)]
 
 use crate::input::{EventKind, NormalizedEvent, SourceKind};
+use crate::migration_amendment::{
+    amendment_accumulator_new, amendment_observe, amendment_summary, AmendmentAccumulator,
+};
 use crate::migration_full_day::FullDayCounts;
 use crate::migration_g3::{self, CandidatePosition, SourceReference, TrainingModel};
 use crate::migration_snapshot;
@@ -31,6 +34,46 @@ pub const MAX_XML_TEXT_NODES: usize = 262_144;
 pub const MAX_FIXM_STRING_BYTES: usize = 1 << 20;
 pub const MAP_RANGE_NM: f64 = 1_000.0;
 
+fn fixm_summary_refusal_count(
+    summary: &oa_fixm::Summary,
+    emitted_rows: u32,
+) -> Result<u64, String> {
+    if summary.rows != emitted_rows {
+        return Err(format!(
+            "FIXM summary row count {} differs from emitted Events rows {}",
+            summary.rows, emitted_rows
+        ));
+    }
+    if summary.sealed_window_dropped > 0 {
+        if summary.rows != 0
+            || summary.rejected != 0
+            || summary.not_decoded != 0
+            || summary.messages != 0
+        {
+            return Err("FIXM sealed-window disposition contradicts other summary counts".into());
+        }
+        return Ok(u64::from(summary.sealed_window_dropped));
+    }
+    let accounted = summary
+        .rows
+        .checked_add(summary.rejected)
+        .and_then(|value| value.checked_add(summary.not_decoded))
+        .ok_or("FIXM summary disposition count overflow")?;
+    if summary.not_decoded == 0 && accounted != summary.messages {
+        return Err(format!(
+            "FIXM messages {} do not reconcile to rows {} + rejected {}",
+            summary.messages, summary.rows, summary.rejected
+        ));
+    }
+    if summary.not_decoded > 0 && accounted < summary.messages {
+        return Err(format!(
+            "FIXM prefix disposition total {} is below messages visited {}",
+            accounted, summary.messages
+        ));
+    }
+    Ok(u64::from(summary.rejected) + u64::from(summary.not_decoded))
+}
+
 struct PendingEvent {
     event: NormalizedEvent,
     original_receive_ns: i64,
@@ -45,6 +88,7 @@ struct PositionAvailability {
 
 struct ComparisonContext<'a> {
     counts: &'a mut FullDayCounts,
+    amendments: &'a mut AmendmentAccumulator,
     g3_model: &'a TrainingModel,
     tracks: &'a [ObservedTrack],
     flights: &'a [crate::flight::SharedFlightView],
@@ -73,6 +117,7 @@ pub struct FullDayRunner {
     xml_parser: oa_xml::Parser,
     fixm_decoder: oa_fixm::Decoder,
     fixm_events: oa_fixm::Events,
+    amendments: AmendmentAccumulator,
 }
 
 impl FullDayRunner {
@@ -121,6 +166,8 @@ impl FullDayRunner {
         fixm_limits.max_elements = MAX_XML_ELEMENTS;
         let fixm_decoder = oa_fixm::Decoder::new(fixm_limits);
         let fixm_events = oa_fixm::new_events(4096, MAX_FIXM_STRING_BYTES);
+        let amendments = amendment_accumulator_new()
+            .map_err(|error| format!("amendment baseline allocation refused: {error:?}"))?;
         Ok(Self {
             runtime,
             g3_model,
@@ -141,6 +188,7 @@ impl FullDayRunner {
             xml_parser,
             fixm_decoder,
             fixm_events,
+            amendments,
         })
     }
 
@@ -571,8 +619,31 @@ impl FullDayRunner {
             .fixm_decoder
             .decode_prefix(&document, &frame.payload, &mut self.fixm_events)
             .map_err(|error| format!("FIXM source projection decode refusal: {error:?}"))?;
-        if summary.not_decoded != 0 || summary.sealed_window_dropped != 0 {
-            return Err("SFDPS source projection is partial or contains a sealed timestamp".into());
+        let emitted_rows =
+            u32::try_from(self.fixm_events.len).map_err(|_| "FIXM emitted row count overflow")?;
+        let refusal_count = match fixm_summary_refusal_count(&summary, emitted_rows) {
+            Ok(count) => count,
+            Err(error) => {
+                self.counts.source_projection_refusals = self
+                    .counts
+                    .source_projection_refusals
+                    .checked_add(1)
+                    .ok_or("source projection refusal count overflow")?;
+                return Err(format!(
+                    "SFDPS source projection denominator invalid: {error}"
+                ));
+            }
+        };
+        if refusal_count > 0 {
+            self.counts.source_projection_refusals = self
+                .counts
+                .source_projection_refusals
+                .checked_add(refusal_count)
+                .ok_or("source projection refusal count overflow")?;
+            return Err(format!(
+                "SFDPS source projection refused {refusal_count} messages (rows={}, rejected={}, not_decoded={}, sealed_window_dropped={}); no complete report written",
+                summary.rows, summary.rejected, summary.not_decoded, summary.sealed_window_dropped
+            ));
         }
         let observed_ms = frame.receipt_ns.div_euclid(1_000_000);
         for row in 0..self.fixm_events.len {
@@ -593,6 +664,7 @@ impl FullDayRunner {
                 .map_err(|error| format!("SFDPS row facts incomplete: {error}"))?;
             let mut context = ComparisonContext {
                 counts: &mut self.counts,
+                amendments: &mut self.amendments,
                 g3_model: &self.g3_model,
                 tracks: &self.latest_tracks,
                 flights: &self.latest_flights,
@@ -671,32 +743,35 @@ impl FullDayRunner {
             .record_g3(&result)
             .map_err(|error| format!("G3 disposition count: {error:?}"))?;
 
-        if let Some(view) = exact_view.or(address_view) {
+        let snapshot_comparison = if let Some(view) = exact_view.or(address_view) {
             let comparison = migration_snapshot::compare_published_view(facts, view)
                 .map_err(|error| format!("flight-state comparison: {error:?}"))?;
-            context
-                .counts
-                .record_snapshot(&comparison)
-                .map_err(|error| format!("flight-state count: {error:?}"))?;
+            comparison
         } else if facts.gufi == 0 {
             let empty = oa_flight::FLIGHT_FREE;
-            let comparison = migration_snapshot::compare_published_row(facts, &empty)
-                .map_err(|error| format!("missing-GUFI comparison: {error:?}"))?;
-            context
-                .counts
-                .record_snapshot(&comparison)
-                .map_err(|error| format!("flight-state count: {error:?}"))?;
+            migration_snapshot::compare_published_row(facts, &empty)
+                .map_err(|error| format!("missing-GUFI comparison: {error:?}"))?
         } else {
-            let comparison = migration_snapshot::compare_published_unavailable(facts)
-                .map_err(|error| format!("candidate-unavailable comparison: {error:?}"))?;
-            context
-                .counts
-                .record_snapshot(&comparison)
-                .map_err(|error| format!("flight-state unavailable count: {error:?}"))?;
-        }
-        context.counts.unobservable_amendment_rows = context
+            migration_snapshot::compare_published_unavailable(facts)
+                .map_err(|error| format!("candidate-unavailable comparison: {error:?}"))?
+        };
+        context
             .counts
-            .unobservable_amendment_rows
+            .record_snapshot(&snapshot_comparison)
+            .map_err(|error| format!("flight-state count: {error:?}"))?;
+        amendment_observe(
+            context.amendments,
+            &snapshot_comparison,
+            facts.gufi,
+            facts.source_time_ms,
+            facts.observed_time_ms,
+            facts.route,
+        )
+        .map_err(|error| format!("amendment propagation count: {error:?}"))?;
+        context.counts.amendment_propagation = amendment_summary(context.amendments);
+        context.counts.unobservable_amendment_decision_rows = context
+            .counts
+            .unobservable_amendment_decision_rows
             .checked_add(1)
             .ok_or("amendment denominator overflow")?;
         if facts.handoff_event.state
@@ -791,4 +866,39 @@ pub fn run_full_day(
     runner.record_stream_summary(&summary)?;
     let counts = runner.finish()?;
     Ok((counts, summary))
+}
+
+#[cfg(test)]
+mod fixm_summary_tests {
+    use super::fixm_summary_refusal_count;
+
+    // REQ: OA-MIG-411
+    #[test]
+    fn rejected_and_unemitted_fixm_messages_cannot_disappear_from_denominator() {
+        let rejected = oa_fixm::Summary {
+            messages: 4,
+            rows: 3,
+            rejected: 1,
+            ..oa_fixm::Summary::default()
+        };
+        assert_eq!(fixm_summary_refusal_count(&rejected, 3), Ok(1));
+
+        let capacity = oa_fixm::Summary {
+            messages: 4,
+            rows: 3,
+            rejected: 1,
+            not_decoded: 2,
+            ..oa_fixm::Summary::default()
+        };
+        assert_eq!(fixm_summary_refusal_count(&capacity, 3), Ok(3));
+        assert!(fixm_summary_refusal_count(&rejected, 2).is_err());
+
+        let inconsistent = oa_fixm::Summary {
+            messages: 4,
+            rows: 2,
+            rejected: 1,
+            ..oa_fixm::Summary::default()
+        };
+        assert!(fixm_summary_refusal_count(&inconsistent, 2).is_err());
+    }
 }

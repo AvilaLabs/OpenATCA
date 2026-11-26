@@ -19,6 +19,8 @@ pub const MAX_H2_INPUT_FRAMES: u64 = 20_000_000;
 pub const MAX_H2_FRAME_WORK_UNITS: u64 = 128 * 1024 * 1024 * 1024;
 pub const MAX_PENDING_FRAMES_PER_STREAM: usize = 4_096;
 pub const MAX_PENDING_FRAME_BYTES_PER_STREAM: usize = 4 * 1024 * 1024;
+/// Recorder-activity reporting threshold, separate from the G3 candidate's 1 s state-age rule.
+pub const H2_RECORDER_ACTIVITY_MAX_GAP_NS: i64 = 60_000_000_000;
 const INPUT_CHUNK_BYTES: usize = 4 * 1024;
 type StreamSortKey = (i64, u8, u64, u8, u64);
 type SelectedStream = Option<(usize, StreamSortKey)>;
@@ -35,6 +37,10 @@ pub struct StreamCounts {
     pub messages: u64,
     pub status_frames: u64,
     pub reject_frames: u64,
+    pub outside_window_frames: u64,
+    pub outside_window_messages: u64,
+    pub outside_window_status_frames: u64,
+    pub outside_window_reject_frames: u64,
     pub physical_bytes: u64,
     pub expanded_bytes: u64,
     pub frame_work_units: u64,
@@ -78,8 +84,10 @@ pub struct SourceCoverage {
     pub full_window_covered: bool,
 }
 
-/// Reconcile observed frame intervals for one source against a predeclared half-open window.
-/// A coverage gap is reported as metadata; it does not erase comparisons over delivered rows.
+/// Reconcile OAF recorder-frame activity intervals (Message, Status, and Reject) against a
+/// predeclared half-open window. This is not message-data coverage; status heartbeats can bridge
+/// a frame-activity gap without proving source messages were present. Gaps never erase delivered
+/// comparisons.
 pub fn source_coverage(
     streams: &[StreamDigest],
     source: RecordingSource,
@@ -238,7 +246,9 @@ struct OafStream<'a> {
     hash: oa_sha256::Sha256,
     hash_final: Option<[u8; 32]>,
     prior_receipt_ns: Option<i64>,
+    coverage_prior_receipt_ns: Option<i64>,
     first_frame_receive_ns: Option<i64>,
+    last_frame_receive_ns: Option<i64>,
     max_frame_gap_ns: i64,
     prior_work: FrameWorkStats,
     counts: StreamCounts,
@@ -279,7 +289,9 @@ impl<'a> OafStream<'a> {
             hash: oa_sha256::Sha256::new(),
             hash_final: None,
             prior_receipt_ns: None,
+            coverage_prior_receipt_ns: None,
             first_frame_receive_ns: None,
+            last_frame_receive_ns: None,
             max_frame_gap_ns: 0,
             prior_work: FrameWorkStats::default(),
             counts: StreamCounts::default(),
@@ -332,25 +344,10 @@ impl<'a> OafStream<'a> {
                 return Err("invalid or sealed OAF receive timestamp".into());
             }
             if self
-                .receive_window_ns
-                .is_some_and(|(start, end)| frame.recv_unix_ns < start || frame.recv_unix_ns >= end)
-            {
-                return Err("OAF frame receive time falls outside the declared day window".into());
-            }
-            if self
                 .prior_receipt_ns
                 .is_some_and(|previous| frame.recv_unix_ns < previous)
             {
                 return Err("OAF segment is not monotone by recorder receive time".into());
-            }
-            if let Some(previous) = self.prior_receipt_ns {
-                let gap = frame
-                    .recv_unix_ns
-                    .checked_sub(previous)
-                    .ok_or("receive gap overflow")?;
-                self.max_frame_gap_ns = self.max_frame_gap_ns.max(gap);
-            } else if self.first_frame_receive_ns.is_none() {
-                self.first_frame_receive_ns = Some(frame.recv_unix_ns);
             }
             self.prior_receipt_ns = Some(frame.recv_unix_ns);
             budget.add_frame()?;
@@ -359,6 +356,91 @@ impl<'a> OafStream<'a> {
                 .frames
                 .checked_add(1)
                 .ok_or("per-stream frame count overflow")?;
+            let outside_window = self.receive_window_ns.is_some_and(|(start, end)| {
+                frame.recv_unix_ns < start || frame.recv_unix_ns >= end
+            });
+            if outside_window {
+                self.counts.outside_window_frames = self
+                    .counts
+                    .outside_window_frames
+                    .checked_add(1)
+                    .ok_or("outside-window frame count overflow")?;
+                budget.counts.outside_window_frames = budget
+                    .counts
+                    .outside_window_frames
+                    .checked_add(1)
+                    .ok_or("outside-window frame count overflow")?;
+                match frame.kind {
+                    Kind::Message => {
+                        self.counts.outside_window_messages = self
+                            .counts
+                            .outside_window_messages
+                            .checked_add(1)
+                            .ok_or("outside-window message count overflow")?;
+                        budget.counts.outside_window_messages = budget
+                            .counts
+                            .outside_window_messages
+                            .checked_add(1)
+                            .ok_or("outside-window message count overflow")?;
+                    }
+                    Kind::Status => {
+                        self.counts.status_frames = self
+                            .counts
+                            .status_frames
+                            .checked_add(1)
+                            .ok_or("status frame count overflow")?;
+                        budget.counts.status_frames = budget
+                            .counts
+                            .status_frames
+                            .checked_add(1)
+                            .ok_or("status frame count overflow")?;
+                        self.counts.outside_window_status_frames = self
+                            .counts
+                            .outside_window_status_frames
+                            .checked_add(1)
+                            .ok_or("outside-window status count overflow")?;
+                        budget.counts.outside_window_status_frames = budget
+                            .counts
+                            .outside_window_status_frames
+                            .checked_add(1)
+                            .ok_or("outside-window status count overflow")?;
+                    }
+                    Kind::Reject => {
+                        self.counts.reject_frames = self
+                            .counts
+                            .reject_frames
+                            .checked_add(1)
+                            .ok_or("reject frame count overflow")?;
+                        budget.counts.reject_frames = budget
+                            .counts
+                            .reject_frames
+                            .checked_add(1)
+                            .ok_or("reject frame count overflow")?;
+                        self.counts.outside_window_reject_frames = self
+                            .counts
+                            .outside_window_reject_frames
+                            .checked_add(1)
+                            .ok_or("outside-window reject count overflow")?;
+                        budget.counts.outside_window_reject_frames = budget
+                            .counts
+                            .outside_window_reject_frames
+                            .checked_add(1)
+                            .ok_or("outside-window reject count overflow")?;
+                    }
+                }
+                continue;
+            }
+            if let Some(previous) = self.coverage_prior_receipt_ns {
+                let gap = frame
+                    .recv_unix_ns
+                    .checked_sub(previous)
+                    .ok_or("coverage gap overflow")?;
+                self.max_frame_gap_ns = self.max_frame_gap_ns.max(gap);
+            } else {
+                self.first_frame_receive_ns = Some(frame.recv_unix_ns);
+            }
+            self.coverage_prior_receipt_ns = Some(frame.recv_unix_ns);
+            self.last_frame_receive_ns = Some(frame.recv_unix_ns);
             match frame.kind {
                 Kind::Message => {
                     let payload_len = frame.payload.len();
@@ -568,7 +650,7 @@ impl<'a> OafStream<'a> {
             sha256,
             messages: self.counts.messages,
             first_frame_receive_ns: self.first_frame_receive_ns,
-            last_frame_receive_ns: self.prior_receipt_ns,
+            last_frame_receive_ns: self.last_frame_receive_ns,
             max_frame_gap_ns: self.max_frame_gap_ns,
         })
     }
@@ -597,9 +679,9 @@ pub fn stream_oaf_segments(
     stream_oaf_segments_in_window(inputs, None, visit)
 }
 
-/// Stream one predeclared half-open UTC receive-time interval. Unlike a windowing filter, this
-/// refuses any message outside the interval so callers cannot accidentally report a partial day
-/// as a complete day. `None` preserves the legacy general-purpose reader behavior above.
+/// Stream one predeclared half-open UTC receive-time interval. Frames outside the interval are
+/// still included in byte/frame/work accounting and timestamp-order checks, then counted and
+/// skipped before message payload normalization. `None` preserves the general-purpose behavior.
 pub fn stream_oaf_segments_in_window(
     inputs: &[StreamInput],
     receive_window_ns: Option<(i64, i64)>,
@@ -946,7 +1028,7 @@ mod tests {
         Ok(())
     }
 
-    // REQ: OA-MIG-411
+    // REQ: OA-MIG-415
     #[test]
     fn bounded_segment_merge_streams_messages_in_receipt_order() -> Result<(), Box<dyn Error>> {
         let adsb = temporary_path("merge_adsb")?;
@@ -985,7 +1067,7 @@ mod tests {
         Ok(())
     }
 
-    // REQ: OA-MIG-411
+    // REQ: OA-MIG-415
     #[test]
     fn nonmonotone_segment_refuses_before_claiming_full_stream() -> Result<(), Box<dyn Error>> {
         let path = temporary_path("nonmonotone")?;
@@ -1000,14 +1082,17 @@ mod tests {
         Ok(())
     }
 
-    // REQ: OA-MIG-411
+    // REQ: OA-MIG-415
     #[test]
-    fn declared_window_is_half_open_and_outside_messages_refuse() -> Result<(), Box<dyn Error>> {
+    fn declared_window_counts_and_skips_physical_prefix_and_suffix() -> Result<(), Box<dyn Error>> {
         let start = 1_800_000_000_000_000_000i64;
         let end = start + 10_000_000_000;
         let path = temporary_path("window")?;
         let sfdps_path = temporary_path("window_sfdps")?;
-        write_frames(&path, &[start, end - 1_000_000_000])?;
+        write_frames(
+            &path,
+            &[start - 1_000_000_000, start, end - 1_000_000_000, end],
+        )?;
         write_frames(&sfdps_path, &[start])?;
         let input = [
             StreamInput {
@@ -1026,32 +1111,24 @@ mod tests {
         });
         let _ = fs::remove_file(&path);
         let _ = fs::remove_file(&sfdps_path);
-        assert_eq!(accepted?.counts.messages, 3);
+        let accepted = accepted?;
+        assert_eq!(accepted.counts.messages, 3);
+        assert_eq!(accepted.counts.frames, 5);
+        assert_eq!(accepted.counts.outside_window_frames, 2);
+        assert_eq!(accepted.counts.outside_window_messages, 2);
         assert_eq!(seen, 3);
-
-        let outside = temporary_path("window_end")?;
-        let sfdps_outside = temporary_path("window_end_sfdps")?;
-        write_frames(&outside, &[end])?;
-        write_frames(&sfdps_outside, &[start])?;
-        let input = [
-            StreamInput {
-                source: RecordingSource::Adsb,
-                path: outside.clone(),
-            },
-            StreamInput {
-                source: RecordingSource::Sfdps,
-                path: sfdps_outside.clone(),
-            },
-        ];
-        let refused = stream_oaf_segments_in_window(&input, Some((start, end)), |_| Ok(()));
-        let _ = fs::remove_file(&outside);
-        let _ = fs::remove_file(&sfdps_outside);
-        assert!(refused.is_err());
+        let adsb_digest = accepted
+            .streams
+            .iter()
+            .find(|stream| stream.source == RecordingSource::Adsb)
+            .ok_or("ADSB digest missing")?;
+        assert_eq!(adsb_digest.first_frame_receive_ns, Some(start));
+        assert_eq!(adsb_digest.last_frame_receive_ns, Some(end - 1_000_000_000));
         assert!(stream_oaf_segments_in_window(&input, Some((end, start)), |_| Ok(())).is_err());
         Ok(())
     }
 
-    // REQ: OA-MIG-411
+    // REQ: OA-MIG-415
     #[test]
     fn normalized_stream_carries_sequences_and_exact_receive_provenance(
     ) -> Result<(), Box<dyn Error>> {
@@ -1097,7 +1174,7 @@ mod tests {
         Ok(())
     }
 
-    // REQ: OA-MIG-411
+    // REQ: OA-MIG-415
     #[test]
     fn source_coverage_reports_unobserved_prefix_without_erasing_available_rows(
     ) -> Result<(), Box<dyn Error>> {
