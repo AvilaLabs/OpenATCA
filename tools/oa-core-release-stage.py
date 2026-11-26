@@ -554,6 +554,8 @@ def git_files(repo: Path, revision: str, crate_relative: str) -> tuple[list[tupl
             if not path.endswith(".rs"):
                 raise StageError(f"non-Rust example needs explicit review: {path}")
             records.append((path, mode))
+        elif path[len(crate_relative) + 1:] in TEST_ASSETS.get(Path(crate_relative).name, {}):
+            records.append((path, mode))
         elif path.startswith(f"{crate_relative}/tests/"):
             inside = path[len(crate_relative) + 1:]
             if path.endswith(".rs") or inside in TEST_ASSETS.get(Path(crate_relative).name, {}):

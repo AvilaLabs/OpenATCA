@@ -222,6 +222,23 @@ class ReleaseStageTests(unittest.TestCase):
             stage_tool.stage(self.repo, self.commit, output, ("oa-mini",))
         self.assertFalse(output.exists())
 
+    def test_pinned_schema_outside_tests_is_staged_but_unlisted_neighbor_refuses(self) -> None:
+        schema = b"<schema/>\n"
+        self._write("crates/oa-mini/testdata/schema/profile.xsd", schema)
+        self._commit_file_change()
+        assets = dict(stage_tool.TEST_ASSETS["oa-mini"])
+        assets["testdata/schema/profile.xsd"] = hashlib.sha256(schema).hexdigest()
+        with patch.dict(stage_tool.TEST_ASSETS, {"oa-mini": assets}):
+            self._stage("schema")
+            copied = self.out_parent / "schema/crates/openatca-mini/testdata/schema/profile.xsd"
+            self.assertEqual(copied.read_bytes(), schema)
+            self._write("crates/oa-mini/testdata/schema/unreviewed.xsd", b"<extra/>\n")
+            self._commit_file_change()
+            output = self.out_parent / "extra-schema"
+            with self.assertRaisesRegex(stage_tool.StageError, "tracked package input is not staged"):
+                self._stage("extra-schema")
+            self.assertFalse(output.exists())
+
     def test_unlisted_test_data_is_refused_before_output(self) -> None:
         self._write("crates/oa-mini/tests/data/unreviewed.bin", b"synthetic bytes\n")
         self._commit_file_change()
