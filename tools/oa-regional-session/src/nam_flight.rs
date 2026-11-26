@@ -774,6 +774,27 @@ mod tests {
         StrIx::new(raw)
     }
 
+    fn add_test_airway(model: &mut Model, from: u32, to: u32) {
+        let airway = intern(model, "V1");
+        let leg_start = u32::try_from(model.airway_legs.from.len()).expect("bounded test index");
+        model.airways.designator.push(airway);
+        model.airways.location.push(b'V');
+        model.airways.legs.push(air_model::Span {
+            start: air_model::AirwayLegIx::new(leg_start),
+            len: 1,
+        });
+        model.airway_legs.from.push(air_model::PointIx::new(from));
+        model.airway_legs.to.push(air_model::PointIx::new(to));
+        model.airway_legs.mea_ft.push(air_model::ALT_NONE);
+        model.airway_legs.mea_opp_ft.push(air_model::ALT_NONE);
+        model.airway_legs.gps_mea_ft.push(air_model::ALT_NONE);
+        model.airway_legs.mea_dir.push(air_model::compass::NONE);
+        model.airway_legs.gps_mea_dir.push(air_model::compass::NONE);
+        model.airway_legs.gap = air_model::bit_zeros(1);
+        model.airway_legs.signal_gap = air_model::bit_zeros(1);
+        model.airway_legs.dogleg = air_model::bit_zeros(1);
+    }
+
     fn preferred_route(
         model: &mut Model,
         origin: &str,
@@ -1120,6 +1141,7 @@ mod tests {
         assert_eq!(cancelled.reply.header.kind, Kind::Lam);
     }
 
+    // REQ: OA-NAM-039
     #[test]
     fn preferred_route_advice_is_attached_to_the_normal_admitted_fpl_path() {
         let mut ingress = active_ingress();
@@ -1132,7 +1154,8 @@ mod tests {
         })
         .expect("bounded flight driver");
         let mut model = model_fixture();
-        preferred_route(&mut model, "KAAA", "KBBB", "H", "DCT FIXA FIXB", None, None);
+        add_test_airway(&mut model, 0, 1);
+        preferred_route(&mut model, "KAAA", "KBBB", "H", "FIXA V1 FIXB", None, None);
 
         let result = receive(
             &mut runtime,
@@ -1155,6 +1178,7 @@ mod tests {
         assert_eq!(routes.revisions.len(), 1);
     }
 
+    // REQ: OA-NAM-039
     #[test]
     fn pfr_type_direction_and_free_text_are_advisory_and_source_bound() {
         let mut model = model_fixture();
