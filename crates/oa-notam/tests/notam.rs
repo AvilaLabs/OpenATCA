@@ -52,7 +52,11 @@ fn types_new_replace_cancel_and_the_referenced_notam() {
     }
     // A cancel that names the NOTAM it cancels.
     let xml = rep(
-        &rep(&msg(&[]), "<event:type>N</event:type>", "<event:type>C</event:type>"),
+        &rep(
+            &msg(&[]),
+            "<event:type>N</event:type>",
+            "<event:type>C</event:type>",
+        ),
         "<event:number>42</event:number>",
         "<event:number>42</event:number><event:referredSeries>Y</event:referredSeries><event:referredNumber>7</event:referredNumber><event:referredYear>2029</event:referredYear>",
     );
@@ -179,7 +183,7 @@ fn rows_round_trip_through_the_columns() {
     assert_eq!(m.present.len(), 2);
     assert_eq!(m.apt_icao.len(), 2);
     // The staged row keeps its budgeted size (RULESET A7).
-    assert_eq!(std::mem::size_of::<Row>(), 248);
+    assert_eq!(std::mem::size_of::<Row>(), 272);
     clear_notams(&mut m);
     assert_eq!((m.len, m.strings_used, m.present.len()), (0, 0, 0));
     assert_eq!(
@@ -380,7 +384,7 @@ fn permanent_and_estimated_ends_are_flagged() {
         "",
     );
     let (n, _) = ok(&nov);
-    assert_eq!(n.flags[0], FLAG_PERMANENT);
+    assert_eq!(n.flags[0], FLAG_PERMANENT | FLAG_END_UNKNOWN);
     assert!(!has_field(&n, 0, Field::End));
     assert_eq!(n.errors[0], 0);
     // No marker, no flag.
@@ -428,7 +432,7 @@ fn text_longer_than_the_limit_or_empty_is_a_field_error_and_takes_no_space() {
     let mut p = parser();
     let mut d = new_decoder(Limits {
         max_text_len: 10,
-        ..Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz())
+        ..Limits::new(oa_time_window::DropWindow::empty_for_tests_and_fuzz())
     });
     let mut out = small();
     let mut s = default_stats();
@@ -528,16 +532,28 @@ fn altitude_limits_convert_to_feet_with_their_reference() {
     );
     assert_eq!(ok(&x).0.ceil_ft[0], 18_000);
     // Unlimited keeps its sentinel and is never "below" the floor.
-    let x = rep(&msg(&[]), "<event:text>", "<event:lowerLimit>FL500</event:lowerLimit><event:upperLimit>UNL</event:upperLimit><event:text>");
+    let x = rep(
+        &msg(&[]),
+        "<event:text>",
+        "<event:lowerLimit>FL500</event:lowerLimit><event:upperLimit>UNL</event:upperLimit><event:text>",
+    );
     let (n, _) = ok(&x);
     assert_eq!((n.ceil_ft[0], n.errors[0]), (ALT_UNLIMITED, 0));
     // A floor above the ceiling in the same reference is an error on the ceiling.
-    let x = rep(&msg(&[]), "<event:text>", "<event:lowerLimit>FL300</event:lowerLimit><event:upperLimit>FL200</event:upperLimit><event:text>");
+    let x = rep(
+        &msg(&[]),
+        "<event:text>",
+        "<event:lowerLimit>FL300</event:lowerLimit><event:upperLimit>FL200</event:upperLimit><event:text>",
+    );
     let (n, _) = ok(&x);
     assert_eq!(n.errors[0], bit(Field::Ceiling));
     assert!(has_field(&n, 0, Field::Floor) && !has_field(&n, 0, Field::Ceiling));
     // Different references are not compared.
-    let x = rep(&msg(&[]), "<event:text>", "<event:lowerLimit>5000FT AGL</event:lowerLimit><event:upperLimit>FL020</event:upperLimit><event:text>");
+    let x = rep(
+        &msg(&[]),
+        "<event:text>",
+        "<event:lowerLimit>5000FT AGL</event:lowerLimit><event:upperLimit>FL020</event:upperLimit><event:text>",
+    );
     assert_eq!(ok(&x).0.errors[0], 0);
 }
 
@@ -724,7 +740,7 @@ fn a_bad_polygon_is_a_field_error_on_the_row_and_none_is_kept() {
     let mut p = parser();
     let mut d = new_decoder(Limits {
         max_poly_vertices: 4,
-        ..Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz())
+        ..Limits::new(oa_time_window::DropWindow::empty_for_tests_and_fuzz())
     });
     let mut out = small();
     let mut s = default_stats();
@@ -1054,7 +1070,11 @@ fn a_message_that_is_not_one_event_is_refused_whole() {
         "<gml:identifier>0a1b2c3d-0000-4000-8000-00000000e001</gml:identifier>",
         &format!("{id}{id}"),
     ] {
-        assert_eq!(err(&rep(&good, id, bad)), DocError::Rejected(Reject::BadId), "{bad}");
+        assert_eq!(
+            err(&rep(&good, id, bad)),
+            DocError::Rejected(Reject::BadId),
+            "{bad}"
+        );
     }
     // No NOTAM, two NOTAMs.
     let notam_start = good.find("<event:textNOTAM>").unwrap();
@@ -1144,7 +1164,7 @@ fn reaching_a_capacity_is_a_reported_refusal_with_nothing_kept() {
     // A document that has too many elements for the decoder.
     let mut small_dec = new_decoder(Limits {
         max_elements: 10,
-        ..Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz())
+        ..Limits::new(oa_time_window::DropWindow::empty_for_tests_and_fuzz())
     });
     let mut out = small();
     let e = decode_bytes(&mut p, &mut small_dec, xml.as_bytes(), &mut out, &mut st).unwrap_err();
@@ -1202,7 +1222,11 @@ fn unknown_paths_are_counted_not_refused() {
     let (n, s) = ok(&xml);
     assert_eq!(s.unknown_elements, 1);
     assert!(!has_field(&n, 0, Field::Year));
-    let xml = rep(&base, "</message:AIXMBasicMessage>", "<message:hasMember><aixm:Airspace gml:id=\"X\"><aixm:timeSlice/></aixm:Airspace></message:hasMember></message:AIXMBasicMessage>");
+    let xml = rep(
+        &base,
+        "</message:AIXMBasicMessage>",
+        "<message:hasMember><aixm:Airspace gml:id=\"X\"><aixm:timeSlice/></aixm:Airspace></message:hasMember></message:AIXMBasicMessage>",
+    );
     let (n, s) = ok(&xml);
     assert_eq!(s.unknown_elements, 1);
     assert_eq!(n.feat_mask[0], 1 << FEAT_AIRPORT);
@@ -1411,7 +1435,11 @@ fn a_namespace_written_with_a_character_reference_is_the_same_namespace() {
 #[test]
 fn a_referred_number_and_year_without_a_series_is_a_local_format_reference() {
     let xml = rep(
-        &rep(&msg(&[]), "<event:type>N</event:type>", "<event:type>C</event:type>"),
+        &rep(
+            &msg(&[]),
+            "<event:type>N</event:type>",
+            "<event:type>C</event:type>",
+        ),
         "<event:number>42</event:number>",
         "<event:number>42</event:number><event:referredNumber>7</event:referredNumber><event:referredYear>2029</event:referredYear>",
     );
@@ -1436,7 +1464,7 @@ fn a_referred_number_and_year_without_a_series_is_a_local_format_reference() {
 fn a_notam_issued_or_cancelled_in_the_drop_window_is_dropped_whole_and_every_counter_is_as_for_an_empty_run(
 ) {
     // 2026-11-20T00:00:00Z to 2026-11-23T00:17:00Z, the sealed window, in Unix ms.
-    let w = oa_sealed::DropWindow::new(1_795_132_800_000, 1_795_393_020_000);
+    let w = oa_time_window::DropWindow::new(1_795_132_800_000, 1_795_393_020_000);
     let issued = "<event:issued>2030-03-05T09:00:00.000Z</event:issued>";
     let in_issued = |t: &str| format!("<event:issued>{t}</event:issued>");
     let base = rep(
@@ -1505,7 +1533,7 @@ fn a_notam_issued_or_cancelled_in_the_drop_window_is_dropped_whole_and_every_cou
 }
 
 /// Decodes `xml` with `w` and returns the outcome, the rows kept and the stats.
-fn decode_with_window(xml: &str, w: oa_sealed::DropWindow) -> (Outcome, usize, Stats) {
+fn decode_with_window(xml: &str, w: oa_time_window::DropWindow) -> (Outcome, usize, Stats) {
     let mut p = parser();
     let mut d = new_decoder(Limits::new(w));
     let mut out = small();
@@ -1516,36 +1544,8 @@ fn decode_with_window(xml: &str, w: oa_sealed::DropWindow) -> (Outcome, usize, S
 
 // REQ: OA-SEAL-014
 #[test]
-fn a_window_that_holds_all_time_drops_every_document_and_the_production_list_drops_the_window() {
-    let issued = "<event:issued>2030-03-05T09:00:00.000Z</event:issued>";
-    let base = msg(&[&airport()]);
-    // All time (the closed failure of the list).
-    let (o, rows, s) = decode_with_window(&base, oa_sealed::DropWindow::all_time());
-    assert!(o.sealed_dropped);
-    assert_eq!(rows, 0);
-    assert_eq!(
-        s,
-        Stats {
-            sealed_window_dropped: 1,
-            ..default_stats()
-        }
-    );
-    // The production list.
-    let w = oa_sealed::sealed_drop_window();
-    let inside = rep(
-        &base,
-        issued,
-        "<event:issued>2026-11-21T00:00:00.000Z</event:issued>",
-    );
-    assert!(decode_with_window(&inside, w).0.sealed_dropped);
-    let (o, rows, _) = decode_with_window(&base, w);
-    assert_eq!((o.sealed_dropped, rows), (false, 1));
-}
-
-// REQ: OA-SEAL-014
-#[test]
 fn issue_and_cancel_times_are_window_keys_in_any_encoding_and_validity_times_are_not() {
-    let w = oa_sealed::DropWindow::new(1_795_132_800_000, 1_795_393_020_000);
+    let w = oa_time_window::DropWindow::new(1_795_132_800_000, 1_795_393_020_000);
     let issued = "<event:issued>2030-03-05T09:00:00.000Z</event:issued>";
     let base = msg(&[&airport()]);
     let with = |t: &str| rep(&base, issued, &format!("<event:issued>{t}</event:issued>"));
@@ -1584,4 +1584,236 @@ fn issue_and_cancel_times_are_window_keys_in_any_encoding_and_validity_times_are
         "</event:NOTAM><fnse:canceled>2030-03-06T00:00:00.000Z</fnse:canceled>",
     );
     assert!(!decode_with_window(&canc_out, w).0.sealed_dropped);
+}
+
+// REQ: OA-NOTAM-026
+#[test]
+fn encoder_roundtrips_retained_scalars_and_escapes_xml_text() {
+    let source = rep(
+        &msg(&[]),
+        "<event:text>RWY 09/27 CLSD</event:text>",
+        "<event:text>A &amp; B &lt;C&gt;</event:text>",
+    );
+    let (before, _) = ok(&source);
+    let mut output = vec![0u8; MAX_ENCODED_BYTES];
+    let len = encode_row(&before, 0, &mut output).unwrap();
+    let xml = std::str::from_utf8(&output[..len]).unwrap();
+    assert!(xml.contains("A &amp; B &lt;C&gt;"));
+    let (after, _) = ok(xml);
+    assert_eq!(row_at(&before, 0), row_at(&after, 0));
+    assert_eq!(text_of(&before, 0), text_of(&after, 0));
+    assert_eq!(schedule_of(&before, 0), schedule_of(&after, 0));
+}
+
+// REQ: OA-NOTAM-026
+#[test]
+fn encoder_roundtrips_each_feature_and_keeps_polygon_ownership() {
+    let second_ring = "31.10 -91.10 31.10 -91.20 31.20 -91.20 31.20 -91.10 31.10 -91.10";
+    let second_runway_element = runway_element(second_ring);
+    let source = msg(&[
+        &airport(),
+        &runway(),
+        &direction(),
+        &runway_element(RING),
+        &second_runway_element,
+        &taxiway(),
+        &taxiway_element("30.30 -90.30 30.30 -90.40 30.40 -90.40 30.30 -90.30"),
+        &navaid(),
+        &unit(),
+        &obstacle_area(),
+        &vertical_structure(),
+        &radar_system(),
+        &primary_radar(),
+    ]);
+    let (before, _) = ok(&source);
+    let mut output = vec![0u8; MAX_ENCODED_BYTES];
+    let len = encode_row(&before, 0, &mut output).unwrap();
+    let xml = std::str::from_utf8(&output[..len]).unwrap();
+    let (after, _) = ok(xml);
+    let old = row_at(&before, 0).unwrap();
+    let new = row_at(&after, 0).unwrap();
+    assert_eq!(old, new);
+    assert_eq!(old.feature_count, 13);
+    assert_eq!(old.feature_count, new.feature_count);
+    for index in 0..old.feature_count as usize {
+        assert_eq!(feature_at(&before, index), feature_at(&after, index));
+    }
+    let old_polys = polygons_of(&before, 0);
+    let new_polys = polygons_of(&after, 0);
+    assert_eq!(old_polys.len(), 3);
+    assert_eq!(old_polys.len(), new_polys.len());
+    for (left, right) in old_polys.zip(new_polys) {
+        assert_eq!(before.poly_kind[left], after.poly_kind[right]);
+        assert_eq!(before.poly_feature[left], after.poly_feature[right]);
+        assert_eq!(
+            polygon_vertices(&before, left),
+            polygon_vertices(&after, right)
+        );
+    }
+
+    let (scalars, _) = ok(&msg(&[]));
+    let mut tiny = [0xA5; 64];
+    assert_eq!(
+        encode_row(&scalars, 0, &mut tiny),
+        Err(EncodeError::OutputTooSmall)
+    );
+    assert!(tiny.iter().all(|&b| b == 0xA5));
+}
+
+// REQ: OA-NOTAM-026
+#[test]
+fn encoder_roundtrips_every_single_feature_fixture() {
+    let fixtures = [
+        airport(),
+        runway(),
+        direction(),
+        runway_element(RING),
+        taxiway(),
+        taxiway_element("30.30 -90.30 30.30 -90.40 30.40 -90.40 30.30 -90.30"),
+        navaid(),
+        unit(),
+        obstacle_area(),
+        vertical_structure(),
+        radar_system(),
+        primary_radar(),
+    ];
+    for fixture in fixtures {
+        let source = msg(&[&fixture]);
+        let (before, _) = ok(&source);
+        let mut output = vec![0u8; MAX_ENCODED_BYTES];
+        let len = encode_row(&before, 0, &mut output).unwrap();
+        let (after, _) = ok(std::str::from_utf8(&output[..len]).unwrap());
+        assert_eq!(row_at(&before, 0), row_at(&after, 0));
+        assert_eq!(feature_at(&before, 0), feature_at(&after, 0));
+        assert_eq!(polygons_of(&before, 0).len(), polygons_of(&after, 0).len());
+    }
+}
+
+// REQ: OA-NOTAM-026
+#[test]
+fn feature_multiplicity_exceeds_default_reservation_with_explicit_capacity() {
+    let mut members = Vec::new();
+    for index in 0..20 {
+        let code = format!("Q{index:02}");
+        let member = rep(
+            &airport(),
+            "<aixm:designator>QQA</aixm:designator>",
+            &format!("<aixm:designator>{code}</aixm:designator>"),
+        );
+        members.push(member);
+    }
+    let refs: Vec<&str> = members.iter().map(String::as_str).collect();
+    let source = msg(&refs);
+    let mut before = new_notams_with_feature_capacity(1, 1 << 16, 16, 4096, 24);
+    let mut stats = default_stats();
+    run_into(source.as_bytes(), &mut before, &mut stats).unwrap();
+    assert_eq!(row_at(&before, 0).unwrap().feature_count, 20);
+    let values: Vec<String> = (0..20)
+        .map(|ix| {
+            let f = feature_at(&before, ix).unwrap();
+            let len = usize::from(f.designator_len);
+            std::str::from_utf8(&f.designator[..len])
+                .unwrap()
+                .to_owned()
+        })
+        .collect();
+    assert_eq!(values.first().map(String::as_str), Some("Q00"));
+    assert_eq!(values.last().map(String::as_str), Some("Q19"));
+
+    let mut output = vec![0u8; MAX_ENCODED_BYTES];
+    let len = encode_row(&before, 0, &mut output).unwrap();
+    let (after, _) = ok(std::str::from_utf8(&output[..len]).unwrap());
+    assert_eq!(row_at(&after, 0).unwrap().feature_count, 20);
+    for index in 0..20 {
+        assert_eq!(feature_at(&before, index), feature_at(&after, index));
+    }
+}
+
+// REQ: OA-NOTAM-026
+#[test]
+fn feature_capacity_refusal_is_transactional() {
+    let members: Vec<String> = (0..20).map(|_| airport()).collect();
+    let refs: Vec<&str> = members.iter().map(String::as_str).collect();
+    let source = msg(&refs);
+    let mut output = new_notams_with_feature_capacity(1, 1 << 16, 16, 4096, 16);
+    let before = mark(&output);
+    let mut stats = default_stats();
+    assert_eq!(
+        run_into(source.as_bytes(), &mut output, &mut stats),
+        Err(DocError::Capacity(CapacityKind::Features))
+    );
+    assert_eq!(mark(&output), before);
+}
+
+// REQ: OA-NOTAM-026
+#[test]
+fn encoder_preserves_estimated_end_and_fnse_event_extension_fields() {
+    let source = rep(
+        &msg(&[]),
+        "<event:effectiveEnd>203003061830</event:effectiveEnd>",
+        "<event:effectiveEnd>203003061830EST</event:effectiveEnd>",
+    );
+    let source = rep(
+        &source,
+        "<fnse:classification>DOM",
+        "<fnse:canceled>2030-03-05T09:30:00.000Z</fnse:canceled><fnse:classification>DOM",
+    );
+    let (before, _) = ok(&source);
+    let mut output = vec![0u8; MAX_ENCODED_BYTES];
+    let len = encode_row(&before, 0, &mut output).unwrap();
+    let xml = std::str::from_utf8(&output[..len]).unwrap();
+    assert!(xml.contains("203003061830EST"));
+    assert!(xml.contains("<fnse:canceled>2030-03-05T09:30:00.000Z</fnse:canceled>"));
+    let (after, _) = ok(xml);
+    assert_eq!(row_at(&before, 0), row_at(&after, 0));
+}
+
+// REQ: OA-NOTAM-026
+#[test]
+fn encoder_roundtrips_permanent_and_explicit_unknown_end_positions() {
+    let permanent_concrete = rep(
+        &msg(&[]),
+        "<event:effectiveEnd>203003061830</event:effectiveEnd>",
+        "<event:effectiveEnd>PERM</event:effectiveEnd>",
+    );
+    let (concrete_before, _) = ok(&permanent_concrete);
+    assert!(has_field(&concrete_before, 0, Field::End));
+    let mut output = vec![0u8; MAX_ENCODED_BYTES];
+    let len = encode_row(&concrete_before, 0, &mut output).unwrap();
+    let xml = std::str::from_utf8(&output[..len]).unwrap();
+    assert!(xml.contains("<event:effectiveEnd>PERM</event:effectiveEnd>"));
+    let (concrete_after, _) = ok(xml);
+    assert_eq!(row_at(&concrete_before, 0), row_at(&concrete_after, 0));
+
+    // The fixture's PERM case has no concrete event valid-time end. GML permits an empty
+    // TimePosition with indeterminatePosition="unknown"; no date is invented.
+    let permanent_unknown = rep(
+        &permanent_concrete,
+        "<gml:endPosition>2030-03-06T18:30:00.000Z</gml:endPosition>",
+        "",
+    );
+    let (unknown_before, _) = ok(&permanent_unknown);
+    assert!(!has_field(&unknown_before, 0, Field::End));
+    assert_eq!(unknown_before.flags[0], FLAG_PERMANENT | FLAG_END_UNKNOWN);
+    let len = encode_row(&unknown_before, 0, &mut output).unwrap();
+    let xml = std::str::from_utf8(&output[..len]).unwrap();
+    assert!(xml.contains("<gml:endPosition indeterminatePosition=\"unknown\"></gml:endPosition>"));
+    assert!(xml.contains("<event:effectiveEnd>PERM</event:effectiveEnd>"));
+    let (unknown_after, _) = ok(xml);
+    assert_eq!(row_at(&unknown_before, 0), row_at(&unknown_after, 0));
+
+    // GML's known-after state is not collapsed into unknown. This profile reports the end as an
+    // error and the encoder refuses the row.
+    let after_source = rep(
+        &permanent_concrete,
+        "<gml:endPosition>2030-03-06T18:30:00.000Z</gml:endPosition>",
+        "<gml:endPosition indeterminatePosition=\"after\"/>",
+    );
+    let (after_rows, _) = ok(&after_source);
+    assert_ne!(after_rows.flags[0] & FLAG_END_UNKNOWN, FLAG_END_UNKNOWN);
+    assert_ne!(after_rows.errors[0] & bit(Field::End), 0);
+    assert_eq!(
+        encode_row(&after_rows, 0, &mut output),
+        Err(EncodeError::InvalidRow)
+    );
 }

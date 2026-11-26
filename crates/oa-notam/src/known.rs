@@ -339,7 +339,7 @@ pub(crate) const KNOWN: &[(&str, &[&str])] = &[
     ("/message:hasMember/event:Event/event:timeSlice/event:EventTimeSlice/gml:validTime", &[]),
     ("/message:hasMember/event:Event/event:timeSlice/event:EventTimeSlice/gml:validTime/gml:TimePeriod", &["gml:id"]),
     ("/message:hasMember/event:Event/event:timeSlice/event:EventTimeSlice/gml:validTime/gml:TimePeriod/gml:beginPosition", &[]),
-    ("/message:hasMember/event:Event/event:timeSlice/event:EventTimeSlice/gml:validTime/gml:TimePeriod/gml:endPosition", &[]),
+    ("/message:hasMember/event:Event/event:timeSlice/event:EventTimeSlice/gml:validTime/gml:TimePeriod/gml:endPosition", &["indeterminatePosition"]),
     ("/message:hasMember/event:Event/gml:boundedBy", &["xsi:nil"]),
     ("/message:hasMember/event:Event/gml:identifier", &["codeSpace"]),
 ];

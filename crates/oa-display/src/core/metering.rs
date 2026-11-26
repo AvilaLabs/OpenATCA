@@ -8,6 +8,15 @@ use core::fmt;
 /// Inclusive absolute difference accepted by the display's metering window, in milliseconds.
 pub const METER_WINDOW_MS: i64 = 60_000;
 /// Maximum packet rows in one meter-list packet.
+///
+/// Engineering memory budget: `MeterPacket` is exactly 104 bytes (asserted below), so this cap
+/// bounds requested row payload to 6,815,744 bytes (6.5 MiB), plus the `Vec` header and allocator
+/// overhead. The count is 256 batches of the TBFM decoder's 256-row default message capacity;
+/// that decoder also has an independent 1 MiB message limit. For scale, it is 1/16 of the
+/// display traffic target ceiling (`MAX_TARGETS`), not an assumption that meter rows join
+/// one-to-one with displayed targets. This is a resource refusal bound, not a forecast of feed
+/// demand or a completeness guarantee. Larger requests are refused and pushes at capacity leave
+/// the list unchanged.
 pub const MAX_METER_ROWS: usize = 1 << 16;
 
 /// Result of comparing exact supplied STA and ETA values. `Early` means ETA precedes STA;

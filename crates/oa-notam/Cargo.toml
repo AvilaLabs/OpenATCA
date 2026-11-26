@@ -18,9 +18,6 @@ oa-xml = { path = "../oa-xml" }
 oa-airspace = { path = "../oa-airspace" }
 oa-geo = { path = "../oa-geo" }
 
-[dev-dependencies]
-oa-sealed = { path = "../oa-sealed" }
-
 [package.metadata.openatca]
 class = "shell"
 candidate_package_name = "openatca-notam"

@@ -84,6 +84,48 @@ pub fn route_store_new(snapshot_sha256: [u8; 32]) -> RouteStore {
     }
 }
 
+/// Build an immutable route-store revision from an already resolved ICAO Item 15.
+/// The source message hash, complete flight identity, and snapshot digest stay bound to the
+/// existing trajectory consumer's revision evidence.
+pub fn icao_route_revision(
+    key: t::FlightKey,
+    resolved: &oa_airspace::shell::route_parse::ResolvedItem15,
+    source_ms: i64,
+    available_ms: i64,
+    message_id: u64,
+    text_sha256: [u8; 32],
+    snapshot_sha256: [u8; 32],
+) -> Result<RouteRevision, String> {
+    if !valid_refusal_key(key) {
+        return Err("cannot retain route revision without a valid full flight key".into());
+    }
+    if source_ms < 0 || available_ms < source_ms {
+        return Err("route revision timestamps are invalid or out of order".into());
+    }
+    if resolved.report.failure != RouteFailure::None {
+        return Err("cannot retain a route that did not resolve completely".into());
+    }
+    let payload_sha256 = canonical_route_digest(
+        snapshot_sha256,
+        text_sha256,
+        resolved.report,
+        &resolved.route,
+    )?;
+    Ok(RouteRevision {
+        evidence: t::RevisionEvidence {
+            source_ms,
+            available_ms,
+            message_id,
+            payload_sha256,
+            key,
+            reserved: [0; 4],
+        },
+        text_sha256,
+        report: resolved.report,
+        converted: resolved.route.clone(),
+    })
+}
+
 fn valid_refusal_key(key: t::FlightKey) -> bool {
     key.gufi.iter().any(|&byte| byte != 0)
         && (1..=0x00ff_ffff).contains(&key.aircraft_address)

@@ -32,7 +32,49 @@ fn uri_bytes<'a>(doc: &Doc<'a>, sp: Span) -> &'a [u8] {
 }
 
 const NS_NAS: &[u8] = b"http://www.faa.aero/nas/3.0";
+const NS_BASE: &[u8] = b"http://www.fixm.aero/base/3.0";
+const NS_FLIGHT: &[u8] = b"http://www.fixm.aero/flight/3.0";
+const NS_FOUNDATION: &[u8] = b"http://www.fixm.aero/foundation/3.0";
 const NS_XSI: &[u8] = b"http://www.w3.org/2001/XMLSchema-instance";
+
+/// Exact Core namespace assignments for paths in the finite encoder profile. NAS extension
+/// elements remain unqualified under the official NAS schema's elementFormDefault="unqualified".
+/// Unknown names and namespace/local-name lookalikes are never normalized.
+fn profile_element_namespace(name: &[u8], uri: &[u8]) -> bool {
+    let expected = match name {
+        b"agreed"
+        | b"route"
+        | b"aircraftDescription"
+        | b"aircraftType"
+        | b"icaoModelIdentifier"
+        | b"arrival"
+        | b"departure"
+        | b"controllingUnit"
+        | b"enRoute"
+        | b"beaconCodeAssignment"
+        | b"currentBeaconCode"
+        | b"boundaryCrossings"
+        | b"position"
+        | b"actualSpeed"
+        | b"surveillance"
+        | b"altitude"
+        | b"flightIdentification"
+        | b"flightStatus"
+        | b"gufi"
+        | b"operator"
+        | b"supplementalData"
+        | b"operatingOrganization" => NS_FLIGHT,
+        b"runwayPositionAndTime"
+        | b"runwayTime"
+        | b"actual"
+        | b"estimated"
+        | b"location"
+        | b"nameValue" => NS_BASE,
+        b"organization" | b"pos" => NS_FOUNDATION,
+        _ => return false,
+    };
+    uri == expected
+}
 
 /// The bounded root classification used when a parsed document is refused as an unsupported
 /// FIXM root. It contains categories only; input names and namespace values are never retained.
@@ -932,7 +974,12 @@ impl Decoder {
             match ns {
                 Ns::None => {}
                 Ns::Xml => h = extend(h, b"{xml"),
-                Ns::Uri(u) => h = extend(extend(h, b"{"), uri_bytes(doc, u)),
+                Ns::Uri(u) => {
+                    let uri = uri_bytes(doc, u);
+                    if !profile_element_namespace(name_bytes(doc.input, name), uri) {
+                        h = extend(extend(h, b"{"), uri_bytes(doc, u));
+                    }
+                }
             }
             if let Some(x) = self.hash.get_mut(i) {
                 *x = h;

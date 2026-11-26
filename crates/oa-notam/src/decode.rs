@@ -21,7 +21,14 @@
 
 use crate::fields::*;
 use crate::known::KNOWN;
-use crate::rows::{field_bit, mark, push_row, truncate_notams, Mark, Notams, Row, BLANK_ROW};
+use crate::rows::{
+    feature_at, field_bit, mark, push_feature_slice, push_row, set_feature_slice, truncate_notams,
+    FeatureSlice, Mark, Notams, Row, BLANK_ROW, FEATURE_ERROR_CORRECTION, FEATURE_ERROR_DESIGNATOR,
+    FEATURE_ERROR_INTERPRETATION, FEATURE_ERROR_SEQUENCE, FEATURE_ERROR_TIME,
+    FEATURE_META_CORRECTION, FEATURE_META_SEQUENCE, FEATURE_TIME_BEGIN_PRESENT,
+    FEATURE_TIME_END_PRESENT, FEATURE_TIME_INSTANT, FEATURE_TIME_INSTANT_PRESENT,
+    FEATURE_TIME_PERIOD,
+};
 use crate::scalar::{
     parse_code, parse_compact_ms, parse_coord, parse_eff_end, parse_fl3, parse_iso_ms,
     parse_lat_lon, parse_limit, parse_uint, parse_uuid, trim, EffEnd,
@@ -162,6 +169,9 @@ const fn ts(tail: &[&str]) -> u64 {
 
 const P_BEGIN: u64 = ts(&["gml:validTime", "gml:TimePeriod", "gml:beginPosition"]);
 const P_END: u64 = ts(&["gml:validTime", "gml:TimePeriod", "gml:endPosition"]);
+const P_INTERPRETATION: u64 = ts(&["aixm:interpretation"]);
+const P_SEQUENCE_NUMBER: u64 = ts(&["aixm:sequenceNumber"]);
+const P_CORRECTION_NUMBER: u64 = ts(&["aixm:correctionNumber"]);
 const P_SCENARIO: u64 = ts(&["event:scenario"]);
 const P_NOTAM: u64 = ts(&["event:textNOTAM", "event:NOTAM"]);
 const fn nt(name: &str) -> u64 {
@@ -334,6 +344,7 @@ pub struct Decoder {
     hash: Vec<u64>,
     state: Vec<u8>,
     feat: Vec<u8>,
+    feature_ix: Vec<u32>,
     elem_text: Vec<u32>,
 }
 
@@ -361,6 +372,7 @@ pub fn new_decoder(limits: Limits) -> Decoder {
         hash: vec![0; n],
         state: vec![0; n],
         feat: vec![0; n],
+        feature_ix: vec![u32::MAX; n],
         elem_text: vec![NO_TEXT; n],
     }
 }
@@ -725,6 +737,165 @@ fn feature_kind(h: u64) -> u8 {
         .map_or(0, |&(_, k)| k)
 }
 
+fn elem_is(doc: &Doc<'_>, i: usize, namespace_alias: &[u8], local: &[u8]) -> bool {
+    let Some(name) = doc.elem_name.get(i).copied() else {
+        return false;
+    };
+    name_bytes(doc.input, name) == local
+        && matches!(alias_of(doc, resolve_elem_ns(doc, ElemIx(i as u32))), Alias::Known(a) if a == namespace_alias)
+}
+
+fn feature_timeslice_parent(doc: &Doc<'_>, i: usize) -> Option<usize> {
+    let parent = doc.elem_parent.get(i).copied()?;
+    if parent == ElemIx::NONE {
+        return None;
+    }
+    let parent = parent.0 as usize;
+    let name = doc.elem_name.get(parent).copied()?;
+    let local = name_bytes(doc.input, name);
+    (matches!(
+        alias_of(doc, resolve_elem_ns(doc, ElemIx(parent as u32))),
+        Alias::Known(b"aixm")
+    ) && local.ends_with(b"TimeSlice"))
+    .then_some(parent)
+}
+
+fn feature_time_component(doc: &Doc<'_>, i: usize) -> Option<(u8, u8)> {
+    let parent = doc.elem_parent.get(i).copied()?;
+    if parent == ElemIx::NONE {
+        return None;
+    }
+    let parent_ix = parent.0 as usize;
+    let child = doc.elem_name.get(i).copied()?;
+    let local = name_bytes(doc.input, child);
+    if elem_is(doc, i, b"gml", b"timePosition") && elem_is(doc, parent_ix, b"gml", b"TimeInstant") {
+        let valid_time = doc.elem_parent.get(parent_ix).copied()?;
+        if valid_time == ElemIx::NONE {
+            return None;
+        }
+        let valid_ix = valid_time.0 as usize;
+        if elem_is(doc, valid_ix, b"gml", b"validTime")
+            && feature_timeslice_parent(doc, valid_ix).is_some()
+        {
+            return Some((FEATURE_TIME_INSTANT, FEATURE_TIME_INSTANT_PRESENT));
+        }
+    }
+    if !elem_is(doc, i, b"gml", local) {
+        return None;
+    }
+    let boundary = if local == b"beginPosition" {
+        FEATURE_TIME_BEGIN_PRESENT
+    } else if local == b"endPosition" {
+        FEATURE_TIME_END_PRESENT
+    } else {
+        return None;
+    };
+    if !elem_is(doc, parent_ix, b"gml", b"TimePeriod") {
+        return None;
+    }
+    let valid_time = doc.elem_parent.get(parent_ix).copied()?;
+    if valid_time == ElemIx::NONE {
+        return None;
+    }
+    let valid_ix = valid_time.0 as usize;
+    if elem_is(doc, valid_ix, b"gml", b"validTime")
+        && feature_timeslice_parent(doc, valid_ix).is_some()
+    {
+        Some((FEATURE_TIME_PERIOD, boundary))
+    } else {
+        None
+    }
+}
+
+fn capture_feature_slice(
+    doc: &Doc<'_>,
+    texts: &[u32],
+    i: usize,
+    index: u32,
+    out: &mut Notams,
+    scratch: &mut [u8; 64],
+) -> bool {
+    let Some(mut f) = feature_at(out, index as usize) else {
+        return false;
+    };
+    let mut changed = false;
+    if feature_timeslice_parent(doc, i).is_some() {
+        if elem_is(doc, i, b"aixm", b"interpretation") {
+            let code = match short(doc, texts, i, scratch) {
+                Raw::Val(b"BASELINE") => Some(INTERPRETATION_BASELINE),
+                Raw::Val(b"SNAPSHOT") => Some(INTERPRETATION_SNAPSHOT),
+                Raw::Val(b"TEMPDELTA") => Some(INTERPRETATION_TEMPDELTA),
+                Raw::Val(b"PERMDELTA") => Some(INTERPRETATION_PERMDELTA),
+                _ => None,
+            };
+            if f.interpretation != 0 || f.errors & FEATURE_ERROR_INTERPRETATION != 0 {
+                f.interpretation = 0;
+                f.errors |= FEATURE_ERROR_INTERPRETATION;
+            } else if let Some(code) = code {
+                f.interpretation = code;
+            } else {
+                f.errors |= FEATURE_ERROR_INTERPRETATION;
+            }
+            changed = true;
+        } else if elem_is(doc, i, b"aixm", b"sequenceNumber")
+            || elem_is(doc, i, b"aixm", b"correctionNumber")
+        {
+            let is_sequence = elem_is(doc, i, b"aixm", b"sequenceNumber");
+            let (present_bit, error_bit) = if is_sequence {
+                (FEATURE_META_SEQUENCE, FEATURE_ERROR_SEQUENCE)
+            } else {
+                (FEATURE_META_CORRECTION, FEATURE_ERROR_CORRECTION)
+            };
+            let value = match short(doc, texts, i, scratch) {
+                Raw::Val(b) => parse_uint(b, 10).and_then(|n| u32::try_from(n).ok()),
+                _ => None,
+            };
+            if f.meta & present_bit != 0 || f.errors & error_bit != 0 {
+                f.meta &= !present_bit;
+                f.errors |= error_bit;
+            } else if let Some(value) = value {
+                f.meta |= present_bit;
+                if is_sequence {
+                    f.sequence_number = value;
+                } else {
+                    f.correction_number = value;
+                }
+            } else {
+                f.errors |= error_bit;
+            }
+            changed = true;
+        }
+    }
+    if let Some((time_kind, time_bit)) = feature_time_component(doc, i) {
+        let value = match text(doc, texts, i, scratch) {
+            Raw::Val(b) => parse_iso_ms(trim(b)),
+            _ => None,
+        };
+        if f.time_kind != 0 && f.time_kind != time_kind {
+            f.errors |= FEATURE_ERROR_TIME;
+        } else {
+            f.time_kind = time_kind;
+            let already = f.time_meta & time_bit != 0;
+            if already || f.errors & FEATURE_ERROR_TIME != 0 {
+                f.errors |= FEATURE_ERROR_TIME;
+            } else if let Some(value) = value {
+                f.time_meta |= time_bit;
+                if time_bit == FEATURE_TIME_INSTANT_PRESENT
+                    || time_bit == FEATURE_TIME_BEGIN_PRESENT
+                {
+                    f.begin_ms = value;
+                } else {
+                    f.end_ms = value;
+                }
+            } else {
+                f.errors |= FEATURE_ERROR_TIME;
+            }
+        }
+        changed = true;
+    }
+    !changed || set_feature_slice(out, index as usize, f)
+}
+
 /// Decodes `input` with `parser` and `dec`. A parse error is [`DocError::Xml`], counted in
 /// `stats` like every other refusal.
 pub fn decode_bytes(
@@ -891,6 +1062,9 @@ fn decode_inner(
     if let Some(f) = dec.feat.first_mut() {
         *f = 0;
     }
+    if let Some(ix) = dec.feature_ix.first_mut() {
+        *ix = u32::MAX;
+    }
     check_attrs(dec, doc, 0, root_hash, stats, &mut unknown_at);
     for i in 1..n {
         let p = doc.elem_parent.get(i).copied().unwrap_or(ElemIx::NONE);
@@ -922,14 +1096,39 @@ fn decode_inner(
         }
         check_attrs(dec, doc, i, h, stats, &mut unknown_at);
         let mut kind = dec.feat.get(pi).copied().unwrap_or(0);
+        let mut feature_ix = dec.feature_ix.get(pi).copied().unwrap_or(u32::MAX);
         if ph == P_MEMBER {
             kind = feature_kind(h);
             if kind != 0 {
                 m.row.feat_mask |= 1u32 << kind;
+                feature_ix = push_feature_slice(
+                    out,
+                    FeatureSlice {
+                        kind,
+                        time_kind: 0,
+                        interpretation: 0,
+                        meta: 0,
+                        time_meta: 0,
+                        errors: 0,
+                        reserved: [0; 2],
+                        begin_ms: 0,
+                        end_ms: 0,
+                        sequence_number: 0,
+                        correction_number: 0,
+                        designator: [0; 12],
+                        designator_len: 0,
+                        icao: [0; 4],
+                        icao_len: 0,
+                    },
+                )
+                .ok_or(DocError::Capacity(CapacityKind::Features))?;
             }
         }
         if let Some(f) = dec.feat.get_mut(i) {
             *f = kind;
+        }
+        if let Some(ix) = dec.feature_ix.get_mut(i) {
+            *ix = feature_ix;
         }
         visit(dec, doc, i, h, kind, &mut m, out)?;
     }
@@ -1108,19 +1307,41 @@ fn surface_ok(doc: &Doc<'_>, i: usize) -> bool {
 /// ignored, a malformed one is an error of `f`.
 fn feature_desig<const N: usize>(
     m: &mut Msg,
+    feature_ix: u32,
     kind: u8,
     f: Field,
     raw: Raw<'_>,
     store_in: Option<fn(&mut Row) -> &mut [u8; N]>,
+    out: &mut Notams,
 ) {
     let bit = 1u32 << kind;
-    if m.desig_set & bit != 0 {
-        return;
-    }
     let parsed = match raw {
         Raw::Val(b) => parse_desig::<N>(b),
         _ => None,
     };
+    if feature_ix != u32::MAX {
+        if let Some(mut feature) = feature_at(out, feature_ix as usize) {
+            if feature.designator_len != 0 || feature.errors & FEATURE_ERROR_DESIGNATOR != 0 {
+                feature.errors |= FEATURE_ERROR_DESIGNATOR;
+            } else if let Some(value) = parsed {
+                for (dest, src) in feature.designator.iter_mut().zip(value) {
+                    *dest = src;
+                }
+                let len = value.iter().position(|byte| *byte == 0).unwrap_or(N);
+                feature.designator_len = u8::try_from(len).unwrap_or(0);
+            } else {
+                feature.errors |= FEATURE_ERROR_DESIGNATOR;
+            }
+            if !set_feature_slice(out, feature_ix as usize, feature) {
+                mark_err(m, f);
+            }
+        } else {
+            mark_err(m, f);
+        }
+    }
+    if m.desig_set & bit != 0 {
+        return;
+    }
     m.desig_set |= bit;
     match parsed {
         Some(v) => {
@@ -1142,6 +1363,10 @@ fn feature_desig<const N: usize>(
 
 /// A time given by two elements that must agree: `bit` names the source, `parsed` the value.
 fn time_source(m: &mut Msg, f: Field, bit: u8, parsed: Option<i64>, dst: fn(&mut Row) -> &mut i64) {
+    if f == Field::End && m.row.flags & FLAG_END_UNKNOWN != 0 {
+        mark_err(m, f);
+        return;
+    }
     if m.src & bit != 0 {
         mark_err(m, f);
         return;
@@ -1242,19 +1467,21 @@ fn polygon(
     doc: &Doc<'_>,
     i: usize,
     kind: u8,
+    feature_ix: u32,
     m: &mut Msg,
     out: &mut Notams,
 ) -> Result<(), DocError> {
     if m.poly_failed {
         return Ok(());
     }
-    let ok = read_ring(dec, doc, i, kind, out)?;
+    let ok = read_ring(dec, doc, i, kind, feature_ix, out)?;
     if !ok {
         m.poly_failed = true;
         mark_err(m, Field::Polygons);
         out.poly_vstart.truncate(m.start.polygons);
         out.poly_vlen.truncate(m.start.polygons);
         out.poly_kind.truncate(m.start.polygons);
+        out.poly_feature.truncate(m.start.polygons);
         out.vtx_lat.truncate(m.start.vertices);
         out.vtx_lon.truncate(m.start.vertices);
     } else {
@@ -1269,6 +1496,7 @@ fn read_ring(
     doc: &Doc<'_>,
     i: usize,
     kind: u8,
+    feature_ix: u32,
     out: &mut Notams,
 ) -> Result<bool, DocError> {
     let t = dec.elem_text.get(i).copied().unwrap_or(NO_TEXT);
@@ -1330,6 +1558,7 @@ fn read_ring(
     out.poly_vstart.push(first as u32);
     out.poly_vlen.push((count - 1) as u32);
     out.poly_kind.push(kind);
+    out.poly_feature.push(feature_ix);
     Ok(true)
 }
 
@@ -1345,6 +1574,10 @@ fn visit(
 ) -> Result<(), DocError> {
     let mut b1 = [0u8; 64];
     let texts = &dec.elem_text;
+    let feature_ix = dec.feature_ix.get(i).copied().unwrap_or(u32::MAX);
+    if feature_ix != u32::MAX && !capture_feature_slice(doc, texts, i, feature_ix, out, &mut b1) {
+        return Err(DocError::Capacity(CapacityKind::Features));
+    }
     match h {
         P_EVENT => m.events = m.events.saturating_add(1),
         P_NOTAM => m.notams = m.notams.saturating_add(1),
@@ -1369,11 +1602,79 @@ fn visit(
             time_source(m, Field::Start, SRC_ISO_START, v, |r| &mut r.start_ms);
         }
         P_END => {
-            let v = match text(doc, texts, i, &mut b1) {
+            let raw = text(doc, texts, i, &mut b1);
+            let value = match raw {
                 Raw::Val(b) => parse_iso_ms(trim(b)),
                 _ => None,
             };
-            time_source(m, Field::End, SRC_ISO_END, v, |r| &mut r.end_ms);
+            if let Some(v) = value {
+                time_source(m, Field::End, SRC_ISO_END, Some(v), |r| &mut r.end_ms);
+            } else {
+                let no_content = match raw {
+                    Raw::Bad => texts.get(i) == Some(&NO_TEXT),
+                    Raw::Val(b) => trim(b).is_empty(),
+                    Raw::Absent => false,
+                };
+                let mut b2 = [0u8; 64];
+                if no_content
+                    && matches!(
+                        attr(doc, i, b"indeterminatePosition", &mut b2),
+                        Raw::Val(b"unknown")
+                    )
+                {
+                    if seen(m, Field::End) || m.row.flags & FLAG_END_UNKNOWN != 0 {
+                        mark_err(m, Field::End);
+                    } else {
+                        m.row.flags |= FLAG_END_UNKNOWN;
+                    }
+                } else {
+                    mark_err(m, Field::End);
+                }
+            }
+        }
+        P_INTERPRETATION => {
+            let value = match short(doc, texts, i, &mut b1) {
+                Raw::Val(b) => match b {
+                    b"BASELINE" => Some(INTERPRETATION_BASELINE),
+                    b"SNAPSHOT" => Some(INTERPRETATION_SNAPSHOT),
+                    b"TEMPDELTA" => Some(INTERPRETATION_TEMPDELTA),
+                    b"PERMDELTA" => Some(INTERPRETATION_PERMDELTA),
+                    _ => None,
+                },
+                _ => None,
+            };
+            if m.row.interpretation != 0 || m.row.slice_errors & SLICE_INTERPRETATION_ERROR != 0 {
+                m.row.interpretation = 0;
+                m.row.slice_errors |= SLICE_INTERPRETATION_ERROR;
+            } else if let Some(code) = value {
+                m.row.interpretation = code;
+            } else {
+                m.row.slice_errors |= SLICE_INTERPRETATION_ERROR;
+            }
+        }
+        P_SEQUENCE_NUMBER | P_CORRECTION_NUMBER => {
+            let (present_bit, error_bit) = if h == P_SEQUENCE_NUMBER {
+                (SLICE_SEQUENCE_PRESENT, SLICE_SEQUENCE_ERROR)
+            } else {
+                (SLICE_CORRECTION_PRESENT, SLICE_CORRECTION_ERROR)
+            };
+            let value = match short(doc, texts, i, &mut b1) {
+                Raw::Val(b) => u32::try_from(parse_uint(b, 10).unwrap_or(u64::MAX)).ok(),
+                _ => None,
+            };
+            if m.row.slice_meta & present_bit != 0 || m.row.slice_errors & error_bit != 0 {
+                m.row.slice_meta &= !present_bit;
+                m.row.slice_errors |= error_bit;
+            } else if let Some(value) = value {
+                m.row.slice_meta |= present_bit;
+                if h == P_SEQUENCE_NUMBER {
+                    m.row.sequence_number = value;
+                } else {
+                    m.row.correction_number = value;
+                }
+            } else {
+                m.row.slice_errors |= error_bit;
+            }
         }
         P_EFF_START => {
             let v = match text(doc, texts, i, &mut b1) {
@@ -1401,6 +1702,9 @@ fn visit(
                         mark_err(m, Field::End);
                     }
                     m.src |= SRC_EFF_END;
+                    if m.row.present & field_bit(Field::End) == 0 && !errored(m, Field::End) {
+                        m.row.flags |= FLAG_END_UNKNOWN;
+                    }
                 }
                 None => time_source(m, Field::End, SRC_EFF_END, None, |r| &mut r.end_ms),
             }
@@ -1602,10 +1906,39 @@ fn visit(
         }
         P_APT_DESIG => {
             let raw = short(doc, texts, i, &mut b1);
-            feature_desig::<8>(m, FEAT_AIRPORT, Field::Airport, raw, Some(|r| &mut r.apt));
+            feature_desig::<8>(
+                m,
+                feature_ix,
+                FEAT_AIRPORT,
+                Field::Airport,
+                raw,
+                Some(|r| &mut r.apt),
+                out,
+            );
         }
         P_APT_ICAO => {
             let raw = short(doc, texts, i, &mut b1);
+            if feature_ix != u32::MAX {
+                if let Some(mut feature) = feature_at(out, feature_ix as usize) {
+                    let parsed = match raw {
+                        Raw::Val(b) => parse_loc4(b),
+                        _ => None,
+                    };
+                    if feature.icao_len != 0 || feature.errors & FEATURE_ERROR_DESIGNATOR != 0 {
+                        feature.errors |= FEATURE_ERROR_DESIGNATOR;
+                    } else if let Some(value) = parsed {
+                        feature.icao = value;
+                        feature.icao_len = 4;
+                    } else {
+                        feature.errors |= FEATURE_ERROR_DESIGNATOR;
+                    }
+                    if !set_feature_slice(out, feature_ix as usize, feature) {
+                        mark_err(m, Field::AirportIcao);
+                    }
+                } else {
+                    mark_err(m, Field::AirportIcao);
+                }
+            }
             // a second airport's ICAO indicator is not recorded; the first wins
             if !seen(m, Field::AirportIcao) {
                 match raw {
@@ -1616,21 +1949,45 @@ fn visit(
         }
         P_RWY_DESIG => {
             let raw = short(doc, texts, i, &mut b1);
-            feature_desig::<12>(m, FEAT_RUNWAY, Field::Runway, raw, None);
+            feature_desig::<12>(m, feature_ix, FEAT_RUNWAY, Field::Runway, raw, None, out);
         }
         P_RWD_DESIG => {
             let raw = short(doc, texts, i, &mut b1);
-            feature_desig::<12>(m, FEAT_RUNWAY_DIRECTION, Field::Runway, raw, None);
+            feature_desig::<12>(
+                m,
+                feature_ix,
+                FEAT_RUNWAY_DIRECTION,
+                Field::Runway,
+                raw,
+                None,
+                out,
+            );
         }
         P_UNIT_DESIG => {
             let raw = short(doc, texts, i, &mut b1);
-            feature_desig::<8>(m, FEAT_UNIT, Field::Unit, raw, Some(|r| &mut r.unit));
+            feature_desig::<8>(
+                m,
+                feature_ix,
+                FEAT_UNIT,
+                Field::Unit,
+                raw,
+                Some(|r| &mut r.unit),
+                out,
+            );
         }
         P_NAVAID_TYPE => {
             let raw = short(doc, texts, i, &mut b1);
-            feature_desig::<8>(m, FEAT_NAVAID, Field::Navaid, raw, Some(|r| &mut r.navaid));
+            feature_desig::<8>(
+                m,
+                feature_ix,
+                FEAT_NAVAID,
+                Field::Navaid,
+                raw,
+                Some(|r| &mut r.navaid),
+                out,
+            );
         }
-        P_RWE_POSLIST | P_TWE_POSLIST => polygon(dec, doc, i, kind, m, out)?,
+        P_RWE_POSLIST | P_TWE_POSLIST => polygon(dec, doc, i, kind, feature_ix, m, out)?,
         _ => {}
     }
     Ok(())
@@ -1714,6 +2071,10 @@ fn finish(mut m: Msg, out: &mut Notams) -> Result<u32, DocError> {
     }
     m.row.poly_first = m.start.polygons as u32;
     m.row.poly_count = out.poly_vstart.len().saturating_sub(m.start.polygons) as u32;
+    m.row.feature_first =
+        u32::try_from(m.start.features).map_err(|_| DocError::Capacity(CapacityKind::Features))?;
+    m.row.feature_count = u32::try_from(out.feature_kind.len().saturating_sub(m.start.features))
+        .map_err(|_| DocError::Capacity(CapacityKind::Features))?;
     if m.poly_failed {
         m.row.poly_count = 0;
     }

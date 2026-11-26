@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).parents[1]))
 import a3_rate_join as rate  # noqa: E402
 
 
-def episode(a, b, start, end, cls="ALERT", ticks=0, flags=frozenset()):
+def episode(a, b, start, end, cls="C4", ticks=0, flags=frozenset()):
     return rate.Episode(
         rate.canonical_pair(a, b),
         rate.DAY_START + start,
@@ -34,6 +34,55 @@ def aggregate(alerts, encounters, complete):
 
 
 class RateJoinTests(unittest.TestCase):
+    # REQ: OA-ENC-022
+    def test_exact_encounter_class_vocabulary_is_accepted(self):
+        for class_name in ("C1", "C2", "C3", "C4", "C5", "C6", "VOLUME_ONLY", "ALT_UNKNOWN"):
+            with self.subTest(class_name=class_name):
+                result = aggregate(
+                    [], [episode("00000001", "00000002", 30, 40, class_name)], True
+                )
+                hour = result["hours"][0]
+                if class_name == "ALT_UNKNOWN":
+                    self.assertEqual(hour["encounter_unresolved"], 1)
+                    self.assertEqual(hour["encounter_miss"], 0)
+                else:
+                    self.assertEqual(hour["encounter_miss"], 1)
+
+    # REQ: OA-ENC-022
+    def test_unknown_missing_and_typo_encounter_classes_refuse_input(self):
+        rows = (
+            ("class,ticks_unevaluated\nUNKNOWN,0\n", "unsupported encounter class"),
+            ("class,ticks_unevaluated\n,0\n", "missing class"),
+            ("class,ticks_unevaluated\nC7,0\n", "unsupported encounter class"),
+            ("ticks_unevaluated\n0\n", "unexpected CSV schema"),
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "encounters.csv"
+            for csv_text, expected_error in rows:
+                with self.subTest(csv_text=csv_text):
+                    path.write_text(
+                        "address_a_hex,address_b_hex,start_s,end_s," + csv_text.split("\n", 1)[0]
+                        + "\n00000001,00000002,0,10,"
+                        + (csv_text.split("\n", 1)[1] if "\n" in csv_text else ""),
+                        encoding="utf-8",
+                    )
+                    with self.assertRaisesRegex(rate.InputError, expected_error):
+                        rate.read_episodes(path, "encounters")
+
+    # REQ: OA-ENC-022
+    def test_direct_aggregate_refuses_invalid_encounter_class_before_labeling(self):
+        malformed = episode("00000001", "00000002", 30, 40, "C4")
+        malformed = rate.Episode(
+            malformed.pair,
+            malformed.start,
+            malformed.end,
+            "C4 typo",
+            malformed.ticks_unevaluated,
+            malformed.flags,
+        )
+        with self.assertRaisesRegex(rate.InputError, "unsupported encounter class"):
+            aggregate([], [malformed], True)
+
     # REQ: OA-ENC-022
     def test_summary_counter_map_stops_before_later_numeric_sections(self):
         summary = (

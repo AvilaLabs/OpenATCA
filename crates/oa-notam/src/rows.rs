@@ -15,11 +15,58 @@ pub const DEFAULT_POLYGONS: usize = 8192 * 4;
 /// Polygon vertices in the default table: 128 per row, against 83 per message with geometry in
 /// the survey (903 vertices in 11 messages, the largest polygon 588 vertices).
 pub const DEFAULT_VERTICES: usize = 8192 * 128;
+/// Default feature-capacity reservation per row. This is a memory-sizing default, not a model
+/// or AIXM occurrence limit; callers may provide a larger total via
+/// [`new_notams_with_feature_capacity`]. The 16-per-row budget uses 48 bytes per feature column
+/// set (about 768 bytes per row, 6 MiB at the default row capacity).
+pub const DEFAULT_FEATURES_PER_ROW: usize = 16;
+pub const FEATURE_TIME_INSTANT: u8 = 1;
+pub const FEATURE_TIME_PERIOD: u8 = 2;
+pub const FEATURE_META_SEQUENCE: u8 = 1;
+pub const FEATURE_META_CORRECTION: u8 = 2;
+pub const FEATURE_ERROR_TIME: u8 = 1;
+pub const FEATURE_ERROR_INTERPRETATION: u8 = 2;
+pub const FEATURE_ERROR_SEQUENCE: u8 = 4;
+pub const FEATURE_ERROR_CORRECTION: u8 = 8;
+pub const FEATURE_ERROR_DESIGNATOR: u8 = 16;
+pub const FEATURE_TIME_BEGIN_PRESENT: u8 = 1;
+pub const FEATURE_TIME_END_PRESENT: u8 = 2;
+pub const FEATURE_TIME_INSTANT_PRESENT: u8 = 4;
+
+/// One AIXM feature time slice retained for encoder round trips. `Notams` stores each member in
+/// its own column; this is the staged read type returned by [`feature_at`]. Its padded C layout
+/// is 56 bytes; the corresponding struct-of-arrays columns occupy 48 bytes per feature.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(C)]
+pub struct FeatureSlice {
+    pub kind: u8,
+    /// `1` is GML TimeInstant, `2` is GML TimePeriod.
+    pub time_kind: u8,
+    pub interpretation: u8,
+    /// Presence bits for optional sequence and correction numbers.
+    pub meta: u8,
+    /// Presence bits for the instant position or period begin/end values.
+    pub time_meta: u8,
+    /// Error bits for malformed or duplicate feature time-slice fields.
+    pub errors: u8,
+    pub reserved: [u8; 2],
+    pub begin_ms: i64,
+    pub end_ms: i64,
+    pub sequence_number: u32,
+    pub correction_number: u32,
+    /// Exact per-object designator retained from supported feature members.
+    pub designator: [u8; 12],
+    pub designator_len: u8,
+    /// Airport ICAO indicator, kept distinct from each airport's designator.
+    pub icao: [u8; 4],
+    pub icao_len: u8,
+}
+const _: () = assert!(core::mem::size_of::<FeatureSlice>() == 56);
 
 /// A row being built, in model units. Fields are meaningful only where `present` has the
 /// field's bit.
-// Budget: staged once per message, never in quantity; the packed size of the columns is 247
-// bytes, and the 8-byte alignment of the 64-bit fields adds one byte at the tail (A7.1).
+// A7.1: 272 bytes per row, up 24 from the guarded 248-byte row to retain the feature span and
+// event-slice metadata. Per-feature data is in separately bounded columns (48 bytes/feature).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(C)]
 pub struct Row {
@@ -39,6 +86,9 @@ pub struct Row {
     pub radius_m: u32,
     pub poly_first: u32,
     pub poly_count: u32,
+    /// Span into the NOTAM feature time-slice columns.
+    pub feature_first: u32,
+    pub feature_count: u32,
     pub feat_mask: u32,
     pub lat_e7: i32,
     pub lon_e7: i32,
@@ -55,6 +105,14 @@ pub struct Row {
     pub floor_ref: u8,
     pub ceil_ref: u8,
     pub feat_kind: u8,
+    /// AIXM event `interpretation` code; zero means missing or not understood.
+    pub interpretation: u8,
+    /// Presence bits for optional event `sequenceNumber` and `correctionNumber`.
+    pub slice_meta: u8,
+    /// Error bits for malformed or duplicate event time-slice metadata.
+    pub slice_errors: u8,
+    pub sequence_number: u32,
+    pub correction_number: u32,
     pub event_id: [u8; 16],
     pub series: [u8; 12],
     pub ref_series: [u8; 12],
@@ -70,7 +128,7 @@ pub struct Row {
     pub icao_location: [u8; 4],
     pub apt_icao: [u8; 4],
 }
-const _: () = assert!(core::mem::size_of::<Row>() == 248);
+const _: () = assert!(core::mem::size_of::<Row>() == 272);
 
 /// A row with every field absent.
 pub const BLANK_ROW: Row = Row {
@@ -90,6 +148,8 @@ pub const BLANK_ROW: Row = Row {
     radius_m: 0,
     poly_first: 0,
     poly_count: 0,
+    feature_first: 0,
+    feature_count: 0,
     feat_mask: 0,
     lat_e7: 0,
     lon_e7: 0,
@@ -106,6 +166,11 @@ pub const BLANK_ROW: Row = Row {
     floor_ref: 0,
     ceil_ref: 0,
     feat_kind: 0,
+    interpretation: 0,
+    slice_meta: 0,
+    slice_errors: 0,
+    sequence_number: 0,
+    correction_number: 0,
     event_id: [0; 16],
     series: [0; 12],
     ref_series: [0; 12],
@@ -127,7 +192,8 @@ pub const BLANK_ROW: Row = Row {
 /// where the row's `present` word has the field's bit (bit `Field as u32`); `errors` has the
 /// bit of every field that was present but malformed, duplicated or inconsistent.
 ///
-/// Geometry is shared: row `r` owns polygons `poly_first[r] .. poly_first[r] + poly_count[r]`;
+/// Geometry is shared: row `r` owns polygons `poly_first[r] .. poly_first[r] + poly_count[r]`,
+/// with `poly_feature` preserving each polygon's owning feature slice;
 /// polygon `p` owns vertices `poly_vstart[p] .. poly_vstart[p] + poly_vlen[p]` of the
 /// `vtx_lat` and `vtx_lon` columns (1e-7 degree, the closing vertex not repeated). The
 /// circle is `lat_e7`, `lon_e7` (field `Centre`) and `radius_m` (field `Radius`). Short text is
@@ -182,10 +248,37 @@ pub struct Notams {
     pub ceil_ref: Vec<u8>,
     pub poly_first: Vec<u32>,
     pub poly_count: Vec<u32>,
+    pub feature_first: Vec<u32>,
+    pub feature_count: Vec<u32>,
+    /// Bounded total capacity of retained feature time slices. The default constructor reserves
+    /// `capacity * DEFAULT_FEATURES_PER_ROW`; this explicit capacity may be larger than that.
+    pub feature_capacity: usize,
+    pub feature_kind: Vec<u8>,
+    pub feature_time_kind: Vec<u8>,
+    pub feature_interpretation: Vec<u8>,
+    pub feature_meta: Vec<u8>,
+    pub feature_time_meta: Vec<u8>,
+    pub feature_errors: Vec<u8>,
+    pub feature_begin_ms: Vec<i64>,
+    pub feature_end_ms: Vec<i64>,
+    pub feature_sequence_number: Vec<u32>,
+    pub feature_correction_number: Vec<u32>,
+    pub feature_designator: Vec<[u8; 12]>,
+    pub feature_designator_len: Vec<u8>,
+    pub feature_icao: Vec<[u8; 4]>,
+    pub feature_icao_len: Vec<u8>,
     /// Bit `k` is set when a feature of kind `k` ([`crate::FEAT_AIRPORT`] ...) is in the message.
     pub feat_mask: Vec<u32>,
     /// The most specific feature kind present (see `docs/FNS_SURVEY.md`), 0 for none.
     pub feat_kind: Vec<u8>,
+    /// AIXM event time-slice interpretation code.
+    pub interpretation: Vec<u8>,
+    /// Presence bits for optional event time-slice sequence/correction values.
+    pub slice_meta: Vec<u8>,
+    /// Error bits for invalid or duplicate event time-slice values.
+    pub slice_errors: Vec<u8>,
+    pub sequence_number: Vec<u32>,
+    pub correction_number: Vec<u32>,
     /// That feature's designator, empty when its kind has none.
     pub feat_desig: Vec<[u8; 12]>,
     pub apt: Vec<[u8; 8]>,
@@ -198,6 +291,9 @@ pub struct Notams {
     pub poly_vlen: Vec<u32>,
     /// The feature kind the polygon belongs to.
     pub poly_kind: Vec<u8>,
+    /// Index of the feature slice owning this polygon, within the feature columns (4 bytes per
+    /// polygon, about 128 KiB at the default polygon capacity).
+    pub poly_feature: Vec<u32>,
     pub vtx_capacity: usize,
     pub vtx_lat: Vec<i32>,
     pub vtx_lon: Vec<i32>,
@@ -213,6 +309,27 @@ pub fn new_notams(
     string_bytes: usize,
     polygons: usize,
     vertices: usize,
+) -> Notams {
+    new_notams_with_feature_capacity(
+        capacity,
+        string_bytes,
+        polygons,
+        vertices,
+        capacity.saturating_mul(DEFAULT_FEATURES_PER_ROW),
+    )
+}
+
+/// An empty `Notams` with an explicit total capacity for retained feature time slices.
+///
+/// Each feature slice uses 48 bytes across its struct-of-arrays columns. Capacity is total across
+/// all rows; the default 16-per-row reserve is only a memory budget and does not constrain valid
+/// AIXM message multiplicity.
+pub fn new_notams_with_feature_capacity(
+    capacity: usize,
+    string_bytes: usize,
+    polygons: usize,
+    vertices: usize,
+    feature_capacity: usize,
 ) -> Notams {
     Notams {
         capacity,
@@ -255,8 +372,30 @@ pub fn new_notams(
         ceil_ref: Vec::with_capacity(capacity),
         poly_first: Vec::with_capacity(capacity),
         poly_count: Vec::with_capacity(capacity),
+        feature_first: Vec::with_capacity(capacity),
+        feature_count: Vec::with_capacity(capacity),
+        feature_capacity,
+        feature_kind: Vec::with_capacity(feature_capacity),
+        feature_time_kind: Vec::with_capacity(feature_capacity),
+        feature_interpretation: Vec::with_capacity(feature_capacity),
+        feature_meta: Vec::with_capacity(feature_capacity),
+        feature_time_meta: Vec::with_capacity(feature_capacity),
+        feature_errors: Vec::with_capacity(feature_capacity),
+        feature_begin_ms: Vec::with_capacity(feature_capacity),
+        feature_end_ms: Vec::with_capacity(feature_capacity),
+        feature_sequence_number: Vec::with_capacity(feature_capacity),
+        feature_correction_number: Vec::with_capacity(feature_capacity),
+        feature_designator: Vec::with_capacity(feature_capacity),
+        feature_designator_len: Vec::with_capacity(feature_capacity),
+        feature_icao: Vec::with_capacity(feature_capacity),
+        feature_icao_len: Vec::with_capacity(feature_capacity),
         feat_mask: Vec::with_capacity(capacity),
         feat_kind: Vec::with_capacity(capacity),
+        interpretation: Vec::with_capacity(capacity),
+        slice_meta: Vec::with_capacity(capacity),
+        slice_errors: Vec::with_capacity(capacity),
+        sequence_number: Vec::with_capacity(capacity),
+        correction_number: Vec::with_capacity(capacity),
         feat_desig: Vec::with_capacity(capacity),
         apt: Vec::with_capacity(capacity),
         apt_icao: Vec::with_capacity(capacity),
@@ -267,6 +406,7 @@ pub fn new_notams(
         poly_vstart: Vec::with_capacity(polygons),
         poly_vlen: Vec::with_capacity(polygons),
         poly_kind: Vec::with_capacity(polygons),
+        poly_feature: Vec::with_capacity(polygons),
         vtx_capacity: vertices,
         vtx_lat: Vec::with_capacity(vertices),
         vtx_lon: Vec::with_capacity(vertices),
@@ -298,6 +438,7 @@ pub struct Mark {
     pub strings_used: usize,
     pub polygons: usize,
     pub vertices: usize,
+    pub features: usize,
 }
 
 /// The current lengths of `n`.
@@ -307,6 +448,7 @@ pub fn mark(n: &Notams) -> Mark {
         strings_used: n.strings_used,
         polygons: n.poly_vstart.len(),
         vertices: n.vtx_lat.len(),
+        features: n.feature_kind.len(),
     }
 }
 
@@ -352,8 +494,15 @@ pub fn truncate_notams(n: &mut Notams, m: Mark) {
     n.ceil_ref.truncate(m.rows);
     n.poly_first.truncate(m.rows);
     n.poly_count.truncate(m.rows);
+    n.feature_first.truncate(m.rows);
+    n.feature_count.truncate(m.rows);
     n.feat_mask.truncate(m.rows);
     n.feat_kind.truncate(m.rows);
+    n.interpretation.truncate(m.rows);
+    n.slice_meta.truncate(m.rows);
+    n.slice_errors.truncate(m.rows);
+    n.sequence_number.truncate(m.rows);
+    n.correction_number.truncate(m.rows);
     n.feat_desig.truncate(m.rows);
     n.apt.truncate(m.rows);
     n.apt_icao.truncate(m.rows);
@@ -363,6 +512,21 @@ pub fn truncate_notams(n: &mut Notams, m: Mark) {
     n.poly_vstart.truncate(m.polygons);
     n.poly_vlen.truncate(m.polygons);
     n.poly_kind.truncate(m.polygons);
+    n.poly_feature.truncate(m.polygons);
+    n.feature_kind.truncate(m.features);
+    n.feature_time_kind.truncate(m.features);
+    n.feature_interpretation.truncate(m.features);
+    n.feature_meta.truncate(m.features);
+    n.feature_time_meta.truncate(m.features);
+    n.feature_errors.truncate(m.features);
+    n.feature_begin_ms.truncate(m.features);
+    n.feature_end_ms.truncate(m.features);
+    n.feature_sequence_number.truncate(m.features);
+    n.feature_correction_number.truncate(m.features);
+    n.feature_designator.truncate(m.features);
+    n.feature_designator_len.truncate(m.features);
+    n.feature_icao.truncate(m.features);
+    n.feature_icao_len.truncate(m.features);
     n.vtx_lat.truncate(m.vertices);
     n.vtx_lon.truncate(m.vertices);
 }
@@ -376,6 +540,7 @@ pub fn clear_notams(n: &mut Notams) {
             strings_used: 0,
             polygons: 0,
             vertices: 0,
+            features: 0,
         },
     );
 }
@@ -423,8 +588,15 @@ pub fn push_row(n: &mut Notams, r: &Row) -> bool {
     n.ceil_ref.push(r.ceil_ref);
     n.poly_first.push(r.poly_first);
     n.poly_count.push(r.poly_count);
+    n.feature_first.push(r.feature_first);
+    n.feature_count.push(r.feature_count);
     n.feat_mask.push(r.feat_mask);
     n.feat_kind.push(r.feat_kind);
+    n.interpretation.push(r.interpretation);
+    n.slice_meta.push(r.slice_meta);
+    n.slice_errors.push(r.slice_errors);
+    n.sequence_number.push(r.sequence_number);
+    n.correction_number.push(r.correction_number);
     n.feat_desig.push(r.feat_desig);
     n.apt.push(r.apt);
     n.apt_icao.push(r.apt_icao);
@@ -454,6 +626,8 @@ pub fn row_at(n: &Notams, i: usize) -> Option<Row> {
         radius_m: *n.radius_m.get(i)?,
         poly_first: *n.poly_first.get(i)?,
         poly_count: *n.poly_count.get(i)?,
+        feature_first: *n.feature_first.get(i)?,
+        feature_count: *n.feature_count.get(i)?,
         feat_mask: *n.feat_mask.get(i)?,
         lat_e7: *n.lat_e7.get(i)?,
         lon_e7: *n.lon_e7.get(i)?,
@@ -470,6 +644,11 @@ pub fn row_at(n: &Notams, i: usize) -> Option<Row> {
         floor_ref: *n.floor_ref.get(i)?,
         ceil_ref: *n.ceil_ref.get(i)?,
         feat_kind: *n.feat_kind.get(i)?,
+        interpretation: *n.interpretation.get(i)?,
+        slice_meta: *n.slice_meta.get(i)?,
+        slice_errors: *n.slice_errors.get(i)?,
+        sequence_number: *n.sequence_number.get(i)?,
+        correction_number: *n.correction_number.get(i)?,
         event_id: *n.event_id.get(i)?,
         series: *n.series.get(i)?,
         ref_series: *n.ref_series.get(i)?,
@@ -484,6 +663,149 @@ pub fn row_at(n: &Notams, i: usize) -> Option<Row> {
         fir: *n.fir.get(i)?,
         icao_location: *n.icao_location.get(i)?,
         apt_icao: *n.apt_icao.get(i)?,
+    })
+}
+
+/// The number of feature slices retained across all rows.
+pub fn feature_slices_len(n: &Notams) -> usize {
+    n.feature_kind.len()
+}
+
+/// Appends one feature slice if its total capacity is available.
+pub fn push_feature_slice(n: &mut Notams, f: FeatureSlice) -> Option<u32> {
+    if f.reserved != [0; 2]
+        || n.feature_kind.len() >= n.feature_capacity
+        || n.feature_time_kind.len() != n.feature_kind.len()
+        || n.feature_interpretation.len() != n.feature_kind.len()
+        || n.feature_meta.len() != n.feature_kind.len()
+        || n.feature_time_meta.len() != n.feature_kind.len()
+        || n.feature_errors.len() != n.feature_kind.len()
+        || n.feature_begin_ms.len() != n.feature_kind.len()
+        || n.feature_end_ms.len() != n.feature_kind.len()
+        || n.feature_sequence_number.len() != n.feature_kind.len()
+        || n.feature_correction_number.len() != n.feature_kind.len()
+        || n.feature_designator.len() != n.feature_kind.len()
+        || n.feature_designator_len.len() != n.feature_kind.len()
+        || n.feature_icao.len() != n.feature_kind.len()
+        || n.feature_icao_len.len() != n.feature_kind.len()
+    {
+        return None;
+    }
+    let index = u32::try_from(n.feature_kind.len()).ok()?;
+    n.feature_kind.push(f.kind);
+    n.feature_time_kind.push(f.time_kind);
+    n.feature_interpretation.push(f.interpretation);
+    n.feature_meta.push(f.meta);
+    n.feature_time_meta.push(f.time_meta);
+    n.feature_errors.push(f.errors);
+    n.feature_begin_ms.push(f.begin_ms);
+    n.feature_end_ms.push(f.end_ms);
+    n.feature_sequence_number.push(f.sequence_number);
+    n.feature_correction_number.push(f.correction_number);
+    n.feature_designator.push(f.designator);
+    n.feature_designator_len.push(f.designator_len);
+    n.feature_icao.push(f.icao);
+    n.feature_icao_len.push(f.icao_len);
+    Some(index)
+}
+
+/// Replaces one feature slice's staged fields without growing any output table.
+pub fn set_feature_slice(n: &mut Notams, index: usize, f: FeatureSlice) -> bool {
+    if f.reserved != [0; 2]
+        || index >= n.feature_kind.len()
+        || index >= n.feature_time_kind.len()
+        || index >= n.feature_interpretation.len()
+        || index >= n.feature_meta.len()
+        || index >= n.feature_time_meta.len()
+        || index >= n.feature_errors.len()
+        || index >= n.feature_begin_ms.len()
+        || index >= n.feature_end_ms.len()
+        || index >= n.feature_sequence_number.len()
+        || index >= n.feature_correction_number.len()
+        || index >= n.feature_designator.len()
+        || index >= n.feature_designator_len.len()
+        || index >= n.feature_icao.len()
+        || index >= n.feature_icao_len.len()
+    {
+        return false;
+    }
+    let Some(kind) = n.feature_kind.get_mut(index) else {
+        return false;
+    };
+    *kind = f.kind;
+    let Some(value) = n.feature_time_kind.get_mut(index) else {
+        return false;
+    };
+    *value = f.time_kind;
+    let Some(value) = n.feature_interpretation.get_mut(index) else {
+        return false;
+    };
+    *value = f.interpretation;
+    let Some(value) = n.feature_meta.get_mut(index) else {
+        return false;
+    };
+    *value = f.meta;
+    let Some(value) = n.feature_time_meta.get_mut(index) else {
+        return false;
+    };
+    *value = f.time_meta;
+    let Some(value) = n.feature_errors.get_mut(index) else {
+        return false;
+    };
+    *value = f.errors;
+    let Some(value) = n.feature_begin_ms.get_mut(index) else {
+        return false;
+    };
+    *value = f.begin_ms;
+    let Some(value) = n.feature_end_ms.get_mut(index) else {
+        return false;
+    };
+    *value = f.end_ms;
+    let Some(value) = n.feature_sequence_number.get_mut(index) else {
+        return false;
+    };
+    *value = f.sequence_number;
+    let Some(value) = n.feature_correction_number.get_mut(index) else {
+        return false;
+    };
+    *value = f.correction_number;
+    let Some(value) = n.feature_designator.get_mut(index) else {
+        return false;
+    };
+    *value = f.designator;
+    let Some(value) = n.feature_designator_len.get_mut(index) else {
+        return false;
+    };
+    *value = f.designator_len;
+    let Some(value) = n.feature_icao.get_mut(index) else {
+        return false;
+    };
+    *value = f.icao;
+    let Some(value) = n.feature_icao_len.get_mut(index) else {
+        return false;
+    };
+    *value = f.icao_len;
+    true
+}
+
+/// Feature slice `index` as a staged record.
+pub fn feature_at(n: &Notams, index: usize) -> Option<FeatureSlice> {
+    Some(FeatureSlice {
+        kind: *n.feature_kind.get(index)?,
+        time_kind: *n.feature_time_kind.get(index)?,
+        interpretation: *n.feature_interpretation.get(index)?,
+        meta: *n.feature_meta.get(index)?,
+        time_meta: *n.feature_time_meta.get(index)?,
+        errors: *n.feature_errors.get(index)?,
+        reserved: [0; 2],
+        begin_ms: *n.feature_begin_ms.get(index)?,
+        end_ms: *n.feature_end_ms.get(index)?,
+        sequence_number: *n.feature_sequence_number.get(index)?,
+        correction_number: *n.feature_correction_number.get(index)?,
+        designator: *n.feature_designator.get(index)?,
+        designator_len: *n.feature_designator_len.get(index)?,
+        icao: *n.feature_icao.get(index)?,
+        icao_len: *n.feature_icao_len.get(index)?,
     })
 }
 

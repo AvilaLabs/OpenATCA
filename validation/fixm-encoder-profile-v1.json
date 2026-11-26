@@ -1,0 +1,398 @@
+{
+  "profile": "oa-fixm encoder subset",
+  "profile_version": 1,
+  "namespace": "http://www.faa.aero/nas/3.0",
+  "sources": {
+    "nas_3_0_schema_documentation": {
+      "url": "https://fixm.aero/releases/US_Ext-3.0/doc/diagrams/Nas.html",
+      "sha256": "2486d467a070c7ef3e7789185e7ab5cd2f21d1395e328d2e4bc87e33502fc6e7",
+      "facts": [
+        "schema elementFormDefault is unqualified",
+        "MessageCollectionType has one-or-more message children",
+        "NasFlightType extends core FlightType and appends assignedAltitude, flightPlan, interimAltitude, requestedAltitude among its extension sequence",
+        "NasHandoffEventType values are INITIATION, ACCEPTANCE, RETRACTION, TAKE_CONTROL, UPDATE, FAILURE",
+        "SfdpsFlightStatusType values are PROPOSED, ACTIVE, COMPLETED, CANCELLED, DROPPED",
+        "NasCoastIndicatorType value is COASTING",
+        "NasAltitudeType is a one-of choice among altitude forms",
+        "NasAltitudeType is an XSD choice; the parsed block and altFixAlt alternatives have named child sequences",
+        "AltFixAltAltitudeType declares point as fb:SignificantPointType followed by post and pre ff:AltitudeType values",
+        "BlockAltitudeType contains unqualified above and below children",
+        "NasHandoffType acceptingUnit is an unqualified child of type AtcUnitReferenceType"
+      ]
+    },
+    "fixm_core_3_0_1_schemas": {
+      "url": "https://www.fixm.aero/releases/FIXM-3.0.1/FIXM_Core_v3_0_1_Schemas.zip",
+      "sha256": "fe53afa19ef16f9323c83f74f7626550b66f8bf511b418ba007810da3ca05e48",
+      "archive_bytes": 132340,
+      "xsd_files_used": [
+        "schemas/core/base/Types.xsd",
+        "schemas/core/base/Airspace.xsd",
+        "schemas/core/flight/flight/FlightData.xsd",
+        "schemas/core/flight/flight/Status.xsd",
+        "schemas/core/flight/enroute/EnRouteData.xsd",
+        "schemas/core/flight/enroute/Position.xsd",
+        "schemas/core/foundation/Altitude.xsd",
+        "schemas/core/foundation/Measures.xsd",
+        "schemas/core/foundation/Location.xsd",
+        "schemas/core/foundation/Aeronautical.xsd",
+        "schemas/core/foundation/Organization.xsd"
+      ],
+      "tracked_archive": "validation/schemas/FIXM_Core_v3_0_1_Schemas.zip"
+    }
+  },
+  "root_and_cardinality": [
+    {
+      "element": "nas:MessageCollection",
+      "type": "nas:MessageCollectionType",
+      "constraint": "at least one message",
+      "enforced_by": "encode rejects EmptyCollection; structural test"
+    },
+    {
+      "element": "message",
+      "type": "nas:FlightMessageType via xsi:type",
+      "constraint": "unqualified local element; emitted once per Events row",
+      "enforced_by": "structural test and decode(encode(x)) round-trip"
+    },
+    {
+      "element": "flight",
+      "type": "fx:FlightType with nas:NasFlightType xsi:type",
+      "constraint": "required exactly once in FlightMessageType",
+      "enforced_by": "encoder emits one; structural test and round-trip"
+    }
+  ],
+  "fields": [
+    {
+      "model": "mandatory row identity",
+      "elements": [
+        "gufi"
+      ],
+      "declared_type": "fb:GloballyUniqueFlightIdentifierType",
+      "constraint": "codeSpace fixed urn:uuid; canonical UUID version 4 with RFC variant 8/9/A/B",
+      "enforced_by": "valid_gufi; negative test"
+    },
+    {
+      "model": "timestamp",
+      "elements": [
+        "flight/@timestamp"
+      ],
+      "declared_type": "nas:NasFlightType/@timestamp",
+      "constraint": "UTC XML dateTime subset; positive year 1970..9999; no leap second",
+      "enforced_by": "format_time; invalid timestamp error"
+    },
+    {
+      "model": "flight type",
+      "elements": [
+        "flight/@flightType"
+      ],
+      "declared_type": "fx:TypeOfFlightType",
+      "constraint": "MILITARY|GENERAL|NON_SCHEDULED|SCHEDULED|OTHER; this model emits GENERAL|NON_SCHEDULED|SCHEDULED",
+      "enforced_by": "numeric enum mapping; unsupported values refused; negative test"
+    },
+    {
+      "model": "source and centre",
+      "elements": [
+        "flight/@source",
+        "flight/@centre"
+      ],
+      "declared_type": "nas:NasFlightType attributes",
+      "constraint": "this decoder model's bounded ASCII alphanumeric codes (2 and 4 bytes)",
+      "enforced_by": "valid_code; XML 1.0 text check"
+    },
+    {
+      "model": "flight identification",
+      "elements": [
+        "flightIdentification/@aircraftIdentification",
+        "flightIdentification/@computerId"
+      ],
+      "declared_type": "nas:NasFlightIdentificationType / inherited fx:FlightIdentificationType",
+      "constraint": "core FlightIdentifierType pattern [A-Z0-9]{1,7}; computerId represented as bounded decoder code",
+      "enforced_by": "valid_code max 7 for callsign; max 4 for computer ID; negative test"
+    },
+    {
+      "model": "flight plan identifier",
+      "elements": [
+        "flightPlan/@identifier"
+      ],
+      "declared_type": "nas:NasFlightPlanType identifier",
+      "constraint": "bounded decoder code; XML 1.0 characters",
+      "enforced_by": "valid_code max 12"
+    },
+    {
+      "model": "departure and arrival",
+      "elements": [
+        "departure/@departurePoint",
+        "arrival/@arrivalPoint",
+        "runwayPositionAndTime/runwayTime/actual/@time",
+        "runwayPositionAndTime/runwayTime/estimated/@time"
+      ],
+      "declared_type": "nas:NasDepartureType, nas:NasArrivalType and their inherited core types",
+      "constraint": "bounded point codes and UTC XML dateTime values",
+      "enforced_by": "valid_code max 12; format_time; tagged round-trip"
+    },
+    {
+      "model": "SFDPS status",
+      "elements": [
+        "flightStatus/@fdpsFlightStatus"
+      ],
+      "declared_type": "nas:SfdpsFlightStatusType",
+      "constraint": "PROPOSED|ACTIVE|COMPLETED|CANCELLED|DROPPED",
+      "enforced_by": "closed enum mapping; negative test"
+    },
+    {
+      "model": "assigned, requested, interim and reported altitude",
+      "elements": [
+        "assignedAltitude/simple|vfrPlus|vfr",
+        "requestedAltitude/simple|vfrPlus|vfr",
+        "interimAltitude",
+        "position/altitude"
+      ],
+      "declared_type": "nas:NasAltitudeType choice and ff:AltitudeType",
+      "constraint": "Assigned form is one selected NAS choice; block preserves ordered lower/upper bounds; altFixAlt preserves fix, pre and post values; FEET emitted; numeric values constrained to model domain -2000..100000 ft; nil interim preserves xsi:nil.",
+      "enforced_by": "form/flag consistency; bounded value and block-order checks; fix-code check; fixed FEET output; tagged block/atFix/simple roundtrips; block/atFix structural coverage; invalid forms refused"
+    },
+    {
+      "model": "aircraft",
+      "elements": [
+        "aircraftDescription/@aircraftAddress",
+        "aircraftType/icaoModelIdentifier"
+      ],
+      "declared_type": "nas:NasAircraftType",
+      "constraint": "nonzero 24-bit hexadecimal address; bounded aircraft model code",
+      "enforced_by": "six-digit uppercase formatter after numeric range validation; valid_code max 4; negative test"
+    },
+    {
+      "model": "route",
+      "elements": [
+        "agreed/route/@nasRouteText"
+      ],
+      "declared_type": "fx:TrajectoryRoutePairType containing nas:NasRouteType",
+      "constraint": "FreeTextType lexical content and maxLength 4096",
+      "enforced_by": "XML 1.0 characters, UTF-8 string-table bounds, maxLength 4096; round-trip"
+    },
+    {
+      "model": "operator",
+      "elements": [
+        "operator/operatingOrganization/organization/@name"
+      ],
+      "declared_type": "fx:AircraftOperatorType and ff:OrganizationType/@name",
+      "constraint": "TextNameType string; XML 1.0 characters",
+      "enforced_by": "valid_code subset and XML 1.0 character check; negative test"
+    },
+    {
+      "model": "control and handoff units",
+      "elements": [
+        "controllingUnit",
+        "boundaryCrossings/handoff/receivingUnit",
+        "boundaryCrossings/handoff/acceptingUnit",
+        "boundaryCrossings/handoff/transferringUnit"
+      ],
+      "declared_type": "NAS acceptingUnit element is fb:AtcUnitReferenceType (abstract); emitted acceptingUnit xsi:type is the concrete fb:IdentifiedUnitReferenceType. Receiving/transferring use fb:IdentifiedUnitReferenceType.",
+      "constraint": "unitIdentifier and optional sectorIdentifier are preserved; bounded ASCII unit and sector values; acceptingUnit uses the official AtcUnitReferenceType",
+      "enforced_by": "valid_code; accepting/receiving/transferring all roundtrip; malformed unit and field-error rows refuse"
+    },
+    {
+      "model": "handoff event",
+      "elements": [
+        "boundaryCrossings/handoff/@event"
+      ],
+      "declared_type": "nas:NasHandoffEventType",
+      "constraint": "INITIATION|ACCEPTANCE|RETRACTION|TAKE_CONTROL|UPDATE|FAILURE",
+      "enforced_by": "closed enum mapping; negative test"
+    },
+    {
+      "model": "beacon",
+      "elements": [
+        "enRoute/beaconCodeAssignment/currentBeaconCode"
+      ],
+      "declared_type": "fb:BeaconCodeType / fb:RestrictedBeaconCodeType",
+      "constraint": "exactly four octal characters [0-7]{4}",
+      "enforced_by": "zero-padded four digit formatting plus parse_beacon; negative test"
+    },
+    {
+      "model": "position",
+      "elements": [
+        "enRoute/position/@positionTime",
+        "enRoute/position/position/location/@srsName",
+        "enRoute/position/position/location/pos"
+      ],
+      "declared_type": "nas:NasAircraftPositionType; fb:LocationPointType; ff:GeographicLocationType",
+      "constraint": "UTC dateTime; fixed CRS urn:ogc:def:crs:EPSG::4326; exactly two decimal degree components in latitude-longitude order; model bounds \u00b190/\u00b1180; 1e-7 precision preserved",
+      "enforced_by": "format_time; fixed srsName; scaled_1e7; coordinate range checks; round-trip and negative test"
+    },
+    {
+      "model": "ground speed and velocity",
+      "elements": [
+        "actualSpeed/surveillance",
+        "trackVelocity/x",
+        "trackVelocity/y"
+      ],
+      "declared_type": "fx:GroundspeedType / nas:NasVelocityType",
+      "constraint": "KNOTS is a permitted groundspeed measure; decimal quantities; model range 0..2000 kt for groundspeed and \u00b12000 kt for velocity",
+      "enforced_by": "fixed KNOTS output; range checks; negative test"
+    },
+    {
+      "model": "coast indicator",
+      "elements": [
+        "enRoute/position/@coastIndicator"
+      ],
+      "declared_type": "nas:NasCoastIndicatorType",
+      "constraint": "COASTING only",
+      "enforced_by": "constant output when field is present"
+    },
+    {
+      "model": "supplemental sequence values",
+      "elements": [
+        "supplementalData/additionalFlightInformation/nameValue"
+      ],
+      "declared_type": "nas:NasSupplementalDataType + fb:NameValueListType + fb:NameValuePairType",
+      "constraint": "at most 10 items; name [A-Z0-9_]{1,20}; value length 0..100",
+      "enforced_by": "encoder emits at most two fixed valid names and u32 decimal values; round-trip"
+    }
+  ],
+  "explicit_refusals": [],
+  "limits": [
+    "This is a finite encoder-profile inventory and its negative checks, not a general XSD processor.",
+    "The raw FIXM Core 3.0.1 XSD archive is pinned. The FAA NAS 3.0 extension is available here as official schema documentation/source extracts rather than as a retrieved raw XSD archive.",
+    "Fields absent from the model are not synthesized. Unmodeled SFDPS operational extensions are outside this encoder subset."
+  ],
+  "element_namespace_map": [
+    {
+      "element": "nas:MessageCollection",
+      "namespace": "http://www.faa.aero/nas/3.0",
+      "basis": "NAS schema global root declaration"
+    },
+    {
+      "element": "message",
+      "namespace": "unqualified",
+      "basis": "NAS MessageCollectionType local element (elementFormDefault=unqualified)"
+    },
+    {
+      "element": "flight",
+      "namespace": "unqualified",
+      "basis": "NAS FlightMessageType local element (elementFormDefault=unqualified)"
+    },
+    {
+      "elements": [
+        "agreed",
+        "route",
+        "aircraftDescription",
+        "aircraftType",
+        "icaoModelIdentifier",
+        "arrival",
+        "departure",
+        "controllingUnit",
+        "enRoute",
+        "beaconCodeAssignment",
+        "currentBeaconCode",
+        "boundaryCrossings",
+        "position",
+        "actualSpeed",
+        "surveillance",
+        "altitude",
+        "flightIdentification",
+        "flightStatus",
+        "gufi",
+        "operator",
+        "operatingOrganization",
+        "supplementalData"
+      ],
+      "namespace": "http://www.fixm.aero/flight/3.0",
+      "basis": "Local elements declared by FIXM Core flight schema types (elementFormDefault=qualified)"
+    },
+    {
+      "elements": [
+        "runwayPositionAndTime",
+        "runwayTime",
+        "actual",
+        "estimated",
+        "location",
+        "nameValue"
+      ],
+      "namespace": "http://www.fixm.aero/base/3.0",
+      "basis": "Local elements declared by FIXM Core base schema types (elementFormDefault=qualified)"
+    },
+    {
+      "elements": [
+        "organization",
+        "pos"
+      ],
+      "namespace": "http://www.fixm.aero/foundation/3.0",
+      "basis": "Local elements declared by FIXM Core foundation schema types (elementFormDefault=qualified)"
+    },
+    {
+      "elements": [
+        "assignedAltitude",
+        "simple",
+        "vfrPlus",
+        "vfr",
+        "flightPlan",
+        "interimAltitude",
+        "requestedAltitude",
+        "additionalFlightInformation",
+        "handoff",
+        "receivingUnit",
+        "transferringUnit",
+        "trackVelocity",
+        "x",
+        "y",
+        "block",
+        "altFixAlt",
+        "point",
+        "post",
+        "pre",
+        "acceptingUnit"
+      ],
+      "namespace": "unqualified",
+      "basis": "NAS extension local elements; NAS schema documentation specifies elementFormDefault=unqualified"
+    }
+  ],
+  "nas_type_evidence": [
+    {
+      "type": "nas:NasAltitudeType",
+      "model": "XSD choice over above, altFixAlt, block, simple, vfr, vfrOnTop, vfrOnTopPlus, vfrPlus",
+      "emitted_supported": [
+        "block",
+        "altFixAlt",
+        "simple",
+        "vfr",
+        "vfrPlus"
+      ],
+      "source_section": "Nas.html, NasAltitudeType source"
+    },
+    {
+      "type": "nas:AltFixAltAltitudeType",
+      "sequence": [
+        "point",
+        "post",
+        "pre"
+      ],
+      "point_type": "fb:SignificantPointType",
+      "post_pre_type": "ff:AltitudeType",
+      "source_section": "Nas.html, AltFixAltAltitudeType source",
+      "point_declared_type": "fb:SignificantPointType (abstract)",
+      "point_emitted_xsi_type": "fb:FixPointType (concrete Core subtype)"
+    },
+    {
+      "type": "nas:BlockAltitudeType",
+      "sequence": [
+        "above",
+        "below"
+      ],
+      "child_type": "ff:AltitudeType",
+      "source_section": "Nas.html, BlockAltitudeType source"
+    },
+    {
+      "type": "nas:NasHandoffType",
+      "element": "acceptingUnit",
+      "element_namespace": "unqualified",
+      "element_type": "fb:AtcUnitReferenceType (abstract)",
+      "source_section": "Nas.html, NasHandoffType/acceptingUnit",
+      "emitted_xsi_type": "fb:IdentifiedUnitReferenceType (concrete Core subtype carrying unitIdentifier)"
+    }
+  ],
+  "roundtrip_coverage": [
+    "OA-FIXM-028 direct tests cover valid block and altFixAlt assignments, all six handoff event values with accepting/receiving/transferring units, and transferringUnit without an event.",
+    "OA-FIXM-028 emitted-child-order assertion includes assignedAltitude, flightPlan, interimAltitude and requestedAltitude.",
+    "OA-FIXM-028 route attribute tab, LF and CR are emitted as numeric character references so XML attribute normalization cannot alter decoded values."
+  ]
+}

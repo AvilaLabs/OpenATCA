@@ -35,6 +35,9 @@ DAY_END = 1_795_129_200  # 2026-11-19T23:00:00Z (exclusive)
 HOUR = 3600
 ADDRESS = re.compile(r"^[0-9A-Fa-f]{8}$")
 SHA256 = re.compile(r"\bsha256 ([0-9a-f]{64})\b")
+ENCOUNTER_CLASSES = frozenset(
+    {"C1", "C2", "C3", "C4", "C5", "C6", "VOLUME_ONLY", "ALT_UNKNOWN"}
+)
 
 
 class InputError(ValueError):
@@ -101,7 +104,12 @@ def read_episodes(path: Path, kind: str) -> list[Episode]:
                 unevaluated = int(_required(row, "ticks_unevaluated", kind))
                 if unevaluated < 0:
                     raise ValueError("negative unevaluated count")
-                class_name = row.get("class", "ALERT") if kind == "encounters" else "ALERT"
+                if kind == "encounters":
+                    class_name = _required(row, "class", kind)
+                    if class_name not in ENCOUNTER_CLASSES:
+                        raise ValueError(f"unsupported encounter class {class_name!r}")
+                else:
+                    class_name = "ALERT"
                 flags = frozenset(filter(None, row.get("flags", "").split("|")))
                 result.append(Episode(pair, start, end, class_name, unevaluated, flags))
             except (ValueError, InputError) as exc:
@@ -176,6 +184,12 @@ def aggregate(
 ) -> dict:
     alerts = list(alerts)
     encounters = list(encounters)
+    for encounter in encounters:
+        if encounter.class_name not in ENCOUNTER_CLASSES:
+            raise InputError(
+                f"unsupported encounter class {encounter.class_name!r}; "
+                "expected C1-C6, VOLUME_ONLY, or ALT_UNKNOWN"
+            )
     # `complete` covers only global run shortfalls. Clip-edge coverage is classified per event.
     usable_start = coverage_start + WARMUP_SECONDS
     by_pair: dict[tuple[str, str], list[Episode]] = defaultdict(list)

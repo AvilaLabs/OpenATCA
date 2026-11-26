@@ -8,11 +8,20 @@
 //! values, not facility adaptation or procedure authorization.
 
 /// Maximum flights examined per call (C2/C3).
+/// This is a bounded engineering call profile, not an observed FAA traffic capacity. The core
+/// reads caller-owned columns in place and retains only two per-flight scratch arrays below:
+/// 256 status bytes and 256 path IDs (1,280 bytes total).
 pub const MAX_ARV_FLIGHTS: usize = 256;
 /// Maximum runway/taxiway candidate paths per call (C2/C3).
+/// Together with the flight limit, this keeps the complete-call work calculation below the
+/// explicit C7 ceiling; larger inputs are refused, never truncated or partially evaluated.
 pub const MAX_ARV_PATHS: usize = 512;
 /// Maximum conservative work units, including matching, identity validation, path ordering and
 /// assigned-path searches (C7).
+/// At the two input limits, `work_bound` is 256*512 + 256*256 + 512 + 256*10 = 199,680
+/// (the last term is the bounded binary-search step count for 512 sorted IDs), just under this
+/// 200,000-unit refusal ceiling. OA-RWY-021 records this synthetic engineering envelope; it is
+/// not a measured or claimed facility-load requirement.
 pub const MAX_ARV_WORK: usize = 200_000;
 /// A path is considered only from its threshold outward to this range, metres (5 NM).
 pub const MAX_THRESHOLD_RANGE_M: f64 = 9_260.0;

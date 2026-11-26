@@ -22,6 +22,12 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 const MAX_ARGUMENT_BYTES: usize = 4_096;
+const FLEET_OPTION_COUNT: usize = 9;
+const MAX_FLEET_ARGUMENTS: usize = FLEET_OPTION_COUNT * 2;
+// Three path values may each use the existing 4 KiB limit; the manifest digest is 64 ASCII
+// hex bytes; five numeric values need at most 20 decimal bytes each; each of the nine fixed
+// option names is shorter than 32 bytes. This admits every supported path/value shape.
+const MAX_FLEET_OPTION_BYTES: usize = 3 * MAX_ARGUMENT_BYTES + 64 + 5 * 20 + 9 * 32;
 const MAX_EXPECTED_BYTES: usize = 32_768;
 const MAX_REPORT_FILES: usize = 512;
 const MAX_REPORT_BYTES: usize = 2_048;
@@ -337,15 +343,27 @@ fn discover_reports(root: &Path) -> Result<Vec<(u32, PathBuf)>, FleetError> {
 }
 
 fn parse_options(args: &[String]) -> Result<Vec<(String, String)>, FleetError> {
+    if args.len() > MAX_FLEET_ARGUMENTS {
+        return Err(FleetError::Usage(
+            "fleet-check accepts at most nine flag/value pairs".into(),
+        ));
+    }
     if args.len() % 2 != 0 {
         return Err(FleetError::Usage(
             "fleet-check needs flag/value pairs".into(),
         ));
     }
-    if args.iter().any(|arg| arg.len() > MAX_ARGUMENT_BYTES) {
-        return Err(FleetError::Usage(
-            "fleet-check argument exceeds 4096 bytes".into(),
-        ));
+    let mut total_bytes = 0usize;
+    for arg in args {
+        if arg.len() > MAX_ARGUMENT_BYTES {
+            return Err(FleetError::Usage(
+                "fleet-check argument exceeds 4096 bytes".into(),
+            ));
+        }
+        total_bytes = total_bytes
+            .checked_add(arg.len())
+            .filter(|bytes| *bytes <= MAX_FLEET_OPTION_BYTES)
+            .ok_or_else(|| FleetError::Usage("fleet-check arguments exceed byte limit".into()))?;
     }
     let mut pairs = Vec::new();
     pairs
@@ -662,6 +680,55 @@ mod tests {
             "--freshness-limit-ns".to_owned(),
             "1_000".replace('_', ""),
         ]
+    }
+
+    // Every supported value shape still fits: three maximum-size paths, a 64-byte pin, and
+    // bounded decimal values. This protects the cap from rejecting a valid path configuration.
+    #[test]
+    fn option_parser_accepts_supported_maximum_path_lengths() {
+        let mut args = Vec::new();
+        for (flag, value) in [
+            ("--issued-package-root", "path"),
+            ("--expected-manifest-sha256", "pin"),
+            ("--expected", "path"),
+            ("--reports-dir", "path"),
+            ("--previous-epoch", "18446744073709551615"),
+            ("--epoch", "18446744073709551615"),
+            ("--clock-domain-id", "4294967295"),
+            ("--query-time-ns", "-9223372036854775808"),
+            ("--freshness-limit-ns", "18446744073709551615"),
+        ] {
+            args.push(flag.to_owned());
+            let value = match flag {
+                "--issued-package-root" | "--expected" | "--reports-dir" => {
+                    "x".repeat(MAX_ARGUMENT_BYTES)
+                }
+                "--expected-manifest-sha256" => "a".repeat(64),
+                _ => value.to_owned(),
+            };
+            args.push(value);
+        }
+        assert!(parse_options(&args).is_ok());
+    }
+
+    #[test]
+    fn option_parser_refuses_many_arguments_before_pair_scanning() {
+        let args = vec!["--x".to_owned(); MAX_FLEET_ARGUMENTS + 1];
+        assert!(
+            matches!(parse_options(&args), Err(FleetError::Usage(message)) if message.contains("at most nine"))
+        );
+    }
+
+    #[test]
+    fn option_parser_refuses_total_bytes_before_duplicate_scan() {
+        let mut args = Vec::new();
+        for _ in 0..FLEET_OPTION_COUNT {
+            args.push("--issued-package-root".to_owned());
+            args.push("x".repeat(MAX_ARGUMENT_BYTES));
+        }
+        assert!(
+            matches!(parse_options(&args), Err(FleetError::Usage(message)) if message.contains("byte limit"))
+        );
     }
 
     fn run_case(case: &Case) -> (Result<(), FleetError>, String) {

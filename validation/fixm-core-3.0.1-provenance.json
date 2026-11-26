@@ -1,0 +1,10 @@
+{
+  "artifact": "FIXM Core 3.0.1 schema archive",
+  "source_url": "https://www.fixm.aero/releases/FIXM-3.0.1/FIXM_Core_v3_0_1_Schemas.zip",
+  "retrieved_utc_date": "2026-11-26",
+  "tracked_path": "validation/schemas/FIXM_Core_v3_0_1_Schemas.zip",
+  "byte_length": 132340,
+  "sha256": "fe53afa19ef16f9323c83f74f7626550b66f8bf511b418ba007810da3ca05e48",
+  "use": "Pinned official Core XSD bytes used to derive the emitted Core element namespace and field-type inventory in fixm-encoder-profile-v1.json.",
+  "license_metadata": "The archive contains schemas/README.txt but no separate license file was present in the downloaded archive."
+}

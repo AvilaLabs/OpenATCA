@@ -16,6 +16,10 @@ const MAX_NODES: usize = 50_000;
 const MAX_DEPTH: usize = 32;
 const MAX_HAZARDS: usize = 256;
 const MAX_REQUIREMENTS: usize = 10_000;
+// The composed train has 132 flight-data verification refs; 160 leaves 28 further links while
+// keeping source/proof refs at 128. Its full log is 1,190 refs, 1,703,765 bytes and 19,299 nodes,
+// within the generator's 1,600-ref, 2 MiB document and 50,000-node bounds.
+const MAX_VERIFICATION_REFS_PER_HAZARD: usize = 160;
 const MAX_REFS_PER_HAZARD: usize = 128;
 
 #[derive(Debug)]
@@ -790,7 +794,16 @@ pub fn check(root: &Path) -> Vec<String> {
             }
         }
         let verification_refs = match hazard.get("verification_refs").and_then(array) {
-            Some(refs) if !refs.is_empty() && refs.len() <= MAX_REFS_PER_HAZARD => refs,
+            Some(refs) if !refs.is_empty() && refs.len() <= MAX_VERIFICATION_REFS_PER_HAZARD => {
+                refs
+            }
+            Some(refs) if refs.len() > MAX_VERIFICATION_REFS_PER_HAZARD => {
+                errors.push(format!(
+                    "hazard {hazard_id}: verification_refs cap exceeded (maximum {})",
+                    MAX_VERIFICATION_REFS_PER_HAZARD
+                ));
+                &[]
+            }
             _ => {
                 errors.push(format!(
                     "hazard {hazard_id}: at least one bounded verification_ref is required"
@@ -1052,12 +1065,40 @@ mod tests {
         .to_string()
     }
 
+    fn fixture_with_verification_count(count: usize) -> String {
+        let reference = r#"{"requirement_id":"OA-AAA-001","file":"tests/safety.rs","test_name":"safety_fixture"}"#;
+        let refs = std::iter::repeat_n(reference, count)
+            .collect::<Vec<_>>()
+            .join(",");
+        fixture().replace(
+            &format!("\"verification_refs\":[{reference}]"),
+            &format!("\"verification_refs\":[{refs}]"),
+        )
+    }
+
     // REQ: OA-MIG-602
     #[test]
     fn declared_hazard_requirement_and_test_links_resolve() {
         let root = TempRoot::new();
         root.write_log(&fixture());
         assert!(check(&root.0).is_empty());
+    }
+
+    // REQ: OA-MIG-602
+    #[test]
+    fn verification_reference_cap_accepts_160_and_refuses_161() {
+        let root = TempRoot::new();
+        root.write_log(&fixture_with_verification_count(
+            MAX_VERIFICATION_REFS_PER_HAZARD,
+        ));
+        assert!(check(&root.0).is_empty());
+
+        root.write_log(&fixture_with_verification_count(
+            MAX_VERIFICATION_REFS_PER_HAZARD + 1,
+        ));
+        assert!(check(&root.0)
+            .iter()
+            .any(|error| error.contains("verification_refs cap exceeded (maximum 160)")));
     }
 
     // REQ: OA-MIG-602

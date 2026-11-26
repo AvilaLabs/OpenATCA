@@ -70,6 +70,7 @@ pub struct CaState {
     pub(crate) totals: CycleStats,
     /// Rows lost before reaching the next cycle, told by the caller.
     pub(crate) lost_input: u64,
+    pub(crate) lost_input_overflow: bool,
 }
 
 const MAX_TRACKS_LIMIT: usize = 1 << 20;
@@ -234,6 +235,7 @@ pub fn ca_new(cfg: &CaConfig) -> Result<CaState, &'static str> {
         started: false,
         totals: CycleStats::default(),
         lost_input: 0,
+        lost_input_overflow: false,
     })
 }
 
@@ -250,7 +252,13 @@ pub fn ca_open(st: &CaState) -> &[Alert] {
 /// Tells conflict alert that `n` rows were lost before they reached it (a table that overflowed, a
 /// row that could not be read): the next cycle counts them and does not report running.
 pub fn ca_note_lost_input(st: &mut CaState, n: u64) {
-    st.lost_input = st.lost_input.saturating_add(n);
+    match st.lost_input.checked_add(n) {
+        Some(value) => st.lost_input = value,
+        None => {
+            st.lost_input = u64::MAX;
+            st.lost_input_overflow = true;
+        }
+    }
 }
 
 /// The counts of every cycle so far, summed.

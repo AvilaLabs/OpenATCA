@@ -2336,6 +2336,7 @@ pub fn serialize_recorded_events(events: &[NormalizedEvent]) -> Result<String, A
             EventKind::Flight(op) if event.source == SourceKind::Flight => {
                 match op {
                     FlightOperation::SetPlanByKey { .. }
+                    | FlightOperation::CancelPlanByKey { .. }
                     | FlightOperation::SetOwnerByKey { .. } => {
                         // The normalized recording format carries GUFI only. A full key cannot
                         // be serialized without changing the format, so refuse rather than drop it.

@@ -268,6 +268,7 @@ fn polygons_are_tested_against_the_models_own_artcc_boundary() {
     dup.poly_vstart.push(0);
     dup.poly_vlen.push(3);
     dup.poly_kind.push(FEAT_RUNWAY_ELEMENT);
+    dup.poly_feature.push(u32::MAX);
     for _ in 0..3 {
         dup.vtx_lat.push(301_000_000);
         dup.vtx_lon.push(-901_000_000);
