@@ -438,6 +438,58 @@ pub fn text_width_units(chars: usize) -> i32 {
     }
 }
 
+/// Canvas-pixel bounds, half-open, including two pixels of text clearance on each side.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(C)]
+pub struct TextBounds {
+    pub x0: i32,
+    pub y0: i32,
+    pub x1: i32,
+    pub y1: i32,
+}
+const _: () = assert!(core::mem::size_of::<TextBounds>() == 16);
+
+/// The stroke renderer's aligned text origin in sixteenths of a canvas pixel.
+pub fn text_origin_x16(x16: i32, size: u8, align: u8, chars: usize) -> i64 {
+    let x16 = i64::from(x16);
+    let width16 = i64::from(text_width_units(chars)) * i64::from(size) * 16 / i64::from(CAP_HEIGHT);
+    match align {
+        1 => x16 - width16 / 2,
+        2 => x16 - width16,
+        _ => x16,
+    }
+}
+
+/// Conservative readable block bounds from the renderer's glyph advance and pixel origin.
+/// `pitch` is the actual line spacing in canvas pixels, not CSS pixels. The final advance cell
+/// and two pixels on every side are reserved even when the last glyph has narrower ink.
+/// A single line uses the same function as a multi-line aircraft block.
+pub fn text_block_bounds_px(
+    anchor16: (i32, i32),
+    size: u8,
+    align: u8,
+    longest_chars: usize,
+    lines: u32,
+    pitch: u32,
+) -> TextBounds {
+    let size = i64::from(size);
+    let left = text_origin_x16(anchor16.0, size as u8, align, longest_chars) >> 4;
+    let top = i64::from(anchor16.1) >> 4;
+    let advance = size * i64::from(ADVANCE) / i64::from(CAP_HEIGHT);
+    let width = i64::try_from(longest_chars)
+        .unwrap_or(i64::MAX / 1024)
+        .saturating_mul(advance);
+    let line_height = i64::from(pitch).max((size * i64::from(MAX_Y) / i64::from(CAP_HEIGHT)) + 1);
+    let height = i64::from(lines).saturating_mul(line_height);
+    let coord = |v: i64| i32::try_from(v).unwrap_or(if v < 0 { i32::MIN } else { i32::MAX });
+    TextBounds {
+        x0: coord(left - 2),
+        y0: coord(top - 2),
+        x1: coord(left.saturating_add(width).saturating_add(2)),
+        y1: coord(top.saturating_add(height).saturating_add(2)),
+    }
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,

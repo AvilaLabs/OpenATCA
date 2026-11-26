@@ -1336,88 +1336,132 @@ fn draw_demo_safety_status(
     Ok(())
 }
 
-// Hot fixed scratch geometry: four i32 screen coordinates, at most sixty labels.
-#[derive(Clone, Copy)]
-#[repr(C)]
-struct LabelBounds {
-    x0: i32,
-    y0: i32,
-    x1: i32,
-    y1: i32,
-}
-const _: () = assert!(core::mem::size_of::<LabelBounds>() == 16);
+// Fixed scratch geometry uses sixteenths of canvas pixels; the font owns pixel bounds.
+type LabelBounds = oa_display::core::font::TextBounds;
 const EMPTY_LABEL: LabelBounds = LabelBounds {
     x0: 0,
     y0: 0,
     x1: 0,
     y1: 0,
 };
+const MAX_MAP_LABELS: usize = 256;
 
 fn overlap_area(a: LabelBounds, b: LabelBounds) -> i64 {
     i64::from((a.x1.min(b.x1) - a.x0.max(b.x0)).max(0))
         * i64::from((a.y1.min(b.y1) - a.y0.max(b.y0)).max(0))
 }
 
-/// Stable target order, eight candidate positions, strict improvement preserves default ties.
+fn text_at(list: &DisplayList, n: usize) -> &str {
+    list.texts
+        .start
+        .get(n)
+        .zip(list.texts.len.get(n))
+        .and_then(|(&start, &len)| list.text.get(start as usize..start as usize + len as usize))
+        .unwrap_or("")
+}
+
+fn text_bounds(list: &DisplayList, start: usize, end: usize) -> LabelBounds {
+    let size = list.texts.size.get(start).copied().unwrap_or(1);
+    let chars = (start..end)
+        .map(|n| text_at(list, n).chars().count())
+        .max()
+        .unwrap_or(0);
+    oa_display::core::font::text_block_bounds_px(
+        (
+            list.texts.x.get(start).copied().unwrap_or(0),
+            list.texts.y.get(start).copied().unwrap_or(0),
+        ),
+        size,
+        list.texts.align.get(start).copied().unwrap_or(ALIGN_LEFT),
+        chars,
+        (end - start) as u32,
+        if end - start > 1 {
+            14
+        } else {
+            u32::from(size) + 2
+        },
+    )
+}
+
+fn target_bounds(center: (i32, i32)) -> LabelBounds {
+    LabelBounds {
+        x0: center.0 / 16 - 9,
+        y0: center.1 / 16 - 9,
+        x1: center.0 / 16 + 10,
+        y1: center.1 / 16 + 10,
+    }
+}
+
+/// Eight compass directions, each with short/long leaders; stable ties keep NE short.
 fn choose_label_bounds(
     center: (i32, i32),
     width: i32,
     height: i32,
     placed: &[LabelBounds],
     targets: &[(i32, i32)],
+    fixes: &[LabelBounds],
     projection: &Projection,
 ) -> LabelBounds {
-    let (x, y) = center;
-    let candidates = [
-        (x + 68 * 16, y - height - 68 * 16),
-        (x + 96 * 16, y - height / 2),
-        (x + 96 * 16, y + 96 * 16),
-        (x - width / 2, y + 96 * 16),
-        (x - width - 96 * 16, y + 96 * 16),
-        (x - width - 96 * 16, y - height / 2),
-        (x - width - 96 * 16, y - height - 96 * 16),
-        (x - width / 2, y - height - 96 * 16),
-    ];
+    let (x, y) = (center.0 / 16, center.1 / 16);
     let view = LabelBounds {
-        x0: 0,
-        y0: projection.top_inset as i32 * 16,
-        x1: projection.width as i32 * 16,
-        y1: projection.height as i32 * 16,
+        x0: 2,
+        y0: projection.top_inset as i32 + 2,
+        x1: projection.width as i32 - 2,
+        y1: projection.height as i32 - 2,
     };
     let mut best = EMPTY_LABEL;
-    let mut best_score = (true, MAX_AIRCRAFT, i64::MAX);
-    for (x0, y0) in candidates {
-        let candidate = LabelBounds {
-            x0,
-            y0,
-            x1: x0 + width,
-            y1: y0 + height,
-        };
-        let outside = i64::from(width) * i64::from(height) - overlap_area(candidate, view);
-        let mut detail_score = outside * 100;
-        let mut overlap_count = 0;
-        for &other in placed {
-            let area = overlap_area(candidate, other);
-            if area > 0 {
-                overlap_count += 1;
+    let mut best_cost = i64::MAX;
+    for (dx, dy) in [
+        (1, -1),
+        (1, 0),
+        (1, 1),
+        (0, 1),
+        (-1, 1),
+        (-1, 0),
+        (-1, -1),
+        (0, -1),
+    ] {
+        for length in [60, 160] {
+            let x0 = x + dx * length
+                - if dx < 0 {
+                    width
+                } else if dx == 0 {
+                    width / 2
+                } else {
+                    0
+                };
+            let y0 = y + dy * length
+                - if dy < 0 {
+                    height
+                } else if dy == 0 {
+                    height / 2
+                } else {
+                    0
+                };
+            let candidate = LabelBounds {
+                x0,
+                y0,
+                x1: x0 + width,
+                y1: y0 + height,
+            };
+            let outside = i64::from(width) * i64::from(height) - overlap_area(candidate, view);
+            let cost = outside * 1000
+                + placed
+                    .iter()
+                    .map(|&b| overlap_area(candidate, b))
+                    .sum::<i64>()
+                + targets
+                    .iter()
+                    .map(|&at| overlap_area(candidate, target_bounds(at)))
+                    .sum::<i64>()
+                + fixes
+                    .iter()
+                    .map(|&b| overlap_area(candidate, b))
+                    .sum::<i64>();
+            if cost < best_cost {
+                best_cost = cost;
+                best = candidate;
             }
-            detail_score += area;
-        }
-        for &(tx, ty) in targets {
-            detail_score += overlap_area(
-                candidate,
-                LabelBounds {
-                    x0: tx - 9 * 16,
-                    y0: ty - 9 * 16,
-                    x1: tx + 9 * 16,
-                    y1: ty + 9 * 16,
-                },
-            );
-        }
-        let score = (outside != 0, overlap_count, detail_score);
-        if score < best_score {
-            best_score = score;
-            best = candidate;
         }
     }
     best
@@ -1429,8 +1473,6 @@ fn declutter_labels(
     positions: &[(i32, i32)],
     callsigns: &[[u8; 8]],
 ) -> Result<(usize, usize, usize, usize), DisplayError> {
-    // Fixed SoA scratch: at most sixty aircraft; source text groups are located before moving
-    // any block. Placement order is lexical callsign, with the source index as a stable tie.
     let mut targets = [(0, 0); MAX_AIRCRAFT];
     let mut keys = [[0u8; 8]; MAX_AIRCRAFT];
     let mut near_airport = [false; MAX_AIRCRAFT];
@@ -1453,23 +1495,20 @@ fn declutter_labels(
     let targets = targets.get(..count).unwrap_or(&[]);
     let mut starts = [0usize; MAX_AIRCRAFT];
     let mut ends = [0usize; MAX_AIRCRAFT];
-    let mut widths = [0i32; MAX_AIRCRAFT];
-    let mut heights = [0i32; MAX_AIRCRAFT];
-    let mut cursor = 0;
     let mut order = [0usize; MAX_AIRCRAFT];
+    let mut cursor = 0;
     let mut block_count = 0;
     for (source, &center) in targets.iter().enumerate() {
         let old_x = center.0 + 14 * 16;
         let old_y = center.1 - 30 * 16;
-        let start = (cursor..list.texts.x.len()).find(|&n| {
+        let Some(start) = (cursor..list.texts.x.len()).find(|&n| {
             list.texts.layer.get(n) == Some(&10)
                 && list.texts.x.get(n) == Some(&old_x)
                 && list.texts.y.get(n) == Some(&old_y)
-        });
-        let Some(start) = start else { continue };
+        }) else {
+            continue;
+        };
         let mut end = start;
-        let mut width = 0;
-        let mut height = 0;
         while end < start + 3
             && list.texts.layer.get(end) == Some(&10)
             && list.texts.x.get(end) == Some(&old_x)
@@ -1479,31 +1518,43 @@ fn declutter_labels(
                 .get(end)
                 .is_some_and(|&y| y == old_y + (end - start) as i32 * 14 * 16)
         {
-            let size = i32::from(list.texts.size.get(end).copied().unwrap_or(10));
-            let len = list.texts.len.get(end).copied().unwrap_or(0) as usize;
-            width =
-                width.max(oa_display::core::font::text_width_units(len) * size * 16 / 6 + 2 * 16);
-            height = (end - start) as i32 * 14 * 16 + size * 16 + 2 * 16;
             end += 1;
         }
         cursor = end;
-        if let (Some(a), Some(b), Some(w), Some(h), Some(o)) = (
+        if let (Some(a), Some(b), Some(o)) = (
             starts.get_mut(source),
             ends.get_mut(source),
-            widths.get_mut(source),
-            heights.get_mut(source),
             order.get_mut(block_count),
         ) {
             *a = start;
             *b = end;
-            *w = width;
-            *h = height;
             *o = source;
             block_count += 1;
         }
     }
-    if let Some(order) = order.get_mut(..block_count) {
-        order.sort_unstable_by_key(|&source| (keys.get(source).copied().unwrap_or([0; 8]), source));
+    if let Some(o) = order.get_mut(..block_count) {
+        o.sort_unstable_by_key(|&i| (keys.get(i).copied().unwrap_or([0; 8]), i));
+    }
+    let mut fixes = [EMPTY_LABEL; MAX_MAP_LABELS];
+    let mut fix_rows = [0usize; MAX_MAP_LABELS];
+    let mut fix_count = 0;
+    for n in 0..list.texts.x.len() {
+        if matches!(list.texts.layer.get(n), Some(4 | 6)) && !text_at(list, n).is_empty() {
+            let b = text_bounds(list, n, n + 1);
+            if b.x1 > 0
+                && b.y1 > projection.top_inset as i32
+                && b.x0 < projection.width as i32
+                && b.y0 < projection.height as i32
+            {
+                if let (Some(slot), Some(row)) =
+                    (fixes.get_mut(fix_count), fix_rows.get_mut(fix_count))
+                {
+                    *slot = b;
+                    *row = n;
+                    fix_count += 1;
+                }
+            }
+        }
     }
     let mut placed = [EMPTY_LABEL; MAX_AIRCRAFT];
     let mut placed_near = [false; MAX_AIRCRAFT];
@@ -1512,37 +1563,73 @@ fn declutter_labels(
         let Some(&center) = targets.get(source) else {
             continue;
         };
-        let old_x = center.0 + 14 * 16;
-        let old_y = center.1 - 30 * 16;
         let start = starts.get(source).copied().unwrap_or(0);
         let end = ends.get(source).copied().unwrap_or(0);
-        let bounds = choose_label_bounds(
+        let old = text_bounds(list, start, end);
+        let mut bounds = choose_label_bounds(
             center,
-            widths.get(source).copied().unwrap_or(0),
-            heights.get(source).copied().unwrap_or(0),
+            old.x1 - old.x0,
+            old.y1 - old.y0,
             placed.get(..placed_count).unwrap_or(&[]),
             targets,
+            fixes.get(..fix_count).unwrap_or(&[]),
             projection,
         );
+        // Mandatory traffic wins over optional map names. If their current cost would
+        // force a traffic collision, let only the names covering a clear candidate yield,
+        // then evaluate the same sixteen candidates against the remaining obstacles.
+        let traffic_collision = placed
+            .get(..placed_count)
+            .unwrap_or(&[])
+            .iter()
+            .any(|&p| overlap_area(bounds, p) > 0)
+            || targets
+                .iter()
+                .any(|&t| overlap_area(bounds, target_bounds(t)) > 0);
+        if traffic_collision {
+            let clear = choose_label_bounds(
+                center,
+                old.x1 - old.x0,
+                old.y1 - old.y0,
+                placed.get(..placed_count).unwrap_or(&[]),
+                targets,
+                &[],
+                projection,
+            );
+            for fix in fixes.get_mut(..fix_count).unwrap_or(&mut []) {
+                if overlap_area(clear, *fix) > 0 {
+                    *fix = EMPTY_LABEL;
+                }
+            }
+            bounds = choose_label_bounds(
+                center,
+                old.x1 - old.x0,
+                old.y1 - old.y0,
+                placed.get(..placed_count).unwrap_or(&[]),
+                targets,
+                fixes.get(..fix_count).unwrap_or(&[]),
+                projection,
+            );
+        }
         for n in start..end {
             if let Some(x) = list.texts.x.get_mut(n) {
-                *x += bounds.x0 - old_x;
+                *x += (bounds.x0 - old.x0) * 16;
             }
             if let Some(y) = list.texts.y.get_mut(n) {
-                *y += bounds.y0 - old_y;
+                *y += (bounds.y0 - old.y0) * 16;
             }
         }
         if let (Some(slot), Some(near)) = (
             placed.get_mut(placed_count),
             placed_near.get_mut(placed_count),
         ) {
-            *slot = bounds;
+            *slot = text_bounds(list, start, end);
             *near = near_airport.get(source).copied().unwrap_or(false);
             placed_count += 1;
         }
         let endpoint = (
-            center.0.clamp(bounds.x0, bounds.x1),
-            center.1.clamp(bounds.y0, bounds.y1),
+            (center.0 / 16).clamp(bounds.x0, bounds.x1) * 16,
+            (center.1 / 16).clamp(bounds.y0, bounds.y1) * 16,
         );
         push_line(
             list,
@@ -1552,9 +1639,51 @@ fn declutter_labels(
             8,
         )?;
     }
+    // Fix names yield to aircraft blocks and symbols; KORD precedes active IAF/FAF, then other names.
+    if let Some(rows) = fix_rows.get_mut(..fix_count) {
+        rows.sort_unstable_by_key(|&n| {
+            let name = text_at(list, n);
+            (
+                if name == "KORD" {
+                    0
+                } else if matches!(name, "JLOWW" | "SEIKA" | "WILLT") {
+                    1
+                } else {
+                    2
+                },
+                n,
+            )
+        });
+    }
+    let mut kept = [EMPTY_LABEL; MAX_MAP_LABELS];
+    let mut kept_count = 0;
+    for &n in fix_rows.get(..fix_count).unwrap_or(&[]) {
+        let b = text_bounds(list, n, n + 1);
+        let collision = placed
+            .get(..placed_count)
+            .unwrap_or(&[])
+            .iter()
+            .any(|&p| overlap_area(b, p) > 0)
+            || targets
+                .iter()
+                .any(|&t| overlap_area(b, target_bounds(t)) > 0)
+            || kept
+                .get(..kept_count)
+                .unwrap_or(&[])
+                .iter()
+                .any(|&p| overlap_area(b, p) > 0);
+        if collision {
+            if let Some(len) = list.texts.len.get_mut(n) {
+                *len = 0;
+            }
+        } else if let Some(slot) = kept.get_mut(kept_count) {
+            *slot = b;
+            kept_count += 1;
+        }
+    }
     let mut overlaps = 0;
-    let mut outside_overlaps = 0;
-    let mut inside_overlaps = 0;
+    let mut outside = 0;
+    let mut inside = 0;
     for a in 0..placed_count {
         for b in a + 1..placed_count {
             if placed
@@ -1564,14 +1693,14 @@ fn declutter_labels(
             {
                 overlaps += 1;
                 if placed_near.get(a) == Some(&true) && placed_near.get(b) == Some(&true) {
-                    inside_overlaps += 1;
+                    inside += 1;
                 } else {
-                    outside_overlaps += 1;
+                    outside += 1;
                 }
             }
         }
     }
-    Ok((placed_count, overlaps, outside_overlaps, inside_overlaps))
+    Ok((placed_count, overlaps, outside, inside))
 }
 
 fn ord_distance_m(lat: i32, lon: i32) -> Option<f64> {
@@ -1648,15 +1777,17 @@ fn draw_public_map(list: &mut DisplayList, projection: &Projection) -> Result<()
             project(projection, b_lat, b_lon),
         ) {
             push_line(list, a, b, palette::AIRPORT, 5)?;
-            push_text(
-                list,
-                (a.0 + 4 * 16, a.1 - 14 * 16),
-                9,
-                ALIGN_LEFT,
-                palette::AIRPORT,
-                6,
-                name,
-            )?;
+            if projection.range_nm < 60.0 {
+                push_text(
+                    list,
+                    (a.0 + 4 * 16, a.1 - 14 * 16),
+                    9,
+                    ALIGN_LEFT,
+                    palette::AIRPORT,
+                    6,
+                    name,
+                )?;
+            }
         }
     }
     if let Some(at) = project(projection, ord_map::KORD.0, ord_map::KORD.1) {
@@ -1801,18 +1932,17 @@ mod tests {
     ) -> Result<(), super::DisplayError> {
         let projection = super::projection_new(419_800_000, -878_000_000, 80.0, 1280, 720, 104)?;
         let center = (640 * 16, 400 * 16);
-        let first =
-            super::choose_label_bounds(center, 72 * 16, 26 * 16, &[], &[center], &projection);
+        let first = super::choose_label_bounds(center, 72, 32, &[], &[center], &[], &projection);
         assert_eq!(
             (first.x0, first.y0),
-            (center.0 + 68 * 16, center.1 - 26 * 16 - 68 * 16)
+            (center.0 / 16 + 60, center.1 / 16 - 32 - 60)
         );
         let second =
-            super::choose_label_bounds(center, 72 * 16, 26 * 16, &[first], &[center], &projection);
+            super::choose_label_bounds(center, 72, 32, &[first], &[center], &[], &projection);
         assert_eq!(super::overlap_area(first, second), 0);
         assert_ne!((first.x0, first.y0), (second.x0, second.y0));
         let repeated =
-            super::choose_label_bounds(center, 72 * 16, 26 * 16, &[first], &[center], &projection);
+            super::choose_label_bounds(center, 72, 32, &[first], &[center], &[], &projection);
         assert_eq!((second.x0, second.y0), (repeated.x0, repeated.y0));
         Ok(())
     }
@@ -1906,6 +2036,120 @@ mod tests {
             "synthetic normal push invalid; first pairs: {conflicts:?}"
         );
         assert_eq!(engine.counters.arrivals_completed, 60);
+        Ok(())
+    }
+    // REQ: OA-DEMO-001
+    #[test]
+    fn e38_fifteen_minute_fixture_exposes_rendered_text_collisions(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut rows = Vec::new();
+        for line in include_str!("../../tests/data/e38d312-15m-layout.tsv")
+            .lines()
+            .filter(|l| !l.starts_with('#'))
+        {
+            let mut fields = line.split('\t');
+            let name = fields.next().ok_or("missing name")?;
+            let x = fields.next().ok_or("missing x")?.parse::<i32>()?;
+            let y = fields.next().ok_or("missing y")?.parse::<i32>()?;
+            let size = fields.next().ok_or("missing size")?.parse::<u8>()?;
+            let lines = fields.next().ok_or("missing lines")?.parse::<u32>()?;
+            assert!(fields.next().is_none());
+            let b = oa_display::core::font::text_block_bounds_px(
+                (x * 16, y * 16),
+                size,
+                0,
+                name.len(),
+                lines,
+                14,
+            );
+            rows.push((name, b));
+        }
+        let mut conflicts = Vec::new();
+        for (a, &(an, aa)) in rows.iter().enumerate() {
+            for &(bn, bb) in rows.iter().skip(a + 1) {
+                if super::overlap_area(aa, bb) > 0 {
+                    conflicts.push((an, bn));
+                }
+            }
+        }
+        eprintln!("e38_frozen_overlap_pairs={} {conflicts:?}", conflicts.len());
+        assert!(conflicts.len() >= 5);
+        assert!(conflicts
+            .iter()
+            .any(|&(a, b)| (a == "TUBEZ" && b == "SYN0026") || (b == "TUBEZ" && a == "SYN0026")));
+        assert!(conflicts
+            .iter()
+            .any(|&(a, b)| (a == "RW27L" && b == "RW28C") || (b == "RW27L" && a == "RW28C")));
+        Ok(())
+    }
+
+    // REQ: OA-DEMO-001
+    #[test]
+    fn rendered_block_and_map_geometry_is_independently_collision_free(
+    ) -> Result<(), super::EngineError> {
+        let bytes = include_bytes!("../../../oa-demo-scenario/tests/data/ord-normal-push-v1.oasd");
+        let mut engine = crate::shell::from_oasd(bytes, oa_sha256::core::sha256::sha256(bytes))?;
+        for minute in [0, 5, 15, 30, 60] {
+            engine.advance_to(minute * 60_000)?;
+            engine.render_frame()?;
+            let l = &engine.display_list;
+            let mut blocks = Vec::new();
+            let mut fixes = Vec::new();
+            let mut row = 0;
+            while row < l.texts.x.len() {
+                let text = super::text_at(l, row);
+                if l.texts.layer.get(row) == Some(&10) && text.starts_with("SYN") {
+                    let mut end = row + 1;
+                    while end < row + 3
+                        && l.texts.layer.get(end) == Some(&10)
+                        && l.texts.x.get(end) == l.texts.x.get(row)
+                        && l.texts.y.get(end)
+                            == Some(
+                                &(l.texts.y.get(row).copied().unwrap_or(0)
+                                    + (end - row) as i32 * 14 * 16),
+                            )
+                    {
+                        end += 1;
+                    }
+                    blocks.push((text, super::text_bounds(l, row, end)));
+                    row = end;
+                } else {
+                    if matches!(l.texts.layer.get(row), Some(4 | 6)) && !text.is_empty() {
+                        fixes.push((text, super::text_bounds(l, row, row + 1)));
+                    }
+                    row += 1;
+                }
+            }
+            assert_eq!(blocks.len(), engine.frame_target_count());
+            let mut collisions = Vec::new();
+            for (a, &(an, aa)) in blocks.iter().enumerate() {
+                for &(bn, bb) in blocks.iter().skip(a + 1) {
+                    if super::overlap_area(aa, bb) > 0 {
+                        collisions.push((an, bn));
+                    }
+                }
+            }
+            for &(a, aa) in &blocks {
+                for &(b, bb) in &fixes {
+                    if super::overlap_area(aa, bb) > 0 {
+                        collisions.push((a, b));
+                    }
+                }
+            }
+            for (a, &(an, aa)) in fixes.iter().enumerate() {
+                for &(bn, bb) in fixes.iter().skip(a + 1) {
+                    if super::overlap_area(aa, bb) > 0 {
+                        collisions.push((an, bn));
+                    }
+                }
+            }
+            eprintln!(
+                "actual_frame minute={minute} blocks={} fix_labels={} collisions={collisions:?}",
+                blocks.len(),
+                fixes.len()
+            );
+            assert!(collisions.is_empty(), "minute {minute}: {collisions:?}");
+        }
         Ok(())
     }
     // REQ: OA-DEMO-001

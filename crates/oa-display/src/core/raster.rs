@@ -17,10 +17,8 @@
 //! last defence. All arithmetic is `i64` on coordinates saturated to 2^30 (1/16 pixel), so
 //! nothing overflows.
 
-use crate::core::font::{strokes_of, text_width_units, ADVANCE, CAP_HEIGHT, MAX_GLYPH_STROKES};
-use crate::core::list::{
-    DisplayList, ALIGN_CENTRE, ALIGN_RIGHT, MAX_LAYERS, MAX_LIST_ROWS, MAX_LIST_TEXT_BYTES,
-};
+use crate::core::font::{strokes_of, ADVANCE, CAP_HEIGHT, MAX_GLYPH_STROKES};
+use crate::core::list::{DisplayList, MAX_LAYERS, MAX_LIST_ROWS, MAX_LIST_TEXT_BYTES};
 use crate::core::palette::{bytes_of, BACKGROUND, PALETTE_LEN};
 use oa_sha256::core::sha256::{Digest, Sha256};
 use std::fmt;
@@ -427,12 +425,12 @@ fn draw_text(
 ) {
     // A grid unit is size / CAP_HEIGHT pixels, so u units are u * size * 16 / CAP_HEIGHT in 1/16.
     let unit16 = |u: i64| (u * size * 16) / i64::from(CAP_HEIGHT);
-    let width16 = unit16(i64::from(text_width_units(s.chars().count())));
-    let left = match align {
-        ALIGN_CENTRE => x16.clamp(-LIMIT, LIMIT) - width16 / 2,
-        ALIGN_RIGHT => x16.clamp(-LIMIT, LIMIT) - width16,
-        _ => x16.clamp(-LIMIT, LIMIT),
-    };
+    let left = crate::core::font::text_origin_x16(
+        x16.clamp(-LIMIT, LIMIT) as i32,
+        size as u8,
+        align,
+        s.chars().count(),
+    );
     let top = y16.clamp(-LIMIT, LIMIT);
     let mut origin = left;
     for ch in s.chars() {
@@ -796,7 +794,59 @@ pub fn render(l: &DisplayList, spec: &FrameSpec, buf: &mut [u8]) -> Result<Diges
 mod tests {
     use super::*;
     use crate::core::list::*;
+    use crate::core::list::{ALIGN_CENTRE, ALIGN_RIGHT};
     use crate::core::palette::{PALETTE, TEXT};
+
+    // REQ: OA-DSP-008
+    #[test]
+    fn shared_text_bounds_enclose_every_rendered_glyph_pixel() {
+        let spec = FrameSpec {
+            width: 256,
+            height: 128,
+            stride: 256 * 4,
+        };
+        for size in [9, 10, 12, 23] {
+            for align in [0, 1, 2] {
+                let text = "SYN0036,?";
+                let at = (128 * 16 + 7, 40 * 16 + 13);
+                let b = crate::core::font::text_block_bounds_px(
+                    at,
+                    size,
+                    align,
+                    text.chars().count(),
+                    1,
+                    u32::from(size) + 2,
+                );
+                let mut list = list_new(ListCaps {
+                    lines: 0,
+                    rects: 0,
+                    circles: 0,
+                    polylines: 0,
+                    poly_vertices: 0,
+                    texts: 1,
+                    text_bytes: 32,
+                })
+                .unwrap();
+                push_text(&mut list, at, size, align, TEXT, 1, text).unwrap();
+                let mut pixels = vec![0; frame_len(&spec)];
+                rasterize(&list, &spec, &mut pixels).unwrap();
+                let bg = bytes_of(BACKGROUND).unwrap();
+                let mut ink = 0;
+                for (offset, p) in pixels.chunks_exact(4).enumerate() {
+                    if p != bg {
+                        let x = (offset % 256) as i32;
+                        let y = (offset / 256) as i32;
+                        assert!(
+                            x >= b.x0 && x < b.x1 && y >= b.y0 && y < b.y1,
+                            "size{size} align{align}: ({x},{y}) outside {b:?}"
+                        );
+                        ink += 1;
+                    }
+                }
+                assert!(ink > 0);
+            }
+        }
+    }
 
     // REQ: OA-DSP-053
     #[test]

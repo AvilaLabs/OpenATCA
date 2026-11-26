@@ -306,7 +306,7 @@
           "rows": [
             "F2-LABEL-01"
           ],
-          "description": "Engine-owned eight-position leader placement in fixed lexical callsign order; visible candidate with the fewest existing block intersections, then overlap area and target penalties; strict improvement preserves default ties. Outer-terminal overlaps are tested at0/5/15/30/60min; both-aircraft-inside5NM overlaps are reported separately.",
+          "description": "Engine-owned lexical callsign order; eight compass directions at 60/160 canvas-pixel leader lengths. Shared stroke-font pixel bounds with 2-pixel padding govern placement and tests. Overlap cost includes blocks, target symbols and visible fix names; fix names yield to blocks, airport identifier then active IAF/FAF then other names. Actual rendered geometry checked at 0/5/15/30/60 minutes; runway number labels omitted at 60 NM and wider.",
           "sources": []
         },
         {
