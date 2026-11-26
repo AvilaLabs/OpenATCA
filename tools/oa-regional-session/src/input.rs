@@ -275,7 +275,8 @@ fn centre_field(text: &str) -> Result<[u8; 4], InputError> {
         return Err(InputError::InvalidLabel);
     }
     let mut out = [0u8; 4];
-    out[..text.len()].copy_from_slice(text.as_bytes());
+    let prefix = out.get_mut(..text.len()).ok_or(InputError::InvalidLabel)?;
+    prefix.copy_from_slice(text.as_bytes());
     Ok(out)
 }
 

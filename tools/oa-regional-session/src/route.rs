@@ -141,9 +141,13 @@ fn valid_padded_centre(bytes: &[u8; 4]) -> bool {
         .iter()
         .position(|&byte| byte == 0)
         .unwrap_or(bytes.len());
-    end > 0
-        && bytes[..end].iter().all(u8::is_ascii_alphanumeric)
-        && bytes[end..].iter().all(|&byte| byte == 0)
+    let Some(prefix) = bytes.get(..end) else {
+        return false;
+    };
+    let Some(padding) = bytes.get(end..) else {
+        return false;
+    };
+    end > 0 && prefix.iter().all(u8::is_ascii_alphanumeric) && padding.iter().all(|&byte| byte == 0)
 }
 
 fn refusal_fence(

@@ -2155,7 +2155,8 @@ fn padded_ascii_text(bytes: &[u8]) -> Result<&str, AdapterError> {
         .iter()
         .position(|&byte| byte == 0)
         .unwrap_or(bytes.len());
-    core::str::from_utf8(&bytes[..end]).map_err(|_| AdapterError::InvalidCentre)
+    let prefix = bytes.get(..end).ok_or(AdapterError::InvalidCentre)?;
+    core::str::from_utf8(prefix).map_err(|_| AdapterError::InvalidCentre)
 }
 
 /// Converts a bounded prefix of decoded ADS-B positions. Oversize input emits no prefix: the
