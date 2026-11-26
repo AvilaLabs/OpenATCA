@@ -56,13 +56,14 @@ fn parse_args() -> Result<ParsedArgs, String> {
             }
             Some("--map-range-nm") if map_range_nm.is_none() => {
                 let value = args.next().ok_or("missing value after --map-range-nm")?;
-                map_range_nm = Some(
-                    value.to_str().ok_or("map range must be UTF-8")?
-                        .parse::<f64>()
-                        .ok()
-                        .filter(|range| range.is_finite())
-                        .ok_or("map range must be a finite decimal")?,
-                );
+                let range = value
+                    .to_str()
+                    .ok_or("map range must be UTF-8")?
+                    .parse::<u32>()
+                    .ok()
+                    .filter(|range| *range > 0)
+                    .ok_or("map range must be a positive integer number of nautical miles")?;
+                map_range_nm = Some(f64::from(range));
             }
             Some("--local-authority-fixture") if !local_authority_fixture => {
                 local_authority_fixture = true;
