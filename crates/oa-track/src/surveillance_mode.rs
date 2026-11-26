@@ -222,7 +222,7 @@ pub fn surveillance_mode_result(
     Ok(ModeResult {
         minimum_nm,
         three_nm_symbol: u8::from(minimum_nm == 3),
-        separation_eligible,
+        separation_eligible: u8::from(separation_eligible),
         flat_aided,
         preferred_radar_distance_m: distance_m,
     })
@@ -287,10 +287,11 @@ mod tests {
     fn coast_is_never_separation_eligible_and_controller_coast_requires_flat() {
         let mut t = target();
         t.coasting = 1;
-        assert!(
-            !surveillance_mode_result(adaptation(SurveillanceMode::TerminalFusion), t)
+        assert_eq!(
+            surveillance_mode_result(adaptation(SurveillanceMode::TerminalFusion), t)
                 .unwrap()
-                .separation_eligible
+                .separation_eligible,
+            0
         );
         t.controller_initiated_coast = 1;
         assert_eq!(
@@ -298,10 +299,11 @@ mod tests {
             Err(ModeRefusal::ControllerCoastRequiresFlat)
         );
         t.flight_plan_aided = 1;
-        assert!(
-            !surveillance_mode_result(adaptation(SurveillanceMode::TerminalFusion), t)
+        assert_eq!(
+            surveillance_mode_result(adaptation(SurveillanceMode::TerminalFusion), t)
                 .unwrap()
-                .separation_eligible
+                .separation_eligible,
+            0
         );
     }
 
