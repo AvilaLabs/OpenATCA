@@ -629,17 +629,20 @@ fn sustained_trace_capacity_case() -> Result<(), Refusal> {
             println!("SUSTAINED\tversion=1\tcompleted_flip_rollback_cycles=64\tconsumer_deliveries=128\ttrace_records={count}\ttrace_capacity={MAX_TRACE}\tfinal_rollback_slot_preserved=1\tfinal_record_sequence=128\tfinal_record_from=Candidate\tfinal_record_to=Legacy\tnext_promotion=TraceFull\tselected_after_refusal=Legacy\tfallback_not_blocked=1\trecorded=0");
             return Ok(());
         }
+        let mut promotion_receipt = authority(
+            unit,
+            policy,
+            promote_authority,
+            source_sequence,
+            source_sequence,
+            now_ns,
+        );
+        promotion_receipt.legacy_state_version = source_sequence;
+        promotion_receipt.candidate_state_version = source_sequence;
         select_candidate(
             &mut selector,
             &readiness,
-            authority(
-                unit,
-                policy,
-                promote_authority,
-                source_sequence,
-                source_sequence,
-                now_ns,
-            ),
+            promotion_receipt,
             now_ns,
             MAX_AGE_NS,
         )?;
@@ -763,6 +766,15 @@ mod tests {
             assert!(run_cycle(index).is_ok());
         }
         assert_eq!(fault_suite(), Ok(8));
-        assert!(sustained_trace_capacity_case().is_ok());
+    }
+
+    // REQ: OA-MIG-302
+    #[test]
+    fn sustained_selector_reaches_reserved_final_rollback_slot() {
+        assert_eq!(
+            sustained_trace_capacity_case(),
+            Ok(()),
+            "the same sustained case used by the executable must complete"
+        );
     }
 }
