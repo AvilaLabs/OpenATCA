@@ -161,6 +161,71 @@ fn outage_mode_preserves_flight_data_and_recovers_on_a_fresh_surveillance_measur
 }
 
 #[test]
+fn ca_alert_history_is_retained_with_an_explicit_unavailable_product_status() {
+    let mut engine = runtime();
+    let active = confirmed(&mut engine);
+    assert_eq!(
+        active.surveillance.ca_product,
+        oa_regional_session::surveillance::ProductAvailability::Available
+    );
+    let start_ns = active.surveillance.ca_open[0].start_ns;
+
+    let outage = regional_step(
+        &mut engine,
+        &ReceiptBatch {
+            receipt_ns: 3 * SECOND,
+            source_clock_regressions: 0,
+            events: vec![row(3 * SECOND, 5, "SURVEILLANCE", 0, 0, "FEED\tDOWN\t0")],
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        outage.surveillance.ca_product,
+        oa_regional_session::surveillance::ProductAvailability::Withheld(
+            oa_regional_session::surveillance::ProductUnavailableReason::SurveillanceFeedUnavailable
+        )
+    );
+    assert!(outage.surveillance.withheld_ca_records > 0);
+    assert!(outage
+        .surveillance
+        .ca_open
+        .iter()
+        .chain(&outage.surveillance.ca_closed)
+        .any(|alert| alert.start_ns == start_ns));
+
+    let recovered = regional_step(
+        &mut engine,
+        &ReceiptBatch {
+            receipt_ns: 4 * SECOND,
+            source_clock_regressions: 0,
+            events: vec![
+                row(
+                    4 * SECOND,
+                    6,
+                    "SURVEILLANCE",
+                    1,
+                    0xabc101,
+                    "POS\t410000000\t-869988000\t10000\t100000\t0\t0",
+                ),
+                row(
+                    4 * SECOND,
+                    7,
+                    "SURVEILLANCE",
+                    2,
+                    0xabc102,
+                    "POS\t410000000\t-869912000\t10000\t-100000\t0\t0",
+                ),
+            ],
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        recovered.surveillance.ca_product,
+        oa_regional_session::surveillance::ProductAvailability::Available
+    );
+}
+
+#[test]
 fn unsupported_fusion_selection_is_refused_and_reported_off() {
     let mut engine = runtime();
     assert_eq!(
@@ -181,6 +246,45 @@ fn unsupported_fusion_selection_is_refused_and_reported_off() {
         RegionalAutomationMode::Surveillance
     );
     assert!(frame.automation.fusion_off);
+}
+
+#[test]
+fn non_surveillance_feed_state_does_not_claim_aggregate_track_health() {
+    let mut engine = runtime();
+    let live = regional_step(
+        &mut engine,
+        &ReceiptBatch {
+            receipt_ns: SECOND,
+            source_clock_regressions: 0,
+            events: vec![row(
+                SECOND,
+                1,
+                "SURVEILLANCE",
+                0,
+                0xabc101,
+                "POS\t410000000\t-870000000\t10000\t0\t0\t0",
+            )],
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        live.automation.effective,
+        EffectiveAutomationMode::Surveillance
+    );
+
+    let unrelated_feed_loss = regional_step(
+        &mut engine,
+        &ReceiptBatch {
+            receipt_ns: 2 * SECOND,
+            source_clock_regressions: 0,
+            events: vec![row(2 * SECOND, 2, "FLIGHT", 0, 0, "FEED\tDOWN\t0")],
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        unrelated_feed_loss.automation.effective,
+        EffectiveAutomationMode::Surveillance
+    );
 }
 
 #[test]

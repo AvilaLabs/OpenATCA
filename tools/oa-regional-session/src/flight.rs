@@ -1042,6 +1042,12 @@ pub fn flight_view_for_key(
     Ok(view)
 }
 
+/// Whether the authoritative table still owns this exact full key, without affecting query
+/// counters. Used to reclaim retired keys from the bounded offline view ledger.
+pub fn flight_driver_has_key(driver: &FlightDriver, key: oa_flight::FlightKey) -> bool {
+    flight_get(&driver.table, &key).is_some()
+}
+
 fn view_for_flight(flight: &Flight, centre: [u8; 4]) -> Option<SharedFlightView> {
     let view = flight
         .views

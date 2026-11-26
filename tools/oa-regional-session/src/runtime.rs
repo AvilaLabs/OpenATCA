@@ -28,14 +28,23 @@ use std::time::Instant;
 
 const DEFAULT_SESSION_NAMESPACE: u16 = 1;
 const QUARANTINE_CLOCK_DOMAIN_ID: u32 = 1;
+/// C7 budget for one full-key search through the bounded (at most 8192-key) sorted view ledger.
+const MAX_FLIGHT_KEY_SEARCH_STEPS: usize = 14;
+/// C7 budget for the bounded in-place suffix move when a new key is registered.
+const MAX_FLIGHT_KEY_INSERT_MOVES: usize = flight::MAX_OFFLINE_DRIVER_FLIGHTS;
+/// C7 budget for retiring absent ledger keys when the view ledger reaches its configured capacity.
+const MAX_FLIGHT_KEY_RECLAIM_WORK: usize = flight::MAX_OFFLINE_DRIVER_FLIGHTS;
+/// C7 budget for exporting the current bounded full-key flight view list once per frame.
+const MAX_FLIGHT_DATA_VIEW_WORK: usize = flight::MAX_OFFLINE_DRIVER_FLIGHTS;
 const MAX_RUNTIME_ITEM_WORK: u32 =
     oa_airspace::core::route::MAX_ROUTE_WORK + crate::input::MAX_FILED_ROUTE_BYTES as u32 + 16;
 
 /// OpenATCA functional selection. These names describe this runtime and do not claim a legacy
 /// FSL/EFSL flag mapping.
-/// Functional basis: FAA JO 7110.65 Chapter 13, §1 allows electronic flight data to support
-/// situational awareness during surveillance/flight-data outages; JO 7210.3EE §§3-6-4 and 3-6-8
-/// require facility contingency procedures for degraded Fusion and discuss single-sensor use.
+/// Functional basis: FAA JO 7110.65BB §13-1-16 allows electronic flight data to support
+/// situational awareness during surveillance/flight-data outages; JO 7210.3EE §3-6-7 addresses
+/// Fusion-mode degradation and facility contingency procedures. These are functional references,
+/// not evidence of an FSL/EFSL flag mapping or a multi-sensor source contract.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RegionalAutomationMode {
     FlightDataOnly,
@@ -342,28 +351,115 @@ fn event_flight_key(event: &crate::input::NormalizedEvent) -> Option<oa_flight::
     }
 }
 
-fn remember_flight_key(
+fn flight_key_search(
+    keys: &[oa_flight::FlightKey],
+    key: oa_flight::FlightKey,
+) -> Result<Result<usize, usize>, String> {
+    if keys.len() > flight::MAX_OFFLINE_DRIVER_FLIGHTS {
+        return Err("known flight key ledger exceeds its C7 scan bound".into());
+    }
+    let (mut low, mut high) = (0usize, keys.len());
+    let mut steps = 0usize;
+    while low < high {
+        steps = steps
+            .checked_add(1)
+            .ok_or("flight-key search work counter overflow")?;
+        if steps > MAX_FLIGHT_KEY_SEARCH_STEPS {
+            return Err("flight-key binary-search budget exceeded".into());
+        }
+        let middle = low + (high - low) / 2;
+        let current = keys
+            .get(middle)
+            .copied()
+            .ok_or("flight-key binary-search index invariant")?;
+        match (
+            current.kind,
+            current.gufi,
+            current.callsign,
+            current.dep,
+            current.arr,
+        )
+            .cmp(&(key.kind, key.gufi, key.callsign, key.dep, key.arr))
+        {
+            std::cmp::Ordering::Equal => return Ok(Ok(middle)),
+            std::cmp::Ordering::Less => low = middle + 1,
+            std::cmp::Ordering::Greater => high = middle,
+        }
+    }
+    Ok(Err(low))
+}
+
+fn reclaim_retired_flight_keys(runtime: &mut RegionalRuntime) -> Result<(), String> {
+    let len = runtime.known_flights.len();
+    if len > MAX_FLIGHT_KEY_RECLAIM_WORK {
+        return Err("flight-key retirement scan exceeded its C7 bound".into());
+    }
+    let mut write = 0usize;
+    for read in 0..len {
+        if read >= MAX_FLIGHT_KEY_RECLAIM_WORK {
+            return Err("flight-key retirement work budget exceeded".into());
+        }
+        let key = runtime
+            .known_flights
+            .get(read)
+            .copied()
+            .ok_or("flight-key retirement index invariant")?;
+        if flight::flight_driver_has_key(&runtime.flights, key) {
+            if write != read {
+                let dest = runtime
+                    .known_flights
+                    .get_mut(write)
+                    .ok_or("flight-key retirement destination invariant")?;
+                *dest = key;
+            }
+            write = write
+                .checked_add(1)
+                .ok_or("flight-key retirement count overflow")?;
+        }
+    }
+    runtime.known_flights.truncate(write);
+    Ok(())
+}
+
+/// Capacity and bounded lookup preflight, before the flight driver, quarantine queue, route store,
+/// or surveillance subsystem commits this item. `Some` reserves a new exact key for commit.
+fn preflight_flight_key(
     runtime: &mut RegionalRuntime,
     event: &crate::input::NormalizedEvent,
+) -> Result<Option<(oa_flight::FlightKey, usize)>, String> {
+    let Some(key) = event_flight_key(event) else {
+        return Ok(None);
+    };
+    if runtime.known_flights.len() >= runtime.profile.max_flights {
+        reclaim_retired_flight_keys(runtime)?;
+    }
+    match flight_key_search(&runtime.known_flights, key)? {
+        Ok(_) => Ok(None),
+        Err(insert_at) if runtime.known_flights.len() < runtime.profile.max_flights => {
+            if runtime.known_flights.len() > MAX_FLIGHT_KEY_INSERT_MOVES {
+                return Err("flight-key insertion move budget exceeded before item commit".into());
+            }
+            Ok(Some((key, insert_at)))
+        }
+        Err(_) => Err("known flight view capacity exhausted before item commit".into()),
+    }
+}
+
+fn commit_flight_key(
+    runtime: &mut RegionalRuntime,
+    pending: Option<(oa_flight::FlightKey, usize)>,
     outcome: flight::FlightApplyOutcome,
-) -> Result<(), String> {
+) {
+    let Some((key, insert_at)) = pending else {
+        return;
+    };
     if !matches!(
         outcome.operation,
         Some(oa_flight::Outcome::Applied | oa_flight::Outcome::Unchanged)
     ) {
-        return Ok(());
+        return;
     }
-    let Some(key) = event_flight_key(event) else {
-        return Ok(());
-    };
-    if runtime.known_flights.contains(&key) {
-        return Ok(());
-    }
-    if runtime.known_flights.len() >= runtime.profile.max_flights {
-        return Err("known flight view capacity exhausted".into());
-    }
-    runtime.known_flights.push(key);
-    Ok(())
+    runtime.known_flights.insert(insert_at, key);
 }
 
 fn runtime_item_outcome(
@@ -938,6 +1034,7 @@ fn execute(
             continue;
         }
 
+        let pending_flight_key = preflight_flight_key(runtime, event)?;
         accept_runtime_item(
             runtime,
             event,
@@ -948,7 +1045,7 @@ fn execute(
         )?;
         let flight_outcome = flight::flight_apply_event(&mut runtime.flights, event)
             .map_err(|error| format!("accepted flight commit invariant: {error:?}"))?;
-        remember_flight_key(runtime, event, flight_outcome)?;
+        commit_flight_key(runtime, pending_flight_key, flight_outcome)?;
         flight_operations.push(flight_outcome);
         route::route_commit_stage(&mut runtime.routes, route_stage);
         surveillance::surveillance_event(&mut runtime.surveillance, event)
@@ -960,10 +1057,23 @@ fn execute(
     let current_feeds = surveillance::feed_statuses(&runtime.surveillance, batch.receipt_ns)?;
     let automation = automation_status(runtime.selected_mode, &current_feeds);
     runtime.last_automation = automation;
+    let unavailable_reason = match automation.degradation {
+        AutomationDegradation::OperatorSelectedFlightDataOnly => {
+            Some(surveillance::ProductUnavailableReason::OperatorSelectedFlightDataOnly)
+        }
+        AutomationDegradation::SurveillanceUnavailable => {
+            Some(surveillance::ProductUnavailableReason::SurveillanceFeedUnavailable)
+        }
+        AutomationDegradation::FusionUnavailable => {
+            Some(surveillance::ProductUnavailableReason::FusionUnavailable)
+        }
+        AutomationDegradation::None => None,
+    };
     let mut surveillance = surveillance::surveillance_finish_with_visibility(
         &mut runtime.surveillance,
         None,
         automation.effective == EffectiveAutomationMode::Surveillance,
+        unavailable_reason,
     )?;
     if runtime.profile.surveillance.render_scope {
         surveillance.frame_sha256 = surveillance::surveillance_present_controls(
@@ -1079,6 +1189,9 @@ fn execute(
     )?;
     runtime.observed.clone_from(&surveillance.tracks);
     let flight_cutoff_ms = route::receipt_cutoff_ms(batch.receipt_ns)?;
+    if runtime.known_flights.len() > MAX_FLIGHT_DATA_VIEW_WORK {
+        return Err("flight-data view work budget exceeded before frame assembly".into());
+    }
     let mut flight_data = Vec::with_capacity(runtime.known_flights.len());
     let mut flight_data_unavailable = 0u32;
     for key in &runtime.known_flights {
@@ -1390,6 +1503,41 @@ mod transaction_tests {
             },
         )
         .unwrap()
+    }
+
+    #[test]
+    fn flight_view_key_capacity_refuses_before_a_second_plan_commit() {
+        let mut engine = runtime();
+        let first = parse_event_line(
+            "v1\t1000000000\t1000000000\t1\tFLIGHT\t00000000000000000000000000000001\tABC101\tZAU1\tPLAN\tPLAN00000001\t2",
+        )
+        .unwrap();
+        regional_step(
+            &mut engine,
+            &ReceiptBatch {
+                receipt_ns: 1_000_000_000,
+                source_clock_regressions: 0,
+                events: vec![first],
+            },
+        )
+        .unwrap();
+        engine.profile.max_flights = 1;
+
+        let second = parse_event_line(
+            "v1\t2000000000\t2000000000\t2\tFLIGHT\t00000000000000000000000000000002\tABC102\tZAU1\tPLAN\tPLAN00000002\t2",
+        )
+        .unwrap();
+        assert!(regional_step(
+            &mut engine,
+            &ReceiptBatch {
+                receipt_ns: 2_000_000_000,
+                source_clock_regressions: 0,
+                events: vec![second],
+            },
+        )
+        .is_err());
+        assert_eq!(flight::flight_driver_report(&engine.flights).flights, 1);
+        assert_eq!(engine.known_flights.len(), 1);
     }
 
     // REQ: OA-REG-018

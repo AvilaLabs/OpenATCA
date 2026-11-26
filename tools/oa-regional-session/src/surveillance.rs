@@ -189,6 +189,9 @@ pub struct SurveillanceFrame {
     pub ca_open: Vec<oa_ca::Alert>,
     pub ca_closed: Vec<oa_ca::Alert>,
     pub ca_altitude_lost: Vec<oa_ca::AltLost>,
+    /// Per-alert acknowledgement/audit rows retained from the inhibition subsystem.
+    pub ca_suppressed: Vec<oa_safety::inhibit::Suppressed>,
+    pub ca_suppressed_overflow: u64,
     pub msaw: Option<crate::msaw_bridge::RegionalMsawFrame>,
     pub msaw_markers: Option<oa_display::core::alert_markers::MarkerStats>,
     pub msaw_altitude_source_unknown: u32,
@@ -200,15 +203,36 @@ pub struct SurveillanceFrame {
     pub track_measurement_seen_ns: Option<i64>,
     /// Source health shared by the display and regional automation mode selector.
     pub feeds: Vec<FeedStatus>,
+    /// Product-specific status. A retained empty/None value is never a healthy no-alert result
+    /// when the corresponding product was withheld by the selected/effective mode.
+    pub track_product: ProductAvailability,
+    pub ca_product: ProductAvailability,
+    pub msaw_product: ProductAvailability,
     /// True when the selected/effective regional mode intentionally withheld surveillance products.
     pub surveillance_withheld: bool,
     pub withheld_tracks: u32,
     pub withheld_alerts: u32,
+    pub withheld_ca_records: u32,
+    pub withheld_msaw_records: u32,
     pub measurement_rejections: u64,
     pub duplicate_rows_replaced: u32,
     pub displayed: u32,
     pub off_map: u32,
     pub warnings: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProductUnavailableReason {
+    OperatorSelectedFlightDataOnly,
+    SurveillanceFeedUnavailable,
+    FusionUnavailable,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProductAvailability {
+    Available,
+    NotConfigured,
+    Withheld(ProductUnavailableReason),
 }
 // A7.2: cold owned frame evidence, retained at most MAX_FRAMES times.
 
@@ -679,14 +703,18 @@ pub fn surveillance_finish(
     s: &mut Surveillance,
     ownership: Option<&OwnershipStatus>,
 ) -> Result<SurveillanceFrame, String> {
-    surveillance_finish_with_visibility(s, ownership, true)
+    surveillance_finish_with_visibility(s, ownership, true, None)
 }
 
 pub(crate) fn surveillance_finish_with_visibility(
     s: &mut Surveillance,
     ownership: Option<&OwnershipStatus>,
     include_surveillance: bool,
+    unavailable_reason: Option<ProductUnavailableReason>,
 ) -> Result<SurveillanceFrame, String> {
+    if !include_surveillance && unavailable_reason.is_none() {
+        return Err("withheld surveillance products require a named reason".into());
+    }
     if s.failed {
         return Err("surveillance failed; reconstruct from the admitted input prefix".into());
     }
@@ -874,25 +902,43 @@ pub(crate) fn surveillance_finish_with_visibility(
         &mut s.events,
         &mut s.states,
     );
-    let (mut ca_closed, mut ca_altitude_lost) = capture_ca_logs(s);
+    let (ca_closed, ca_altitude_lost) = capture_ca_logs(s);
+    let ca_suppressed = oa_safety::inhibit::suppressed_log(&s.inhibits).to_vec();
+    let ca_suppressed_overflow = oa_safety::inhibit::suppressed_overflow(&s.inhibits);
+    oa_safety::inhibit::suppressed_clear(&mut s.inhibits);
     let withheld_tracks = if include_surveillance {
         0
     } else {
         u32::try_from(tracks.len()).map_err(|_| "withheld track count overflow")?
     };
-    let withheld_alerts = if include_surveillance {
+    let withheld_ca_records = if include_surveillance {
         0
     } else {
-        u32::try_from(
-            ca_open(&s.ca).len()
-                + ca_closed.len()
-                + ca_altitude_lost.len()
-                + msaw
-                    .as_ref()
-                    .map_or(0, |frame| frame.open.len() + frame.closed.len()),
-        )
-        .map_err(|_| "withheld alert count overflow")?
+        let rows = ca_open(&s.ca)
+            .len()
+            .checked_add(ca_closed.len())
+            .and_then(|count| count.checked_add(ca_altitude_lost.len()))
+            .and_then(|count| count.checked_add(ca_suppressed.len()))
+            .ok_or("withheld CA record count overflow")?;
+        u32::try_from(rows).map_err(|_| "withheld CA record count overflow")?
     };
+    let withheld_msaw_records = if include_surveillance {
+        0
+    } else {
+        let rows = msaw.as_ref().map_or(Ok(0), |frame| {
+            frame
+                .open
+                .len()
+                .checked_add(frame.closed.len())
+                .and_then(|count| count.checked_add(frame.skipped.len()))
+                .ok_or("withheld MSAW record count overflow")
+        })?;
+        u32::try_from(rows).map_err(|_| "withheld MSAW record count overflow")?
+    };
+    let withheld_alerts = withheld_ca_records
+        .checked_add(withheld_msaw_records)
+        .ok_or("withheld alert count overflow")?;
+    let msaw_configured = msaw.is_some();
     let feeds = feed_statuses(s, time_ns)?;
     let (msaw_markers, digest, displayed, off_map, warnings) = if !s.profile.render_scope {
         let digest = if include_surveillance {
@@ -1059,8 +1105,6 @@ pub(crate) fn surveillance_finish_with_visibility(
     if !include_surveillance {
         tracks.clear();
         flags.clear();
-        ca_closed.clear();
-        ca_altitude_lost.clear();
     }
     Ok(SurveillanceFrame {
         time_ns,
@@ -1068,14 +1112,12 @@ pub(crate) fn surveillance_finish_with_visibility(
         tracks,
         flags,
         frame_sha256: digest,
-        ca_open: if include_surveillance {
-            ca_open(&s.ca).to_vec()
-        } else {
-            Vec::new()
-        },
+        ca_open: ca_open(&s.ca).to_vec(),
         ca_closed,
         ca_altitude_lost,
-        msaw: if include_surveillance { msaw } else { None },
+        ca_suppressed,
+        ca_suppressed_overflow,
+        msaw,
         msaw_markers,
         msaw_altitude_source_unknown,
         ca_stats: ca.stats,
@@ -1085,9 +1127,18 @@ pub(crate) fn surveillance_finish_with_visibility(
         track_transport_seen_ns,
         track_measurement_seen_ns: s.track_measurement_seen_ns,
         feeds,
+        track_product: product_availability(include_surveillance, true, unavailable_reason)?,
+        ca_product: product_availability(include_surveillance, true, unavailable_reason)?,
+        msaw_product: product_availability(
+            include_surveillance,
+            msaw_configured,
+            unavailable_reason,
+        )?,
         surveillance_withheld: !include_surveillance,
         withheld_tracks,
         withheld_alerts,
+        withheld_ca_records,
+        withheld_msaw_records,
         measurement_rejections: s.measurement_rejections,
         duplicate_rows_replaced,
         displayed,
@@ -1096,11 +1147,33 @@ pub(crate) fn surveillance_finish_with_visibility(
     })
 }
 
+fn product_availability(
+    include_surveillance: bool,
+    configured: bool,
+    reason: Option<ProductUnavailableReason>,
+) -> Result<ProductAvailability, String> {
+    if include_surveillance && configured {
+        return Ok(ProductAvailability::Available);
+    }
+    if include_surveillance {
+        return Ok(ProductAvailability::NotConfigured);
+    }
+    reason
+        .map(ProductAvailability::Withheld)
+        .ok_or_else(|| "withheld surveillance products require a named reason".into())
+}
+
 pub(crate) fn feed_statuses(s: &Surveillance, time_ns: i64) -> Result<Vec<FeedStatus>, String> {
     let mut feeds = Vec::with_capacity(FEED_NAMES.len());
     for (i, &name) in FEED_NAMES.iter().enumerate() {
         let seen = if i == 0 {
-            s.track_measurement_seen_ns
+            s.track_measurement_seen_ns.or_else(|| {
+                if s.track_down {
+                    s.seen.first().copied().flatten()
+                } else {
+                    None
+                }
+            })
         } else {
             required(&s.seen, i)?
         };
@@ -1471,5 +1544,77 @@ mod tests {
         assert_eq!(capture_ca_logs(&mut s), (vec![], vec![]));
         assert_eq!(s.alerts.capacity, MAX_PAIRS);
         assert_eq!(s.events.capacity, MAX_TRACKS);
+    }
+
+    #[test]
+    fn withheld_ca_product_retains_suppressed_open_or_closed_alert_state() {
+        let mut s = new_surveillance();
+        surveillance_begin(&mut s, SECOND_NS).expect("begin suppressed alert frame");
+        let mut policy = oa_safety::inhibit::inhibit_config_none();
+        policy.max_alert_suppression_ns = Some(5 * SECOND_NS);
+        oa_safety::inhibit::pair_suppress_create(
+            &mut s.inhibits,
+            &policy,
+            &oa_safety::inhibit::PairSuppressRequest {
+                addr_a: 0x123456,
+                addr_b: 0x123457,
+                alert_start_ns: SECOND_NS,
+                start_ns: SECOND_NS,
+                end_ns: 4 * SECOND_NS,
+                text: oa_safety::inhibit::AlertControlText {
+                    reason: "SECTOR COORDINATION",
+                    author: "SUP A",
+                },
+            },
+            SECOND_NS,
+        )
+        .expect("explicit pair suppression is admitted");
+        let track = |addr| CaTrack {
+            lat_deg: 41.0,
+            lon_deg: -87.0,
+            addr,
+            vel_east_mps: 0.0,
+            vel_north_mps: 0.0,
+            r95_m: 0.0,
+            alt_ft: 10_000.0,
+            vrate_fpm: 0.0,
+            flags: 0,
+            ground: AIRBORNE,
+        };
+        let rows = [track(0x123456), track(0x123457)];
+        let cycle = ca_cycle(
+            &mut s.ca,
+            SECOND_NS,
+            &rows,
+            &mut s.alerts,
+            &mut s.events,
+            &mut s.states,
+        );
+        assert_eq!(cycle.stats.suppressed, 1);
+        assert!(ca_open(&s.ca)
+            .first()
+            .is_some_and(|alert| alert.flags & oa_ca::AF_SUPPRESSED != 0));
+
+        let frame = surveillance_finish_with_visibility(
+            &mut s,
+            None,
+            false,
+            Some(ProductUnavailableReason::OperatorSelectedFlightDataOnly),
+        )
+        .expect("withheld product carries explicit status");
+        assert_eq!(
+            frame.ca_product,
+            ProductAvailability::Withheld(ProductUnavailableReason::OperatorSelectedFlightDataOnly)
+        );
+        assert!(frame.withheld_ca_records > 0);
+        assert!(frame
+            .ca_open
+            .iter()
+            .chain(&frame.ca_closed)
+            .any(|alert| alert.flags & oa_ca::AF_SUPPRESSED != 0));
+        assert!(frame
+            .ca_suppressed
+            .iter()
+            .any(|audit| audit.alert_start_ns == SECOND_NS));
     }
 }
