@@ -196,7 +196,10 @@ fn recorded_stream_runs_100_paired_m2_flip_rollback_bins_and_consumer_applies_ea
         report.m2_refusal_count,
         0,
         "first-cycle M2 result: {:?}",
-        report.cycles.first().map(|cycle| cycle.m2_ingest_refusal.as_deref())
+        report
+            .cycles
+            .first()
+            .map(|cycle| cycle.m2_ingest_refusal.as_deref())
     );
     assert_eq!(report.flip_rollback_attempt_count, 100);
     assert_eq!(report.flip_rollback_complete_count, 100);
