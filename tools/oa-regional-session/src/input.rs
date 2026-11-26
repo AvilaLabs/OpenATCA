@@ -517,6 +517,10 @@ fn parse_flight_v2(parts: &[&str]) -> Result<FlightOperation, InputError> {
         "HO_UPDATE" if parts.len() == 11 => FlightOperation::HandoffEvent(H::Update {
             to: field::<8>(part(parts, 10)?)?,
         }),
+        "HO_UPDATE_LEGACY" if parts.len() == 11 => FlightOperation::Handoff {
+            operation: HandoffOperation::Update,
+            unit: field::<8>(part(parts, 10)?)?,
+        },
         "HO_ACCEPT_NATIVE" if parts.len() == 11 => FlightOperation::HandoffEvent(H::Accept {
             by: field::<8>(part(parts, 10)?)?,
         }),

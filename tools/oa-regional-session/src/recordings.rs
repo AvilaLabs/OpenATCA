@@ -2410,7 +2410,7 @@ pub fn serialize_recorded_events(events: &[NormalizedEvent]) -> Result<String, A
                         // silently dropping identity binding while serializing.
                         return Err(AdapterError::UnsupportedEvent);
                     }
-                    _ => write_serialized_flight_operation(&mut out, op)?,
+                    _ => write_serialized_flight_operation(&mut out, op, version)?,
                 }
             }
             _ => return Err(AdapterError::UnsupportedEvent),
@@ -2430,6 +2430,7 @@ pub fn serialize_recorded_events(events: &[NormalizedEvent]) -> Result<String, A
 fn write_serialized_flight_operation(
     out: &mut String,
     operation: crate::input::FlightOperation,
+    version: &str,
 ) -> Result<(), AdapterError> {
     use crate::input::{
         FlightHandoff as H, FlightLifecycle as L, FlightOperation as O, HandoffOperation,
@@ -2472,6 +2473,7 @@ fn write_serialized_flight_operation(
                 HandoffOperation::Accept => "HO_ACCEPT",
                 HandoffOperation::Take => "HO_TAKE",
                 HandoffOperation::Fail => "HO_FAIL",
+                HandoffOperation::Update if version == "v2" => "HO_UPDATE_LEGACY",
                 HandoffOperation::Update => "HO_UPDATE",
                 HandoffOperation::Retract => "HO_RETRACT",
             };
