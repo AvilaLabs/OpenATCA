@@ -57,6 +57,9 @@ pub const MAX_ZAU_DISTINCT_ADDRESSES: usize = 250_000;
 /// pass keeps only the latest snapshot for each of 100 fixed bins. At 4096 rows per family this
 /// admits typical sparse bins while refusing before the 6 GiB process budget can be consumed.
 pub const MAX_H5_RETAINED_SNAPSHOT_BYTES: usize = 512 * 1024 * 1024;
+/// Only the current pair of same-time frame projections is retained during the one-pass replay.
+/// This is separate from the 100-bin historical snapshot cap and refuses before consumer apply.
+pub const MAX_H5_PAIRED_FRAME_SNAPSHOT_BYTES: usize = 64 * 1024 * 1024;
 /// Flight operations are spatially associated only while their last in-box position is this
 /// recent. This is a filter freshness limit, not a claim about aircraft-state age.
 pub const ZAU_POSITION_ASSOCIATION_MAX_AGE_NS: i64 = 60_000_000_000;
@@ -226,6 +229,27 @@ pub struct CycleAttempt {
     pub m1_validation_ns: Option<u128>,
     pub flip_rollback_status: &'static str,
     pub unavailable: &'static str,
+    /// Number of actual paired RegionalFrame updates applied to the local consumer in this bin.
+    pub consumer_frame_updates: u64,
+    /// Largest source-time difference between consecutive paired updates in this bin.
+    pub consumer_max_virtual_gap_ns: Option<i64>,
+    /// Largest measured monotonic ACK time for a selected-state update in this bin.
+    pub consumer_max_apply_ack_ns: Option<u128>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PerUpdateConsumerReport {
+    pub updates: u64,
+    pub virtual_gap_samples: u64,
+    pub virtual_gap_limit_ns: i64,
+    pub virtual_gap_exceeded: u64,
+    pub max_virtual_gap_ns: Option<i64>,
+    pub max_monotonic_apply_ack_ns: Option<u128>,
+    pub decision_limit_ns: i64,
+    pub decision_to_first_output_samples: u64,
+    pub decision_to_first_output_exceeded: u64,
+    pub max_decision_to_first_output_ns: Option<u128>,
+    pub status: &'static str,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -258,6 +282,7 @@ pub struct RecordedDrillReport {
     pub consumer_receipts: Vec<ConsumerReceipt>,
     pub replay_consumer_receipts: Vec<ConsumerReceipt>,
     pub cycles: Vec<CycleAttempt>,
+    pub per_update_consumer: PerUpdateConsumerReport,
     pub replica_cycles: [Vec<ReplicaCycle>; 2],
     pub model_sha256: String,
     pub map_centre_lat_e7: i32,
@@ -1026,6 +1051,7 @@ struct ReplayRun {
     retained_snapshot_bytes: usize,
 }
 
+#[derive(Clone, Copy)]
 struct ReplaySpec<'a> {
     model_bytes: &'a [u8],
     model_sha: [u8; 32],
@@ -3830,6 +3856,9 @@ pub fn run_recorded(
             m1_transition_refusal: Some(m1_refusal), m1_validation_ns: Some(m1_validation_ns),
             flip_rollback_status: "NOT_PERFORMED_INCOMPLETE_STATE",
             unavailable: "same-implementation replay sides; selector health, source locator/time basis, complete family coverage, alert acknowledgement/suppression and M1 window authority are unavailable",
+            consumer_frame_updates: 0,
+            consumer_max_virtual_gap_ns: None,
+            consumer_max_apply_ack_ns: None,
         });
     }
     let input_streams = converted
@@ -3923,6 +3952,19 @@ pub fn run_recorded(
         consumer_receipts: receipts,
         replay_consumer_receipts,
         cycles,
+        per_update_consumer: PerUpdateConsumerReport {
+            updates: 0,
+            virtual_gap_samples: 0,
+            virtual_gap_limit_ns: policy(endpoint_class).update_interval_ns,
+            virtual_gap_exceeded: 0,
+            max_virtual_gap_ns: None,
+            max_monotonic_apply_ack_ns: None,
+            decision_limit_ns: policy(endpoint_class).max_decision_delay_ns,
+            decision_to_first_output_samples: 0,
+            decision_to_first_output_exceeded: 0,
+            max_decision_to_first_output_ns: None,
+            status: "UNOBSERVABLE_CYCLE_SUMMARY_ONLY",
+        },
         replica_cycles,
         model_sha256: oa_sha256::to_hex(&model_sha),
         map_centre_lat_e7,
@@ -3949,7 +3991,903 @@ pub struct RecordedRunOptions<'a> {
     pub local_authority_fixture: bool,
 }
 
+#[derive(Default)]
+struct LiveCycleState {
+    frames: u64,
+    position_inputs: u64,
+    flight_inputs: u64,
+    handoff_inputs: u64,
+    m2_attempted: bool,
+    m2_refusal: Option<String>,
+    m2_validation_ns: Option<u128>,
+    m1_refusal: Option<String>,
+    m1_validation_ns: Option<u128>,
+    flip_attempted: bool,
+    flip_completed: bool,
+    selected: Option<Output>,
+    decision_ack_ns: Option<u128>,
+    rollback_ack_ns: Option<u128>,
+    last_generation: Option<u64>,
+    last_counts: Option<[u64; 4]>,
+    last_digest: Option<String>,
+    last_display_rows: Option<u64>,
+    output_row_acks: u64,
+    max_apply_ack_ns: Option<u128>,
+    max_virtual_gap_ns: Option<i64>,
+    display_equal: bool,
+    initialized: bool,
+}
+
+#[derive(Default)]
+struct LiveUpdateState {
+    updates: u64,
+    gap_samples: u64,
+    gap_exceeded: u64,
+    max_gap_ns: Option<i64>,
+    max_apply_ack_ns: Option<u128>,
+    decision_samples: u64,
+    decision_exceeded: u64,
+    max_decision_ns: Option<u128>,
+    output_rows_acked: u64,
+    last_virtual_ns: Option<i64>,
+}
+
+struct LivePairProcessor<'a> {
+    consumer: &'a mut Consumer,
+    policy: UnitPolicy,
+    local_authority_fixture: bool,
+    cycles: Vec<LiveCycleState>,
+    metrics: LiveUpdateState,
+    generation: u64,
+    peak_legacy_snapshot_bytes: usize,
+    peak_candidate_snapshot_bytes: usize,
+}
+
+fn apply_live_snapshot(
+    consumer: &mut Consumer,
+    generation: &mut u64,
+    snapshot: &ReplaySnapshot,
+    selected_side: Output,
+) -> Result<([u64; 4], String, u64, u128, u64), String> {
+    let next_generation = generation
+        .checked_add(1)
+        .ok_or("H5 state generation overflow")?;
+    let transaction = next_generation
+        .checked_sub(1)
+        .ok_or("H5 state transaction underflow")?;
+    let applied = consumer.apply_selected_snapshot(
+        transaction,
+        next_generation,
+        snapshot.view(),
+        &snapshot.display_targets,
+        selected_side,
+    )?;
+    *generation = next_generation;
+    Ok((applied.0, applied.1, applied.2, applied.3, next_generation))
+}
+
+fn checked_frame_gap(previous_ns: Option<i64>, current_ns: i64) -> Result<Option<i64>, String> {
+    let Some(previous_ns) = previous_ns else {
+        return Ok(None);
+    };
+    let gap = current_ns
+        .checked_sub(previous_ns)
+        .ok_or("consumer virtual-time gap overflow")?;
+    if gap <= 0 {
+        return Err("consumer received duplicate or non-increasing frame time".into());
+    }
+    Ok(Some(gap))
+}
+
+fn exceeds_latency_limit(elapsed_ns: u128, limit_ns: i64) -> bool {
+    elapsed_ns > limit_ns as u128
+}
+
+impl LivePairProcessor<'_> {
+    fn visit(
+        &mut self,
+        cycle_index: usize,
+        legacy: ReplaySnapshot,
+        candidate: ReplaySnapshot,
+    ) -> Result<(), String> {
+        if legacy.observed_time_ns != candidate.observed_time_ns
+            || legacy.sequence != candidate.sequence
+            || legacy.unit != candidate.unit
+            || legacy.side != Side::Legacy
+            || candidate.side != Side::Candidate
+        {
+            return Err("paired runtime frames differ in time, sequence, unit, or side".into());
+        }
+        let pair_bytes = replay_snapshot_bytes(&legacy)?
+            .checked_add(replay_snapshot_bytes(&candidate)?)
+            .ok_or("paired frame snapshot byte arithmetic overflow")?;
+        if pair_bytes > MAX_H5_PAIRED_FRAME_SNAPSHOT_BYTES {
+            return Err("paired current-frame snapshot byte cap exceeded".into());
+        }
+        self.peak_legacy_snapshot_bytes = self
+            .peak_legacy_snapshot_bytes
+            .max(replay_snapshot_bytes(&legacy)?);
+        self.peak_candidate_snapshot_bytes = self
+            .peak_candidate_snapshot_bytes
+            .max(replay_snapshot_bytes(&candidate)?);
+        let state_slot = self
+            .cycles
+            .get_mut(cycle_index)
+            .ok_or("paired frame cycle index exceeds fixed table")?;
+        let mut state = std::mem::take(state_slot);
+        state.frames = state
+            .frames
+            .checked_add(1)
+            .ok_or("paired cycle frame count overflow")?;
+        state.display_equal &= display_targets_equal(
+            &legacy.display_targets,
+            &candidate.display_targets,
+        );
+
+        let virtual_ns = legacy.observed_time_ns;
+        let mut frame_ack_ns = None;
+        let mut selected_frame_applied = false;
+        if !state.m2_attempted {
+            state.m2_attempted = true;
+            let decision_started = Instant::now();
+            let unit = legacy.unit;
+            if self.local_authority_fixture {
+                match prepare_local_fixture_candidate(
+                    unit,
+                    self.policy,
+                    virtual_ns,
+                    legacy.view(),
+                    candidate.view(),
+                    cycle_index,
+                ) {
+                    Ok(fixture) => {
+                        state.m2_validation_ns = Some(fixture.m2_validation_ns);
+                        state.m1_validation_ns = Some(fixture.m1_fixture_ns);
+                        state.flip_attempted = true;
+                        let mut selector = fixture.selector;
+                        let (counts, digest, rows, ack_ns, generation) = apply_live_snapshot(
+                            self.consumer,
+                            &mut self.generation,
+                            &candidate,
+                            Output::Candidate,
+                        )?;
+                        let candidate_ack_ns = virtual_ns
+                            .checked_add(
+                                i64::try_from(ack_ns)
+                                    .map_err(|_| "candidate ACK duration exceeds i64")?,
+                            )
+                            .ok_or("candidate ACK virtual time overflow")?;
+                        observe_delivery(
+                            &mut selector,
+                            self.policy.consumer_id,
+                            Output::Candidate,
+                            1,
+                            candidate_ack_ns,
+                        )
+                        .map_err(|error| format!("candidate state ACK refused: {error:?}"))?;
+                        self.record_rows(rows)?;
+                        state.output_row_acks = state
+                            .output_row_acks
+                            .checked_add(rows)
+                            .ok_or("cycle output ACK row count overflow")?;
+                        state.max_apply_ack_ns = Some(
+                            state.max_apply_ack_ns.map_or(ack_ns, |current| current.max(ack_ns)),
+                        );
+                        state.last_generation = Some(generation);
+                        state.last_counts = Some(counts);
+                        state.last_digest = Some(digest);
+                        state.last_display_rows = Some(
+                            u64::try_from(candidate.display_targets.len())
+                                .map_err(|_| "candidate display block count overflow")?,
+                        );
+                        state.decision_ack_ns = Some(decision_started.elapsed().as_nanos());
+                        self.record_decision(state.decision_ack_ns.unwrap_or(0))?;
+
+                        let mut event_material = Vec::with_capacity(40);
+                        event_material.extend_from_slice(b"H5 local fixture rollback v1");
+                        event_material.extend_from_slice(
+                            &u64::try_from(cycle_index)
+                                .map_err(|_| "rollback cycle conversion overflow")?
+                                .to_le_bytes(),
+                        );
+                        let rollback = RollbackReceipt {
+                            unit,
+                            kind: RollbackKind::ControllerRequest,
+                            principal_id: [8; 32],
+                            principal_role_id: 1,
+                            policy_version: self.policy.policy_version,
+                            policy_digest: self.policy.policy_digest,
+                            source_epoch_digest: self.policy.source_epoch_digest,
+                            evidence_set_handle: self.policy.evidence_set_handle,
+                            approval_set_handle: self.policy.approval_set_handle,
+                            sequence: 2,
+                            legacy_epoch: legacy.source_epoch,
+                            candidate_epoch: candidate.source_epoch,
+                            legacy_state_version: legacy.state_version,
+                            candidate_state_version: candidate.state_version,
+                            legacy_sequence: legacy.sequence,
+                            candidate_sequence: candidate.sequence,
+                            legacy_health: legacy.health,
+                            legacy_source_available: true,
+                            legacy_health_observed_ns: legacy.observed_time_ns,
+                            event_id: oa_sha256::sha256(&event_material),
+                            observed_ns: candidate_ack_ns,
+                        };
+                        rollback(
+                            &mut selector,
+                            rollback,
+                            candidate_ack_ns,
+                            self.policy.max_snapshot_age_ns,
+                        )
+                        .map_err(|error| format!("local fixture rollback refused: {error:?}"))?;
+                        let (counts, digest, rows, ack_ns, generation) = apply_live_snapshot(
+                            self.consumer,
+                            &mut self.generation,
+                            &legacy,
+                            Output::Legacy,
+                        )?;
+                        let rollback_ack_ns = candidate_ack_ns
+                            .checked_add(
+                                i64::try_from(ack_ns)
+                                    .map_err(|_| "rollback ACK duration exceeds i64")?,
+                            )
+                            .ok_or("rollback ACK virtual time overflow")?;
+                        observe_delivery(
+                            &mut selector,
+                            self.policy.consumer_id,
+                            Output::Legacy,
+                            2,
+                            rollback_ack_ns,
+                        )
+                        .map_err(|error| format!("rollback state ACK refused: {error:?}"))?;
+                        self.record_rows(rows)?;
+                        state.output_row_acks = state
+                            .output_row_acks
+                            .checked_add(rows)
+                            .ok_or("cycle output ACK row count overflow")?;
+                        state.max_apply_ack_ns = Some(
+                            state.max_apply_ack_ns.map_or(ack_ns, |current| current.max(ack_ns)),
+                        );
+                        state.last_generation = Some(generation);
+                        state.last_counts = Some(counts);
+                        state.last_digest = Some(digest);
+                        state.last_display_rows = Some(
+                            u64::try_from(legacy.display_targets.len())
+                                .map_err(|_| "rollback display block count overflow")?,
+                        );
+                        state.rollback_ack_ns = Some(ack_ns);
+                        frame_ack_ns = Some(ack_ns);
+                        state.flip_completed = true;
+                        state.selected = Some(Output::Legacy);
+                        selected_frame_applied = true;
+                    }
+                    Err(error) => {
+                        state.m2_refusal = Some(error.clone());
+                        if error.starts_with("local fixture M1") {
+                            state.m1_refusal = Some(error);
+                        }
+                        state.selected = Some(Output::Legacy);
+                    }
+                }
+            } else {
+                let (refusal, elapsed, selected_side) = m2_attempt_for_runtime_snapshots(
+                    unit,
+                    self.policy,
+                    virtual_ns,
+                    legacy.view(),
+                    candidate.view(),
+                );
+                state.m2_refusal = Some(refusal);
+                state.m2_validation_ns = Some(elapsed);
+                let m1_key = oa_migration::SwapUnitKey {
+                    function_id: unit.function_id,
+                    scope_id: unit.scope_id,
+                    window_start_ns: unit.window_start_ns,
+                    window_end_ns: unit.window_end_ns,
+                };
+                let (m1_refusal, m1_elapsed) =
+                    m1_refusal_without_authority(m1_key, unit.window_start_ns);
+                state.m1_refusal = Some(m1_refusal);
+                state.m1_validation_ns = Some(m1_elapsed);
+                state.selected = Some(selected_side);
+            }
+            if !selected_frame_applied {
+                let output = state.selected.unwrap_or(Output::Legacy);
+                let snapshot = match output {
+                    Output::Legacy => &legacy,
+                    Output::Candidate => &candidate,
+                };
+                let (counts, digest, rows, ack_ns, generation) = apply_live_snapshot(
+                    self.consumer,
+                    &mut self.generation,
+                    snapshot,
+                    output,
+                )?;
+                self.record_rows(rows)?;
+                state.output_row_acks = state
+                    .output_row_acks
+                    .checked_add(rows)
+                    .ok_or("cycle output ACK row count overflow")?;
+                state.max_apply_ack_ns = Some(
+                    state.max_apply_ack_ns.map_or(ack_ns, |current| current.max(ack_ns)),
+                );
+                state.last_generation = Some(generation);
+                state.last_counts = Some(counts);
+                state.last_digest = Some(digest);
+                state.last_display_rows = Some(
+                    u64::try_from(snapshot.display_targets.len())
+                        .map_err(|_| "selected display block count overflow")?,
+                );
+                frame_ack_ns = Some(ack_ns);
+                state.decision_ack_ns = Some(decision_started.elapsed().as_nanos());
+                self.record_decision(state.decision_ack_ns.unwrap_or(0))?;
+                selected_frame_applied = true;
+            }
+        }
+        if !selected_frame_applied {
+            let output = state.selected.unwrap_or(Output::Legacy);
+            let snapshot = match output {
+                Output::Legacy => &legacy,
+                Output::Candidate => &candidate,
+            };
+            let (counts, digest, rows, ack_ns, generation) = apply_live_snapshot(
+                self.consumer,
+                &mut self.generation,
+                snapshot,
+                output,
+            )?;
+            self.record_rows(rows)?;
+            state.output_row_acks = state
+                .output_row_acks
+                .checked_add(rows)
+                .ok_or("cycle output ACK row count overflow")?;
+            state.max_apply_ack_ns = Some(
+                state.max_apply_ack_ns.map_or(ack_ns, |current| current.max(ack_ns)),
+            );
+            state.last_generation = Some(generation);
+            state.last_counts = Some(counts);
+            state.last_digest = Some(digest);
+            state.last_display_rows = Some(
+                u64::try_from(snapshot.display_targets.len())
+                    .map_err(|_| "selected display block count overflow")?,
+            );
+            frame_ack_ns = Some(ack_ns);
+        }
+        if let Some(gap) = self.record_update(
+            virtual_ns,
+            frame_ack_ns.ok_or("frame has no consumer ACK")?,
+        )? {
+            state.max_virtual_gap_ns =
+                Some(state.max_virtual_gap_ns.map_or(gap, |current| current.max(gap)));
+        }
+        state.initialized = true;
+        *self
+            .cycles
+            .get_mut(cycle_index)
+            .ok_or("paired frame cycle index exceeds fixed table")? = state;
+        Ok(())
+    }
+
+    fn record_rows(&mut self, rows: u64) -> Result<(), String> {
+        self.metrics.output_rows_acked = self
+            .metrics
+            .output_rows_acked
+            .checked_add(rows)
+            .ok_or("consumer applied row count overflow")?;
+        Ok(())
+    }
+
+    fn record_decision(&mut self, elapsed_ns: u128) -> Result<(), String> {
+        self.metrics.decision_samples = self
+            .metrics
+            .decision_samples
+            .checked_add(1)
+            .ok_or("decision latency sample count overflow")?;
+        self.metrics.max_decision_ns = Some(
+            self.metrics.max_decision_ns.map_or(elapsed_ns, |current| current.max(elapsed_ns)),
+        );
+        if exceeds_latency_limit(elapsed_ns, self.policy.max_decision_delay_ns) {
+            self.metrics.decision_exceeded = self
+                .metrics
+                .decision_exceeded
+                .checked_add(1)
+                .ok_or("decision latency exceedance overflow")?;
+        }
+        Ok(())
+    }
+
+    fn record_update(&mut self, virtual_ns: i64, ack_ns: u128) -> Result<Option<i64>, String> {
+        self.metrics.updates = self
+            .metrics
+            .updates
+            .checked_add(1)
+            .ok_or("consumer update count overflow")?;
+        self.metrics.max_apply_ack_ns = Some(
+            self.metrics.max_apply_ack_ns.map_or(ack_ns, |current| current.max(ack_ns)),
+        );
+        let update_gap = checked_frame_gap(self.metrics.last_virtual_ns, virtual_ns)?;
+        if let Some(gap) = update_gap {
+            self.metrics.gap_samples = self
+                .metrics.gap_samples
+                .checked_add(1)
+                .ok_or("virtual-gap sample count overflow")?;
+            self.metrics.max_gap_ns = Some(
+                self.metrics.max_gap_ns.map_or(gap, |current| current.max(gap)),
+            );
+            if exceeds_latency_limit(gap as u128, self.policy.update_interval_ns) {
+                self.metrics.gap_exceeded = self
+                    .metrics
+                    .gap_exceeded
+                    .checked_add(1)
+                    .ok_or("virtual-gap exceedance count overflow")?;
+            }
+        }
+        self.metrics.last_virtual_ns = Some(virtual_ns);
+        Ok(update_gap)
+    }
+}
+
+fn capture_replay_frame(
+    index: usize,
+    frame: &RegionalFrame,
+    spec: ReplaySpec<'_>,
+) -> Result<(usize, ReplaySnapshot), String> {
+    let unit = cycle_window(index, spec.start, spec.end)?;
+    let snapshot = snapshot_from_runtime_frame(
+        frame,
+        unit,
+        spec.snapshot_policy,
+        spec.side,
+        spec.source_epoch,
+        spec.local_authority_fixture,
+    )?;
+    Ok((index, snapshot))
+}
+
+fn push_replay_frame(
+    replay: &mut RegionalReplayAccumulator,
+    event: crate::input::NormalizedEvent,
+    spec: ReplaySpec<'_>,
+) -> Result<Option<(usize, ReplaySnapshot)>, String> {
+    let mut captured = None;
+    regional_replay_push_observed(replay, event, |index, frame| {
+        captured = Some(capture_replay_frame(index, frame, spec)?);
+        Ok(())
+    })?;
+    Ok(captured)
+}
+
+fn finish_replay_frames(
+    replay: RegionalReplayAccumulator,
+    spec: ReplaySpec<'_>,
+) -> Result<(Vec<ReplicaCycle>, Option<(usize, ReplaySnapshot)>), String> {
+    let mut captured = None;
+    let cycles = regional_replay_finish_observed(replay, |index, frame| {
+        captured = Some(capture_replay_frame(index, frame, spec)?);
+        Ok(())
+    })?;
+    Ok((cycles, captured))
+}
+
+/// One guarded source pass drives two independent RegionalSession runtimes. Each matched frame
+/// is immediately offered to M2 and applied to the typed local consumer; only fixed 100-bin
+/// aggregates and the current pair of snapshots are retained.
 pub fn run_recorded_stream(
+    inputs: &[StreamInput],
+    centre: [u8; 4],
+    endpoint_class: EndpointClass,
+    model_bytes: &[u8],
+    map_range_nm: f64,
+    options: RecordedRunOptions<'_>,
+) -> Result<RecordedDrillReport, String> {
+    let RecordedRunOptions {
+        worker_executable,
+        local_authority_fixture,
+    } = options;
+    if local_authority_fixture
+        && inputs.iter().any(|input| input.source != RecordingSource::Adsb)
+    {
+        return Err("local authority fixture accepts ADS-B-only replay inputs".into());
+    }
+    if H5_CAPTURE_START_NS != 1_795_121_400_000_000_000
+        || H5_MEASUREMENT_START_NS != 1_795_122_000_000_000_000
+        || H5_MEASUREMENT_END_NS != 1_795_125_600_000_000_000
+    {
+        return Err("frozen H5 capture/measurement window mismatch".into());
+    }
+    let run_started = Instant::now();
+    let model_sha = oa_sha256::sha256(model_bytes);
+    let model = oa_airspace::core::snapshot::decode(model_bytes)
+        .map_err(|error| format!("model snapshot decode: {error:?}"))?;
+    let (map_centre_lat_e7, map_centre_lon_e7) = model_centre(&model)?;
+    drop(model);
+    let profile = RegionalRunProfile::recorded_peak_rendered();
+    let snapshot_policy = policy(endpoint_class);
+    let mut legacy_replay = regional_replay_new_with_warmup(
+        model_bytes,
+        model_sha,
+        map_range_nm,
+        H5_CAPTURE_START_NS,
+        H5_MEASUREMENT_START_NS,
+        H5_MEASUREMENT_END_NS,
+        profile,
+    )?;
+    let mut candidate_replay = regional_replay_new_with_warmup(
+        model_bytes,
+        model_sha,
+        map_range_nm,
+        H5_CAPTURE_START_NS,
+        H5_MEASUREMENT_START_NS,
+        H5_MEASUREMENT_END_NS,
+        profile,
+    )?;
+    let mut consumer = Consumer::spawn(worker_executable)?;
+    let mut cycles = Vec::new();
+    cycles
+        .try_reserve_exact(CYCLES)
+        .map_err(|_| "paired H5 cycle table allocation refused")?;
+    cycles.extend((0..CYCLES).map(|_| LiveCycleState {
+        display_equal: true,
+        ..LiveCycleState::default()
+    }));
+    let mut processor = LivePairProcessor {
+        consumer: &mut consumer,
+        policy: snapshot_policy,
+        local_authority_fixture,
+        cycles,
+        metrics: LiveUpdateState::default(),
+        generation: 0,
+        peak_legacy_snapshot_bytes: 0,
+        peak_candidate_snapshot_bytes: 0,
+    };
+    let mut counts = StreamPassCounts {
+        normalized_events: 0,
+        positions: 0,
+        flights: 0,
+        handoffs: 0,
+        warmup_events: 0,
+        input_ack_count: 0,
+        warmup_ack_count: 0,
+        cycle_input_acks: [0; CYCLES],
+        cycle_input_max_ack_ns: [0; CYCLES],
+        cycle_positions: [0; CYCLES],
+        cycle_flights: [0; CYCLES],
+        cycle_handoffs: [0; CYCLES],
+    };
+    let mut region_filter = ZauBoxFilter::default();
+    let legacy_spec = ReplaySpec {
+        model_bytes,
+        model_sha,
+        range_nm: map_range_nm,
+        capture_start: H5_CAPTURE_START_NS,
+        start: H5_MEASUREMENT_START_NS,
+        end: H5_MEASUREMENT_END_NS,
+        profile,
+        snapshot_policy,
+        side: Side::Legacy,
+        source_epoch: 1,
+        local_authority_fixture,
+    };
+    let candidate_spec = ReplaySpec {
+        side: Side::Candidate,
+        source_epoch: 2,
+        ..legacy_spec
+    };
+    let summary = stream_normalized_events(
+        inputs,
+        Some((H5_CAPTURE_START_NS, H5_MEASUREMENT_END_NS)),
+        centre,
+        |event, _provenance| {
+            if run_started.elapsed() > MAX_RUNTIME {
+                return Err("recorded H5 runtime cap exceeded".into());
+            }
+            counts.normalized_events = counts
+                .normalized_events
+                .checked_add(1)
+                .ok_or("normalized event count overflow")?;
+            if counts.normalized_events > profile.max_total_events as u64 {
+                return Err("recorded profile normalized event cap exceeded".into());
+            }
+            if !region_filter.admit(&event)? {
+                return Ok(());
+            }
+            if event.receipt_ns < H5_MEASUREMENT_START_NS {
+                counts.warmup_events = counts
+                    .warmup_events
+                    .checked_add(1)
+                    .ok_or("warm-up event count overflow")?;
+            } else {
+                let index = row_cycle_in_span(
+                    event.receipt_ns,
+                    H5_MEASUREMENT_START_NS,
+                    H5_MEASUREMENT_END_NS,
+                )?;
+                match (&event.source, &event.kind) {
+                    (SourceKind::Surveillance, EventKind::Position { .. }) => {
+                        let slot = counts.cycle_positions.get_mut(index).ok_or("position bin")?;
+                        *slot = slot.checked_add(1).ok_or("position count overflow")?;
+                    }
+                    (SourceKind::Flight, EventKind::Flight(_)) => {
+                        let slot = counts.cycle_flights.get_mut(index).ok_or("flight bin")?;
+                        *slot = slot.checked_add(1).ok_or("flight count overflow")?;
+                        if handoff_event(&event) {
+                            let slot = counts.cycle_handoffs.get_mut(index).ok_or("handoff bin")?;
+                            *slot = slot.checked_add(1).ok_or("handoff count overflow")?;
+                        }
+                    }
+                    _ => (),
+                }
+            }
+            match (&event.source, &event.kind) {
+                (SourceKind::Surveillance, EventKind::Position { .. }) => {
+                    counts.positions = counts.positions.checked_add(1).ok_or("position count overflow")?;
+                }
+                (SourceKind::Flight, EventKind::Flight(_)) => {
+                    counts.flights = counts.flights.checked_add(1).ok_or("flight count overflow")?;
+                    if handoff_event(&event) {
+                        counts.handoffs = counts.handoffs.checked_add(1).ok_or("handoff count overflow")?;
+                    }
+                }
+                _ => (),
+            }
+            let left = push_replay_frame(&mut legacy_replay, event, legacy_spec)?;
+            let right = push_replay_frame(&mut candidate_replay, event.clone(), candidate_spec)?;
+            match (left, right) {
+                (Some((left_bin, left)), Some((right_bin, right))) if left_bin == right_bin => {
+                    processor.visit(left_bin, left, right)?;
+                }
+                (None, None) => (),
+                _ => return Err("independent runtime frame boundaries diverged".into()),
+            }
+            Ok(())
+        },
+    )?;
+    if summary.normalized_events != counts.normalized_events {
+        return Err("stream callback/reader normalized event count mismatch".into());
+    }
+    let (legacy_cycles, legacy_final) = finish_replay_frames(legacy_replay, legacy_spec)?;
+    let (candidate_cycles, candidate_final) = finish_replay_frames(candidate_replay, candidate_spec)?;
+    match (legacy_final, candidate_final) {
+        (Some((left_bin, left)), Some((right_bin, right))) if left_bin == right_bin => {
+            processor.visit(left_bin, left, right)?;
+        }
+        (None, None) => (),
+        _ => return Err("independent runtime final frame boundaries diverged".into()),
+    }
+    if legacy_cycles.len() != CYCLES || candidate_cycles.len() != CYCLES {
+        return Err("regional replay cycle aggregate count differs from fixed H5 bins".into());
+    }
+    consumer.finish()?;
+    if run_started.elapsed() > MAX_RUNTIME {
+        return Err("recorded H5 runtime cap exceeded after paired replay".into());
+    }
+    let region_report = region_filter.finish()?;
+    let streams = h5_stream_reports(
+        &summary,
+        H5_MEASUREMENT_START_NS,
+        H5_MEASUREMENT_END_NS,
+        snapshot_policy.update_interval_ns,
+    )?;
+    let source_activity = source_coverage(
+        &summary.recording.streams,
+        RecordingSource::Adsb,
+        (H5_CAPTURE_START_NS, H5_MEASUREMENT_END_NS),
+        snapshot_policy.update_interval_ns,
+    )?;
+    let full_local_source = local_authority_fixture
+        && source_activity.full_window_covered
+        && summary.normalized_events > 0
+        && summary.recording.counts.frames > 0
+        && summary.recording.counts.reject_frames == 0
+        && summary.quarantine_rows == 0
+        && summary.manual_handling_required == 0
+        && summary.unprocessed_frames == 0;
+
+    let mut cycle_reports = Vec::new();
+    cycle_reports
+        .try_reserve_exact(CYCLES)
+        .map_err(|_| "H5 cycle report allocation refused")?;
+    for index in 0..CYCLES {
+        let unit = cycle_window(index, H5_MEASUREMENT_START_NS, H5_MEASUREMENT_END_NS)?;
+        let state = processor.cycles.get(index).ok_or("H5 cycle state missing")?;
+        let legacy_cycle = legacy_cycles.get(index).ok_or("legacy cycle aggregate missing")?;
+        let candidate_cycle = candidate_cycles.get(index).ok_or("candidate cycle aggregate missing")?;
+        let m1_refusal = state.m1_refusal.clone().or_else(|| {
+            (!local_authority_fixture).then(|| {
+                m1_refusal_without_authority(
+                    oa_migration::SwapUnitKey {
+                        function_id: unit.function_id,
+                        scope_id: unit.scope_id,
+                        window_start_ns: unit.window_start_ns,
+                        window_end_ns: unit.window_end_ns,
+                    },
+                    unit.window_start_ns,
+                )
+                .0
+            })
+        });
+        cycle_reports.push(CycleAttempt {
+            index,
+            start_ns: unit.window_start_ns,
+            end_ns: unit.window_end_ns,
+            position_inputs: counts.cycle_positions[index],
+            flight_inputs: counts.cycle_flights[index],
+            handoff_operations: counts.cycle_handoffs[index],
+            consumer_acks: 0,
+            consumer_max_ack_ns: None,
+            replay_output_max_ack_ns: state.max_apply_ack_ns.unwrap_or(0),
+            replay_output_acks: state.output_row_acks,
+            selected_state_applied_generation: state.last_generation,
+            selected_state_applied_family_counts: state.last_counts,
+            selected_display_block_rows: state.last_display_rows,
+            display_targets_equal: state.initialized && state.display_equal,
+            selected_state_applied_sha256: state.last_digest.clone(),
+            decision_to_selected_output_ack_ns: state.decision_ack_ns,
+            rollback_output_apply_ack_ns: state.rollback_ack_ns,
+            flip_rollback_attempted: state.flip_attempted,
+            selected_output: if state.flip_completed {
+                "candidate_then_legacy_rollback"
+            } else {
+                state.selected.map_or("no_frame_no_selection", selected_output_name)
+            },
+            selector_export_dropped_baseline: legacy_cycle.selector_export_dropped,
+            selector_export_dropped_candidate: candidate_cycle.selector_export_dropped,
+            replay_projection_equal: legacy_cycle.frames > 0
+                && candidate_cycle.frames > 0
+                && legacy_cycle.projection_sha256 == candidate_cycle.projection_sha256,
+            baseline_projection_sha256: legacy_cycle.projection_sha256.clone(),
+            second_projection_sha256: candidate_cycle.projection_sha256.clone(),
+            baseline_track_rows: legacy_cycle.track_rows,
+            second_track_rows: candidate_cycle.track_rows,
+            baseline_flight_views: legacy_cycle.flight_views,
+            second_flight_views: candidate_cycle.flight_views,
+            baseline_handoff_views: legacy_cycle.handoff_views,
+            second_handoff_views: candidate_cycle.handoff_views,
+            baseline_active_ca_alerts: legacy_cycle.active_ca_alerts,
+            second_active_ca_alerts: candidate_cycle.active_ca_alerts,
+            m2_ingest_refusal: state.m2_refusal.clone().or_else(|| {
+                (!state.m2_attempted).then(|| "no paired runtime frame in cycle".into())
+            }),
+            m2_validation_ns: state.m2_validation_ns,
+            m1_transition_refusal: m1_refusal,
+            m1_validation_ns: state.m1_validation_ns,
+            flip_rollback_status: if state.flip_completed {
+                "CANDIDATE_APPLIED_ACKED_THEN_ROLLED_BACK_AND_ACKED_LOCAL_FIXTURE"
+            } else if state.flip_attempted {
+                "INCOMPLETE_FLIP_OR_ROLLBACK"
+            } else if state.m2_attempted {
+                "M2_REFUSED_DEFAULT_STATE_APPLIED"
+            } else {
+                "NO_FRAME_NO_M2_ATTEMPT"
+            },
+            unavailable: if local_authority_fixture {
+                "two independent same-implementation RegionalSession runtimes; local synthetic M1 authority is unauthenticated; no FAA legacy/manual control source; ACK/suppression of active alerts remain unknown and cause refusal"
+            } else {
+                "same-implementation replay sides; selector health, source locator/time basis, complete family coverage, alert acknowledgement/suppression and M1 window authority are unavailable"
+            },
+            consumer_frame_updates: state.frames,
+            consumer_max_virtual_gap_ns: state.max_virtual_gap_ns,
+            consumer_max_apply_ack_ns: state.max_apply_ack_ns,
+        });
+    }
+    let update_status = if processor.metrics.updates == 0 {
+        "INCOMPLETE_NO_CONSUMER_UPDATES"
+    } else if processor.metrics.gap_exceeded > 0 {
+        "LIMIT_FAILED_VIRTUAL_UPDATE_GAP"
+    } else if processor.metrics.decision_exceeded > 0 {
+        "LIMIT_FAILED_DECISION_TO_FIRST_OUTPUT"
+    } else if processor.metrics.gap_samples == 0 {
+        "INCOMPLETE_NO_VIRTUAL_GAP_SAMPLES"
+    } else {
+        "MEASURED_WITHIN_DECLARED_LIMITS"
+    };
+    let cycle_attempts = processor
+        .cycles
+        .iter()
+        .filter(|cycle| cycle.m2_attempted)
+        .count();
+    let flip_attempts = processor
+        .cycles
+        .iter()
+        .filter(|cycle| cycle.flip_attempted)
+        .count();
+    let flip_completions = processor
+        .cycles
+        .iter()
+        .filter(|cycle| cycle.flip_completed)
+        .count();
+    let m2_refusals = processor
+        .cycles
+        .iter()
+        .filter(|cycle| cycle.m2_refusal.is_some())
+        .count();
+    Ok(RecordedDrillReport {
+        run_profile: profile,
+        centre: String::from_utf8_lossy(&centre).into_owned(),
+        endpoint_class: match endpoint_class {
+            EndpointClass::Terminal => "terminal",
+            EndpointClass::EnrouteLongRange => "enroute",
+        },
+        update_interval_ns: snapshot_policy.update_interval_ns,
+        decision_limit_ns: snapshot_policy.max_decision_delay_ns,
+        window_start_ns: H5_MEASUREMENT_START_NS,
+        window_end_ns: H5_MEASUREMENT_END_NS,
+        capture_start_ns: H5_CAPTURE_START_NS,
+        warmup_event_count: counts.warmup_events,
+        input_ack_count: 0,
+        warmup_input_ack_count: 0,
+        replay_output_ack_count: processor.metrics.output_rows_acked,
+        input_streams: streams,
+        stream_counts: summary.recording.counts,
+        region_filter: region_report,
+        normalized_event_count: counts.normalized_events,
+        position_input_count: counts.positions,
+        flight_input_count: counts.flights,
+        handoff_operation_count: counts.handoffs,
+        quarantine_record_count: summary.quarantine_rows,
+        manual_handling_required_count: summary.manual_handling_required,
+        invalid_source_frame_count: 0,
+        truncated_source_frame_count: 0,
+        skipped_source_bytes: 0,
+        source_files_refused: 0,
+        consumer_receipts: Vec::new(),
+        replay_consumer_receipts: Vec::new(),
+        cycles: cycle_reports,
+        per_update_consumer: PerUpdateConsumerReport {
+            updates: processor.metrics.updates,
+            virtual_gap_samples: processor.metrics.gap_samples,
+            virtual_gap_limit_ns: snapshot_policy.update_interval_ns,
+            virtual_gap_exceeded: processor.metrics.gap_exceeded,
+            max_virtual_gap_ns: processor.metrics.max_gap_ns,
+            max_monotonic_apply_ack_ns: processor.metrics.max_apply_ack_ns,
+            decision_limit_ns: snapshot_policy.max_decision_delay_ns,
+            decision_to_first_output_samples: processor.metrics.decision_samples,
+            decision_to_first_output_exceeded: processor.metrics.decision_exceeded,
+            max_decision_to_first_output_ns: processor.metrics.max_decision_ns,
+            status: if full_local_source {
+                update_status
+            } else {
+                "INCOMPLETE_SOURCE_COVERAGE"
+            },
+        },
+        replica_cycles: [legacy_cycles, candidate_cycles],
+        model_sha256: oa_sha256::to_hex(&model_sha),
+        map_centre_lat_e7,
+        map_centre_lon_e7,
+        map_range_nm,
+        source_state_families_available: [true, true, true, false],
+        qualification: if full_local_source
+            && m2_refusals == 0
+            && flip_completions == CYCLES
+            && update_status == "MEASURED_WITHIN_DECLARED_LIMITS"
+        {
+            "LOCAL_FIXTURE_M2_AND_PER_UPDATE_MECHANISM_ONLY"
+        } else {
+            "INCOMPLETE_RECORDED_REPLAY_OR_LIMIT_FAILURE"
+        },
+        authority_mode: if local_authority_fixture {
+            "LOCAL_SYNTHETIC_M1_AND_EMPTY_CONTROL_INPUT_FIXTURE_NOT_AUTHENTICATED"
+        } else {
+            "UNAVAILABLE_NO_LOCAL_FIXTURE"
+        },
+        m2_attempt_count: u64::try_from(cycle_attempts)
+            .map_err(|_| "M2 cycle attempt conversion overflow")?
+            .checked_mul(2)
+            .ok_or("M2 attempt total overflow")?,
+        m2_refusal_count: u64::try_from(m2_refusals)
+            .map_err(|_| "M2 refusal conversion overflow")?,
+        flip_rollback_attempt_count: u64::try_from(flip_attempts)
+            .map_err(|_| "flip/rollback attempt conversion overflow")?,
+        flip_rollback_complete_count: u64::try_from(flip_completions)
+            .map_err(|_| "flip/rollback completion conversion overflow")?,
+        max_retained_snapshot_bytes_per_replica: processor
+            .peak_legacy_snapshot_bytes
+            .max(processor.peak_candidate_snapshot_bytes),
+    })
+}
+
+/// Historical cycle-summary implementation retained for diagnostic compatibility.
+pub fn run_recorded_stream_cycle_summary(
     inputs: &[StreamInput],
     centre: [u8; 4],
     endpoint_class: EndpointClass,
@@ -4359,6 +5297,9 @@ pub fn run_recorded_stream(
             } else {
                 "same-implementation replay sides; selector health, source locator/time basis, complete family coverage, alert acknowledgement/suppression and M1 window authority are unavailable"
             },
+            consumer_frame_updates: 0,
+            consumer_max_virtual_gap_ns: None,
+            consumer_max_apply_ack_ns: None,
         });
     }
     output_consumer.finish()?;
@@ -4426,6 +5367,19 @@ pub fn run_recorded_stream(
         consumer_receipts: Vec::new(),
         replay_consumer_receipts: Vec::new(),
         cycles,
+        per_update_consumer: PerUpdateConsumerReport {
+            updates: 0,
+            virtual_gap_samples: 0,
+            virtual_gap_limit_ns: snapshot_policy.update_interval_ns,
+            virtual_gap_exceeded: 0,
+            max_virtual_gap_ns: None,
+            max_monotonic_apply_ack_ns: None,
+            decision_limit_ns: snapshot_policy.max_decision_delay_ns,
+            decision_to_first_output_samples: 0,
+            decision_to_first_output_exceeded: 0,
+            max_decision_to_first_output_ns: None,
+            status: "UNOBSERVABLE_CYCLE_SUMMARY_ONLY",
+        },
         replica_cycles,
         model_sha256: oa_sha256::to_hex(&model_sha),
         map_centre_lat_e7,
@@ -4476,6 +5430,20 @@ fn row_cycle_in_span(time_ns: i64, start: i64, end: i64) -> Result<usize, String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // REQ: OA-MIG-414
+    #[test]
+    fn paired_consumer_gap_and_decision_thresholds_are_inclusive_at_the_limit() {
+        assert_eq!(checked_frame_gap(None, 10).expect("first frame"), None);
+        assert_eq!(
+            checked_frame_gap(Some(10), 4_800_000_010).expect("terminal boundary"),
+            Some(4_800_000_000)
+        );
+        assert!(exceeds_latency_limit(1_000_000_001, 1_000_000_000));
+        assert!(!exceeds_latency_limit(1_000_000_000, 1_000_000_000));
+        assert!(checked_frame_gap(Some(20), 20).is_err());
+        assert!(checked_frame_gap(Some(21), 20).is_err());
+    }
 
     // REQ: OA-MIG-414
     #[test]
