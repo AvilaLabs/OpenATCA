@@ -831,6 +831,7 @@ mod tests {
     #![allow(clippy::expect_used, clippy::panic)]
 
     use super::*;
+    use crate::nam_handoff::nam_session_ingress_state;
     use oa_nam::{Aerodrome, Facility, Field13, Field16};
 
     const LOCAL: Facility = Facility(*b"KZMP");
