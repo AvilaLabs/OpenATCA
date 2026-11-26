@@ -80,10 +80,12 @@ fn arguments() -> Result<Arguments, CliError> {
     let mut audit_principal = None;
     let mut audit_role = None;
     let mut audit_time_ns = None;
+    let mut principal_registry_path = None;
+    let mut principal_registry_sha256 = None;
     let mut count = 0;
     while let Some(arg) = args.next() {
         count += 1;
-        if count > 40 {
+        if count > 48 {
             return Err(CliError::Usage);
         }
         match arg.to_str() {
@@ -212,6 +214,20 @@ fn arguments() -> Result<Arguments, CliError> {
                         .ok_or(CliError::Usage)?,
                 );
             }
+            Some("--principal-registry") if execute && principal_registry_path.is_none() => {
+                principal_registry_path =
+                    Some(args.next().map(PathBuf::from).ok_or(CliError::Usage)?);
+            }
+            Some("--principal-registry-sha256")
+                if execute && principal_registry_sha256.is_none() =>
+            {
+                principal_registry_sha256 = Some(
+                    args.next()
+                        .and_then(|value| value.into_string().ok())
+                        .and_then(|value| parse_audit_digest(&value).ok())
+                        .ok_or(CliError::Usage)?,
+                );
+            }
             _ => return Err(CliError::Usage),
         }
     }
@@ -229,11 +245,21 @@ fn arguments() -> Result<Arguments, CliError> {
         || audit_tail.is_some()
         || audit_principal.is_some()
         || audit_role.is_some()
-        || audit_time_ns.is_some();
+        || audit_time_ns.is_some()
+        || principal_registry_path.is_some()
+        || principal_registry_sha256.is_some();
     let quarantine_release = if any_quarantine_release {
         let source = quarantine_source.ok_or(CliError::Usage)?;
         let source_instance = quarantine_instance.ok_or(CliError::Usage)?;
         let item_id = quarantine_item.ok_or(CliError::Usage)?;
+        let registry_path = principal_registry_path.ok_or(CliError::Usage)?;
+        let registry_pin = principal_registry_sha256.ok_or(CliError::Usage)?;
+        oa_sealed::Sealed::production()
+            .check(&registry_path)
+            .map_err(|_| CliError::Usage)?;
+        let principal_registry =
+            oa_audit_log::shell::load_principal_registry(&registry_path, registry_pin)
+                .map_err(|_| CliError::Usage)?;
         Some(oa_regional_session::cli::QuarantineReleaseOptions {
             source,
             identity: oa_quarantine::InputIdentity {
@@ -249,6 +275,7 @@ fn arguments() -> Result<Arguments, CliError> {
             },
             principal: audit_principal.ok_or(CliError::Usage)?,
             role: audit_role.ok_or(CliError::Usage)?,
+            principal_registry,
             time_ns: audit_time_ns.ok_or(CliError::Usage)?,
         })
     } else {
@@ -537,7 +564,7 @@ fn run() -> Result<(), CliError> {
 fn main() {
     if let Err(error) = run() {
         let message = match error {
-            CliError::Usage => "usage: oa-regional-session run --input FILE --out NEW_DIR (--snapshot FILE | --synthetic-model) [--msaw-inputs MANIFEST | --synthetic-msaw] [--performance MANIFEST] [--profile recorded-peak-rendered] [--quarantine-release-source flight-data|surveillance --quarantine-release-instance N --quarantine-release-item N --manual-handoff-ref TEXT --audit-log FILE --audit-count N --audit-tail SHA256 --audit-principal N --audit-role monitor|operate|configure --audit-time-ns N]; stage --input FILE --out NEW_DIR".to_owned(),
+            CliError::Usage => "usage: oa-regional-session run --input FILE --out NEW_DIR (--snapshot FILE | --synthetic-model) [--msaw-inputs MANIFEST | --synthetic-msaw] [--performance MANIFEST] [--profile recorded-peak-rendered] [--quarantine-release-source flight-data|surveillance --quarantine-release-instance N --quarantine-release-item N --manual-handoff-ref TEXT --audit-log FILE --audit-count N --audit-tail SHA256 --audit-principal N --audit-role monitor|operate|configure --audit-time-ns N --principal-registry FILE --principal-registry-sha256 SHA256]; stage --input FILE --out NEW_DIR".to_owned(),
             CliError::Io(error) => format!("I/O error: {error}"),
             CliError::InputTooLarge => "input exceeds the 16 MiB limit".to_owned(),
             CliError::InvalidUtf8 => "input is not UTF-8".to_owned(),

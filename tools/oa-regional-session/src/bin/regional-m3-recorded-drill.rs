@@ -2,10 +2,11 @@
 //! when required paired system state is unavailable. This is an offline diagnostic, not a switch.
 #![forbid(unsafe_code)]
 
+use oa_audit_core::{Checkpoint, PrincipalRegistry};
 use oa_migration_switch::EndpointClass;
 use oa_regional_session::migration_drill::{
-    consumer_worker, run_recorded_stream, RecordedDrillReport, RecordedRunOptions,
-    MAX_CONSUMER_FRAME_BYTES, MAX_NORMALIZED_EVENTS, MAX_ZAU_BOX_ADDRESSES,
+    consumer_worker, run_recorded_stream, RecordedAuditOptions, RecordedDrillReport,
+    RecordedRunOptions, MAX_CONSUMER_FRAME_BYTES, MAX_NORMALIZED_EVENTS, MAX_ZAU_BOX_ADDRESSES,
     MAX_ZAU_DISTINCT_ADDRESSES, ZAU_POSITION_ASSOCIATION_MAX_AGE_NS,
 };
 use oa_regional_session::recordings_reader::RecordingSource;
@@ -15,7 +16,40 @@ use oa_regional_session::recordings_stream::{
 use std::env;
 use std::path::PathBuf;
 
-type ParsedArgs = (Vec<StreamInput>, [u8; 4], EndpointClass, PathBuf, f64, bool);
+type ParsedArgs = (
+    Vec<StreamInput>,
+    [u8; 4],
+    EndpointClass,
+    PathBuf,
+    f64,
+    bool,
+    Option<AuditArgs>,
+);
+
+struct AuditArgs {
+    log_path: PathBuf,
+    registry_path: PathBuf,
+    registry_pin: [u8; 32],
+    principal_id: u64,
+    checkpoint: Checkpoint,
+}
+
+fn parse_digest(text: &str) -> Result<[u8; 32], String> {
+    if text.len() != 64
+        || !text
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    {
+        return Err("SHA-256 must be 64 lowercase hexadecimal characters".into());
+    }
+    let mut digest = [0; 32];
+    for (i, pair) in text.as_bytes().chunks_exact(2).enumerate() {
+        let hi = (pair[0] as char).to_digit(16).ok_or("invalid SHA-256")? as u8;
+        let lo = (pair[1] as char).to_digit(16).ok_or("invalid SHA-256")? as u8;
+        digest[i] = (hi << 4) | lo;
+    }
+    Ok(digest)
+}
 
 fn parse_args() -> Result<ParsedArgs, String> {
     let mut args = env::args_os().skip(1);
@@ -25,6 +59,12 @@ fn parse_args() -> Result<ParsedArgs, String> {
     let mut model_snapshot = None;
     let mut map_range_nm = None;
     let mut local_authority_fixture = false;
+    let mut audit_log = None;
+    let mut audit_count = None;
+    let mut audit_tail = None;
+    let mut audit_principal = None;
+    let mut registry_path = None;
+    let mut registry_pin = None;
     while let Some(flag) = args.next() {
         match flag.to_str() {
             Some("--adsb") | Some("--sfdps") => {
@@ -68,11 +108,44 @@ fn parse_args() -> Result<ParsedArgs, String> {
             Some("--local-authority-fixture") if !local_authority_fixture => {
                 local_authority_fixture = true;
             }
-            _ => return Err("usage: regional-m3-recorded-drill (--adsb FILE | --sfdps FILE)+ --centre ZAU1 --endpoint-class terminal|enroute --model-snapshot FILE --map-range-nm NM [--local-authority-fixture] (fixture is unauthenticated and never represents FAA legacy/manual state)".into()),
+            Some("--audit-log") if audit_log.is_none() => audit_log = Some(PathBuf::from(args.next().ok_or("missing path after --audit-log")?)),
+            Some("--audit-count") if audit_count.is_none() => audit_count = Some(args.next().ok_or("missing count after --audit-count")?.to_str().ok_or("audit count must be UTF-8")?.parse::<u64>().map_err(|_| "audit count must be an unsigned integer")?),
+            Some("--audit-tail") if audit_tail.is_none() => audit_tail = Some(parse_digest(args.next().ok_or("missing digest after --audit-tail")?.to_str().ok_or("audit tail must be UTF-8")?)?),
+            Some("--audit-principal") if audit_principal.is_none() => audit_principal = Some(args.next().ok_or("missing principal after --audit-principal")?.to_str().ok_or("audit principal must be UTF-8")?.parse::<u64>().ok().filter(|id| *id > 0).ok_or("audit principal must be positive")?),
+            Some("--principal-registry") if registry_path.is_none() => registry_path = Some(PathBuf::from(args.next().ok_or("missing path after --principal-registry")?)),
+            Some("--principal-registry-sha256") if registry_pin.is_none() => registry_pin = Some(parse_digest(args.next().ok_or("missing digest after --principal-registry-sha256")?.to_str().ok_or("registry digest must be UTF-8")?)?),
+            _ => return Err("usage: regional-m3-recorded-drill (--adsb FILE | --sfdps FILE)+ --centre ZAU1 --endpoint-class terminal|enroute --model-snapshot FILE --map-range-nm NM [--local-authority-fixture --audit-log FILE --audit-count N --audit-tail SHA256 --audit-principal N --principal-registry FILE --principal-registry-sha256 SHA256] (registry roles and timestamps are caller claims; fixture is unauthenticated and never represents FAA legacy/manual state)".into()),
         }
     }
     if inputs.is_empty() {
         return Err("at least one recorded input is required".into());
+    }
+    let audit_fields = [
+        audit_log.is_some(),
+        audit_count.is_some(),
+        audit_tail.is_some(),
+        audit_principal.is_some(),
+        registry_path.is_some(),
+        registry_pin.is_some(),
+    ];
+    let audit = if audit_fields.iter().all(|present| *present) {
+        Some(AuditArgs {
+            log_path: audit_log.ok_or("audit log path missing")?,
+            checkpoint: Checkpoint {
+                count: audit_count.ok_or("audit count missing")?,
+                tail: audit_tail.ok_or("audit tail missing")?,
+            },
+            principal_id: audit_principal.ok_or("audit principal missing")?,
+            registry_path: registry_path.ok_or("principal registry path missing")?,
+            registry_pin: registry_pin.ok_or("principal registry digest missing")?,
+        })
+    } else if audit_fields.iter().any(|present| *present) {
+        return Err("all six audit flags are required together".into());
+    } else {
+        None
+    };
+    if local_authority_fixture != audit.is_some() {
+        return Err("--local-authority-fixture requires --audit-log, --audit-count, --audit-tail, --audit-principal, --principal-registry, and --principal-registry-sha256; role inputs are registry-derived and remain unauthenticated".into());
     }
     Ok((
         inputs,
@@ -81,6 +154,7 @@ fn parse_args() -> Result<ParsedArgs, String> {
         model_snapshot.ok_or("--model-snapshot is required")?,
         map_range_nm.ok_or("--map-range-nm is required")?,
         local_authority_fixture,
+        audit,
     ))
 }
 
@@ -140,7 +214,7 @@ fn emit(report: &RecordedDrillReport) {
         .collect::<Vec<_>>()
         .join(",");
     println!(
-        "H5RECORDED\tversion=7\tmode=paired_single_pass_two_independent_same_implementation_runtimes\tprivileged_action_audit=UNAVAILABLE_PUBLISHED_M2_API\tauthority_mode={}\tqualification={}\tcentre={}\tendpoint_class={}\tmeasurement_start_ns={}\tmeasurement_end_ns={}\tcapture_start_ns={}\twarmup_events={}\tupdate_interval_ns={}\tdecision_limit_ns={}\tcycles_defined=100\tm2_ingest_attempts={}\tm2_cycles_refused={}\tflip_rollback_cycles_attempted={}\tflip_rollback_cycles_completed={}\taudit_events_written=0\tmax_retained_snapshot_bytes_per_replica={}\tdrill_runtime_cap_s=300\tphysical_input_byte_cap={}\tinput_frame_cap={}\tinput_stream_cap={}\tnormalized_event_cap={}\tconsumer_event_frame_cap_bytes={}\tsource_files_seen={}\tsource_frames_seen={}\tsource_reject_frames={}\tnormalized_events={}\tposition_inputs={}\tflight_inputs={}\thandoff_operations={}\tactive_ca_alert_frame_rows={}\thandoff_state_frame_rows={}\trenderer_target_frame_rows={}\tpaired_runtime_frame_denominator={}\tquarantine_records={}\tmanual_handling_required={}\tinvalid_source_frames={}\ttruncated_source_frames={}\tskipped_source_bytes={}\tsource_files_refused={}\tsource_error_counter_status=UNAVAILABLE_ON_SUCCESSFUL_STREAM_ABORTED_ON_INVALID_TRUNCATED_RESYNC_OR_REFUSED_INPUT\tinput_delivery=single_stream_callback_to_two_independent_runtimes\tselected_state_apply_ack_rows={}\treplay_projection_equal_cycles={}\tmodel_sha256={}\tmap_centre_lat_e7={}\tmap_centre_lon_e7={}\tmap_range_nm={}\tprofile_max_frames={}\tprofile_max_tracks={}\tprofile_max_flights={}\tprofile_max_total_events={}\tprofile_max_baro_evidence={}\tprofile_max_drain_rows={}\tprofile_max_ca_candidates={}\tprofile_max_open_alerts={}\tprofile_max_ca_work_per_frame={}\tconsumer_output_order=monotonic_generation_checked\tconsumer_scope=local_worker_applies_each_selected_typed_snapshot_and_ACKs_its_exact_digest_no_external_endpoint_or_source_completeness_claim\ttrack_output_integrity=typed_snapshot_digest_ACK\tactive_alert_projection=typed_CA_rows_ACK_ack_suppression_unknown\tdisplay_block_projection=existing_renderer_Target_rows_joined_to_track_state\thandoff_projection=typed_flight_handoff_rows_ACK\tstate_families_available={},{},{},{}",
+        "H5RECORDED\tversion=8\tmode=paired_single_pass_two_independent_same_implementation_runtimes\tprivileged_action_audit=registry_derived_role_hash_chain\tauthority_mode={}\tqualification={}\tcentre={}\tendpoint_class={}\tmeasurement_start_ns={}\tmeasurement_end_ns={}\tcapture_start_ns={}\twarmup_events={}\tupdate_interval_ns={}\tdecision_limit_ns={}\tcycles_defined=100\tm2_ingest_attempts={}\tm2_cycles_refused={}\tflip_rollback_cycles_attempted={}\tflip_rollback_cycles_completed={}\taudit_chain_count={}\tmax_retained_snapshot_bytes_per_replica={}\tdrill_runtime_cap_s=300\tphysical_input_byte_cap={}\tinput_frame_cap={}\tinput_stream_cap={}\tnormalized_event_cap={}\tconsumer_event_frame_cap_bytes={}\tsource_files_seen={}\tsource_frames_seen={}\tsource_reject_frames={}\tnormalized_events={}\tposition_inputs={}\tflight_inputs={}\thandoff_operations={}\tactive_ca_alert_frame_rows={}\thandoff_state_frame_rows={}\trenderer_target_frame_rows={}\tpaired_runtime_frame_denominator={}\tquarantine_records={}\tmanual_handling_required={}\tinvalid_source_frames={}\ttruncated_source_frames={}\tskipped_source_bytes={}\tsource_files_refused={}\tsource_error_counter_status=UNAVAILABLE_ON_SUCCESSFUL_STREAM_ABORTED_ON_INVALID_TRUNCATED_RESYNC_OR_REFUSED_INPUT\tinput_delivery=single_stream_callback_to_two_independent_runtimes\tselected_state_apply_ack_rows={}\treplay_projection_equal_cycles={}\tmodel_sha256={}\tmap_centre_lat_e7={}\tmap_centre_lon_e7={}\tmap_range_nm={}\tprofile_max_frames={}\tprofile_max_tracks={}\tprofile_max_flights={}\tprofile_max_total_events={}\tprofile_max_baro_evidence={}\tprofile_max_drain_rows={}\tprofile_max_ca_candidates={}\tprofile_max_open_alerts={}\tprofile_max_ca_work_per_frame={}\tconsumer_output_order=monotonic_generation_checked\tconsumer_scope=local_worker_applies_each_selected_typed_snapshot_and_ACKs_its_exact_digest_no_external_endpoint_or_source_completeness_claim\ttrack_output_integrity=typed_snapshot_digest_ACK\tactive_alert_projection=typed_CA_rows_ACK_ack_suppression_unknown\tdisplay_block_projection=existing_renderer_Target_rows_joined_to_track_state\thandoff_projection=typed_flight_handoff_rows_ACK\tstate_families_available={},{},{},{}",
         report.authority_mode,
         report.qualification,
         report.centre,
@@ -155,6 +229,7 @@ fn emit(report: &RecordedDrillReport) {
         report.m2_refusal_count,
         report.flip_rollback_attempt_count,
         report.flip_rollback_complete_count,
+        report.migration_audit_checkpoint.map_or_else(|| "UNAVAILABLE".to_owned(), |checkpoint| checkpoint.count.to_string()),
         report.max_retained_snapshot_bytes_per_replica,
         MAX_H2_PHYSICAL_INPUT_BYTES,
         MAX_H2_INPUT_FRAMES,
@@ -484,14 +559,21 @@ fn main() {
         }
         return;
     }
-    let (inputs, centre, endpoint_class, model_path, map_range_nm, local_authority_fixture) =
-        match parse_args() {
-            Ok(value) => value,
-            Err(error) => {
-                eprintln!("{error}");
-                std::process::exit(2);
-            }
-        };
+    let (
+        inputs,
+        centre,
+        endpoint_class,
+        model_path,
+        map_range_nm,
+        local_authority_fixture,
+        audit_args,
+    ) = match parse_args() {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::exit(2);
+        }
+    };
     let model_bytes = match oa_regional_session::cli::read_guarded(
         &model_path,
         oa_airspace::core::snapshot::MAX_SNAPSHOT_BYTES,
@@ -509,6 +591,24 @@ fn main() {
             std::process::exit(2);
         }
     };
+    let audit_registry = if let Some(audit) = audit_args.as_ref() {
+        for path in [&audit.log_path, &audit.registry_path] {
+            if let Err(error) = oa_sealed::Sealed::production().check(path) {
+                eprintln!("guarded audit path refused: {error:?}");
+                std::process::exit(1);
+            }
+        }
+        match oa_audit_log::shell::load_principal_registry(&audit.registry_path, audit.registry_pin)
+        {
+            Ok(registry) => Some(registry),
+            Err(error) => {
+                eprintln!("principal registry refused: {error:?}");
+                std::process::exit(1);
+            }
+        }
+    } else {
+        None
+    };
     match run_recorded_stream(
         &inputs,
         centre,
@@ -518,6 +618,14 @@ fn main() {
         RecordedRunOptions {
             worker_executable: &executable,
             local_authority_fixture,
+            migration_audit: audit_args.as_ref().zip(audit_registry.as_ref()).map(
+                |(audit, registry)| RecordedAuditOptions {
+                    audit_log: &audit.log_path,
+                    principal_registry: registry,
+                    principal_id: audit.principal_id,
+                    checkpoint: audit.checkpoint,
+                },
+            ),
         },
     ) {
         Ok(report) => emit(&report),

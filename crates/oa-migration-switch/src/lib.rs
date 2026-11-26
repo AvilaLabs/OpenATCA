@@ -699,6 +699,28 @@ pub fn new_selector_with_capacity(
     interfaced_facilities: &[u32],
     profile: CapacityProfile,
 ) -> Result<Selector, Refusal> {
+    new_selector_with_capacity_and_audit_checkpoint(
+        unit,
+        policy,
+        evidence,
+        start_ns,
+        interfaced_facilities,
+        profile,
+        oa_audit_core::genesis(),
+    )
+}
+
+/// Allocate a bounded selector and bind it to the caller's trusted audit-chain checkpoint.
+/// The shell must verify the checkpoint against durable storage before issuing action receipts.
+pub fn new_selector_with_capacity_and_audit_checkpoint(
+    unit: SwapUnitKey,
+    policy: UnitPolicy,
+    evidence: EvidenceKind,
+    start_ns: i64,
+    interfaced_facilities: &[u32],
+    profile: CapacityProfile,
+    checkpoint: oa_audit_core::Checkpoint,
+) -> Result<Selector, Refusal> {
     if !valid_unit(unit)
         || start_ns < unit.window_start_ns
         || !in_window(unit, start_ns)
@@ -757,8 +779,8 @@ pub fn new_selector_with_capacity(
         output_sequence: 0,
         delivered_sequence: 0,
         last_authority_sequence: 0,
-        last_audit_sequence: 0,
-        last_audit_digest: [0; 32],
+        last_audit_sequence: checkpoint.count,
+        last_audit_digest: checkpoint.tail,
         last_output_time_ns: start_ns,
         last_delivery_time_ns: start_ns,
         pending_delivery: false,

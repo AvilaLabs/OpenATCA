@@ -18,6 +18,10 @@ use crate::session::{flush_receipt_group, push_event, session_cursor_new_with_li
 use crate::surveillance::SurveillanceConfig;
 use crate::ReceiptBatch;
 use oa_airspace::core::model::{point_kind, str_at, Model};
+use oa_audit_core::{
+    authorize_principal, Action as AuditAction, Checkpoint as AuditCheckpoint, PrincipalRegistry,
+    Role as AuditRole,
+};
 use oa_migration::{
     empty_audit_log, evaluate_transition, new_unit, AuthorityApproval, AuthorityRole, Comparison,
     DependencyRequirement, EvidenceQuality, MetricCriterion, MetricEvidence, RollbackRule,
@@ -25,8 +29,9 @@ use oa_migration::{
     ROLE_ASSESSOR, ROLE_CONTROLLER_ON_POSITION, ROLE_SUPERVISOR, ROLE_TECH_OPS,
 };
 use oa_migration_switch::{
-    authorize_window, ingest_view, new_promotion_intent, new_selector_with_capacity,
-    observe_delivery, prepare_candidate_into, rollback, select_candidate, selected, AlertState,
+    authorize_window, candidate_audit_event, ingest_view, new_promotion_intent,
+    new_selector_with_capacity, new_selector_with_capacity_and_audit_checkpoint, observe_delivery,
+    prepare_candidate_into, rollback, rollback_audit_event, select_candidate, selected, AlertState,
     BusinessKey, CapacityProfile, Diff, EndpointClass, EntityFamily, EvidenceKind, FamilyCoverage,
     FieldStatus, FlightState, HandoffState, Health, Output, PromotionIntentRequest, RollbackKind,
     RollbackReceipt, Side, SnapshotView, SourceIdentity, SwapUnitKey, TrackState, UnitPolicy,
@@ -308,6 +313,8 @@ pub struct RecordedDrillReport {
     pub m2_refusal_count: u64,
     pub flip_rollback_attempt_count: u64,
     pub flip_rollback_complete_count: u64,
+    /// Latest durable M2 audit checkpoint for this run; caller/role inputs remain unauthenticated.
+    pub migration_audit_checkpoint: Option<AuditCheckpoint>,
     pub max_retained_snapshot_bytes_per_replica: usize,
     pub stage_progress: H5StageProgress,
 }
@@ -3408,6 +3415,8 @@ fn local_fixture_window_authorization(
     unit: SwapUnitKey,
     policy: UnitPolicy,
     at_ns: i64,
+    principal_id: u32,
+    assessor_principal_id: u32,
 ) -> Result<oa_migration_switch::WindowAuthorization, String> {
     let key = M1SwapUnitKey {
         function_id: unit.function_id,
@@ -3512,7 +3521,7 @@ fn local_fixture_window_authorization(
                 to,
                 role: AuthorityRole::FacilitySupervisor,
                 approved: true,
-                principal_id: 8,
+                principal_id,
                 approved_at_ns: at,
                 policy_version: policy.policy_version,
                 policy_digest: policy.policy_digest,
@@ -3527,7 +3536,7 @@ fn local_fixture_window_authorization(
                 to,
                 role: AuthorityRole::IndependentAssessor,
                 approved: true,
-                principal_id: 9,
+                principal_id: assessor_principal_id,
                 approved_at_ns: at,
                 policy_version: policy.policy_version,
                 policy_digest: policy.policy_digest,
@@ -3606,15 +3615,17 @@ fn prepare_local_fixture_candidate(
     legacy: SnapshotView<'_>,
     candidate: SnapshotView<'_>,
     cycle: usize,
+    audit: &mut MigrationAuditState<'_>,
 ) -> Result<LocalFixtureCandidate, String> {
     let m2_started = Instant::now();
-    let mut selector = new_selector_with_capacity(
+    let mut selector = new_selector_with_capacity_and_audit_checkpoint(
         unit,
         policy,
         EvidenceKind::Recorded,
         unit.window_start_ns,
         &[],
         CapacityProfile::REPLAY_4096,
+        audit.checkpoint,
     )
     .map_err(|error| format!("local fixture selector: {error:?}"))?;
     ingest_view(
@@ -3645,7 +3656,17 @@ fn prepare_local_fixture_candidate(
     }
     let m2_before_authority_ns = m2_started.elapsed().as_nanos();
     let m1_started = Instant::now();
-    let authorization = local_fixture_window_authorization(&selector, unit, policy, at_ns)?;
+    let principal_id = u32::try_from(audit.principal_id)
+        .map_err(|_| "migration audit principal exceeds M2 principal capacity")?;
+    let assessor_principal_id = if principal_id == 9 { 10 } else { 9 };
+    let authorization = local_fixture_window_authorization(
+        &selector,
+        unit,
+        policy,
+        at_ns,
+        principal_id,
+        assessor_principal_id,
+    )?;
     let m1_fixture_ns = m1_started.elapsed().as_nanos();
     let mut event_material = Vec::with_capacity(32);
     event_material.extend_from_slice(b"H5 local fixture promotion event v1");
@@ -3663,21 +3684,44 @@ fn prepare_local_fixture_candidate(
             sequence: 1,
             evaluated_at_ns: at_ns,
             principal_role_id: 1,
-            principal_id: 8,
+            principal_id,
             event_key,
         },
     )
     .map_err(|error| format!("local fixture candidate intent: {error:?}"))?;
+    let role = authorize_principal(
+        audit.principal_registry,
+        audit.principal_id,
+        AuditAction::MigrationFlip,
+    )
+    .map_err(|error| format!("migration flip registry authorization: {error:?}"))?;
+    let event = candidate_audit_event(&selector, &intent, at_ns)
+        .map_err(|error| format!("migration flip audit intent: {error:?}"))?;
+    if event.principal != audit.principal_id || event.role != role || role != AuditRole::Configure {
+        return Err(
+            "migration flip audit event does not match registry-derived principal role".into(),
+        );
+    }
+    let (next_checkpoint, receipt) =
+        oa_audit_log::shell::append_receipt(audit.audit_log, audit.checkpoint, event)
+            .map_err(|error| format!("migration flip audit append refused: {error:?}"))?;
+    audit.checkpoint = next_checkpoint;
     let select_started = Instant::now();
-    select_candidate(
+    if let Err(error) = select_candidate(
         &mut selector,
         &readiness,
         &authorization,
         &intent,
         at_ns,
         policy.max_snapshot_age_ns,
-    )
-    .map_err(|error| format!("local fixture candidate selection: {error:?}"))?;
+        receipt,
+    ) {
+        return Err(format!(
+            "migration flip refused after durable audit append: {error:?}; audit_count={} audit_tail={}",
+            audit.checkpoint.count,
+            oa_sha256::to_hex(&audit.checkpoint.tail)
+        ));
+    }
     Ok(LocalFixtureCandidate {
         selector,
         m2_validation_ns: m2_before_authority_ns
@@ -4132,6 +4176,7 @@ pub fn run_recorded(
         m2_refusal_count,
         flip_rollback_attempt_count: 0,
         flip_rollback_complete_count: 0,
+        migration_audit_checkpoint: None,
         max_retained_snapshot_bytes_per_replica,
         stage_progress: H5StageProgress::default(),
     })
@@ -4140,9 +4185,66 @@ pub fn run_recorded(
 /// Runs the bounded two-pass H5 replay over a source stream. Capture includes the ten-minute
 /// warm-up; only the following fixed hour contributes to the 100 measurement bins.
 #[derive(Clone, Copy)]
+pub struct RecordedAuditOptions<'a> {
+    pub audit_log: &'a Path,
+    pub principal_registry: &'a PrincipalRegistry,
+    pub principal_id: u64,
+    pub checkpoint: AuditCheckpoint,
+}
+
+#[derive(Clone, Copy)]
 pub struct RecordedRunOptions<'a> {
     pub worker_executable: &'a Path,
     pub local_authority_fixture: bool,
+    /// Required when the explicitly labeled local authority fixture can perform M2 actions.
+    pub migration_audit: Option<RecordedAuditOptions<'a>>,
+}
+
+#[derive(Clone, Copy)]
+struct MigrationAuditState<'a> {
+    audit_log: &'a Path,
+    principal_registry: &'a PrincipalRegistry,
+    principal_id: u64,
+    checkpoint: AuditCheckpoint,
+}
+
+impl<'a> From<RecordedAuditOptions<'a>> for MigrationAuditState<'a> {
+    fn from(options: RecordedAuditOptions<'a>) -> Self {
+        Self {
+            audit_log: options.audit_log,
+            principal_registry: options.principal_registry,
+            principal_id: options.principal_id,
+            checkpoint: options.checkpoint,
+        }
+    }
+}
+
+impl MigrationAuditState<'_> {
+    fn append_action(
+        &mut self,
+        selector: &oa_migration_switch::Selector,
+        action: AuditAction,
+        event: oa_audit_core::Event,
+    ) -> Result<oa_audit_core::AuditReceipt, String> {
+        let role = authorize_principal(self.principal_registry, self.principal_id, action)
+            .map_err(|error| format!("principal registry refused {action:?}: {error:?}"))?;
+        if event.principal != self.principal_id
+            || event.role != role
+            || role != AuditRole::Configure
+        {
+            return Err(format!(
+                "{action:?} audit intent does not match registry-derived principal role"
+            ));
+        }
+        let (checkpoint, receipt) = oa_audit_log::shell::append_receipt(
+            self.audit_log,
+            oa_migration_switch::audit_checkpoint(selector),
+            event,
+        )
+        .map_err(|error| format!("{action:?} durable audit append refused: {error:?}"))?;
+        self.checkpoint = checkpoint;
+        Ok(receipt)
+    }
 }
 
 #[derive(Default)]
@@ -4187,6 +4289,7 @@ struct LivePairProcessor<'a> {
     consumer: &'a mut Consumer,
     policy: UnitPolicy,
     local_authority_fixture: bool,
+    migration_audit: Option<MigrationAuditState<'a>>,
     cycles: Vec<LiveCycleState>,
     metrics: LiveUpdateState,
     generation: u64,
@@ -4321,6 +4424,9 @@ impl LivePairProcessor<'_> {
                     legacy.view(),
                     candidate.view(),
                     cycle_index,
+                    self.migration_audit
+                        .as_mut()
+                        .ok_or("local M2 fixture has no registry-backed audit state")?,
                 );
                 add_stage_ns(
                     &mut self.stage_progress.selector_validation_ns,
@@ -4396,6 +4502,11 @@ impl LivePairProcessor<'_> {
                             unit,
                             kind: RollbackKind::ControllerRequest,
                             principal_id: [8; 32],
+                            audit_principal_id: self
+                                .migration_audit
+                                .as_ref()
+                                .ok_or("local M2 fixture has no audit principal")?
+                                .principal_id,
                             principal_role_id: 1,
                             policy_version: self.policy.policy_version,
                             policy_digest: self.policy.policy_digest,
@@ -4417,21 +4528,38 @@ impl LivePairProcessor<'_> {
                             event_id: oa_sha256::sha256(&event_material),
                             observed_ns: candidate_ack_ns,
                         };
+                        let audit = self
+                            .migration_audit
+                            .as_mut()
+                            .ok_or("local M2 fixture has no registry-backed audit state")?;
+                        let rollback_event =
+                            rollback_audit_event(&selector, rollback_receipt, candidate_ack_ns)
+                                .map_err(|error| {
+                                    format!("rollback audit intent refused: {error:?}")
+                                })?;
+                        let durable_receipt = audit.append_action(
+                            &selector,
+                            AuditAction::MigrationRollback,
+                            rollback_event,
+                        )?;
                         let rollback_started = Instant::now();
                         let rollback_result = rollback(
                             &mut selector,
                             rollback_receipt,
                             candidate_ack_ns,
                             self.policy.max_snapshot_age_ns,
+                            durable_receipt,
                         );
                         add_stage_ns(
                             &mut self.stage_progress.selector_validation_ns,
                             rollback_started.elapsed().as_nanos(),
                             "selector rollback",
                         )?;
-                        rollback_result.map_err(|error| {
-                            format!("local fixture rollback refused: {error:?}")
-                        })?;
+                        rollback_result.map_err(|error| format!(
+                            "local fixture rollback refused after durable audit append: {error:?}; audit_count={} audit_tail={}",
+                            audit.checkpoint.count,
+                            oa_sha256::to_hex(&audit.checkpoint.tail)
+                        ))?;
                         let AppliedSnapshotResult {
                             family_counts: counts,
                             digest,
@@ -4753,7 +4881,30 @@ pub fn run_recorded_stream(
     let RecordedRunOptions {
         worker_executable,
         local_authority_fixture,
+        migration_audit,
     } = options;
+    if local_authority_fixture != migration_audit.is_some() {
+        return Err("the local authority fixture requires registry-backed audit inputs, and audit inputs are refused without that fixture".into());
+    }
+    if let Some(audit) = migration_audit {
+        let principal_id = audit.principal_id;
+        if principal_id == 0 || principal_id > u64::from(u32::MAX) {
+            return Err(
+                "migration audit principal must fit the positive M2 principal field".into(),
+            );
+        }
+        for action in [AuditAction::MigrationFlip, AuditAction::MigrationRollback] {
+            let role = authorize_principal(audit.principal_registry, principal_id, action)
+                .map_err(|error| {
+                    format!("migration principal registry refused {action:?}: {error:?}")
+                })?;
+            if role != AuditRole::Configure {
+                return Err(format!(
+                    "migration action {action:?} requires configure registry role"
+                ));
+            }
+        }
+    }
     if H5_CAPTURE_START_NS != 1_795_121_400_000_000_000
         || H5_MEASUREMENT_START_NS != 1_795_122_000_000_000_000
         || H5_MEASUREMENT_END_NS != 1_795_125_600_000_000_000
@@ -4799,6 +4950,7 @@ pub fn run_recorded_stream(
         consumer: &mut consumer,
         policy: snapshot_policy,
         local_authority_fixture,
+        migration_audit: migration_audit.map(MigrationAuditState::from),
         cycles,
         metrics: LiveUpdateState::default(),
         generation: 0,
@@ -5293,6 +5445,7 @@ pub fn run_recorded_stream(
             .map_err(|_| "flip/rollback attempt conversion overflow")?,
         flip_rollback_complete_count: u64::try_from(flip_completions)
             .map_err(|_| "flip/rollback completion conversion overflow")?,
+        migration_audit_checkpoint: processor.migration_audit.map(|audit| audit.checkpoint),
         max_retained_snapshot_bytes_per_replica: processor
             .peak_legacy_snapshot_bytes
             .max(processor.peak_candidate_snapshot_bytes),
@@ -5312,7 +5465,12 @@ pub fn run_recorded_stream_cycle_summary(
     let RecordedRunOptions {
         worker_executable,
         local_authority_fixture,
+        migration_audit,
     } = options;
+    let mut migration_audit = migration_audit.map(MigrationAuditState::from);
+    if local_authority_fixture != migration_audit.is_some() {
+        return Err("the local authority fixture requires registry-backed audit inputs, and audit inputs are refused without that fixture".into());
+    }
     if local_authority_fixture
         && inputs
             .iter()
@@ -5453,6 +5611,9 @@ pub fn run_recorded_stream_cycle_summary(
                 legacy_snapshot.view(),
                 candidate_snapshot.view(),
                 index,
+                migration_audit
+                    .as_mut()
+                    .ok_or("local M2 fixture has no registry-backed audit state")?,
             ) {
                 Ok(fixture_candidate) => {
                     let mut selector = fixture_candidate.selector;
@@ -5505,6 +5666,10 @@ pub fn run_recorded_stream_cycle_summary(
                         unit,
                         kind: RollbackKind::ControllerRequest,
                         principal_id: [8; 32],
+                        audit_principal_id: migration_audit
+                            .as_ref()
+                            .ok_or("local M2 fixture has no audit principal")?
+                            .principal_id,
                         principal_role_id: 1,
                         policy_version: snapshot_policy.policy_version,
                         policy_digest: snapshot_policy.policy_digest,
@@ -5524,13 +5689,29 @@ pub fn run_recorded_stream_cycle_summary(
                         event_id,
                         observed_ns: candidate_ack_ns,
                     };
+                    let audit = migration_audit
+                        .as_mut()
+                        .ok_or("local M2 fixture has no registry-backed audit state")?;
+                    let rollback_event =
+                        rollback_audit_event(&selector, rollback_cause, candidate_ack_ns)
+                            .map_err(|error| format!("rollback audit intent refused: {error:?}"))?;
+                    let durable_receipt = audit.append_action(
+                        &selector,
+                        AuditAction::MigrationRollback,
+                        rollback_event,
+                    )?;
                     rollback(
                         &mut selector,
                         rollback_cause,
                         candidate_ack_ns,
                         snapshot_policy.max_snapshot_age_ns,
+                        durable_receipt,
                     )
-                    .map_err(|error| format!("local fixture rollback refused: {error:?}"))?;
+                    .map_err(|error| format!(
+                        "local fixture rollback refused after durable audit append: {error:?}; audit_count={} audit_tail={}",
+                        audit.checkpoint.count,
+                        oa_sha256::to_hex(&audit.checkpoint.tail)
+                    ))?;
 
                     generation = worker_generation
                         .checked_add(1)
@@ -5827,6 +6008,7 @@ pub fn run_recorded_stream_cycle_summary(
         m2_refusal_count,
         flip_rollback_attempt_count,
         flip_rollback_complete_count,
+        migration_audit_checkpoint: migration_audit.map(|audit| audit.checkpoint),
         max_retained_snapshot_bytes_per_replica,
         stage_progress: H5StageProgress::default(),
     })
@@ -6276,6 +6458,20 @@ mod tests {
             snapshot.handoff_coverage = FamilyCoverage::CompleteEmpty;
             snapshot.alert_coverage = FamilyCoverage::CompleteEmpty;
         }
+        let registry =
+            oa_audit_core::parse_principal_registry(b"OACERT-LOCAL-PRINCIPALS-V1\n8\tconfigure\n")
+                .map_err(|error| format!("fixture registry parse: {error:?}"))?;
+        let audit_path = std::env::temp_dir().join(format!(
+            "oa-migration-audit-{}-{}.log",
+            std::process::id(),
+            now_ns
+        ));
+        let mut audit = MigrationAuditState {
+            audit_log: &audit_path,
+            principal_registry: &registry,
+            principal_id: 8,
+            checkpoint: oa_audit_core::genesis(),
+        };
         let mut selector = prepare_local_fixture_candidate(
             unit,
             policy,
@@ -6283,8 +6479,10 @@ mod tests {
             legacy.view(),
             candidate.view(),
             0,
+            &mut audit,
         )?
         .selector;
+        assert_eq!(audit.checkpoint.count, 1);
         assert_eq!(selected(&selector), Output::Candidate);
         let candidate_ack_ns = now_ns + 1;
         observe_delivery(
@@ -6299,6 +6497,7 @@ mod tests {
             unit,
             kind: RollbackKind::ControllerRequest,
             principal_id: [8; 32],
+            audit_principal_id: audit.principal_id,
             principal_role_id: 1,
             policy_version: policy.policy_version,
             policy_digest: policy.policy_digest,
@@ -6318,13 +6517,21 @@ mod tests {
             event_id: [9; 32],
             observed_ns: candidate_ack_ns,
         };
+        let rollback_event = rollback_audit_event(&selector, rollback_cause, candidate_ack_ns)
+            .map_err(|error| format!("fixture rollback intent: {error:?}"))?;
+        let durable_receipt =
+            audit.append_action(&selector, AuditAction::MigrationRollback, rollback_event)?;
         rollback(
             &mut selector,
             rollback_cause,
             candidate_ack_ns,
             policy.max_snapshot_age_ns,
+            durable_receipt,
         )
         .map_err(|error| format!("fixture rollback: {error:?}"))?;
+        assert_eq!(audit.checkpoint.count, 2);
+        oa_audit_log::shell::read_records(&audit_path, audit.checkpoint, &mut |_| {})
+            .map_err(|error| format!("fixture audit verification: {error:?}"))?;
         assert_eq!(selected(&selector), Output::Legacy);
         observe_delivery(
             &mut selector,
@@ -6334,6 +6541,8 @@ mod tests {
             candidate_ack_ns + 1,
         )
         .map_err(|error| format!("fixture rollback ACK: {error:?}"))?;
+        std::fs::remove_file(&audit_path)
+            .map_err(|error| format!("fixture audit cleanup: {error}"))?;
         Ok(())
     }
 

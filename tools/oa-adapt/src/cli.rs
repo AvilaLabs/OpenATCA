@@ -13,6 +13,7 @@
 //!                 --issuer <principal-id> --approver <principal-id> --reason <text>
 //!                 --audit-log <file> --audit-count <n> --audit-tail <sha256>
 //!                 --audit-principal <numeric-id> --audit-role monitor|operate|configure
+//!                 --principal-registry <file> --principal-registry-sha256 <pin>
 //!                 --audit-time-ns <n>
 //! oa-adapt fleet-check --issued-package-root <dir> --expected-manifest-sha256 <hex>
 //!                       --expected <processor-list.tsv> --reports-dir <dir>
@@ -101,6 +102,7 @@ pub const USAGE: &str = "usage:
                  --issuer <principal-id> --approver <principal-id> --reason <text>
                  --audit-log <file> --audit-count <n> --audit-tail <sha256>
                  --audit-principal <numeric-id> --audit-role monitor|operate|configure
+                 --principal-registry <file> --principal-registry-sha256 <pin>
                  --audit-time-ns <n>
   oa-adapt fleet-check --issued-package-root <dir> --expected-manifest-sha256 <hex>
                        --expected <processor-list.tsv> --reports-dir <dir>
@@ -402,7 +404,7 @@ pub fn run_package(args: &[String], out: &mut dyn Write) -> Result<(), CliError>
 
 /// `issue`: create a bounded v2, v3, or v4 manifest after verifying the prior pin.
 pub fn run_issue(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
-    const FIELDS: [&str; 17] = [
+    const FIELDS: [&str; 19] = [
         "--snapshot",
         "--out-root",
         "--previous-package-root",
@@ -420,10 +422,12 @@ pub fn run_issue(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
         "--audit-principal",
         "--audit-role",
         "--audit-time-ns",
+        "--principal-registry",
+        "--principal-registry-sha256",
     ];
     if args.len() < FIELDS.len() * 2 || args.len() > (FIELDS.len() + 2) * 2 || args.len() % 2 != 0 {
         return Err(CliError::Usage(
-            "issue requires seventeen mandatory flag/value pairs and optional --ca-preset/--pver-catalog pairs".into(),
+            "issue requires nineteen mandatory flag/value pairs and optional --ca-preset/--pver-catalog pairs".into(),
         ));
     }
     if args
@@ -508,6 +512,25 @@ pub fn run_issue(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
             )));
         }
     };
+    let registry_path = PathBuf::from(get("--principal-registry")?);
+    let registry_pin = crate::manifest::parse_pin(get("--principal-registry-sha256")?)
+        .map_err(|error| CliError::Usage(format!("invalid principal registry pin: {error}")))?;
+    oa_sealed::Sealed::production()
+        .check(&registry_path)
+        .map_err(|refusal| failed("principal registry path", refusal))?;
+    let registry = oa_audit_log::shell::load_principal_registry(&registry_path, registry_pin)
+        .map_err(|error| failed("principal registry", error))?;
+    let registry_role = oa_audit_core::authorize_principal(
+        &registry,
+        audit_principal,
+        oa_audit_core::Action::AdaptationIssue,
+    )
+    .map_err(|error| CliError::Usage(format!("adaptation issuer registry refused: {error:?}")))?;
+    if audit_role != registry_role {
+        return Err(CliError::Usage(
+            "claimed audit role does not match pinned principal registry".into(),
+        ));
+    }
     let audit_count = get("--audit-count")?
         .parse::<u64>()
         .map_err(|_| CliError::Usage("--audit-count must be an unsigned integer".into()))?;
@@ -527,7 +550,7 @@ pub fn run_issue(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
         .map_err(|e| CliError::Usage(format!("adaptation issue audit details invalid: {e:?}")))?;
     let event = oa_audit_core::Event {
         principal: audit_principal,
-        role: audit_role,
+        role: registry_role,
         action: oa_audit_core::Action::AdaptationIssue,
         target,
         target_len,
@@ -727,6 +750,11 @@ mod tests {
         let candidate_root = root.join("candidate");
         let audit_path = root.join("audit.log");
         let audit_path_text = audit_path.to_str().expect("audit path is utf8");
+        let registry_path = root.join("principals.tsv");
+        let registry_bytes = b"OACERT-LOCAL-PRINCIPALS-V1\n103\tconfigure\n";
+        std::fs::write(&registry_path, registry_bytes).expect("write synthetic registry");
+        let registry_path_text = registry_path.to_str().expect("registry path is utf8");
+        let registry_pin = oa_sha256::to_hex(&oa_sha256::sha256(registry_bytes));
         let empty_audit_tail = "00".repeat(32);
         let first_pin_hex = oa_sha256::to_hex(&first_pin);
         let args = [
@@ -765,6 +793,10 @@ mod tests {
             "configure",
             "--audit-time-ns",
             "100",
+            "--principal-registry",
+            registry_path_text,
+            "--principal-registry-sha256",
+            registry_pin.as_str(),
         ]
         .into_iter()
         .map(str::to_owned)

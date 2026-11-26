@@ -346,6 +346,7 @@ fn known_good_adsb_and_fixm_smoke_reaches_runtime_and_rendered_snapshot() {
 
 // REQ: OA-MIG-414
 #[test]
+// REQ: OA-AUDIT-005, OA-AUDIT-007, OA-AUDIT-008
 fn recorded_stream_runs_100_paired_m2_flip_rollback_bins_and_consumer_applies_each_update() {
     let id = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
     let path = std::env::temp_dir().join(format!(
@@ -374,6 +375,16 @@ fn recorded_stream_runs_100_paired_m2_flip_rollback_bins_and_consumer_applies_ea
     ];
     let model_bytes = synthetic_model();
     let worker = Path::new(env!("CARGO_BIN_EXE_regional-m3-recorded-drill"));
+    let registry =
+        oa_audit_core::parse_principal_registry(b"OACERT-LOCAL-PRINCIPALS-V1\n8\tconfigure\n")
+            .expect("synthetic audit registry");
+    let audit_path = std::env::temp_dir().join(format!("oa-h5-test-{}.audit", std::process::id()));
+    let audit = RecordedAuditOptions {
+        audit_log: &audit_path,
+        principal_registry: &registry,
+        principal_id: 8,
+        checkpoint: oa_audit_core::genesis(),
+    };
     let report = run_recorded_stream(
         &input,
         *b"ZAU1",
@@ -383,6 +394,7 @@ fn recorded_stream_runs_100_paired_m2_flip_rollback_bins_and_consumer_applies_ea
         RecordedRunOptions {
             worker_executable: worker,
             local_authority_fixture: true,
+            migration_audit: Some(audit),
         },
     )
     .expect("paired synthetic recorded stream completes");
@@ -412,6 +424,12 @@ fn recorded_stream_runs_100_paired_m2_flip_rollback_bins_and_consumer_applies_ea
     );
     assert_eq!(report.flip_rollback_attempt_count, 100);
     assert_eq!(report.flip_rollback_complete_count, 100);
+    assert_eq!(
+        report
+            .migration_audit_checkpoint
+            .map(|checkpoint| checkpoint.count),
+        Some(200)
+    );
     assert!(report
         .cycles
         .iter()
@@ -475,4 +493,5 @@ fn recorded_stream_runs_100_paired_m2_flip_rollback_bins_and_consumer_applies_ea
         report.authority_mode,
         "LOCAL_SYNTHETIC_M1_AND_EMPTY_CONTROL_INPUT_FIXTURE_NOT_AUTHENTICATED"
     );
+    std::fs::remove_file(&audit_path).expect("remove synthetic audit log");
 }
