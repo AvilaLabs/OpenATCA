@@ -19,9 +19,9 @@ use oa_quarantine::{
     InputOutcome, InputSource, QuarantineEvent, QuarantineQueue, ReasonFlags, SourceStats,
     REASON_INPUT_INVALID, REASON_RESOURCE_LIMIT, REASON_SURVEILLANCE_INVALID,
 };
+use oa_track::surveillance_mode::{ModeAdaptation, TargetModeEvidence};
 use std::fmt::Write as _;
 use std::path::Path;
-use oa_track::surveillance_mode::{ModeAdaptation, TargetModeEvidence};
 use std::time::Instant;
 
 const DEFAULT_SESSION_NAMESPACE: u16 = 1;
