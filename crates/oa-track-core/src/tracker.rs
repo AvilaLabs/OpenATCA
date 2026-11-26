@@ -2626,13 +2626,15 @@ mod tests {
         let (small, large) = (payload(4096, 0), payload(38_000, 0));
         let per_track = |bytes: usize, tracks: usize| bytes as f64 / tracks as f64;
         assert!((per_track(small, 4096) - per_track(large, 38_000)).abs() < 12.0);
-        // With a 12-entry ring, the per-track vectors total 2,295 bytes: two 664-byte filters,
-        // twelve 72-byte measurements, and 103 bytes of other per-track columns/free-list entries.
+        // With a 12-entry ring, the pre-A7.1 per-track vectors totaled 2,295 bytes: two 664-byte
+        // filters, twelve 72-byte measurements, and 103 bytes of other columns/free-list entries.
+        // A7.1 adds 11 bytes per track for observed Mode A (u16), source time (i64), and conflict
+        // state (u8).
         // The 38,000-track index rounds 76,000 entries to 131,072 (13.80 bytes per track, under
         // the strict 16-byte-per-track bound). The fixed 8-row hold buffer and 16-entry log add
         // under 0.04 bytes per track; the rollback pool is explicitly zero here. This is a bound
         // on initialized Vec element payload, not allocator reservation or process memory.
-        assert!(per_track(large, 38_000) < 2_312.0);
+        assert!(per_track(large, 38_000) < 2_323.0);
         assert_eq!(
             payload(4096, CONFIRM_POOL) - small,
             CONFIRM_POOL * (core::mem::size_of::<TrackSnap>() + core::mem::size_of::<u32>())
