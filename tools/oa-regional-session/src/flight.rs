@@ -1054,7 +1054,7 @@ pub fn flight_driver_has_key(driver: &FlightDriver, key: oa_flight::FlightKey) -
 /// Maximum index probes one exact-key lookup can perform in this driver's allocated key index.
 /// `oa-flight::index_find` checks at most `cells.len()` cells before it returns.
 pub fn flight_driver_key_index_cells(driver: &FlightDriver) -> usize {
-    driver.table.by_key.cells.len()
+    oa_flight::flight_key_index_cells(&driver.table)
 }
 
 fn view_for_flight(flight: &Flight, centre: [u8; 4]) -> Option<SharedFlightView> {

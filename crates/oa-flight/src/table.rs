@@ -84,6 +84,11 @@ pub fn flights_len(t: &FlightTable) -> usize {
     t.cfg.capacity.saturating_sub(t.free.len())
 }
 
+/// Maximum linear-probe steps for one full-key lookup in this table's allocated index.
+pub fn flight_key_index_cells(t: &FlightTable) -> usize {
+    t.by_key.cells.len()
+}
+
 /// Empties the three logs after the caller has read them; counts are unchanged.
 pub fn flights_log_clear(t: &mut FlightTable) {
     t.refusals.clear();
