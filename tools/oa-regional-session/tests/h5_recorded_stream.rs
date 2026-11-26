@@ -4,11 +4,13 @@
 use oa_airspace::core::{model, snapshot};
 use oa_migration_switch::EndpointClass;
 use oa_regional_session::migration_drill::{
-    run_recorded_stream, RecordedRunOptions, H5_CAPTURE_START_NS, H5_MEASUREMENT_END_NS,
-    H5_MEASUREMENT_START_NS,
+    regional_replay_finish_observed, regional_replay_new_with_warmup,
+    regional_replay_push_observed, run_recorded_stream, RecordedRunOptions, H5_CAPTURE_START_NS,
+    H5_MEASUREMENT_END_NS, H5_MEASUREMENT_START_NS,
 };
 use oa_regional_session::recordings_reader::RecordingSource;
 use oa_regional_session::recordings_stream::StreamInput;
+use oa_regional_session::runtime::RegionalRunProfile;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -168,6 +170,162 @@ fn write_synthetic_sfdps(path: &Path) {
         receive_ns += SYNTHETIC_STEP_NS;
     }
     file.sync_all().expect("sync synthetic SFDPS OAF fixture");
+}
+
+fn write_tracker_smoke_inputs(adsb_path: &Path, sfdps_path: &Path) {
+    // These are the same quality-qualified 450 kt / 0.00279-degree-per-second values used by
+    // recording_import_cli's actual tracker-confirmation fixture, moved into this test's clock.
+    // The reports are synthetic; the OAF and FIXM parsers/adapters/runtime are production paths.
+    let mut adsb_file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(adsb_path)
+        .expect("create tracker smoke ADS-B fixture");
+    for sequence in 0..12u64 {
+        let source_ns = H5_CAPTURE_START_NS
+            .checked_add(i64::try_from(sequence).expect("smoke index") * 1_000_000_000)
+            .expect("smoke ADS-B time");
+        let lon_e7 = i32::try_from(-883_000_000i64 + i64::try_from(sequence).unwrap() * 27_900)
+            .expect("smoke longitude");
+        let row = oa_adsb::Row {
+            time_ns: source_ns,
+            icao: 0x00ab_cdef,
+            lat_e7: 419_000_000,
+            lon_e7,
+            baro_alt_ft: 35_000,
+            gs_dkt: 4_500,
+            track_ddeg: 900,
+            nic: 8,
+            nac_p: 9,
+            nac_v: 2,
+            sil: 3,
+            version: 2,
+            source: 0,
+            ..oa_adsb::ROW_EMPTY
+        };
+        let mut reports = oa_adsb::Reports::default();
+        oa_adsb::reports_push(&mut reports, &row);
+        let mut payload = Vec::new();
+        oa_adsb::encode_payload(&mut payload, &reports, 0, 1).expect("encode smoke ADS-B payload");
+        let mut frame = vec![0; oa_feed::HEADER_LEN + payload.len() + oa_feed::TRAILER_LEN];
+        let bytes = oa_feed::encode_frame(
+            &mut frame,
+            oa_feed::Kind::Message as u8,
+            0,
+            sequence + 1,
+            source_ns,
+            source_ns / 1_000_000,
+            &payload,
+        )
+        .expect("encode smoke ADS-B OAF frame");
+        adsb_file
+            .write_all(frame.get(..bytes).expect("smoke ADS-B frame slice"))
+            .expect("write smoke ADS-B frame");
+    }
+    adsb_file.sync_all().expect("sync smoke ADS-B file");
+
+    let mut sfdps_file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(sfdps_path)
+        .expect("create tracker smoke SFDPS fixture");
+    let receipt_ns = H5_CAPTURE_START_NS + 5_000_000_000;
+    let xml = br#"<ns5:MessageCollection xmlns:ns5="http://www.faa.aero/nas/3.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><message xsi:type="ns5:FlightMessageType"><flight xsi:type="ns5:NasFlightType" centre="ZAU1" source="TH" system="SLC" timestamp="2026-11-19T20:50:05.000Z"><gufi codeSpace="urn:uuid">11111111-2222-3333-4444-555555555555</gufi><controllingUnit unitIdentifier="ZAU1"/><aircraftDescription xsi:type="ns5:NasAircraftType" equipmentQualifier="L" aircraftAddress="ABCDEF" registration="N1TST" wakeTurbulence="M"/></flight></message></ns5:MessageCollection>"#;
+    let mut frame = vec![0; oa_feed::HEADER_LEN + xml.len() + oa_feed::TRAILER_LEN];
+    let bytes = oa_feed::encode_frame(
+        &mut frame,
+        oa_feed::Kind::Message as u8,
+        0,
+        1,
+        receipt_ns,
+        receipt_ns / 1_000_000,
+        xml,
+    )
+    .expect("encode smoke SFDPS OAF frame");
+    sfdps_file
+        .write_all(frame.get(..bytes).expect("smoke SFDPS frame slice"))
+        .expect("write smoke SFDPS frame");
+    sfdps_file.sync_all().expect("sync smoke SFDPS file");
+}
+
+#[test]
+fn known_good_adsb_and_fixm_smoke_reaches_runtime_and_rendered_snapshot() {
+    let scratch = std::env::temp_dir().join(format!(
+        "openatca-h5-runtime-smoke-{}-{}",
+        std::process::id(),
+        NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir(&scratch).expect("create runtime smoke temp directory");
+    let adsb_path = scratch.join("smoke-adsb.oaf");
+    let sfdps_path = scratch.join("smoke-sfdps.oaf");
+    let _adsb_fixture = FixtureFile(adsb_path.clone());
+    let _sfdps_fixture = FixtureFile(sfdps_path.clone());
+    write_tracker_smoke_inputs(&adsb_path, &sfdps_path);
+    let inputs = [
+        StreamInput {
+            source: RecordingSource::Adsb,
+            path: adsb_path,
+        },
+        StreamInput {
+            source: RecordingSource::Sfdps,
+            path: sfdps_path,
+        },
+    ];
+    let model_bytes = synthetic_model();
+    let mut replay = regional_replay_new_with_warmup(
+        &model_bytes,
+        oa_sha256::sha256(&model_bytes),
+        100.0,
+        H5_CAPTURE_START_NS,
+        H5_CAPTURE_START_NS,
+        H5_CAPTURE_START_NS + 12_000_000_000,
+        RegionalRunProfile::recorded_peak_rendered(),
+    )
+    .expect("construct real runtime smoke");
+    let mut positions = 0u64;
+    let mut flights = 0u64;
+    let mut visited_frames = 0u64;
+    let mut max_tracks = 0usize;
+    let mut max_display_targets = 0usize;
+    let summary = oa_regional_session::recordings_stream::stream_normalized_events(
+        &inputs,
+        Some((H5_CAPTURE_START_NS, H5_CAPTURE_START_NS + 12_000_000_000)),
+        *b"ZAU1",
+        |event, _provenance| {
+            match event.kind {
+                oa_regional_session::EventKind::Position { .. } => positions += 1,
+                oa_regional_session::EventKind::Flight(_) => flights += 1,
+                _ => {}
+            }
+            regional_replay_push_observed(&mut replay, event, |_, frame| {
+                visited_frames += 1;
+                max_tracks = max_tracks.max(frame.surveillance.tracks.len());
+                max_display_targets =
+                    max_display_targets.max(frame.surveillance.display_targets.len());
+                Ok(())
+            })
+        },
+    )
+    .expect("decode and normalize synthetic source files");
+    regional_replay_finish_observed(replay, |_, frame| {
+        visited_frames += 1;
+        max_tracks = max_tracks.max(frame.surveillance.tracks.len());
+        max_display_targets = max_display_targets.max(frame.surveillance.display_targets.len());
+        Ok(())
+    })
+    .expect("finish runtime smoke replay");
+    assert_eq!(positions, 12, "accepted normalized ADS-B positions");
+    assert_eq!(flights, 1, "accepted normalized FIXM flight message");
+    assert_eq!(summary.normalized_events, positions + flights);
+    assert!(visited_frames > 0, "runtime produced no frames");
+    assert!(
+        max_tracks > 0,
+        "confirmed tracker output absent from RegionalFrame"
+    );
+    assert!(
+        max_display_targets > 0,
+        "rendered display target absent from RegionalFrame"
+    );
 }
 
 #[test]
