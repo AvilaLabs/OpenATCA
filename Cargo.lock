@@ -526,9 +526,6 @@ dependencies = [
 [[package]]
 name = "oa-sha256"
 version = "0.0.1"
-dependencies = [
- "oa-sealed",
-]
 
 [[package]]
 name = "oa-shadow"
@@ -696,9 +693,6 @@ dependencies = [
 [[package]]
 name = "oa-xml"
 version = "0.0.1"
-dependencies = [
- "oa-sealed",
-]
 
 [[package]]
 name = "oa-zip"
