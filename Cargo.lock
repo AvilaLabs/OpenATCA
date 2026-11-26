@@ -446,7 +446,6 @@ version = "0.0.1"
 dependencies = [
  "oa-airspace",
  "oa-geo",
- "oa-sealed",
  "oa-time-window",
  "oa-xml",
 ]
@@ -501,6 +500,7 @@ name = "oa-replay"
 version = "0.0.1"
 dependencies = [
  "oa-adsb",
+ "oa-airspace",
  "oa-deflate",
  "oa-feed",
  "oa-fixm",

@@ -23,6 +23,8 @@ oa-notam = { path = "../oa-notam" }
 oa-sealed = { path = "../oa-sealed" }
 
 [dev-dependencies]
+# F1a: guarded public-snapshot cross-check for the NOTAM compatibility test only.
+oa-airspace = { path = "../oa-airspace" }
 # Workspace crate: compresses test recordings to .oaf.gz.
 oa-deflate = { path = "../oa-deflate" }
 oa-time-window = { path = "../oa-time-window" }

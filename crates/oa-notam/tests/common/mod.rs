@@ -181,7 +181,7 @@ pub fn small() -> Notams {
 
 pub fn decoder() -> Decoder {
     new_decoder(Limits::new(
-        oa_sealed::DropWindow::empty_for_tests_and_fuzz(),
+        oa_time_window::DropWindow::empty_for_tests_and_fuzz(),
     ))
 }
 
