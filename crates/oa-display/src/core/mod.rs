@@ -7,6 +7,7 @@ pub mod alert_markers;
 pub mod font;
 pub mod interaction;
 pub mod list;
+pub mod metering;
 pub mod ownership;
 pub mod palette;
 pub mod project;

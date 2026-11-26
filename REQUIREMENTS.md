@@ -7163,6 +7163,12 @@ This is a bounded normalized-input composition, not facility, deadline or operat
 - **OA-DSP-077** Bounded MSAW markers distinguish caution, warning and protection loss by shape and label, use the matching aircraft's current supplied position, and count off-map and unlocated alerts. Complete validation and list-budget checks precede mutation; a count header retains every alert category.
 - **OA-DSP-078** Explicit scene and replay top insets preserve the default 104 pixel view, validate additional reserved header space before allocation, and clip map primitives to the resulting map viewport.
 
+- **OA-DSP-079** The metering field compares exact supplied Unix-millisecond STA and ETA values using `STA - ETA`; the inclusive ±60,000 ms window is the only within-window classification.
+- **OA-DSP-080** A paired value outside the window preserves the signed difference and distinguishes early (ETA before STA) from late (ETA after STA).
+- **OA-DSP-081** Missing STA and ETA remain absent, including when both are missing; a later supplied schedule is compared against the current supplied ETA without substituting another meter point.
+- **OA-DSP-082** Difference and aggregate-counter overflow are explicit; a counter overflow refuses the observation without changing any counter.
+- **OA-DSP-083** A meter list refuses capacities above its fixed limit and refuses a push at capacity without changing prior rows; clearing permits reuse within the same allocation.
+
 ## Controller interaction (oa-display)
 
 - **OA-UI-001** Selection, intent queue, completion and presentation are pure functions over caller-supplied plain values.
