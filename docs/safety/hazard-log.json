@@ -8729,7 +8729,7 @@
     {
       "type": "UNMET",
       "id": "OA-AUDIT-005-RUNTIME-SHELL-INTEGRATION",
-      "detail": "At this source snapshot, tools/oa-adapt issue is the only production privileged-action shell caller. No runtime migration flip/rollback or quarantine-release command consumes the durable audit append API; L12 certification integration is still in a separate branch. Pure receipt constructors and synthetic tests do not close these integrations."
+      "detail": "At this source snapshot, tools/oa-adapt issue and oa-regional-session's explicit in-process manual quarantine handoff are production shell callers of the durable audit append API. A normal migration flip/rollback shell caller is still absent; certification integration is tracked separately. The quarantine handoff covers only the runtime queue front for the current bounded replay and makes no authentication or external manual-workflow claim."
     }
   ],
   "hazards": [
@@ -10312,6 +10312,26 @@
           "requirement_id": "OA-AUDIT-005",
           "file": "crates/oa-quarantine/src/tests.rs",
           "test_name": "acknowledgement_is_explicit_and_invalid_timing_never_mutates_queue"
+        },
+        {
+          "requirement_id": "OA-AUDIT-002",
+          "file": "tools/oa-regional-session/src/runtime.rs",
+          "test_name": "quarantine_maintainer_appends_before_ack_and_refuses_audit_failure"
+        },
+        {
+          "requirement_id": "OA-AUDIT-003",
+          "file": "tools/oa-regional-session/src/runtime.rs",
+          "test_name": "quarantine_maintainer_appends_before_ack_and_refuses_audit_failure"
+        },
+        {
+          "requirement_id": "OA-AUDIT-005",
+          "file": "tools/oa-regional-session/src/runtime.rs",
+          "test_name": "quarantine_maintainer_appends_before_ack_and_refuses_audit_failure"
+        },
+        {
+          "requirement_id": "OA-AUDIT-006",
+          "file": "tools/oa-regional-session/src/runtime.rs",
+          "test_name": "quarantine_maintainer_appends_before_ack_and_refuses_audit_failure"
         }
       ],
       "proof_refs": []
@@ -11825,6 +11845,11 @@
           "requirement_id": "OA-QUAR-004",
           "file": "crates/oa-quarantine/src/tests.rs",
           "test_name": "work_and_elapsed_time_overruns_are_named_refusals_and_reason_counts"
+        },
+        {
+          "requirement_id": "OA-QUAR-004",
+          "file": "tools/oa-regional-session/src/runtime.rs",
+          "test_name": "quarantine_maintainer_appends_before_ack_and_refuses_audit_failure"
         },
         {
           "requirement_id": "OA-XML-001",
@@ -23289,7 +23314,7 @@
       "id": "OA-AUDIT-005",
       "function": "migration_selector_and_rollback",
       "hazard_id": "HZ-CUTOVER-001",
-      "rationale": "Engineering safety candidate: a privileged migration change without its preceding audit intent could leave the selected output changed without a durable record. Direct tests cover the selector receipt gate and adaptation shell pre-commit behavior; migration and quarantine currently expose core receipt-gated APIs without a production shell action caller, so their runtime integration remains unmet."
+      "rationale": "Engineering safety candidate: a privileged migration change without its preceding audit intent could leave the selected output changed without a durable record. Direct tests cover the selector receipt gate, adaptation shell pre-commit behavior, and regional-session quarantine append-before-ack path. Migration still has no normal shell action caller in this snapshot; the quarantine path covers only an explicit in-process queue-front handoff."
     },
     {
       "id": "OA-AUDIT-006",

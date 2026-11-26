@@ -231,7 +231,11 @@ fn full_source_queue_returns_counted_manual_event_without_blocking_other_sources
 // REQ: OA-QUAR-002, OA-QUAR-004, OA-AUDIT-002, OA-AUDIT-003, OA-AUDIT-005
 #[test]
 fn acknowledgement_is_explicit_and_invalid_timing_never_mutates_queue() {
-    let mut queue = queue_new();
+    let starting_checkpoint = oa_audit_core::Checkpoint {
+        count: 9,
+        tail: [9; 32],
+    };
+    let mut queue = queue_new_with_audit_checkpoint(starting_checkpoint);
     let mut invalid = outcome(InputSource::Surveillance, 701, REASON_SURVEILLANCE_INVALID);
     invalid.completed_at_ns = 99;
     assert_eq!(
@@ -264,8 +268,8 @@ fn acknowledgement_is_explicit_and_invalid_timing_never_mutates_queue() {
         details: empty_details,
         details_len: empty_details_len,
     };
-    let genesis = oa_audit_core::genesis();
-    let wrong_receipt = oa_audit_core::receipt_claim(1, [1; 32], genesis.tail, wrong_event);
+    let wrong_receipt =
+        oa_audit_core::receipt_claim(10, [1; 32], starting_checkpoint.tail, wrong_event);
     assert_eq!(
         queue_acknowledge(&mut queue, InputSource::Surveillance, wrong_receipt),
         Err(QuarantineError::AuditRequired)
@@ -285,7 +289,7 @@ fn acknowledgement_is_explicit_and_invalid_timing_never_mutates_queue() {
         details: empty_details,
         details_len: empty_details_len,
     };
-    let receipt = oa_audit_core::receipt_claim(1, [2; 32], genesis.tail, event);
+    let receipt = oa_audit_core::receipt_claim(10, [2; 32], starting_checkpoint.tail, event);
     let acknowledged = queue_acknowledge(&mut queue, InputSource::Surveillance, receipt)
         .expect("explicit manual responsibility handoff");
     assert_eq!(acknowledged, before);
@@ -313,10 +317,10 @@ fn acknowledgement_is_explicit_and_invalid_timing_never_mutates_queue() {
         Some(before)
     );
     let release_checkpoint = oa_audit_core::Checkpoint {
-        count: 1,
+        count: 10,
         tail: receipt.digest(),
     };
-    let fresh_receipt = oa_audit_core::receipt_claim(2, [3; 32], release_checkpoint.tail, event);
+    let fresh_receipt = oa_audit_core::receipt_claim(11, [3; 32], release_checkpoint.tail, event);
     queue_acknowledge(&mut queue, InputSource::Surveillance, fresh_receipt)
         .expect("fresh intent releases requeued item");
 }

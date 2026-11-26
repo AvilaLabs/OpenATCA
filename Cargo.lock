@@ -509,6 +509,8 @@ version = "0.0.1"
 dependencies = [
  "oa-adsb",
  "oa-airspace",
+ "oa-audit-core",
+ "oa-audit-log",
  "oa-ca",
  "oa-display",
  "oa-display-present",
