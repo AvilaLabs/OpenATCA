@@ -198,6 +198,8 @@ pub enum Item15Reject {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+// A7.2: cold struct, size guard waived; source variation evidence is read during shell route
+// resolution and is not retained in a hot core cache.
 pub struct MagneticVariationSource {
     pub reference: route::FixIdentity,
     /// East-positive hundredths of a degree, supplied by a parsed NASR/CIFP source row.
@@ -208,6 +210,8 @@ pub struct MagneticVariationSource {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+// A7.2: cold struct, size guard waived; bearing-distance evidence is returned from one route
+// resolution call and is not retained in a hot core cache.
 pub struct BearingDistanceEvidence {
     pub reference: route::FixIdentity,
     pub bearing_magnetic_deg: u16,
@@ -220,6 +224,8 @@ pub struct BearingDistanceEvidence {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+// A7.2: cold struct, size guard waived; this bounded-vector parse result is handed to the caller
+// and is not retained in a hot core cache.
 pub struct ResolvedItem15 {
     pub route: route::ConvertedRoute,
     pub report: route::RouteReport,
@@ -231,6 +237,8 @@ pub struct ResolvedItem15 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+// A7.2: cold struct, size guard waived; this Field 15 detail is transient shell parse output, not
+// retained in a hot core cache.
 pub struct FiledLevelChange {
     pub element_index: u8,
     pub point_token: String,
