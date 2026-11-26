@@ -14,6 +14,7 @@
 //! | state                  | drawing                                                          |
 //! |------------------------|------------------------------------------------------------------|
 //! | tracking               | 8 px square outline and a centre dot, [`palette::TARGET`]            |
+//! | FUSION                 | 8 px solid circle (`T_FUSION`), per FAA N JO 7110.676              |
 //! | coasting               | the square with an X through it; data block tag `CST`            |
 //! | uncertain              | a 12 px diamond and a centre dot, and the 95% radius drawn as a circle of true scale; tag `UNC` (and `R95?` when the radius is unknown or cannot be drawn) |
 //! | coasting and uncertain | the diamond with an X through it, the circle; tags `CST UNC`     |
@@ -26,7 +27,7 @@
 //! and a data block at a fixed offset: line 1 the callsign (the hex address without one, or with
 //! two callsigns heard for the address at one instant), line 2 the altitude in hundreds of feet
 //! and the ground speed in knots over ten (`---` or `--` when absent), line 3 the state tags
-//! above when there are any, in the order `CST UNC CS? R95? REACQ`.
+//! above when there are any, in the order `CST UNC CS? ISR R95? REACQ`.
 //!
 //! Data blocks are placed at one fixed offset from the symbol.
 // TODO(LS-401): automatic data block placement without overlap in holding and on final (M8);
@@ -86,8 +87,12 @@ pub const T_UNCERTAIN: u8 = 2;
 /// Two different callsigns were heard for this address at the same instant: the callsign is not
 /// shown (it would be a choice by sort order, E6) and the data block says so.
 pub const T_CS_CONFLICT: u8 = 4;
+/// Caller selected terminal FUSION mode; draw its solid-circle target symbol.
+pub const T_FUSION: u8 = 8;
+/// Increased separation required is explicitly reported for this target; data-block tag `ISR`.
+pub const T_ISR: u8 = 16;
 /// Every flag bit this module knows; a target with another bit is refused.
-const FLAGS_KNOWN: u8 = T_COAST | T_UNCERTAIN | T_CS_CONFLICT;
+const FLAGS_KNOWN: u8 = T_COAST | T_UNCERTAIN | T_CS_CONFLICT | T_FUSION | T_ISR;
 
 /// Largest leader, minutes.
 pub const MAX_LEADER_MIN: f64 = 30.0;
@@ -182,7 +187,7 @@ pub struct Target {
     pub gs_dkt: u16,
     /// Seconds since the track was last reacquired, or [`NO_REACQ`].
     pub reacq_age_s: u16,
-    /// [`T_COAST`], [`T_UNCERTAIN`] and [`T_CS_CONFLICT`].
+    /// [`T_COAST`], [`T_UNCERTAIN`], [`T_CS_CONFLICT`], [`T_FUSION`] and [`T_ISR`].
     pub flags: u8,
     pub trail_len: u8,
 }
@@ -293,6 +298,55 @@ pub fn targets_columns(s: &TargetSet) -> TargetColumns<'_> {
         trail_lat_e7: &s.trail_lat_e7,
         trail_lon_e7: &s.trail_lon_e7,
     }
+}
+
+/// Add only caller-selected surveillance presentation flags to already converted targets.
+/// `modes` must be strictly increasing by address, as are targets produced from `RowStore`.
+/// Unmatched mode rows are permitted because valid targets can be off the displayed map.
+pub fn targets_apply_mode_flags(
+    s: &mut TargetSet,
+    modes: &[(u32, u8)],
+) -> Result<u32, TrafficError> {
+    const MODE_FLAGS: u8 = T_FUSION | T_ISR;
+    if modes.len() > s.capacity
+        || modes.iter().any(|(_, flags)| flags & !MODE_FLAGS != 0)
+        || modes.windows(2).any(|pair| pair[0].0 >= pair[1].0)
+    {
+        return Err(TrafficError::Malformed {
+            what: "surveillance mode overlay is invalid or outside the target bound",
+        });
+    }
+    if s.addr.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err(TrafficError::Malformed {
+            what: "converted target addresses are not strictly ordered",
+        });
+    }
+    let mut target_index = 0usize;
+    let mut mode_index = 0usize;
+    let mut applied = 0u32;
+    while target_index < s.addr.len() && mode_index < modes.len() {
+        let address = s.addr[target_index];
+        let (mode_address, mode_flags) = modes[mode_index];
+        if address < mode_address {
+            target_index += 1;
+        } else if address > mode_address {
+            mode_index += 1;
+        } else {
+            let flags = s
+                .flags
+                .get_mut(target_index)
+                .ok_or(TrafficError::Malformed {
+                    what: "target flag column is inconsistent",
+                })?;
+            *flags |= mode_flags;
+            applied = applied.checked_add(1).ok_or(TrafficError::Malformed {
+                what: "mode overlay count overflow",
+            })?;
+            target_index += 1;
+            mode_index += 1;
+        }
+    }
+    Ok(applied)
 }
 
 /// Empties the set and its refusal counts for the next frame, keeping every capacity.
@@ -487,8 +541,8 @@ pub fn traffic_caps(max_targets: usize, st: &TrafficStyle) -> Result<ListCaps, D
     Ok(ListCaps {
         // Leader, diamond (4) and X (2).
         lines: rows("traffic lines", 8, 0)?,
-        // Centre dot and the trail.
-        rects: rows("traffic rects", 1 + MAX_TRAIL as u128, 0)?,
+        // Centre dot or seven scanline rectangles for the filled FUSION symbol, plus trail.
+        rects: rows("traffic rects", 7 + MAX_TRAIL as u128, 0)?,
         // The 95% circle and the reacquired mark.
         circles: rows("traffic circles", 2, 0)?,
         polylines: 0,
@@ -593,6 +647,7 @@ pub fn tags_text(b: &mut TextBuf, flags: u8, reacquired: bool, r95_unknown: bool
         (flags & T_COAST != 0, "CST"),
         (flags & T_UNCERTAIN != 0, "UNC"),
         (flags & T_CS_CONFLICT != 0, "CS?"),
+        (flags & T_ISR != 0, "ISR"),
         (r95_unknown, "R95?"),
         (reacquired, "REACQ"),
     ] {
@@ -744,6 +799,24 @@ fn diamond(l: &mut DisplayList, c: (i32, i32), h: i32) -> Result<(), DisplayErro
     Ok(())
 }
 
+/// Filled 8 px FUSION circle. The display list has bounded filled rectangles but no filled-circle
+/// primitive; seven 1 px scanlines preserve the solid-circle distinction without changing format.
+fn fusion_circle(l: &mut DisplayList, c: (i32, i32)) -> Result<(), DisplayError> {
+    for (y_index, half_width) in [1, 3, 4, 4, 4, 3, 1].into_iter().enumerate() {
+        let y = i32::try_from(y_index)
+            .map_err(|_| DisplayError::BadView("FUSION symbol row overflow"))?
+            - 3;
+        push_rect(
+            l,
+            add(c, -px(half_width), px(y) - 8),
+            add(c, px(half_width), px(y) + 8),
+            palette::TARGET,
+            LAYER_SYMBOL,
+        )?;
+    }
+    Ok(())
+}
+
 /// The scalar columns of target `i`; `None` when a column is shorter than the others (which the
 /// private columns make impossible, and which is counted if it ever happens).
 // A7.2: cold struct, size guard waived (one per target on the stack, not held in quantity).
@@ -844,6 +917,7 @@ pub fn build_traffic(
         };
         let coast = t.flags & T_COAST != 0;
         let uncertain = t.flags & T_UNCERTAIN != 0;
+        let fusion = t.flags & T_FUSION != 0;
         let conflict = t.flags & T_CS_CONFLICT != 0;
         let reacq = t.reacq_age != NO_REACQ && t.reacq_age < st.reacquired_s;
         let at = LatLon::new(f64::from(t.lat) * 1e-7, f64::from(t.lon) * 1e-7).ok();
@@ -881,7 +955,15 @@ pub fn build_traffic(
         }
 
         // The position symbol.
-        let half = if uncertain {
+        let half = if fusion {
+            fusion_circle(l, c)?;
+            if uncertain {
+                diamond(l, c, DIAMOND_HALF)?;
+                DIAMOND_HALF
+            } else {
+                SQUARE_HALF
+            }
+        } else if uncertain {
             diamond(l, c, DIAMOND_HALF)?;
             DIAMOND_HALF
         } else {
@@ -904,7 +986,7 @@ pub fn build_traffic(
                 LAYER_SYMBOL,
             )?;
             stats.coasting += 1;
-        } else {
+        } else if !fusion {
             push_rect(
                 l,
                 add(c, -8, -8),
