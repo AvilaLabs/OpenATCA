@@ -17,10 +17,6 @@ workspace = true
 oa-time-window = { path = "../oa-time-window" }
 oa-xml = { path = "../oa-xml" }
 
-[dev-dependencies]
-# Tests, examples and real-data fixtures exercise the private hold-out guard.
-oa-sealed = { path = "../oa-sealed" }
-
 [package.metadata.openatca]
 class = "shell"
 candidate_package_name = "openatca-fixm"

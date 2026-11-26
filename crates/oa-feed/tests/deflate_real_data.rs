@@ -9,8 +9,9 @@
     clippy::panic
 )]
 
-mod common;
+mod deflate_corpus_common;
 use common::*;
+use deflate_corpus_common as common;
 use oa_zip::inflate;
 use std::path::{Path, PathBuf};
 use std::time::Instant;

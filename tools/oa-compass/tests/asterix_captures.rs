@@ -25,7 +25,7 @@
     clippy::indexing_slicing
 )]
 
-#[path = "common/pcap.rs"]
+#[path = "asterix_corpus_common/pcap.rs"]
 mod pcap;
 
 use oa_asterix::cat048::*;

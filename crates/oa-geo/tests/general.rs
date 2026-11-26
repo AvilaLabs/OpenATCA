@@ -57,7 +57,9 @@ fn manifest_declares_no_dependencies() {
                 t.is_empty()
                     || t.starts_with('#')
                     || t == "oa-math = { path = \"../oa-math\" }"
-                    || t == "oa-ieee = { path = \"../oa-ieee\" }",
+                    || t == "oa-ieee = { path = \"../oa-ieee\" }"
+                    || t == "oa-math = { path = \"../openatca-math\", package = \"openatca-math\", version = \"0.1.0\" }"
+                    || t == "oa-ieee = { path = \"../openatca-ieee\", package = \"openatca-ieee\", version = \"0.1.0\" }",
                 "dependency declared: {t}"
             );
         }

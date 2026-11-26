@@ -1562,7 +1562,7 @@ fn width_overflow_message_is_refused_and_seeded() {
         decode_message(&m),
         Err(Grib2Error::BadPacking("group width over 32 bits"))
     );
-    let seed = include_bytes!("../../../fuzz/seeds/grib2/width-overflow.grib2");
+    let seed = include_bytes!("../tests/fixtures/width-overflow.grib2");
     assert_eq!(seed.as_slice(), m.as_slice());
 }
 
@@ -1801,11 +1801,11 @@ fn the_committed_point_seeds_are_what_the_builders_write_and_are_refused() {
     let n = 4096u32;
     let seeds: [(&[u8], Vec<u8>); 2] = [
         (
-            include_bytes!("../../../fuzz/seeds/grib2/points-without-data.grib2"),
+            include_bytes!("../tests/fixtures/points-without-data.grib2"),
             square_message(n, &encode_jpeg2000(&[], n * n, 273.5, 0, 0, 0, 0)),
         ),
         (
-            include_bytes!("../../../fuzz/seeds/grib2/points-flat-codestream.grib2"),
+            include_bytes!("../tests/fixtures/points-flat-codestream.grib2"),
             square_message(n, &encode_jpeg2000(&J2K_FLAT_4096, n * n, 0.0, 0, 0, 8, 0)),
         ),
     ];

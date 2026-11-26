@@ -16,10 +16,6 @@ workspace = true
 # F1: path dependency inside this workspace, for CRC-32 (gzip trailer) and, in tests, the inflater.
 oa-zip = { path = "../oa-zip" }
 
-[dev-dependencies]
-# Workspace crate, not an outside dependency (RULESET F1): the sealed hold-out guard, so the tests read their inputs through it.
-oa-sealed = { path = "../oa-sealed" }
-
 [package.metadata.openatca]
 class = "shell"
 candidate_package_name = "openatca-deflate"

@@ -50,11 +50,6 @@ version = "0.0.1"
 [[package]]
 name = "oa-asterix"
 version = "0.0.1"
-dependencies = [
- "oa-adsb",
- "oa-json",
- "oa-sealed",
-]
 
 [[package]]
 name = "oa-awc"
@@ -145,7 +140,6 @@ version = "0.0.1"
 name = "oa-deflate"
 version = "0.0.1"
 dependencies = [
- "oa-sealed",
  "oa-zip",
 ]
 
@@ -226,7 +220,6 @@ dependencies = [
 name = "oa-fixm"
 version = "0.0.1"
 dependencies = [
- "oa-sealed",
  "oa-time-window",
  "oa-xml",
 ]
@@ -263,7 +256,6 @@ version = "0.0.1"
 dependencies = [
  "oa-j2k",
  "oa-math",
- "oa-sealed",
 ]
 
 [[package]]

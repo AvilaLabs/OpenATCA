@@ -96,7 +96,9 @@ class ReleaseStageTests(unittest.TestCase):
         self._write("crates/oa-mini/tests/acceptance.rs", b"include_str!(\"fixtures/vector.txt\");\n")
         self._write("crates/oa-mini/tests/fixtures/vector.txt", b"vector bytes\n")
         self.api_patch = patch.dict(stage_tool.API_DOCS, {"oa-mini": "docs/core-api/test.md", "oa-base": "docs/core-api/test.md"})
-        self.assets_patch = patch.dict(stage_tool.TEST_ASSETS, {"oa-mini": {"tests/fixtures/vector.txt"}})
+        self.assets_patch = patch.dict(stage_tool.TEST_ASSETS, {
+            "oa-mini": {"tests/fixtures/vector.txt": hashlib.sha256(b"vector bytes\n").hexdigest()}
+        })
         self.api_patch.start()
         self.assets_patch.start()
         self.candidates_patch = patch.object(stage_tool, "ROOT_CANDIDATES", ("oa-mini",))
@@ -143,7 +145,8 @@ class ReleaseStageTests(unittest.TestCase):
         self.assertIn('rust-version = "1.89"', staged_manifest)
         self.assertIn('authors = ["Synthetic Test"]', staged_manifest)
         self.assertIn('oa-base = { path = "../openatca-base", package = "openatca-base", version = "0.1.0" }', staged_manifest)
-        self.assertIn('"tests/fixtures/*"', staged_manifest)
+        self.assertIn('"tests/fixtures/vector.txt"', staged_manifest)
+        self.assertNotIn('"tests/fixtures/*"', staged_manifest)
         self.assertIn('[lib]\nname = "oa_mini"', staged_manifest)
         self.assertIn('[lib]\nname = "base_api"', (first / "crates/openatca-base/Cargo.toml").read_text())
         self.assertEqual(manifest["package_order"], ["openatca-base", "openatca-mini"])
@@ -157,6 +160,7 @@ class ReleaseStageTests(unittest.TestCase):
         self.assertEqual(manifest["source_files_sha256"]["crates/oa-mini/src/lib.rs"],
                          hashlib.sha256((self.repo / "crates/oa-mini/src/lib.rs").read_bytes()).hexdigest())
         release_manifest = json.loads((first / "release-manifest.json").read_text())
+        self.assertEqual(release_manifest["input_provenance"], stage_tool.INPUT_PROVENANCE)
         self.assertEqual(release_manifest["staged_files_sha256"]["crates/openatca-mini/src/lib.rs"],
                          hashlib.sha256((first / "crates/openatca-mini/src/lib.rs").read_bytes()).hexdigest())
 
@@ -180,6 +184,53 @@ class ReleaseStageTests(unittest.TestCase):
         self._commit_file_change()
         output = self.out_parent / "private"
         with self.assertRaisesRegex(stage_tool.StageError, "prohibited private"):
+            stage_tool.stage(self.repo, self.commit, output, ("oa-mini",))
+        self.assertFalse(output.exists())
+
+    def test_allowlisted_fixture_hash_mismatch_is_refused_before_output(self) -> None:
+        self._write("crates/oa-mini/tests/fixtures/vector.txt", b"changed fixture\n")
+        self._commit_file_change()
+        output = self.out_parent / "changed-fixture"
+        with self.assertRaisesRegex(stage_tool.StageError, "allowlisted input hash mismatch"):
+            stage_tool.stage(self.repo, self.commit, output, ("oa-mini",))
+        self.assertFalse(output.exists())
+
+    def test_unlisted_test_data_is_refused_before_output(self) -> None:
+        self._write("crates/oa-mini/tests/data/unreviewed.bin", b"synthetic bytes\n")
+        self._commit_file_change()
+        output = self.out_parent / "unlisted-data"
+        with self.assertRaisesRegex(stage_tool.StageError, "tracked package input is not staged"):
+            stage_tool.stage(self.repo, self.commit, output, ("oa-mini",))
+        self.assertFalse(output.exists())
+
+    def test_allowlisted_generator_is_exact_and_byte_identical(self) -> None:
+        generator = b"# synthetic generator\n"
+        self._write("crates/oa-mini/tools/gen.py", generator)
+        self._commit_file_change()
+        allowlist = patch.dict(stage_tool.PACKAGE_TOOLS, {
+            "oa-mini": {"tools/gen.py": hashlib.sha256(generator).hexdigest()}
+        })
+        allowlist.start()
+        self.addCleanup(allowlist.stop)
+        self._stage("generator")
+        output = self.out_parent / "generator"
+        self.assertEqual((output / "crates/openatca-mini/tools/gen.py").read_bytes(), generator)
+        staged_manifest = (output / "crates/openatca-mini/Cargo.toml").read_text()
+        self.assertIn('"tools/gen.py"', staged_manifest)
+        self.assertNotIn('"tools/*"', staged_manifest)
+
+    def test_unlisted_tool_is_refused_even_with_allowlisted_generator(self) -> None:
+        generator = b"# synthetic generator\n"
+        self._write("crates/oa-mini/tools/gen.py", generator)
+        self._write("crates/oa-mini/tools/extra.py", b"# synthetic extra\n")
+        self._commit_file_change()
+        allowlist = patch.dict(stage_tool.PACKAGE_TOOLS, {
+            "oa-mini": {"tools/gen.py": hashlib.sha256(generator).hexdigest()}
+        })
+        allowlist.start()
+        self.addCleanup(allowlist.stop)
+        output = self.out_parent / "unlisted-tool"
+        with self.assertRaisesRegex(stage_tool.StageError, "tracked package input is not staged"):
             stage_tool.stage(self.repo, self.commit, output, ("oa-mini",))
         self.assertFalse(output.exists())
 

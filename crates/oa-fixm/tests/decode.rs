@@ -69,7 +69,7 @@ fn run(xml: &str) -> Run {
         xml,
         64,
         1 << 16,
-        Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz()),
+        Limits::new(oa_time_window::DropWindow::empty_for_tests_and_fuzz()),
     );
     res.expect("decodes");
     r
@@ -786,7 +786,7 @@ fn row_capacity_is_all_or_nothing_per_document() {
         &three,
         2,
         1024,
-        Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz()),
+        Limits::new(oa_time_window::DropWindow::empty_for_tests_and_fuzz()),
     );
     assert_eq!(res, Err(FixmError::RowCapacity { capacity: 2 }));
     assert_eq!(r.ev.len, 0);
@@ -795,7 +795,7 @@ fn row_capacity_is_all_or_nothing_per_document() {
         &three,
         3,
         1024,
-        Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz()),
+        Limits::new(oa_time_window::DropWindow::empty_for_tests_and_fuzz()),
     );
     assert_eq!(res, Ok(()));
     assert_eq!(r.ev.len, 3);
@@ -804,7 +804,7 @@ fn row_capacity_is_all_or_nothing_per_document() {
     // Existing rows survive a refused document.
     let mut parser = Parser::new(XmlLimits::default()).unwrap();
     let mut dec = Decoder::new(Limits::new(
-        oa_sealed::DropWindow::empty_for_tests_and_fuzz(),
+        oa_time_window::DropWindow::empty_for_tests_and_fuzz(),
     ));
     let mut ev = new_events(3, 1024);
     let one_doc = doc(&[message("TH", "")]);
@@ -834,7 +834,7 @@ fn string_table_capacity_rolls_the_whole_document_back() {
         &two,
         8,
         15,
-        Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz()),
+        Limits::new(oa_time_window::DropWindow::empty_for_tests_and_fuzz()),
     );
     assert_eq!(res, Err(FixmError::StringCapacity { capacity: 15 }));
     assert_eq!(r.ev.len, 0);
@@ -843,7 +843,7 @@ fn string_table_capacity_rolls_the_whole_document_back() {
         &two,
         8,
         20,
-        Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz()),
+        Limits::new(oa_time_window::DropWindow::empty_for_tests_and_fuzz()),
     );
     assert_eq!(res, Ok(()));
     assert_eq!(r.ev.strings_used, 20);
@@ -859,7 +859,7 @@ fn route_text_is_bounded_and_entities_are_decoded() {
     let route = |t: &str| format!(r#"<agreed><route nasRouteText="{t}"/></agreed>"#);
     let limits = Limits {
         max_route_len: 8,
-        ..Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz())
+        ..Limits::new(oa_time_window::DropWindow::empty_for_tests_and_fuzz())
     };
     let (r, res) = run_with(&doc(&[message("FH", &route("12345678"))]), 4, 64, limits);
     res.unwrap();
@@ -936,7 +936,7 @@ fn unknown_path_table_is_bounded() {
     let body = r#"<a1/><a2/><a3/><a4/><a1/>"#;
     let limits = Limits {
         max_unknown_paths: 2,
-        ..Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz())
+        ..Limits::new(oa_time_window::DropWindow::empty_for_tests_and_fuzz())
     };
     let (r, res) = run_with(&doc(&[message("TH", body)]), 4, 64, limits);
     res.unwrap();
@@ -984,7 +984,7 @@ fn namespaced_and_foreign_elements_are_unknown_not_decoded() {
 fn documents_that_are_not_sfdps_message_collections_are_refused() {
     let mut parser = Parser::new(XmlLimits::default()).unwrap();
     let mut dec = Decoder::new(Limits::new(
-        oa_sealed::DropWindow::empty_for_tests_and_fuzz(),
+        oa_time_window::DropWindow::empty_for_tests_and_fuzz(),
     ));
     let mut ev = new_events(8, 64);
     for xml in [
@@ -1022,7 +1022,7 @@ fn element_limit_and_input_mismatch_are_errors() {
     let mut ev = new_events(4, 64);
     let mut dec = Decoder::new(Limits {
         max_elements: n - 1,
-        ..Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz())
+        ..Limits::new(oa_time_window::DropWindow::empty_for_tests_and_fuzz())
     });
     assert_eq!(
         dec.decode(&d, xml.as_bytes(), &mut ev),
@@ -1033,7 +1033,7 @@ fn element_limit_and_input_mismatch_are_errors() {
     );
     let mut dec = Decoder::new(Limits {
         max_elements: n,
-        ..Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz())
+        ..Limits::new(oa_time_window::DropWindow::empty_for_tests_and_fuzz())
     });
     assert!(dec.decode(&d, xml.as_bytes(), &mut ev).is_ok());
     let copy = xml.clone();
@@ -1097,7 +1097,7 @@ fn mutated_fixtures_never_panic() {
     let mut parser = Parser::new(XmlLimits::default()).unwrap();
     let mut dec = Decoder::new(Limits {
         max_unknown_paths: 8,
-        ..Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz())
+        ..Limits::new(oa_time_window::DropWindow::empty_for_tests_and_fuzz())
     });
     let mut ev = new_events(4, 64);
     let mut docs = 0usize;
@@ -1172,7 +1172,7 @@ fn decoder_is_reusable_and_does_not_grow() {
     let small = doc(&[message("BA", "")]);
     let mut parser = Parser::new(XmlLimits::default()).unwrap();
     let mut dec = Decoder::new(Limits::new(
-        oa_sealed::DropWindow::empty_for_tests_and_fuzz(),
+        oa_time_window::DropWindow::empty_for_tests_and_fuzz(),
     ));
     let mut ev = new_events(8, 4096);
     let caps = |e: &Events| {
@@ -1236,7 +1236,7 @@ fn route_attribute_whitespace_is_normalised() {
         &doc(&[message("FH", &route("AA\tBB\r\nCC"))]),
         4,
         64,
-        Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz()),
+        Limits::new(oa_time_window::DropWindow::empty_for_tests_and_fuzz()),
     );
     res.unwrap();
     assert_eq!(route_text(&r.ev, 0), "AA BB CC");
@@ -1246,7 +1246,7 @@ fn decode_prefix_run(xml: &str, cap: usize) -> (Summary, usize) {
     let mut parser = Parser::new(XmlLimits::default()).unwrap();
     let d = parser.parse(xml.as_bytes()).expect("fixture parses");
     let mut dec = Decoder::new(Limits::new(
-        oa_sealed::DropWindow::empty_for_tests_and_fuzz(),
+        oa_time_window::DropWindow::empty_for_tests_and_fuzz(),
     ));
     let mut ev = new_events(cap, 1 << 16);
     let s = dec.decode_prefix(&d, xml.as_bytes(), &mut ev).unwrap();
@@ -1314,7 +1314,7 @@ fn foreign_siblings_do_not_count_as_messages() {
         &xml,
         1,
         1 << 16,
-        Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz()),
+        Limits::new(oa_time_window::DropWindow::empty_for_tests_and_fuzz()),
     );
     res.expect("one message fits one row");
     assert_eq!((r.sum.messages, r.sum.rows), (1, 1));
@@ -1647,7 +1647,7 @@ fn unsupported_fixm_roots_have_bounded_categories_without_retaining_names() {
 }
 
 fn windowed() -> Limits {
-    Limits::new(oa_sealed::DropWindow::new(DROP.0, DROP.1))
+    Limits::new(oa_time_window::DropWindow::new(DROP.0, DROP.1))
 }
 
 // REQ: OA-SEAL-014
@@ -1749,7 +1749,7 @@ fn a_message_with_an_invalid_field_before_its_time_is_still_dropped_with_its_doc
 fn a_window_that_holds_all_time_drops_every_document_and_the_production_list_drops_the_window() {
     let xml = doc(&[at("2030-01-02T03:04:05Z", "")]);
     // All time (the closed failure of the list).
-    let all = Limits::new(oa_sealed::DropWindow::all_time());
+    let all = Limits::new(oa_time_window::DropWindow::all_time());
     let (r, res) = run_with(&xml, 64, 1 << 16, all);
     res.unwrap();
     assert_eq!(
@@ -1760,14 +1760,6 @@ fn a_window_that_holds_all_time_drops_every_document_and_the_production_list_dro
         }
     );
     assert_eq!(r.dec.stats(), &untouched(all, 1));
-    // The production list.
-    let prod = Limits::new(oa_sealed::sealed_drop_window());
-    let (r, res) = run_with(&doc(&[at("2026-11-21T00:00:00Z", "")]), 64, 1 << 16, prod);
-    res.unwrap();
-    assert_eq!(r.sum.sealed_window_dropped, 1);
-    let (r, res) = run_with(&xml, 64, 1 << 16, prod);
-    res.unwrap();
-    assert_eq!((r.sum.sealed_window_dropped, r.ev.len), (0, 1));
 }
 
 // REQ: OA-SEAL-014
