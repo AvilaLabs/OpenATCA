@@ -51,6 +51,7 @@ pub mod radar;
 pub mod realtime;
 pub mod registration;
 pub mod spill;
+pub mod surveillance_mode;
 pub mod synth_truth;
 pub mod types {
     pub use crate::output_hash::{output_hash_into, OUTPUT_HASH_TAG};
