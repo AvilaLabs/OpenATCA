@@ -253,31 +253,28 @@ jobs:
     if: ${{ !startsWith(github.ref, 'refs/heads/wip/') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
     steps:
       - uses: actions/checkout@v4
       - name: Toolchain
         run: rustup toolchain install nightly-2026-08-21 --profile minimal --component rust-src && rustup default nightly-2026-08-21
       - name: Install cargo-fuzz
         run: cargo +nightly-2026-08-21 install --locked cargo-fuzz --version 0.13.2
-      - name: Fuzz every target for 60 seconds
+      - name: Enumerate and verify fuzz targets
         working-directory: fuzz
         run: |
-          set -eu
-          for t in $(cargo +nightly-2026-08-21 fuzz list); do
-            corpus="$RUNNER_TEMP/fuzz-corpus/$t"
-            mkdir -p "$corpus" "artifacts/$t"
-            if [ -d "seeds/$t" ]; then cp seeds/"$t"/* "$corpus"/; fi
-            echo "::group::fuzz $t"
-            cargo +nightly-2026-08-21 fuzz run "$t" "$corpus" -- \
-              -artifact_prefix="$PWD/artifacts/$t/" \
-              -rss_limit_mb=2048 -max_total_time=60
-            echo "::endgroup::"
-          done
+          set -euo pipefail
+          cargo +nightly-2026-08-21 fuzz list > "$RUNNER_TEMP/fuzz-targets.txt"
+      - name: Fuzz assigned targets for 60 seconds each
+        run: python3 .github/scripts/run_fuzz_shard.py --targets-file "$RUNNER_TEMP/fuzz-targets.txt" --shard "${{ matrix.shard }}"
       - name: Upload crash artifacts
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: fuzz-artifacts
-          path: fuzz/artifacts/
+          name: fuzz-artifacts-shard-${{ matrix.shard }}
+          path: fuzz/artifacts/shard-${{ matrix.shard }}/
           if-no-files-found: warn
           retention-days: 14
