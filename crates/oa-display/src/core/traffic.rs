@@ -14,7 +14,7 @@
 //! | state                  | drawing                                                          |
 //! |------------------------|------------------------------------------------------------------|
 //! | tracking               | 8 px square outline and a centre dot, [`palette::TARGET`]            |
-//! | FUSION                 | 8 px solid circle (`T_FUSION`), per FAA N JO 7110.676              |
+//! | eligible 3 NM FUSION  | 8 px solid circle (`T_FUSION`), per FAA N JO 7110.676              |
 //! | coasting               | the square with an X through it; data block tag `CST`            |
 //! | uncertain              | a 12 px diamond and a centre dot, and the 95% radius drawn as a circle of true scale; tag `UNC` (and `R95?` when the radius is unknown or cannot be drawn) |
 //! | coasting and uncertain | the diamond with an X through it, the circle; tags `CST UNC`     |
@@ -87,7 +87,7 @@ pub const T_UNCERTAIN: u8 = 2;
 /// Two different callsigns were heard for this address at the same instant: the callsign is not
 /// shown (it would be a choice by sort order, E6) and the data block says so.
 pub const T_CS_CONFLICT: u8 = 4;
-/// Caller selected terminal FUSION mode; draw its solid-circle target symbol.
+/// Caller selected the eligible 3 NM terminal-FUSION cue; draw the solid circle.
 pub const T_FUSION: u8 = 8;
 /// Increased separation required is explicitly reported for this target; data-block tag `ISR`.
 pub const T_ISR: u8 = 16;

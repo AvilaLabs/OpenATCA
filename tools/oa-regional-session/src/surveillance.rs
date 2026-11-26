@@ -209,8 +209,10 @@ pub struct SurveillanceFrame {
 // A7.2: cold owned frame evidence, retained at most MAX_FRAMES times.
 
 /// Caller-visible result of applying one explicit mode adaptation to one current track.
-/// The evidence fields are caller assertions, not authenticated claims. Absent rows are reported
-/// with `evidence_present == 0`, unknown source/reliability/ISR, and the missing-FL sentinel.
+/// The supplied evidence fields are caller assertions, not authenticated claims. FLAT is a
+/// separate result field; this runtime leaves it false because its flight-view join does not aid
+/// the tracker. Absent rows are reported with `evidence_present == 0`, unknown source/reliability/
+/// ISR, and the missing-FL sentinel.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(C)]
 pub struct ModeDecisionRecord {
@@ -742,11 +744,9 @@ pub fn surveillance_finish_with_mode(
         || mode_evidence
             .windows(2)
             .any(|pair| pair[0].address >= pair[1].address)
-        || mode_evidence.iter().any(|item| {
-            item.state_ns != time_ns
-                || item.controller_initiated_coast > 1
-                || item.flight_plan_aided > 1
-        })
+        || mode_evidence
+            .iter()
+            .any(|item| item.state_ns != time_ns || item.controller_initiated_coast > 1)
         || (mode.is_none() && !mode_evidence.is_empty())
     {
         return Err("surveillance mode evidence is not bounded, ordered, and epoch-matched".into());
@@ -845,7 +845,6 @@ pub fn surveillance_finish_with_mode(
                 reliability: ReliabilityEvidence::Unknown,
                 isr: IsrEvidence::Unknown,
                 controller_initiated_coast: 0,
-                flight_plan_aided: 0,
             });
             let target_mode = TargetModeState {
                 lat_e7: row.lat_e7,
@@ -858,9 +857,9 @@ pub fn surveillance_finish_with_mode(
                 isr: evidence_row.isr,
                 coasting: u8::from(row.flags & O_COAST != 0),
                 controller_initiated_coast: evidence_row.controller_initiated_coast,
-                // A flight-plan join does not currently aid the tracker. Do not call a plain
-                // address match FLAT unless the explicit caller evidence asserts that contract.
-                flight_plan_aided: evidence_row.flight_plan_aided,
+                // The current runtime's address-to-flight-view join only drives a separate
+                // trajectory forecast; it does not aid the tracker. Never synthesize FLAT here.
+                flight_plan_aided: 0,
             };
             let decision = surveillance_mode_result(adaptation, target_mode);
             let (refusal, result) = match decision {
@@ -886,26 +885,23 @@ pub fn surveillance_finish_with_mode(
                 reliability: evidence_row.reliability,
                 isr: evidence_row.isr,
                 controller_initiated_coast: evidence_row.controller_initiated_coast,
-                flight_plan_aided: evidence_row.flight_plan_aided,
+                flight_plan_aided: result.flat_aided,
                 evidence_present: u8::from(evidence.is_some()),
                 coasting: target_mode.coasting,
                 refusal,
                 reserved: [0; 2],
                 result,
             });
-            let display_flags = (if adaptation.mode
-                == oa_track::surveillance_mode::SurveillanceMode::TerminalFusion
-            {
-                oa_display::traffic::T_FUSION
-            } else {
-                0
-            }) | (if evidence
-                .is_some_and(|item| item.isr == IsrEvidence::Required)
-            {
-                oa_display::traffic::T_ISR
-            } else {
-                0
-            });
+            let display_flags =
+                (if refusal == 0 && result.fusion_solid_circle != 0 {
+                    oa_display::traffic::T_FUSION
+                } else {
+                    0
+                }) | (if evidence.is_some_and(|item| item.isr == IsrEvidence::Required) {
+                    oa_display::traffic::T_ISR
+                } else {
+                    0
+                });
             mode_flags.push((address, display_flags));
         }
         flags.push(row.flags);
