@@ -1,0 +1,23 @@
+{
+  "profile": "A3-ZAU-2026-11-19-literal-coincidence-v2",
+  "source": "oa-ca alerts.csv + oa-encounter encounters.csv from the same OAF clip",
+  "evaluation_start_utc": "2026-11-19T00:00:00Z",
+  "evaluation_end_utc_exclusive": "2026-11-19T23:00:00Z",
+  "hour_bins": "UTC half-open [hour_start,hour_end); event assigned once by onset",
+  "pair_identity": "unordered pair of canonical uppercase eight-hex-digit aircraft addresses",
+  "episode_overlap": "closed intervals overlap when max(start_a,start_b) <= min(end_a,end_b)",
+  "encounter_proxy": "known-altitude oa-encounter record-volume episode: horizontal < 5 NM and vertical < 1000 ft",
+  "alert_proxy": "oa-ca alert episode; these are CA outputs, not operator presentation acknowledgements",
+  "true_alert_match": "same unordered pair and closed interval overlap with a known-altitude encounter episode",
+  "truth_unknown": "ALT_UNKNOWN encounters are unresolved, never a hit or a nuisance label",
+  "warning_rate": "matched known-altitude encounter episodes divided by resolved known-altitude encounter episodes (matches + misses); unresolved cases are reported separately",
+  "nuisance_rate": "covered unmatched alert episode count per covered evaluation hour; unresolved alert episodes are reported separately",
+  "warmup": "120 seconds after the first usable clip time; only episodes beginning before first_usable_time + 120 seconds lack earlier tracker context",
+  "local_coverage": "clip-edge gaps affect only episode intervals they intersect; later fully covered hours remain eligible despite an earlier warmup gap; each hour reports covered seconds and only covered hours enter nuisance-rate exposure",
+  "right_censoring": "an episode ending at or after clip coverage end is reported right-censored and cannot be a negative miss or nuisance label; count it in its onset hour",
+  "unresolved": "unknown-altitude labels, any unevaluated episode, global run shortfalls, event onset before usable warmup, and event ending at/after clip coverage end remain unresolved; these conditions never become nuisance alerts or misses",
+  "coverage": "global oa-ca and oa-encounter summary shortfalls remain conservative gates; clip-boundary completeness is checked per episode and per hour",
+  "adapter_limits": "200000 episode rows per CSV, 512 MiB per CSV, and 10000000 same-pair interval comparisons; exceedance refuses the aggregate",
+  "privacy": "inputs and outputs pass the production sealed-path guard; input files must be regular, single-link files; output is a new private directory with create-new 0600 aggregate files",
+  "claim_limit": "literal ADS-B-derived encounter-volume coincidence proxy only; not independent truth, FAA/human truth, or facility false-alert qualification"
+}

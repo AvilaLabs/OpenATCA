@@ -1097,7 +1097,8 @@
     "OA-RWY-016",
     "OA-RWY-019",
     "OA-RWY-014",
-    "OA-RWY-017"
+    "OA-RWY-017",
+    "OA-ENC-022"
   ],
   "non_safety_requirement_assessments": [
     {
@@ -10520,7 +10521,8 @@
         "OA-MIG-601",
         "OA-MIG-602",
         "OA-REG-019",
-        "OA-REG-020"
+        "OA-REG-020",
+        "OA-ENC-022"
       ],
       "source_refs": [
         {
@@ -10534,6 +10536,10 @@
         {
           "document": "REQUIREMENTS.md",
           "locator": "OA-MIG-408 through OA-MIG-413 and OA-MIG-415 through OA-MIG-416; OA-REG-019 through OA-REG-020"
+        },
+        {
+          "document": "REQUIREMENTS.md",
+          "locator": "OA-ENC-022"
         }
       ],
       "verification_refs": [
@@ -10796,6 +10802,96 @@
           "requirement_id": "OA-REG-020",
           "file": "tools/test_j2_portability.py",
           "test_name": "test_sidecars_must_match_the_recording_import_manifest"
+        },
+        {
+          "requirement_id": "OA-ENC-022",
+          "file": "tools/oa-encounter/tests/test_a3_rate_join.py",
+          "test_name": "test_altitude_unknown_truth_and_alert_stay_unresolved"
+        },
+        {
+          "requirement_id": "OA-ENC-022",
+          "file": "tools/oa-encounter/tests/test_a3_rate_join.py",
+          "test_name": "test_cli_requires_matching_clip_profiles_and_emits_only_aggregate_data"
+        },
+        {
+          "requirement_id": "OA-ENC-022",
+          "file": "tools/oa-encounter/tests/test_a3_rate_join.py",
+          "test_name": "test_clip_without_full_window_and_warmup_makes_negative_claim_unresolved"
+        },
+        {
+          "requirement_id": "OA-ENC-022",
+          "file": "tools/oa-encounter/tests/test_a3_rate_join.py",
+          "test_name": "test_closed_interval_endpoint_overlap_is_a_match_and_unordered_pair_matches"
+        },
+        {
+          "requirement_id": "OA-ENC-022",
+          "file": "tools/oa-encounter/tests/test_a3_rate_join.py",
+          "test_name": "test_episode_csv_guard_requires_regular_file"
+        },
+        {
+          "requirement_id": "OA-ENC-022",
+          "file": "tools/oa-encounter/tests/test_a3_rate_join.py",
+          "test_name": "test_episode_interval_guard_rejects_holdout_overlap_including_closed_boundary"
+        },
+        {
+          "requirement_id": "OA-ENC-022",
+          "file": "tools/oa-encounter/tests/test_a3_rate_join.py",
+          "test_name": "test_episode_onset_is_counted_once_in_utc_half_open_hour"
+        },
+        {
+          "requirement_id": "OA-ENC-022",
+          "file": "tools/oa-encounter/tests/test_a3_rate_join.py",
+          "test_name": "test_incomplete_run_or_unevaluated_episode_never_creates_negative_claim"
+        },
+        {
+          "requirement_id": "OA-ENC-022",
+          "file": "tools/oa-encounter/tests/test_a3_rate_join.py",
+          "test_name": "test_missing_preroll_only_affects_near_start_episodes"
+        },
+        {
+          "requirement_id": "OA-ENC-022",
+          "file": "tools/oa-encounter/tests/test_a3_rate_join.py",
+          "test_name": "test_right_censoring_is_local_to_the_event_time"
+        },
+        {
+          "requirement_id": "OA-ENC-022",
+          "file": "tools/oa-encounter/tests/test_a3_rate_join.py",
+          "test_name": "test_unmatched_alert_is_nuisance_only_with_complete_coverage"
+        },
+        {
+          "requirement_id": "OA-ENC-022",
+          "file": "tools/oa-encounter/tests/test_a3_rate_join.py",
+          "test_name": "test_wrong_pair_does_not_match"
+        },
+        {
+          "requirement_id": "OA-ENC-022",
+          "file": "tools/oa-encounter/tests/test_a3_rate_join.py",
+          "test_name": "test_degraded_summary_keeps_clip_digest_and_mixed_runs_stay_unresolved"
+        },
+        {
+          "requirement_id": "OA-ENC-022",
+          "file": "tools/oa-encounter/tests/test_a3_rate_join.py",
+          "test_name": "test_different_degraded_clip_digests_never_alias"
+        },
+        {
+          "requirement_id": "OA-ENC-022",
+          "file": "tools/oa-encounter/tests/test_a3_rate_join.py",
+          "test_name": "test_count_only_diagnostic_reports_bounded_unresolved_counts_without_rates"
+        },
+        {
+          "requirement_id": "OA-ENC-022",
+          "file": "tools/oa-encounter/tests/test_a3_rate_join.py",
+          "test_name": "test_count_only_diagnostic_refuses_more_than_fixed_row_limit"
+        },
+        {
+          "requirement_id": "OA-ENC-022",
+          "file": "tools/oa-encounter/tests/test_a3_rate_join.py",
+          "test_name": "test_summary_counter_map_stops_before_later_numeric_sections"
+        },
+        {
+          "requirement_id": "OA-ENC-022",
+          "file": "tools/oa-encounter/tests/test_a3_rate_join.py",
+          "test_name": "test_coverage_validation_rejects_nonfinite_and_reversed_timestamps"
         }
       ],
       "proof_refs": []
@@ -22399,6 +22495,12 @@
       "function": "safety_net_state_and_display",
       "hazard_id": "HZ-NET-STATE-001",
       "rationale": "Engineering safety candidate: a stale prediction shown as current can conceal that the monitor is degraded. The profile marks a report at least 4.8 s old as degraded; this is a development threshold, not a facility-approved adaptation or live-feed freshness claim."
+    },
+    {
+      "id": "OA-ENC-022",
+      "function": "migration_comparison_and_safety_evidence",
+      "hazard_id": "HZ-EVIDENCE-001",
+      "rationale": "Engineering safety candidate: an incorrectly matched or over-credited offline A3 rate join could misstate evidence used in a migration or safety review. The join requires same-clip digest/profile binding, matches closed same-pair intervals, uses UTC half-open onset bins, and keeps unknown altitude, incomplete run summaries, unevaluated ticks, warmup gaps, and right-censored events unresolved for negative claims. Its results are ADS-B-derived encounter-volume coincidence proxies only; they are not independent FAA/human truth, controller intent, or facility false-alert qualification."
     }
   ],
   "unresolved_requirement_assessments": []

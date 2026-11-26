@@ -1,0 +1,20 @@
+{
+  "schema": "openatca-a3-count-only-diagnostic-profile-v1",
+  "profile_id": "A3-ZAU-2026-11-19-count-only-diagnostic-v1",
+  "purpose": "After-the-fact bounded diagnostic for input episode row counts when the frozen v2 join refuses its 200000-row ceiling. This profile does not authorize matching, classification, rates, nuisance claims, or truth qualification.",
+  "interval_start_utc": "2026-11-19T00:00:00Z",
+  "interval_end_utc_exclusive": "2026-11-19T23:00:00Z",
+  "hour_bins": "23 fixed UTC half-open bins; episode rows counted once by onset",
+  "warmup_seconds": 120,
+  "matching": "not performed",
+  "classification": "all counted in-window episode rows remain unresolved",
+  "global_shortfall": "preserve CA and encounter summary completion states and available integer counters; no degraded run may be reported complete",
+  "privacy": "No aircraft address, pair, event details, or source row is emitted",
+  "limits": {
+    "rows_per_input": 1000000,
+    "bytes_per_csv": 536870912,
+    "bytes_per_summary": 1048576,
+    "bytes_per_profile": 65536
+  },
+  "output": "New guarded private directory containing aggregate hourly JSON and CSV, create-new 0600 files. Explicitly diagnostic only; the frozen v2 rate result remains unavailable when v2 limits or global completeness fail."
+}
