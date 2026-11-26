@@ -11,7 +11,7 @@ use oa_regional_session::runtime::{
 use oa_regional_session::surveillance::SurveillanceConfig;
 use oa_regional_session::{cli::synthetic_model, ReceiptBatch};
 use oa_sha256::{to_hex, Sha256};
-use std::env::ArgsOs;
+use std::env;
 use std::ffi::OsString;
 use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io::{Read, Write};
@@ -75,7 +75,7 @@ struct Counts {
     feed_recovered_elapsed_ns: Option<u64>,
 }
 
-fn parse_args(args: ArgsOs) -> Result<Arguments, String> {
+fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Arguments, String> {
     let values: Vec<OsString> = args.collect();
     if values.len() != 4 {
         return Err(
@@ -401,7 +401,7 @@ fn write_interruption(
     write_new(&output.join("INTERRUPTED.json"), body.as_bytes())
 }
 
-pub fn run(args: ArgsOs) -> Result<(), String> {
+pub fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), String> {
     let args = parse_args(args)?;
     let executable = env::current_exe().map_err(|error| error.to_string())?;
     let executable_sha = hash_file(&executable, MAX_EXECUTABLE_BYTES)?;

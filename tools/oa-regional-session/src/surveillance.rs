@@ -1259,7 +1259,7 @@ mod tests {
     // REQ: OA-REG-021
     #[test]
     fn failed_render_preflight_does_not_reserve_or_count_a_presentation() {
-        let mut stream = PresentationLedger::new(1);
+        let stream = PresentationLedger::new(1);
         assert_eq!(stream.preflight().unwrap(), 1);
         // Production records only after rasterization and digest both succeed.
         assert_eq!(stream.pending.len(), 0);
