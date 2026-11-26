@@ -348,6 +348,26 @@
     "CA run has 70 INPUT MISSING cycles from invalid rows; frozen v2 requires complete run summaries.",
     "The 263819 input alert episodes exceed the unchanged frozen v2 ceiling of200000; this separate count-only diagnostic performs no pair matching."
   ],
+  "rejected_row_reason_diagnostic": {
+    "alerts_byte_identical_to_original": true,
+    "alerts_sha256": "346ee8e0863b20a47c8da853d9231ec90c781d7225d2525cc35ed3d878723501",
+    "analysis_timing": "after-the-fact reason-counter diagnostic; original rate qualification is unchanged",
+    "bad_row_total": 70,
+    "claim_limit": "Identifies the failed CA input predicate; does not establish whether source reports or tracker estimation caused the excessive speeds.",
+    "config_sha256": "3d969a962311ad8f467ae64083e0393e916681af0b4b79a82995b1d3ee24be9f",
+    "reason_counts": {
+      "altitude": 0,
+      "latitude": 0,
+      "longitude": 0,
+      "nonfinite_velocity_component": 0,
+      "speed_above_configured_ceiling": 70,
+      "vertical_rate": 0
+    },
+    "reason_counts_overlap": true,
+    "source_commit": "0fe182507ebc8bd2e92761bbba0081357b7011ab",
+    "speed_ceiling_mps": 700,
+    "track_row_denominator": 38083140
+  },
   "schema": "openatca-a3-count-only-diagnostic-v1",
   "unresolved_episode_row_totals": {
     "alerts": 255916,
