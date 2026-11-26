@@ -1,7 +1,7 @@
 name: ci
 on:
   push:
-    branches: [main, 'train/**']
+    branches: [main, 'train/**', 'wip/**']
   pull_request:
 permissions:
   contents: read
@@ -153,6 +153,7 @@ jobs:
   # REQUIREMENTS.md promises results are the same bits on every IEEE-754 machine (oa-math). The
   # golden-digest tests run here on a second architecture (aarch64) to prove it.
   arm:
+    if: ${{ !startsWith(github.ref, 'refs/heads/wip/') }}
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 60
     steps:
@@ -223,6 +224,7 @@ jobs:
   # The dev profile (opt-level 1, debug assertions and overflow checks on). The debug_assert! checks
   # never run in the release-only test job above.
   debug-assertions:
+    if: ${{ !startsWith(github.ref, 'refs/heads/wip/') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
@@ -235,6 +237,7 @@ jobs:
   # with its own Cargo.lock; the root workspace never builds it. The corpus is the committed
   # synthetic seeds (the real-data corpora from make_corpora.py are not redistributable).
   fuzz-smoke:
+    if: ${{ !startsWith(github.ref, 'refs/heads/wip/') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
