@@ -798,27 +798,9 @@ pub fn capacity_storage_budget_bytes(profile: CapacityProfile) -> Result<usize, 
     let per_snapshot = profile
         .tracks
         .checked_mul(OPTION_TRACK_STATE_BYTES)
-        .and_then(|n| {
-            n.checked_add(
-                profile
-                    .flights
-                    .checked_mul(OPTION_FLIGHT_STATE_BYTES)?,
-            )
-        })
-        .and_then(|n| {
-            n.checked_add(
-                profile
-                    .handoffs
-                    .checked_mul(OPTION_HANDOFF_STATE_BYTES)?,
-            )
-        })
-        .and_then(|n| {
-            n.checked_add(
-                profile
-                    .alerts
-                    .checked_mul(OPTION_ALERT_STATE_BYTES)?,
-            )
-        })
+        .and_then(|n| n.checked_add(profile.flights.checked_mul(OPTION_FLIGHT_STATE_BYTES)?))
+        .and_then(|n| n.checked_add(profile.handoffs.checked_mul(OPTION_HANDOFF_STATE_BYTES)?))
+        .and_then(|n| n.checked_add(profile.alerts.checked_mul(OPTION_ALERT_STATE_BYTES)?))
         .ok_or(Refusal::InvalidUnit)?;
     per_snapshot
         .checked_mul(2)
