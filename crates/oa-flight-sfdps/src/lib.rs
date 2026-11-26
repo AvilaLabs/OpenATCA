@@ -4,6 +4,7 @@
 
 pub mod adapter;
 pub mod audit;
+pub mod candidate_projection;
 pub mod compat;
 pub mod migration_adapter;
 pub mod migration_projection;

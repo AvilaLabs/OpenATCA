@@ -57,6 +57,9 @@ oa-flight-sfdps = { path = "../../crates/oa-flight-sfdps" }
 # F1: Connor approved this caller link on 2026-11-26; recorded source rows are classified before
 # normalized events are committed, with bounded per-source manual-handling accounting.
 oa-quarantine = { path = "../../crates/oa-quarantine" }
+# F1: Connor approved this shell-only M4 projection edge on 2026-11-26. The regional shell is the
+# existing boundary that receives flight and alert outputs; import site: migration_shadow.rs.
+oa-migration-shadow = { path = "../../crates/oa-migration-shadow" }
 
 [package.metadata.openatca]
 class = "shell"

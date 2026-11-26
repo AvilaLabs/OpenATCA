@@ -6,6 +6,7 @@ pub mod cli;
 pub mod commands;
 pub mod flight;
 pub mod input;
+pub mod migration_shadow;
 pub mod msaw_bridge;
 pub mod operator;
 pub mod performance;
