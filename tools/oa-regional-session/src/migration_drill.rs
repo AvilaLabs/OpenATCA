@@ -4240,10 +4240,12 @@ impl LivePairProcessor<'_> {
                             sequence: 2,
                             legacy_epoch: legacy.source_epoch,
                             candidate_epoch: candidate.source_epoch,
-                            legacy_state_version: legacy.state_version,
-                            candidate_state_version: candidate.state_version,
-                            legacy_sequence: legacy.sequence,
-                            candidate_sequence: candidate.sequence,
+                            // This selector was created for the current bin and ingested the
+                            // replay snapshots as its initial (1,1) state on both sides.
+                            legacy_state_version: 1,
+                            candidate_state_version: 1,
+                            legacy_sequence: 1,
+                            candidate_sequence: 1,
                             legacy_health: legacy.health,
                             legacy_source_available: true,
                             legacy_health_observed_ns: legacy.observed_time_ns,
