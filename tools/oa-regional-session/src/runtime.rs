@@ -9,7 +9,8 @@ use crate::flight::{
 use crate::nam_flight::{self, NamFlightContext, NamFlightResult, NamFlightRuntime};
 use crate::nam_pointout::{
     self, NamPointOutRuntime, PointOutContext, PointOutDecision, PointOutDecisionResult,
-    PointOutMode, PointOutResult, PointOutTransmitResult, PointOutView,
+    PointOutMode, PointOutResponseProfile, PointOutResult, PointOutRetirementReason,
+    PointOutTickResult, PointOutTransmitResult, PointOutView,
 };
 use crate::route::{self, RouteStore};
 use crate::session::{summarize_input_batch, FrameEvidence, ReceiptBatch, MAX_EVENTS_PER_RECEIPT};
@@ -503,6 +504,15 @@ pub fn regional_set_nam_pointout_mode(
     nam_pointout::nam_pointout_set_mode(&mut runtime.nam_pointouts, mode)
 }
 
+/// Selects one of the Rev G ICD's contradictory POA/POJ response passages before Enhanced
+/// point-outs begin. The choice is partner policy, not a universal interpretation of Rev G.
+pub fn regional_set_nam_pointout_response_profile(
+    runtime: &mut RegionalRuntime,
+    profile: PointOutResponseProfile,
+) -> Result<(), nam_pointout::PointOutError> {
+    nam_pointout::nam_pointout_set_response_profile(&mut runtime.nam_pointouts, profile)
+}
+
 /// Apply an explicit local Enhanced point-out decision and return the encoded response for the
 /// caller's configured transport. This does not alter flight ownership or treat transport receipt
 /// as controller approval.
@@ -522,6 +532,31 @@ pub fn regional_decide_nam_pointout(
         responding_route,
         now_ms,
         runtime.centre,
+    )
+}
+
+/// Advance the NAM session timer and return point-out-specific resends/timeouts alongside the
+/// original session actions.
+pub fn regional_tick_nam_pointout(
+    runtime: &mut RegionalRuntime,
+    ingress: &mut crate::nam_handoff::NamSessionIngress,
+    now_ms: u64,
+) -> Result<PointOutTickResult, nam_pointout::PointOutError> {
+    nam_pointout::nam_pointout_tick(&mut runtime.nam_pointouts, ingress, now_ms)
+}
+
+/// Retire one view after the operator/runtime reports the exact lifecycle closure and full key.
+pub fn regional_retire_nam_pointout(
+    runtime: &mut RegionalRuntime,
+    point_out_id: oa_nam::MsgId,
+    expected_key: Option<oa_flight::FlightKey>,
+    reason: PointOutRetirementReason,
+) -> Result<PointOutView, nam_pointout::PointOutError> {
+    nam_pointout::nam_pointout_retire(
+        &mut runtime.nam_pointouts,
+        point_out_id,
+        expected_key,
+        reason,
     )
 }
 

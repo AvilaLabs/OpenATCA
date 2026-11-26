@@ -74,7 +74,7 @@ pub const fn accepted_delivery_seq(accepted: &SessionAcceptedMessage) -> Option<
     }
 }
 
-/// Whether session correlation admitted a PLA/LRM as the response to this peer's POI.
+/// Whether session correlation admitted a logical response to a POI, POA or POJ.
 pub const fn accepted_pointout_response(accepted: &SessionAcceptedMessage) -> bool {
     matches!(accepted.admission, NamAdmission::CorrelatedPointOutResponse)
 }
@@ -174,15 +174,14 @@ pub fn nam_session_ingress_receive(
         {
             Some(NamAdmission::CorrelatedRtiResponse)
         }
-        [] if actions.as_slice().iter().any(|action| {
-            matches!(
-                action,
-                session::Action::Response {
-                    header,
-                    answers: Kind::Poi
-                } if *header == message.header
-            )
-        }) && matches!(message.header.kind, Kind::Pla | Kind::Lrm) =>
+        [] if actions.as_slice().iter().any(|action| match action {
+            session::Action::Response { header, answers } if *header == message.header => {
+                (*answers == Kind::Poi && matches!(message.header.kind, Kind::Pla | Kind::Lrm))
+                    || (matches!(*answers, Kind::Poa | Kind::Poj)
+                        && matches!(message.header.kind, Kind::Lam | Kind::Lrm))
+            }
+            _ => false,
+        }) =>
         {
             Some(NamAdmission::CorrelatedPointOutResponse)
         }

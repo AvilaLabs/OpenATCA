@@ -265,6 +265,9 @@ pub enum Event {
     Received(Header),
     /// The application wants to send an ATM message of this kind; the session numbers it.
     SendAtm(Kind),
+    /// The application selected an explicit peer policy in which this ATM message has no
+    /// logical response. It still receives a session number but creates no pending timer.
+    SendAtmWithoutResponse(Kind),
     /// The application wants to send a logical response (LAM, LRM, RLA, PLA) to a received
     /// message; the session numbers it.
     SendResponse { kind: Kind, reference: MsgId },
@@ -940,6 +943,28 @@ pub fn step(cfg: &Config, s: Session, ev: Event, now: Millis) -> (Session, Actio
                         s.pending_len += 1;
                     }
                 }
+                a.push(Action::SendAtm { kind, number });
+            }
+        }
+        Event::SendAtmWithoutResponse(kind) => {
+            if !matches!(kind, Kind::Poa | Kind::Poj) {
+                a.push(Action::Refuse {
+                    reason: Refusal::NotAnAtmMessage,
+                });
+            } else if s.state != State::Active {
+                a.push(Action::Refuse {
+                    reason: Refusal::NotActive,
+                });
+            } else if s
+                .pending()
+                .iter()
+                .any(|pending| pending.number == s.next_number % NUMBER_MODULUS)
+            {
+                a.push(Action::Refuse {
+                    reason: Refusal::MessageNumberInUse,
+                });
+            } else {
+                let number = take_number(&mut s);
                 a.push(Action::SendAtm { kind, number });
             }
         }

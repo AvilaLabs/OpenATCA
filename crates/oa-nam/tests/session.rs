@@ -312,6 +312,38 @@ fn active_irs_and_trs_received_have_no_effect() {
     }
 }
 
+#[test]
+fn explicit_pointout_no_response_policy_numbers_poa_poj_without_pending_timers() {
+    let c = cfg();
+    let s = active(&c);
+    let (s, actions) = run(&c, s, Event::SendAtmWithoutResponse(Kind::Poa), 10);
+    assert_eq!(
+        actions,
+        [Action::SendAtm {
+            kind: Kind::Poa,
+            number: 1
+        }]
+    );
+    assert!(s.pending().is_empty());
+    let (s, actions) = run(&c, s, Event::SendAtmWithoutResponse(Kind::Poj), 11);
+    assert_eq!(
+        actions,
+        [Action::SendAtm {
+            kind: Kind::Poj,
+            number: 2
+        }]
+    );
+    assert!(s.pending().is_empty());
+    let (same, actions) = run(&c, s, Event::SendAtmWithoutResponse(Kind::Fpl), 12);
+    assert_eq!(
+        actions,
+        [Action::Refuse {
+            reason: Refusal::NotAnAtmMessage
+        }]
+    );
+    assert_eq!(same.next_number, s.next_number);
+}
+
 // REQ: OA-NAM-012
 #[test]
 fn active_trq_received_answers_trs_then_irq_and_goes_activating() {

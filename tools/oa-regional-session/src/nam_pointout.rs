@@ -7,8 +7,8 @@
 use crate::flight::{self, FlightDriver, FlightViewStatus, SharedFlightView};
 use crate::nam_handoff::{
     accepted_delivery_seq, accepted_message, accepted_pointout_response,
-    nam_session_ingress_local_event, nam_session_ingress_receive, NamIngressResult,
-    NamSessionIngress,
+    nam_session_ingress_local_event, nam_session_ingress_receive, nam_session_ingress_state,
+    NamIngressResult, NamSessionIngress,
 };
 use crate::route;
 use crate::surveillance::ObservedTrack;
@@ -36,10 +36,31 @@ pub enum PointOutStatus {
     AwaitingManualCoordination,
     /// Enhanced POI is displayed for an explicit controller decision.
     AwaitingControllerDecision,
+    /// A locally sent Enhanced POI has received PLA and is waiting on the remote controller.
+    AwaitingRemoteControllerDecision,
+    /// The peer did not logically accept the point-out before the NAM response timeout.
+    ResponseTimedOut,
     Approved,
     Denied,
     /// The computer refused the locally sent POI; this is a protocol refusal, not an operational decision.
     ComputerRejected,
+}
+
+/// The Rev G ICD's two conflicting POA/POJ response statements are explicit configuration.
+/// §3.7.3.1/.4.1 expects a LAM/LRM; Annex B.1.8.5/.6 says no response is sent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PointOutResponseProfile {
+    IcdPartIiSection37Lam,
+    IcdAnnexBNoResponse,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PointOutAckStatus {
+    NotExpected,
+    Awaiting,
+    Received,
+    Rejected,
+    TimedOut,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -78,6 +99,7 @@ pub struct PointOutView {
     pub route_key: Option<RouteKey>,
     pub address: Option<u32>,
     pub status: PointOutStatus,
+    pub ack_status: PointOutAckStatus,
     /// Established code carried by the POI, if present.
     pub established_mode_a: Option<u16>,
     /// Receiving-controller assigned code carried by POA, if present.
@@ -88,6 +110,7 @@ pub struct PointOutView {
     pub assigned_comparison: BeaconComparison,
     pub source_ns: i64,
     pub receipt_ns: i64,
+    pub context_sequence: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -99,6 +122,7 @@ pub enum PointOutError {
     ReferenceMismatch,
     UnsupportedEnhancedMessage,
     InvalidContext,
+    ResponseProfileRequired,
     MissingFields,
     InvalidCode,
     Duplicate,
@@ -109,6 +133,8 @@ pub enum PointOutError {
     FutureFlight,
     FlightMismatch,
     SessionResponse,
+    MessageNumberInUse,
+    PendingResponse,
     InvalidTransition,
 }
 
@@ -145,15 +171,34 @@ pub struct PointOutTransmitResult {
     pub view: PointOutView,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PointOutRetirementReason {
+    /// The operator confirms the aircraft exited delegated airspace and potential conflicts resolved.
+    AirspaceExitedAndConflictsResolved,
+    /// Basic verbal point-out coordination was closed by the operator.
+    ManualCoordinationClosed,
+}
+
+#[derive(Clone, Debug)]
+pub struct PointOutTickResult {
+    pub actions: session::Actions,
+    /// Exact prior ATM messages to resend unchanged after session timeout processing.
+    pub retransmissions: Vec<Vec<u8>>,
+    /// Point-out identifiers whose computer response timed out; operational POA/POJ status is retained.
+    pub timed_out: Vec<MsgId>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Record {
     view: PointOutView,
     source: Message,
     outbound: bool,
+    decision_message: Option<Message>,
 }
 
 pub struct NamPointOutRuntime {
     mode: PointOutMode,
+    response_profile: Option<PointOutResponseProfile>,
     records: Vec<Record>,
     capacity: usize,
 }
@@ -164,6 +209,7 @@ pub fn nam_pointout_runtime_new(capacity: usize, mode: PointOutMode) -> Option<N
     }
     Some(NamPointOutRuntime {
         mode,
+        response_profile: None,
         records: Vec::with_capacity(capacity),
         capacity,
     })
@@ -176,12 +222,150 @@ pub fn nam_pointout_set_mode(
     if !runtime.records.is_empty() {
         return Err(PointOutError::InvalidContext);
     }
+    if mode == PointOutMode::Enhanced && runtime.response_profile.is_none() {
+        return Err(PointOutError::ResponseProfileRequired);
+    }
     runtime.mode = mode;
+    Ok(())
+}
+
+pub fn nam_pointout_set_response_profile(
+    runtime: &mut NamPointOutRuntime,
+    response_profile: PointOutResponseProfile,
+) -> Result<(), PointOutError> {
+    if !runtime.records.is_empty() {
+        return Err(PointOutError::InvalidContext);
+    }
+    runtime.response_profile = Some(response_profile);
     Ok(())
 }
 
 pub fn nam_pointout_views(runtime: &NamPointOutRuntime) -> impl Iterator<Item = &PointOutView> {
     runtime.records.iter().map(|record| &record.view)
+}
+
+/// Drive the actual NAM peer timer and map POI/POA/POJ resend and timeout actions back to their
+/// bounded point-out records. Other NAM session actions remain visible in `actions` to the caller.
+pub fn nam_pointout_tick(
+    runtime: &mut NamPointOutRuntime,
+    ingress: &mut NamSessionIngress,
+    now_ms: u64,
+) -> Result<PointOutTickResult, PointOutError> {
+    let actions = nam_session_ingress_local_event(ingress, session::Event::Tick, now_ms)
+        .map_err(|_| PointOutError::SessionResponse)?;
+    let mut retransmissions = Vec::with_capacity(session::MAX_ACTIONS);
+    let mut timed_out = Vec::with_capacity(session::MAX_ACTIONS);
+    for action in actions.as_slice() {
+        match action {
+            session::Action::ResendAtm { kind, number }
+                if matches!(kind, Kind::Poi | Kind::Poa | Kind::Poj) =>
+            {
+                let message = runtime
+                    .records
+                    .iter()
+                    .find_map(|record| {
+                        if record.outbound
+                            && record.source.header.kind == *kind
+                            && record.source.header.id.number == *number
+                        {
+                            Some(&record.source)
+                        } else {
+                            record.decision_message.as_ref().filter(|message| {
+                                message.header.kind == *kind && message.header.id.number == *number
+                            })
+                        }
+                    })
+                    .ok_or(PointOutError::ReferenceMismatch)?;
+                let bytes = frame(&encode(message).map_err(|_| PointOutError::MissingFields)?)
+                    .map_err(|_| PointOutError::MissingFields)?;
+                retransmissions.push(bytes);
+            }
+            session::Action::ResponseTimeout { kind, number }
+                if matches!(kind, Kind::Poi | Kind::Poa | Kind::Poj) =>
+            {
+                let record = runtime
+                    .records
+                    .iter_mut()
+                    .find(|record| {
+                        (record.outbound
+                            && record.source.header.kind == *kind
+                            && record.source.header.id.number == *number)
+                            || record.decision_message.as_ref().is_some_and(|message| {
+                                message.header.kind == *kind && message.header.id.number == *number
+                            })
+                    })
+                    .ok_or(PointOutError::ReferenceMismatch)?;
+                record.view.ack_status = PointOutAckStatus::TimedOut;
+                if *kind == Kind::Poi {
+                    record.view.status = PointOutStatus::ResponseTimedOut;
+                }
+                timed_out.push(record.view.point_out_id);
+            }
+            _ => {}
+        }
+    }
+    Ok(PointOutTickResult {
+        actions,
+        retransmissions,
+        timed_out,
+    })
+}
+
+/// Retire a point-out only after an explicit operational lifecycle signal. Pending NAM response
+/// timers block retirement; removing the record releases its wrapped message identifier for reuse.
+pub fn nam_pointout_retire(
+    runtime: &mut NamPointOutRuntime,
+    point_out_id: MsgId,
+    expected_key: Option<FlightKey>,
+    reason: PointOutRetirementReason,
+) -> Result<PointOutView, PointOutError> {
+    let index = runtime
+        .records
+        .iter()
+        .position(|record| record.view.point_out_id == point_out_id)
+        .ok_or(PointOutError::ReferenceMismatch)?;
+    let view = runtime
+        .records
+        .get(index)
+        .ok_or(PointOutError::ReferenceMismatch)?
+        .view;
+    if view.key != expected_key {
+        return Err(PointOutError::FlightMismatch);
+    }
+    if view.ack_status == PointOutAckStatus::Awaiting {
+        return Err(PointOutError::PendingResponse);
+    }
+    if reason == PointOutRetirementReason::ManualCoordinationClosed
+        && runtime.mode != PointOutMode::Basic
+    {
+        return Err(PointOutError::InvalidContext);
+    }
+    runtime.records.remove(index);
+    Ok(view)
+}
+
+fn next_id(
+    runtime: &NamPointOutRuntime,
+    ingress: &NamSessionIngress,
+    sender: oa_nam::Facility,
+    receiver: oa_nam::Facility,
+) -> Result<MsgId, PointOutError> {
+    let next = nam_session_ingress_state(ingress).next_number % 1000;
+    let candidate = MsgId {
+        sender,
+        receiver,
+        number: next,
+    };
+    if runtime.records.iter().any(|record| {
+        record.view.point_out_id == candidate
+            || record
+                .decision_message
+                .as_ref()
+                .is_some_and(|message| message.header.id == candidate)
+    }) {
+        return Err(PointOutError::MessageNumberInUse);
+    }
+    Ok(candidate)
 }
 
 /// Send a caller-prepared POI through the active peer session. Flight identity is an explicit
@@ -196,6 +380,9 @@ pub fn nam_pointout_send_offer(
     local_facility: [u8; 4],
     observed: &[ObservedTrack],
 ) -> Result<PointOutTransmitResult, PointOutError> {
+    if runtime.mode == PointOutMode::Enhanced && runtime.response_profile.is_none() {
+        return Err(PointOutError::ResponseProfileRequired);
+    }
     if message.header.kind != Kind::Poi {
         return Err(PointOutError::WrongKind);
     }
@@ -237,7 +424,13 @@ pub fn nam_pointout_send_offer(
         context.receipt_ns,
     );
     // Validate the caller's message before consuming a session message number.
-    message.header.id.number = 0;
+    let candidate = next_id(
+        runtime,
+        ingress,
+        message.header.id.sender,
+        message.header.id.receiver,
+    )?;
+    message.header.id.number = candidate.number;
     encode(&message).map_err(|_| PointOutError::MissingFields)?;
     let actions =
         nam_session_ingress_local_event(ingress, session::Event::SendAtm(Kind::Poi), now_ms)
@@ -253,6 +446,9 @@ pub fn nam_pointout_send_offer(
             _ => None,
         })
         .ok_or(PointOutError::SessionResponse)?;
+    if number != candidate.number {
+        return Err(PointOutError::SessionResponse);
+    }
     message.header.id.number = number;
     let framed_bytes = frame(&encode(&message).map_err(|_| PointOutError::MissingFields)?)
         .map_err(|_| PointOutError::MissingFields)?;
@@ -264,17 +460,20 @@ pub fn nam_pointout_send_offer(
         route_key: context.binding.map(|binding| binding.route_key),
         address,
         status: PointOutStatus::AwaitingComputerResponse,
+        ack_status: PointOutAckStatus::Awaiting,
         established_mode_a,
         assigned_mode_a: None,
         observed_comparison,
         assigned_comparison: BeaconComparison::Unknown,
         source_ns: context.source_ns,
         receipt_ns: context.receipt_ns,
+        context_sequence: context.sequence,
     };
     runtime.records.push(Record {
         view,
         source: message.clone(),
         outbound: true,
+        decision_message: None,
     });
     Ok(PointOutTransmitResult {
         framed_bytes,
@@ -303,6 +502,9 @@ pub fn nam_pointout_decide(
     {
         return Err(PointOutError::UnsupportedEnhancedMessage);
     }
+    let response_profile = runtime
+        .response_profile
+        .ok_or(PointOutError::ResponseProfileRequired)?;
     let index = runtime
         .records
         .iter()
@@ -316,11 +518,13 @@ pub fn nam_pointout_decide(
         .get(index)
         .ok_or(PointOutError::ReferenceMismatch)?;
     let source = &record.source;
-    let id = MsgId {
+    let mut id = MsgId {
         sender: oa_nam::Facility(local_facility),
         receiver: source.header.id.sender,
         number: 0,
     };
+    let candidate = next_id(runtime, ingress, id.sender, id.receiver)?;
+    id.number = candidate.number;
     let (kind, f07, status, assigned_mode_a) = match decision {
         PointOutDecision::Approve { assigned_mode_a } => {
             if assigned_mode_a.is_some_and(|code| code > 0o7777) {
@@ -362,7 +566,12 @@ pub fn nam_pointout_decide(
     message.f16 = source.f16.clone();
     message.f31 = Some(responding_route);
     encode(&message).map_err(|_| PointOutError::MissingFields)?;
-    let actions = nam_session_ingress_local_event(ingress, session::Event::SendAtm(kind), now_ms)
+    let event = if response_profile == PointOutResponseProfile::IcdAnnexBNoResponse {
+        session::Event::SendAtmWithoutResponse(kind)
+    } else {
+        session::Event::SendAtm(kind)
+    };
+    let actions = nam_session_ingress_local_event(ingress, event, now_ms)
         .map_err(|_| PointOutError::SessionResponse)?;
     let number = actions
         .as_slice()
@@ -372,6 +581,9 @@ pub fn nam_pointout_decide(
             _ => None,
         })
         .ok_or(PointOutError::SessionResponse)?;
+    if number != candidate.number {
+        return Err(PointOutError::SessionResponse);
+    }
     message.header.id.number = number;
     let framed_bytes = frame(&encode(&message).map_err(|_| PointOutError::MissingFields)?)
         .map_err(|_| PointOutError::MissingFields)?;
@@ -383,6 +595,11 @@ pub fn nam_pointout_decide(
     record.view.assigned_mode_a = assigned_mode_a;
     record.view.assigned_comparison =
         compare_codes(record.view.established_mode_a, assigned_mode_a);
+    record.view.ack_status = match response_profile {
+        PointOutResponseProfile::IcdPartIiSection37Lam => PointOutAckStatus::Awaiting,
+        PointOutResponseProfile::IcdAnnexBNoResponse => PointOutAckStatus::NotExpected,
+    };
+    record.decision_message = Some(message.clone());
     Ok(PointOutDecisionResult {
         framed_bytes,
         message,
@@ -432,6 +649,8 @@ pub fn nam_pointout_receive(
         return Err(PointOutError::InvalidTime);
     }
     let message = parse_exact(framed_bytes)?;
+    let context_view = positive_binding(flights, context.binding, context.receipt_ns)?;
+    prevalidate_pointout(runtime, &message, context, context_view, local_facility)?;
     let admission = nam_session_ingress_receive(ingress, framed_bytes, now_ms)
         .map_err(|_| PointOutError::NotAdmitted)?;
     let accepted = admission
@@ -443,13 +662,12 @@ pub fn nam_pointout_receive(
         Some(session::Seq::First | session::Seq::InOrder | session::Seq::Gap(_))
     );
     let correlated_pointout_response = accepted_pointout_response(accepted)
-        && matches!(message.header.kind, Kind::Pla | Kind::Lrm);
+        && matches!(message.header.kind, Kind::Pla | Kind::Lam | Kind::Lrm);
     if accepted_message(accepted).header != message.header
         || (!delivered && !correlated_pointout_response)
     {
         return Err(PointOutError::NotAdmitted);
     }
-    let context_view = positive_binding(flights, context.binding, context.receipt_ns)?;
     let message = accepted_message(accepted);
     match message.header.kind {
         Kind::Poi => receive_poi(
@@ -465,17 +683,173 @@ pub fn nam_pointout_receive(
         ),
         Kind::Poa | Kind::Poj => receive_decision(
             runtime,
+            ingress,
             &admission,
             message,
             context,
             context_view,
             local_facility,
+            now_ms,
         ),
-        Kind::Pla | Kind::Lrm => {
-            receive_logical_ack(runtime, &admission, message, context, context_view)
+        Kind::Pla => receive_logical_ack(runtime, &admission, message, context, context_view),
+        Kind::Lam => receive_decision_ack(runtime, &admission, message, context, context_view),
+        Kind::Lrm => {
+            let record = pointout_response_record(runtime, message)?;
+            if record.outbound {
+                receive_logical_ack(runtime, &admission, message, context, context_view)
+            } else {
+                receive_decision_ack(runtime, &admission, message, context, context_view)
+            }
         }
         _ => Err(PointOutError::WrongKind),
     }
+}
+
+/// Perform all point-out-owned semantic checks before the irreversible NAM sequence step.
+fn prevalidate_pointout(
+    runtime: &NamPointOutRuntime,
+    message: &Message,
+    context: PointOutContext,
+    binding_view: Option<SharedFlightView>,
+    local_facility: [u8; 4],
+) -> Result<(), PointOutError> {
+    match message.header.kind {
+        Kind::Poi => {
+            if message.header.id.receiver.0 != local_facility
+                || message
+                    .f31
+                    .as_ref()
+                    .is_none_or(|field| field.facility.0 != local_facility)
+            {
+                return Err(PointOutError::WrongPeer);
+            }
+            if context.response_sector.is_none() {
+                return Err(PointOutError::MissingFields);
+            }
+            if runtime.records.len() >= runtime.capacity {
+                return Err(PointOutError::Capacity);
+            }
+            if runtime
+                .records
+                .iter()
+                .any(|record| record.view.point_out_id == message.header.id)
+            {
+                return Err(PointOutError::Duplicate);
+            }
+            let _ = field_code(message.f07.as_ref())?;
+        }
+        Kind::Pla | Kind::Lam | Kind::Lrm => {
+            let record = pointout_response_record(runtime, message)?;
+            let response_to_poi = record.outbound
+                && record.view.status == PointOutStatus::AwaitingComputerResponse
+                && matches!(message.header.kind, Kind::Pla | Kind::Lrm);
+            let response_to_decision = !record.outbound
+                && record.decision_message.is_some()
+                && record.view.ack_status == PointOutAckStatus::Awaiting
+                && matches!(message.header.kind, Kind::Lam | Kind::Lrm);
+            if !response_to_poi && !response_to_decision {
+                return Err(PointOutError::InvalidTransition);
+            }
+            let (expected_sender, expected_receiver) = if response_to_poi {
+                (record.view.to, record.view.from)
+            } else {
+                (record.view.from, record.view.to)
+            };
+            if message.header.id.sender.0 != expected_sender
+                || message.header.id.receiver.0 != expected_receiver
+                || !same_context(&record.view, context)
+                || binding_view.is_some_and(|view| Some(view.address) != record.view.address)
+                || (message.header.kind == Kind::Pla
+                    && message
+                        .f31
+                        .as_ref()
+                        .is_none_or(|field| field.facility.0 != message.header.id.sender.0))
+            {
+                return Err(PointOutError::WrongPeer);
+            }
+        }
+        Kind::Poa | Kind::Poj => {
+            if runtime.mode != PointOutMode::Enhanced {
+                return Err(PointOutError::UnsupportedEnhancedMessage);
+            }
+            if runtime.response_profile.is_none() {
+                return Err(PointOutError::ResponseProfileRequired);
+            }
+            let reference = message
+                .header
+                .reference
+                .ok_or(PointOutError::MissingReference)?;
+            let record = runtime
+                .records
+                .iter()
+                .find(|record| record.view.point_out_id == reference)
+                .ok_or(PointOutError::ReferenceMismatch)?;
+            if !record.outbound
+                || record.view.status != PointOutStatus::AwaitingRemoteControllerDecision
+            {
+                return Err(PointOutError::InvalidTransition);
+            }
+            if message.header.id.sender.0 != record.view.to
+                || message.header.id.receiver.0 != record.view.from
+                || local_facility != record.view.from
+                || !same_context(&record.view, context)
+                || binding_view.is_some_and(|view| Some(view.address) != record.view.address)
+                || message
+                    .f31
+                    .as_ref()
+                    .is_none_or(|field| field.facility.0 != message.header.id.sender.0)
+            {
+                return Err(PointOutError::WrongPeer);
+            }
+            let expected_acid = source_acid(record.source.f07.as_ref())?;
+            if source_acid(message.f07.as_ref())? != expected_acid {
+                return Err(PointOutError::FlightMismatch);
+            }
+            if message.header.kind == Kind::Poa {
+                let _ = optional_field_code(message.f07.as_ref())?;
+            }
+        }
+        _ => return Err(PointOutError::WrongKind),
+    }
+    Ok(())
+}
+
+fn pointout_response_record<'a>(
+    runtime: &'a NamPointOutRuntime,
+    message: &Message,
+) -> Result<&'a Record, PointOutError> {
+    let reference = message
+        .header
+        .reference
+        .ok_or(PointOutError::MissingReference)?;
+    let record = match message.header.kind {
+        Kind::Pla => runtime
+            .records
+            .iter()
+            .find(|record| record.outbound && record.view.point_out_id == reference),
+        Kind::Lam => runtime.records.iter().find(|record| {
+            !record.outbound
+                && record
+                    .decision_message
+                    .as_ref()
+                    .is_some_and(|decision| decision.header.id == reference)
+        }),
+        Kind::Lrm => runtime
+            .records
+            .iter()
+            .find(|record| record.outbound && record.view.point_out_id == reference)
+            .or_else(|| {
+                runtime.records.iter().find(|record| {
+                    !record.outbound
+                        && record
+                            .decision_message
+                            .as_ref()
+                            .is_some_and(|decision| decision.header.id == reference)
+                })
+            }),
+        _ => None,
+    };
+    record.ok_or(PointOutError::ReferenceMismatch)
 }
 
 fn receive_poi(
@@ -530,12 +904,14 @@ fn receive_poi(
         route_key: binding.map(|binding| binding.route_key),
         address,
         status,
+        ack_status: PointOutAckStatus::NotExpected,
         established_mode_a,
         assigned_mode_a: None,
         observed_comparison,
         assigned_comparison: BeaconComparison::Unknown,
         source_ns: context.source_ns,
         receipt_ns: context.receipt_ns,
+        context_sequence: context.sequence,
     };
     let sector = context
         .response_sector
@@ -583,6 +959,7 @@ fn receive_poi(
         view,
         source: message.clone(),
         outbound: false,
+        decision_message: None,
     });
     Ok(PointOutResult {
         ingress: ingress_result.clone(),
@@ -594,11 +971,13 @@ fn receive_poi(
 
 fn receive_decision(
     runtime: &mut NamPointOutRuntime,
+    ingress_state: &mut NamSessionIngress,
     ingress: &NamIngressResult,
     message: &Message,
     context: PointOutContext,
     binding_view: Option<SharedFlightView>,
     local_facility: [u8; 4],
+    now_ms: u64,
 ) -> Result<PointOutResult, PointOutError> {
     if runtime.mode != PointOutMode::Enhanced {
         return Err(PointOutError::UnsupportedEnhancedMessage);
@@ -614,13 +993,16 @@ fn receive_decision(
         .ok_or(PointOutError::ReferenceMismatch)?;
     let record = runtime
         .records
-        .get_mut(index)
+        .get(index)
         .ok_or(PointOutError::ReferenceMismatch)?;
     if !record.outbound {
         return Err(PointOutError::InvalidTransition);
     }
-    let current = &mut record.view;
-    if current.status != PointOutStatus::AwaitingControllerDecision {
+    let response_profile = runtime
+        .response_profile
+        .ok_or(PointOutError::ResponseProfileRequired)?;
+    let current = record.view;
+    if current.status != PointOutStatus::AwaitingRemoteControllerDecision {
         return Err(PointOutError::InvalidTransition);
     }
     if message.header.id.sender.0 != current.to
@@ -638,21 +1020,66 @@ fn receive_decision(
     {
         return Err(PointOutError::WrongPeer);
     }
-    current.status = if message.header.kind == Kind::Poa {
+    let mut updated = current;
+    updated.status = if message.header.kind == Kind::Poa {
         PointOutStatus::Approved
     } else {
         PointOutStatus::Denied
     };
     if message.header.kind == Kind::Poa {
-        current.assigned_mode_a = optional_field_code(message.f07.as_ref())?;
-        current.assigned_comparison =
-            compare_codes(current.established_mode_a, current.assigned_mode_a);
+        updated.assigned_mode_a = optional_field_code(message.f07.as_ref())?;
+        updated.assigned_comparison =
+            compare_codes(updated.established_mode_a, updated.assigned_mode_a);
     }
+    let (response_actions, response_framed) = match response_profile {
+        PointOutResponseProfile::IcdAnnexBNoResponse => (None, None),
+        PointOutResponseProfile::IcdPartIiSection37Lam => {
+            let actions = nam_session_ingress_local_event(
+                ingress_state,
+                session::Event::SendResponse {
+                    kind: Kind::Lam,
+                    reference: message.header.id,
+                },
+                now_ms,
+            )
+            .map_err(|_| PointOutError::SessionResponse)?;
+            let number = actions
+                .as_slice()
+                .iter()
+                .find_map(|action| match action {
+                    session::Action::SendResponse {
+                        kind: Kind::Lam,
+                        number,
+                        reference,
+                    } if *reference == message.header.id => Some(*number),
+                    _ => None,
+                })
+                .ok_or(PointOutError::SessionResponse)?;
+            let response = bare(Header {
+                kind: Kind::Lam,
+                id: MsgId {
+                    sender: oa_nam::Facility(local_facility),
+                    receiver: message.header.id.sender,
+                    number,
+                },
+                reference: Some(message.header.id),
+            });
+            let bytes = frame(&encode(&response).map_err(|_| PointOutError::MissingFields)?)
+                .map_err(|_| PointOutError::MissingFields)?;
+            (Some(actions), Some(bytes))
+        }
+    };
+    updated.context_sequence = context.sequence;
+    runtime
+        .records
+        .get_mut(index)
+        .ok_or(PointOutError::ReferenceMismatch)?
+        .view = updated;
     Ok(PointOutResult {
         ingress: ingress.clone(),
-        response_actions: None,
-        response_framed: None,
-        view: Some(*current),
+        response_actions,
+        response_framed,
+        view: Some(updated),
     })
 }
 
@@ -680,6 +1107,11 @@ fn receive_logical_ack(
         || message.header.id.receiver.0 != record.view.from
         || !same_context(&record.view, context)
         || binding_view.is_some_and(|view| Some(view.address) != record.view.address)
+        || (message.header.kind == Kind::Pla
+            && message
+                .f31
+                .as_ref()
+                .is_none_or(|field| field.facility.0 != message.header.id.sender.0))
     {
         return Err(PointOutError::WrongPeer);
     }
@@ -694,10 +1126,70 @@ fn receive_logical_ack(
         Kind::Lrm => PointOutStatus::ComputerRejected,
         Kind::Pla => match runtime.mode {
             PointOutMode::Basic => PointOutStatus::AwaitingManualCoordination,
-            PointOutMode::Enhanced => PointOutStatus::AwaitingControllerDecision,
+            PointOutMode::Enhanced => PointOutStatus::AwaitingRemoteControllerDecision,
         },
         _ => return Err(PointOutError::WrongKind),
     };
+    record.view.ack_status = if message.header.kind == Kind::Pla {
+        PointOutAckStatus::Received
+    } else {
+        PointOutAckStatus::Rejected
+    };
+    record.view.context_sequence = context.sequence;
+    Ok(PointOutResult {
+        ingress: ingress.clone(),
+        response_actions: None,
+        response_framed: None,
+        view: Some(record.view),
+    })
+}
+
+fn receive_decision_ack(
+    runtime: &mut NamPointOutRuntime,
+    ingress: &NamIngressResult,
+    message: &Message,
+    context: PointOutContext,
+    binding_view: Option<SharedFlightView>,
+) -> Result<PointOutResult, PointOutError> {
+    let reference = message
+        .header
+        .reference
+        .ok_or(PointOutError::MissingReference)?;
+    let index = runtime
+        .records
+        .iter()
+        .position(|record| {
+            !record.outbound
+                && record
+                    .decision_message
+                    .as_ref()
+                    .is_some_and(|decision| decision.header.id == reference)
+        })
+        .ok_or(PointOutError::ReferenceMismatch)?;
+    let record = runtime
+        .records
+        .get_mut(index)
+        .ok_or(PointOutError::ReferenceMismatch)?;
+    let decision = record
+        .decision_message
+        .as_ref()
+        .ok_or(PointOutError::ReferenceMismatch)?;
+    if record.view.ack_status != PointOutAckStatus::Awaiting
+        || message.header.id.sender != decision.header.id.receiver
+        || message.header.id.receiver != decision.header.id.sender
+        || !same_context(&record.view, context)
+        || binding_view.is_some_and(|view| Some(view.address) != record.view.address)
+    {
+        return Err(PointOutError::WrongPeer);
+    }
+    record.view.ack_status = if message.header.kind == Kind::Lam {
+        PointOutAckStatus::Received
+    } else if message.header.kind == Kind::Lrm {
+        PointOutAckStatus::Rejected
+    } else {
+        return Err(PointOutError::WrongKind);
+    };
+    record.view.context_sequence = context.sequence;
     Ok(PointOutResult {
         ingress: ingress.clone(),
         response_actions: None,
@@ -711,6 +1203,7 @@ fn same_context(view: &PointOutView, context: PointOutContext) -> bool {
         && view.route_key == context.binding.map(|binding| binding.route_key)
         && context.source_ns >= view.source_ns
         && context.receipt_ns >= view.receipt_ns
+        && context.sequence > view.context_sequence
 }
 
 fn positive_binding(
@@ -939,9 +1432,19 @@ mod tests {
             binding: None,
             source_ns: receipt_ns,
             receipt_ns,
-            sequence: 1,
+            sequence: u64::try_from(receipt_ns / 1_000_000_000).expect("positive sequence"),
             response_sector: Some(*b"2A"),
         }
+    }
+
+    fn enhanced_runtime(profile: PointOutResponseProfile) -> NamPointOutRuntime {
+        let mut runtime =
+            nam_pointout_runtime_new(4, PointOutMode::Basic).expect("bounded runtime");
+        nam_pointout_set_response_profile(&mut runtime, profile)
+            .expect("explicit response profile");
+        nam_pointout_set_mode(&mut runtime, PointOutMode::Enhanced)
+            .expect("configured Enhanced mode");
+        runtime
     }
 
     fn framed(message: &Message) -> Vec<u8> {
@@ -959,8 +1462,7 @@ mod tests {
 
     #[test]
     fn incoming_poi_is_displayed_and_only_explicit_enhanced_decision_generates_poa() {
-        let mut runtime =
-            nam_pointout_runtime_new(4, PointOutMode::Enhanced).expect("bounded runtime");
+        let mut runtime = enhanced_runtime(PointOutResponseProfile::IcdPartIiSection37Lam);
         let mut flights = empty_flights();
         let mut ingress = active_ingress(LOCAL, PEER);
         let request = poi(PEER, LOCAL, 21);
@@ -1019,12 +1521,203 @@ mod tests {
             BeaconComparison::Mismatch
         );
         assert!(parse_exact(&response.framed_bytes).is_ok());
+        let logical_ack = bare(header(
+            Kind::Lam,
+            PEER,
+            LOCAL,
+            22,
+            Some(response.message.header.id),
+        ));
+        let acknowledged = nam_pointout_receive(
+            &mut runtime,
+            &mut flights,
+            &mut ingress,
+            &framed(&logical_ack),
+            4,
+            LOCAL.0,
+            context(3_000_000_000),
+            &[],
+        )
+        .expect("LAM is correlated to the sent POA");
+        let acknowledged = acknowledged.view.expect("point-out view");
+        assert_eq!(acknowledged.status, PointOutStatus::Approved);
+        assert_eq!(acknowledged.ack_status, PointOutAckStatus::Received);
+    }
+
+    #[test]
+    fn no_response_profile_is_explicit_and_poi_refusal_does_not_consume_sequence() {
+        let mut runtime = nam_pointout_runtime_new(2, PointOutMode::Basic).expect("runtime");
+        assert_eq!(
+            nam_pointout_set_mode(&mut runtime, PointOutMode::Enhanced),
+            Err(PointOutError::ResponseProfileRequired)
+        );
+        let mut flights = empty_flights();
+        let mut ingress = active_ingress(LOCAL, PEER);
+        let request = poi(PEER, LOCAL, 21);
+        let before = nam_session_ingress_state(&ingress);
+        let mut missing_sector = context(2_000_000_000);
+        missing_sector.response_sector = None;
+        assert_eq!(
+            nam_pointout_receive(
+                &mut runtime,
+                &mut flights,
+                &mut ingress,
+                &framed(&request),
+                2,
+                LOCAL.0,
+                missing_sector,
+                &[],
+            )
+            .expect_err("missing configured local sector refuses before session commit"),
+            PointOutError::MissingFields
+        );
+        assert_eq!(nam_session_ingress_state(&ingress), before);
+        assert!(nam_pointout_receive(
+            &mut runtime,
+            &mut flights,
+            &mut ingress,
+            &framed(&request),
+            2,
+            LOCAL.0,
+            context(2_000_000_000),
+            &[],
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn uncorrelated_poa_is_refused_without_committing_nam_delivery_state() {
+        let mut runtime = enhanced_runtime(PointOutResponseProfile::IcdPartIiSection37Lam);
+        let mut flights = empty_flights();
+        let mut ingress = active_ingress(LOCAL, PEER);
+        let sent = nam_pointout_send_offer(
+            &mut runtime,
+            &mut flights,
+            &mut ingress,
+            poi(LOCAL, PEER, 0),
+            context(1_000_000_000),
+            2,
+            LOCAL.0,
+            &[],
+        )
+        .expect("outgoing POI");
+        let mut poa = poi(PEER, LOCAL, 9);
+        poa.header.kind = Kind::Poa;
+        poa.header.reference = Some(MsgId {
+            sender: LOCAL,
+            receiver: PEER,
+            number: sent.view.point_out_id.number.wrapping_add(1) % 1000,
+        });
+        poa.f32 = None;
+        poa.f31 = Some(Field31 {
+            facility: PEER,
+            sector: Some(*b"2A"),
+            text: None,
+        });
+        let before = nam_session_ingress_state(&ingress);
+        assert_eq!(
+            nam_pointout_receive(
+                &mut runtime,
+                &mut flights,
+                &mut ingress,
+                &framed(&poa),
+                3,
+                LOCAL.0,
+                context(2_000_000_000),
+                &[],
+            )
+            .expect_err("unknown POA reference is refused before ingress commit"),
+            PointOutError::ReferenceMismatch
+        );
+        assert_eq!(nam_session_ingress_state(&ingress), before);
+        assert_eq!(
+            nam_pointout_views(&runtime)
+                .next()
+                .expect("outbound point-out retained")
+                .status,
+            PointOutStatus::AwaitingComputerResponse
+        );
+    }
+
+    #[test]
+    fn annex_b_no_response_is_explicit_and_terminal_records_can_be_retired() {
+        let mut runtime = enhanced_runtime(PointOutResponseProfile::IcdAnnexBNoResponse);
+        let mut flights = empty_flights();
+        let mut ingress = active_ingress(LOCAL, PEER);
+        let received = nam_pointout_receive(
+            &mut runtime,
+            &mut flights,
+            &mut ingress,
+            &framed(&poi(PEER, LOCAL, 21)),
+            2,
+            LOCAL.0,
+            context(2_000_000_000),
+            &[],
+        )
+        .expect("POI admitted");
+        let id = received.view.expect("point-out").point_out_id;
+        let decision = nam_pointout_decide(
+            &mut runtime,
+            &mut ingress,
+            id,
+            PointOutDecision::Deny,
+            Field31 {
+                facility: LOCAL,
+                sector: Some(*b"2A"),
+                text: None,
+            },
+            3,
+            LOCAL.0,
+        )
+        .expect("explicit configured no-response decision");
+        assert_eq!(decision.message.header.kind, Kind::Poj);
+        assert_eq!(decision.view.ack_status, PointOutAckStatus::NotExpected);
+        assert_eq!(nam_pointout_views(&runtime).count(), 1);
+        let retired = nam_pointout_retire(
+            &mut runtime,
+            id,
+            None,
+            PointOutRetirementReason::AirspaceExitedAndConflictsResolved,
+        )
+        .expect("operator lifecycle event retires terminal record");
+        assert_eq!(retired.status, PointOutStatus::Denied);
+        assert_eq!(nam_pointout_views(&runtime).count(), 0);
+    }
+
+    #[test]
+    fn pending_poi_timeout_is_visible_and_unblocks_safe_retirement() {
+        let mut runtime = enhanced_runtime(PointOutResponseProfile::IcdPartIiSection37Lam);
+        let mut flights = empty_flights();
+        let mut ingress = active_ingress(LOCAL, PEER);
+        let sent = nam_pointout_send_offer(
+            &mut runtime,
+            &mut flights,
+            &mut ingress,
+            poi(LOCAL, PEER, 0),
+            context(1_000_000_000),
+            2,
+            LOCAL.0,
+            &[],
+        )
+        .expect("outgoing POI");
+        let tick = nam_pointout_tick(&mut runtime, &mut ingress, 60_002).expect("session tick");
+        assert_eq!(tick.timed_out, vec![sent.view.point_out_id]);
+        let view = nam_pointout_views(&runtime).next().expect("retained view");
+        assert_eq!(view.status, PointOutStatus::ResponseTimedOut);
+        assert_eq!(view.ack_status, PointOutAckStatus::TimedOut);
+        nam_pointout_retire(
+            &mut runtime,
+            sent.view.point_out_id,
+            None,
+            PointOutRetirementReason::AirspaceExitedAndConflictsResolved,
+        )
+        .expect("timeout ends pending response lifecycle");
+        assert_eq!(nam_pointout_views(&runtime).count(), 0);
     }
 
     #[test]
     fn outbound_poi_requires_correlated_pla_before_enhanced_poa_and_duplicate_is_refused() {
-        let mut runtime =
-            nam_pointout_runtime_new(4, PointOutMode::Enhanced).expect("bounded runtime");
+        let mut runtime = enhanced_runtime(PointOutResponseProfile::IcdPartIiSection37Lam);
         let mut flights = empty_flights();
         let mut ingress = active_ingress(LOCAL, PEER);
         let sent = nam_pointout_send_offer(
@@ -1065,7 +1758,7 @@ mod tests {
         .expect("PLA is correlated to the outstanding POI");
         assert_eq!(
             accepted.view.expect("view").status,
-            PointOutStatus::AwaitingControllerDecision
+            PointOutStatus::AwaitingRemoteControllerDecision
         );
 
         let mut poa = poi(PEER, LOCAL, 9);
@@ -1092,15 +1785,21 @@ mod tests {
         assert_eq!(view.status, PointOutStatus::Approved);
         assert_eq!(view.assigned_mode_a, Some(0o1234));
         assert_eq!(view.assigned_comparison, BeaconComparison::Match);
+        assert!(accepted.response_actions.as_ref().is_some_and(|actions| {
+            actions.as_slice().iter().any(|action| {
+                matches!(
+                    action,
+                    session::Action::SendResponse { kind: Kind::Lam, reference, .. }
+                        if *reference == poa.header.id
+                )
+            })
+        }));
         assert_eq!(
-            accepted
-                .ingress
-                .actions
-                .as_slice()
-                .iter()
-                .filter(|action| matches!(action, session::Action::SendLam { .. }))
-                .count(),
-            1
+            parse_exact(accepted.response_framed.as_deref().expect("encoded LAM"))
+                .expect("LAM parses")
+                .header
+                .reference,
+            Some(poa.header.id)
         );
         assert_eq!(
             nam_pointout_receive(
@@ -1114,7 +1813,7 @@ mod tests {
                 &[],
             )
             .expect_err("duplicate delivery must not repeat state transition"),
-            PointOutError::NotAdmitted,
+            PointOutError::InvalidTransition,
         );
     }
 
