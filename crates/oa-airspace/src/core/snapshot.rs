@@ -7,8 +7,9 @@
 //! magic "OATCA-ADAPT" (11 bytes), format version u32
 //! nasr_effective u32, cifp_cycle u32, buffer_m u32, artcc (u32 length, bytes),
 //! nasr_sha256 [32], cifp_sha256 [32]
-//! (version 4: cycle_override length and UTF-8 bytes; version 5: option-tagged cycle_override
-//! and preferred-route availability)
+//! version-specific header tail: v3 has none; v4 has an untagged cycle_override length u32
+//! followed by UTF-8 bytes; v5 has a tagged length u32 (0 = None, n+1 = Some with n UTF-8
+//! bytes), then preferred-route availability u8 (0 unavailable, 1 present)
 //! then the tables in fixed order, each: 4-byte tag, row count u32, its columns in the order
 //! of the field declarations in `model.rs`; a bitset column is ceil(rows/64) u64 words.
 //! versions 3/4 tables: STRS PNTS VERT BNDS SEGS AWYS AWLG PROC RTES LEGS MORA UNRS DISA;
