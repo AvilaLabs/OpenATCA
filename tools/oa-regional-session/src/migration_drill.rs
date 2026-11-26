@@ -5,33 +5,33 @@
 //! without manufacturing missing system state. A successful input ACK is not an M2 flip ACK.
 #![forbid(unsafe_code)]
 
+use crate::ReceiptBatch;
 use crate::input::{EventKind, FlightOperation, SourceKind};
 use crate::recordings_cli::convert_recordings;
 use crate::recordings_reader::{RecordingInput, RecordingSource};
 use crate::recordings_stream::{
-    source_coverage, stream_normalized_events, NormalizedStreamSummary, StreamCounts, StreamInput,
+    NormalizedStreamSummary, StreamCounts, StreamInput, source_coverage, stream_normalized_events,
 };
-use crate::runtime::{regional_new_with_profile, regional_step, RegionalFrame, RegionalRunProfile};
+use crate::runtime::{RegionalFrame, RegionalRunProfile, regional_new_with_profile, regional_step};
 use crate::session::{flush_receipt_group, push_event, session_cursor_new_with_limit};
 use crate::surveillance::SurveillanceConfig;
-use crate::ReceiptBatch;
-use oa_airspace::core::model::{point_kind, str_at, Model};
+use oa_airspace::core::model::{Model, point_kind, str_at};
 use oa_migration::{
-    empty_audit_log, evaluate_transition, new_unit, AuthorityApproval, AuthorityRole, Comparison,
-    DependencyRequirement, EvidenceQuality, MetricCriterion, MetricEvidence, RollbackRule,
-    RollbackTriggerPolicy, Stage, SwapUnitKey as M1SwapUnitKey, TransitionInput, TransitionPolicy,
-    ROLE_ASSESSOR, ROLE_CONTROLLER_ON_POSITION, ROLE_SUPERVISOR, ROLE_TECH_OPS,
+    AuthorityApproval, AuthorityRole, Comparison, DependencyRequirement, EvidenceQuality,
+    MetricCriterion, MetricEvidence, ROLE_ASSESSOR, ROLE_CONTROLLER_ON_POSITION, ROLE_SUPERVISOR,
+    ROLE_TECH_OPS, RollbackRule, RollbackTriggerPolicy, Stage, SwapUnitKey as M1SwapUnitKey,
+    TransitionInput, TransitionPolicy, empty_audit_log, evaluate_transition, new_unit,
 };
 use oa_migration_switch::{
-    authorize_window, ingest_view, new_promotion_intent,
+    AlertState, BusinessKey, CapacityProfile, Diff, EndpointClass, EntityFamily, EvidenceKind,
+    FamilyCoverage, FieldStatus, FlightState, HandoffState, Health, Output, PromotionIntentRequest,
+    REPLAY_ROWS_PER_FAMILY, RollbackKind, RollbackReceipt, Side, SnapshotView, SourceIdentity,
+    SwapUnitKey, TrackState, UnitPolicy, authorize_window, ingest_view, new_promotion_intent,
     new_selector_with_capacity, observe_delivery, prepare_candidate_into, rollback,
-    select_candidate, selected, AlertState, BusinessKey, CapacityProfile,
-    Diff, EndpointClass, EntityFamily, EvidenceKind, FamilyCoverage, FieldStatus, FlightState,
-    HandoffState, Health, Output, PromotionIntentRequest, RollbackKind, RollbackReceipt, Side,
-    SnapshotView, SourceIdentity, SwapUnitKey, TrackState, UnitPolicy, REPLAY_ROWS_PER_FAMILY,
+    select_candidate, selected,
 };
 #[cfg(test)]
-use oa_migration_switch::{Snapshot, MAX_ALERTS, MAX_FLIGHTS, MAX_HANDOFFS, MAX_TRACKS};
+use oa_migration_switch::{MAX_ALERTS, MAX_FLIGHTS, MAX_HANDOFFS, MAX_TRACKS, Snapshot};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::Path;
@@ -1543,7 +1543,7 @@ fn worker_read_frame<R: Read>(reader: &mut R) -> io::Result<Option<Vec<u8>>> {
                 return Err(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
                     "partial frame",
-                ))
+                ));
             }
             _ if byte[0] == b'\n' => {
                 frame.push(b'\n');
@@ -1909,23 +1909,63 @@ fn parse_applied_state_row(
 
 fn serialize_applied_state_row(row: &AppliedStateRow, selected: &str) -> Result<Vec<u8>, String> {
     let bytes = match row {
-        AppliedStateRow::Track { key, ordinal, status, lat_e7, lon_e7, altitude_ft, digest } => format!(
+        AppliedStateRow::Track {
+            key,
+            ordinal,
+            status,
+            lat_e7,
+            lon_e7,
+            altitude_ft,
+            digest,
+        } => format!(
             "H5STATE\t1\tselected={selected}\tTRACK\tkey={}\tordinal={ordinal}\tstatus={status}\tlat_e7={lat_e7}\tlon_e7={lon_e7}\taltitude_ft={altitude_ft}\tdigest={}",
-            hex_encode(key)?, hex_encode(digest)?,
+            hex_encode(key)?,
+            hex_encode(digest)?,
         ),
-        AppliedStateRow::Flight { key, ordinal, status, plan_digest, digest } => format!(
+        AppliedStateRow::Flight {
+            key,
+            ordinal,
+            status,
+            plan_digest,
+            digest,
+        } => format!(
             "H5STATE\t1\tselected={selected}\tFLIGHT\tkey={}\tordinal={ordinal}\tstatus={status}\tplan_digest={}\tdigest={}",
-            hex_encode(key)?, hex_encode(plan_digest)?, hex_encode(digest)?,
+            hex_encode(key)?,
+            hex_encode(plan_digest)?,
+            hex_encode(digest)?,
         ),
-        AppliedStateRow::Handoff { key, ordinal, status, lifecycle, owner, recipient, digest } => format!(
+        AppliedStateRow::Handoff {
+            key,
+            ordinal,
+            status,
+            lifecycle,
+            owner,
+            recipient,
+            digest,
+        } => format!(
             "H5STATE\t1\tselected={selected}\tHANDOFF\tkey={}\tordinal={ordinal}\tstatus={status}\tlifecycle={lifecycle}\towner={owner}\trecipient={recipient}\tdigest={}",
-            hex_encode(key)?, hex_encode(digest)?,
+            hex_encode(key)?,
+            hex_encode(digest)?,
         ),
-        AppliedStateRow::Alert { key, ordinal, status, active, ack_unknown, suppressed_unknown, digest } => {
-            if !ack_unknown || !suppressed_unknown { return Err("selected alert acknowledgement/suppression must remain unknown".into()); }
+        AppliedStateRow::Alert {
+            key,
+            ordinal,
+            status,
+            active,
+            ack_unknown,
+            suppressed_unknown,
+            digest,
+        } => {
+            if !ack_unknown || !suppressed_unknown {
+                return Err(
+                    "selected alert acknowledgement/suppression must remain unknown".into(),
+                );
+            }
             format!(
                 "H5STATE\t1\tselected={selected}\tALERT\tkey={}\tordinal={ordinal}\tstatus={status}\tactive={}\tack=UNKNOWN\tsuppressed=UNKNOWN\tdigest={}",
-                hex_encode(key)?, u8::from(*active), hex_encode(digest)?,
+                hex_encode(key)?,
+                u8::from(*active),
+                hex_encode(digest)?,
             )
         }
     };
@@ -3406,10 +3446,18 @@ pub fn run_recorded(
                 .ok_or("replay projection cycle missing")?;
             let payload = format!(
                 "OA-REGIONAL-REPLAY\t1\tpass={pass}\tcycle={index}\tframes={}\ttracks={}\tflights={}\thandoffs={}\tactive_ca_alerts={}\tca_work_short={}\tca_input_short={}\tca_tracks_unscanned={}\tquarantined={}\tmanual_handling={}\tlast_frame_ns={}\tprojection_sha256={}",
-                row.frames, row.track_rows, row.flight_views, row.handoff_views,
-                row.active_ca_alerts, row.ca_work_short, row.ca_input_short,
-                row.ca_tracks_unscanned, row.quarantined_items, row.manual_handling_items,
-                row.last_frame_ns.map_or_else(|| "UNAVAILABLE".into(), |value| value.to_string()),
+                row.frames,
+                row.track_rows,
+                row.flight_views,
+                row.handoff_views,
+                row.active_ca_alerts,
+                row.ca_work_short,
+                row.ca_input_short,
+                row.ca_tracks_unscanned,
+                row.quarantined_items,
+                row.manual_handling_items,
+                row.last_frame_ns
+                    .map_or_else(|| "UNAVAILABLE".into(), |value| value.to_string()),
                 row.projection_sha256,
             );
             let sequence = u64::try_from(pass + 1).map_err(|_| "replay sequence overflow")?;
@@ -4251,20 +4299,22 @@ mod tests {
                 position(oa_adsb::ZAU_BOX.lat_min_e7, oa_adsb::ZAU_BOX.lon_min_e7),
             ))?);
         }
-        assert!(filter
-            .admit(&spatial_event(
-                SourceKind::Surveillance,
-                MAX_ZAU_BOX_ADDRESSES as u32 + 1,
-                position(oa_adsb::ZAU_BOX.lat_min_e7, oa_adsb::ZAU_BOX.lon_min_e7),
-            ))
-            .is_err());
+        assert!(
+            filter
+                .admit(&spatial_event(
+                    SourceKind::Surveillance,
+                    MAX_ZAU_BOX_ADDRESSES as u32 + 1,
+                    position(oa_adsb::ZAU_BOX.lat_min_e7, oa_adsb::ZAU_BOX.lon_min_e7),
+                ))
+                .is_err()
+        );
         Ok(())
     }
 
     // REQ: OA-MIG-414
     #[test]
-    fn selected_snapshot_rows_apply_to_typed_worker_tables_with_the_same_digest(
-    ) -> Result<(), String> {
+    fn selected_snapshot_rows_apply_to_typed_worker_tables_with_the_same_digest()
+    -> Result<(), String> {
         let track = TrackState {
             key: BusinessKey {
                 entity_key: [0x11; 32],
@@ -4356,8 +4406,8 @@ mod tests {
     }
 
     #[test]
-    fn local_authority_fixture_runs_candidate_select_and_acknowledged_rollback(
-    ) -> Result<(), String> {
+    fn local_authority_fixture_runs_candidate_select_and_acknowledged_rollback()
+    -> Result<(), String> {
         let policy = policy(EndpointClass::Terminal);
         let unit = SwapUnitKey {
             function_id: 1,
@@ -4526,19 +4576,23 @@ mod tests {
             ),
             Ok(Some(CYCLES - 1))
         );
-        assert!(replay_measurement_cycle(
-            measurement_end,
-            capture_start,
-            measurement_start,
-            measurement_end
-        )
-        .is_err());
-        assert!(replay_measurement_cycle(
-            capture_start - 1,
-            capture_start,
-            measurement_start,
-            measurement_end
-        )
-        .is_err());
+        assert!(
+            replay_measurement_cycle(
+                measurement_end,
+                capture_start,
+                measurement_start,
+                measurement_end
+            )
+            .is_err()
+        );
+        assert!(
+            replay_measurement_cycle(
+                capture_start - 1,
+                capture_start,
+                measurement_start,
+                measurement_end
+            )
+            .is_err()
+        );
     }
 }
