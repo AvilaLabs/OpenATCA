@@ -35,47 +35,99 @@ pub struct CycleOut {
     pub input_short: u64,
 }
 
+fn add_count(total: &mut u64, increment: u64, overflowed: &mut bool) {
+    match total.checked_add(increment) {
+        Some(value) => *total = value,
+        None => {
+            *total = u64::MAX;
+            *overflowed = true;
+        }
+    }
+}
+
 fn add(t: &mut CycleStats, s: &CycleStats) {
-    t.cycles += s.cycles;
-    t.out_of_order += s.out_of_order;
-    t.tracks += s.tracks;
-    t.rows_bad += s.rows_bad;
-    t.rows_bad_lat += s.rows_bad_lat;
-    t.rows_bad_lon += s.rows_bad_lon;
-    t.rows_bad_velocity_component += s.rows_bad_velocity_component;
-    t.rows_bad_speed += s.rows_bad_speed;
-    t.rows_bad_altitude += s.rows_bad_altitude;
-    t.rows_bad_vrate += s.rows_bad_vrate;
-    t.rows_duplicate += s.rows_duplicate;
-    t.rows_over_capacity += s.rows_over_capacity;
-    t.rows_high_lat += s.rows_high_lat;
-    t.r95_clamped += s.r95_clamped;
-    t.grid_work += s.grid_work;
-    t.tracks_unscanned += s.tracks_unscanned;
-    t.pairs_chord += s.pairs_chord;
-    t.candidates += s.candidates;
-    t.pairs_skipped_vertical += s.pairs_skipped_vertical;
-    t.candidates_dropped += s.candidates_dropped;
-    t.evaluated += s.evaluated;
-    t.not_evaluated += s.not_evaluated;
-    t.eval_failed += s.eval_failed;
-    t.ground_excluded += s.ground_excluded;
-    t.beyond_reach += s.beyond_reach;
-    t.alt_unknown_pairs += s.alt_unknown_pairs;
-    t.in_conflict += s.in_conflict;
-    t.suppressed += s.suppressed;
-    t.suppressions_dropped += s.suppressions_dropped;
-    t.control_lookup_refused += s.control_lookup_refused;
-    t.opened += s.opened;
-    t.closed += s.closed;
-    t.open_dropped += s.open_dropped;
-    t.alt_lost += s.alt_lost;
-    t.alt_lost_dropped += s.alt_lost_dropped;
-    t.alerts_dropped += s.alerts_dropped;
-    t.net_refused += s.net_refused;
-    t.rate_unknown_pairs += s.rate_unknown_pairs;
-    t.rows_lost_upstream = t.rows_lost_upstream.saturating_add(s.rows_lost_upstream);
-    t.finish_dropped += s.finish_dropped;
+    let mut overflowed = t.count_overflow || s.count_overflow;
+    add_count(&mut t.cycles, s.cycles, &mut overflowed);
+    add_count(&mut t.out_of_order, s.out_of_order, &mut overflowed);
+    add_count(&mut t.tracks, s.tracks, &mut overflowed);
+    add_count(&mut t.rows_bad, s.rows_bad, &mut overflowed);
+    add_count(&mut t.rows_bad_lat, s.rows_bad_lat, &mut overflowed);
+    add_count(&mut t.rows_bad_lon, s.rows_bad_lon, &mut overflowed);
+    add_count(
+        &mut t.rows_bad_velocity_component,
+        s.rows_bad_velocity_component,
+        &mut overflowed,
+    );
+    add_count(&mut t.rows_bad_speed, s.rows_bad_speed, &mut overflowed);
+    add_count(
+        &mut t.rows_bad_altitude,
+        s.rows_bad_altitude,
+        &mut overflowed,
+    );
+    add_count(&mut t.rows_bad_vrate, s.rows_bad_vrate, &mut overflowed);
+    add_count(&mut t.rows_duplicate, s.rows_duplicate, &mut overflowed);
+    add_count(
+        &mut t.rows_over_capacity,
+        s.rows_over_capacity,
+        &mut overflowed,
+    );
+    add_count(&mut t.rows_high_lat, s.rows_high_lat, &mut overflowed);
+    add_count(&mut t.r95_clamped, s.r95_clamped, &mut overflowed);
+    add_count(&mut t.grid_work, s.grid_work, &mut overflowed);
+    add_count(&mut t.tracks_unscanned, s.tracks_unscanned, &mut overflowed);
+    add_count(&mut t.pairs_chord, s.pairs_chord, &mut overflowed);
+    add_count(&mut t.candidates, s.candidates, &mut overflowed);
+    add_count(
+        &mut t.pairs_skipped_vertical,
+        s.pairs_skipped_vertical,
+        &mut overflowed,
+    );
+    add_count(
+        &mut t.candidates_dropped,
+        s.candidates_dropped,
+        &mut overflowed,
+    );
+    add_count(&mut t.evaluated, s.evaluated, &mut overflowed);
+    add_count(&mut t.not_evaluated, s.not_evaluated, &mut overflowed);
+    add_count(&mut t.eval_failed, s.eval_failed, &mut overflowed);
+    add_count(&mut t.ground_excluded, s.ground_excluded, &mut overflowed);
+    add_count(&mut t.beyond_reach, s.beyond_reach, &mut overflowed);
+    add_count(
+        &mut t.alt_unknown_pairs,
+        s.alt_unknown_pairs,
+        &mut overflowed,
+    );
+    add_count(&mut t.in_conflict, s.in_conflict, &mut overflowed);
+    add_count(&mut t.suppressed, s.suppressed, &mut overflowed);
+    add_count(
+        &mut t.suppressions_dropped,
+        s.suppressions_dropped,
+        &mut overflowed,
+    );
+    add_count(
+        &mut t.control_lookup_refused,
+        s.control_lookup_refused,
+        &mut overflowed,
+    );
+    add_count(&mut t.opened, s.opened, &mut overflowed);
+    add_count(&mut t.closed, s.closed, &mut overflowed);
+    add_count(&mut t.open_dropped, s.open_dropped, &mut overflowed);
+    add_count(&mut t.alt_lost, s.alt_lost, &mut overflowed);
+    add_count(&mut t.alt_lost_dropped, s.alt_lost_dropped, &mut overflowed);
+    add_count(&mut t.alerts_dropped, s.alerts_dropped, &mut overflowed);
+    add_count(&mut t.net_refused, s.net_refused, &mut overflowed);
+    add_count(
+        &mut t.rate_unknown_pairs,
+        s.rate_unknown_pairs,
+        &mut overflowed,
+    );
+    add_count(
+        &mut t.rows_lost_upstream,
+        s.rows_lost_upstream,
+        &mut overflowed,
+    );
+    add_count(&mut t.finish_dropped, s.finish_dropped, &mut overflowed);
+    t.count_overflow = overflowed;
 }
 
 fn row_ok(c: &CaConfig, o: &CaTrack) -> bool {
@@ -569,6 +621,13 @@ pub fn net_report_of(s: &CycleStats) -> NetReport {
 /// The cycle also knows how many of its held radii were finite and exceeded the configured cap;
 /// that detail is kept out of the public aggregate statistics, so only `ca_cycle` passes it here.
 fn net_report_with_radius_cap(s: &CycleStats, above_cap: u64) -> NetReport {
+    if s.count_overflow {
+        return NetReport::Degraded {
+            reason: Reason::InputMissing,
+            area: Area::Whole,
+            count: u32::MAX,
+        };
+    }
     let (work, input) = shortfalls(s);
     if s.suppressions_dropped > 0 {
         NetReport::Degraded {
@@ -675,6 +734,7 @@ fn ca_cycle_inner(
     st.last_ns = t_ns;
     stats.cycles = 1;
     stats.rows_lost_upstream = core::mem::take(&mut st.lost_input);
+    stats.count_overflow = core::mem::take(&mut st.lost_input_overflow);
     let above_cap = load(st, rows, &mut stats);
     grid_build(st);
     // Rows above the latitude the cell search is shown for are used and counted.
@@ -831,9 +891,10 @@ pub fn ca_finish(st: &mut CaState, alerts: &mut AlertLog, net: &mut StateTable) 
         n += 1;
     }
     st.open.clear();
-    st.totals.closed += n;
-    st.totals.alerts_dropped += dropped;
-    st.totals.finish_dropped += dropped;
+    let mut overflowed = st.totals.count_overflow;
+    add_count(&mut st.totals.closed, n, &mut overflowed);
+    add_count(&mut st.totals.alerts_dropped, dropped, &mut overflowed);
+    add_count(&mut st.totals.finish_dropped, dropped, &mut overflowed);
     if dropped > 0 && st.started {
         let r = NetReport::Degraded {
             reason: Reason::BudgetExceeded,
@@ -841,8 +902,80 @@ pub fn ca_finish(st: &mut CaState, alerts: &mut AlertLog, net: &mut StateTable) 
             count: sat32(dropped),
         };
         if state_report(net, NetId::ConflictAlert, r, st.last_ns, st.last_ns).is_err() {
-            st.totals.net_refused += 1;
+            add_count(&mut st.totals.net_refused, 1, &mut overflowed);
         }
     }
+    st.totals.count_overflow = overflowed;
     n
+}
+
+#[cfg(test)]
+mod lifetime_stats_tests {
+    use super::{add, net_report_of};
+    use crate::types::CycleStats;
+    use oa_safety::net::{Area, NetReport, Reason};
+
+    // REQ: OA-CA-011
+    #[test]
+    fn lifetime_cycle_stats_accumulate_ordinary_counts_exactly() {
+        let mut totals = CycleStats {
+            cycles: 12,
+            opened: 5,
+            rows_lost_upstream: 2,
+            ..CycleStats::default()
+        };
+        let cycle = CycleStats {
+            cycles: 1,
+            opened: 2,
+            rows_lost_upstream: 3,
+            ..CycleStats::default()
+        };
+
+        add(&mut totals, &cycle);
+
+        assert_eq!(totals.cycles, 13);
+        assert_eq!(totals.opened, 7);
+        assert_eq!(totals.rows_lost_upstream, 5);
+        assert!(!totals.count_overflow);
+    }
+
+    // REQ: OA-CA-011
+    #[test]
+    fn lifetime_cycle_stats_saturate_and_report_incomplete_on_overflow() {
+        let mut totals = CycleStats {
+            cycles: u64::MAX,
+            rows_bad: u64::MAX,
+            rows_lost_upstream: u64::MAX,
+            ..CycleStats::default()
+        };
+        let cycle = CycleStats {
+            cycles: 1,
+            rows_bad: 1,
+            rows_lost_upstream: 1,
+            ..CycleStats::default()
+        };
+
+        add(&mut totals, &cycle);
+
+        assert_eq!(totals.cycles, u64::MAX);
+        assert_eq!(totals.rows_bad, u64::MAX);
+        assert_eq!(totals.rows_lost_upstream, u64::MAX);
+        assert!(totals.count_overflow);
+        assert_eq!(
+            net_report_of(&totals),
+            NetReport::Degraded {
+                reason: Reason::InputMissing,
+                area: Area::Whole,
+                count: u32::MAX,
+            }
+        );
+
+        let source_overflow = CycleStats {
+            count_overflow: true,
+            ..CycleStats::default()
+        };
+        let mut clean = CycleStats::default();
+        add(&mut clean, &source_overflow);
+        assert!(clean.count_overflow);
+    }
 }

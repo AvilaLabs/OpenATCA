@@ -6191,7 +6191,7 @@ configuration with no default; the crate's tests use synthetic values.
   the work and input counts apart), otherwise; unavailable (`SurveillanceLost`) for a cycle whose time is not
   after the last, and unavailable (`InputMissing`) when the configuration was refused (the batch tool exits
   rather than publishing it); reports the table refuses are counted. A caller that lost rows before a cycle
-  says so, and that cycle is not running.
+  says so, and that cycle is not running. Lifetime `CycleStats` additions use checked arithmetic, saturate affected counts at `u64::MAX`, and set an explicit overflow flag; the normal summary reports overflow and remains degraded/incomplete rather than declaring a complete run.
 - **OA-CA-012** One conflict is one alert from its first cycle in conflict to its last, ended when the pair
   has been out of conflict for the hysteresis (a return within it continues the alert, a later one is a new
   alert), with its start, peak (the smallest time to loss) and end.

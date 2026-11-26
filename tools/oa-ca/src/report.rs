@@ -208,28 +208,28 @@ pub struct SummaryInput<'a> {
 /// something, or a cycle refused.
 pub fn degraded(i: &SummaryInput) -> bool {
     let t = &i.totals;
-    t.not_evaluated
-        + t.tracks_unscanned
-        + t.rows_duplicate
-        + t.rows_bad
-        + t.rows_high_lat
-        + t.r95_clamped
-        + t.open_dropped
-        + t.rows_over_capacity
-        + t.out_of_order
-        + t.alerts_dropped
-        + t.alt_lost_dropped
-        + t.suppressions_dropped
-        + t.control_lookup_refused
-        + t.net_refused
-        + t.rows_lost_upstream
-        + t.finish_dropped
-        + i.rows_skipped
-        + i.log_overflow
-        + i.event_overflow
-        + i.tracker_overflow
-        + i.tracker_capacity_refused
-        > 0
+    t.count_overflow
+        || t.not_evaluated > 0
+        || t.tracks_unscanned > 0
+        || t.rows_duplicate > 0
+        || t.rows_bad > 0
+        || t.rows_high_lat > 0
+        || t.r95_clamped > 0
+        || t.open_dropped > 0
+        || t.rows_over_capacity > 0
+        || t.out_of_order > 0
+        || t.alerts_dropped > 0
+        || t.alt_lost_dropped > 0
+        || t.suppressions_dropped > 0
+        || t.control_lookup_refused > 0
+        || t.net_refused > 0
+        || t.rows_lost_upstream > 0
+        || t.finish_dropped > 0
+        || i.rows_skipped > 0
+        || i.log_overflow > 0
+        || i.event_overflow > 0
+        || i.tracker_overflow > 0
+        || i.tracker_capacity_refused > 0
 }
 
 /// `summary.txt`: counts only, no address and no callsign.
@@ -459,6 +459,10 @@ pub fn summary_text(i: &SummaryInput) -> String {
         (
             "rows lost before a cycle (told to conflict alert)",
             t.rows_lost_upstream,
+        ),
+        (
+            "lifetime counter overflow (totals incomplete)",
+            if t.count_overflow { 1 } else { 0 },
         ),
     ] {
         let _ = writeln!(o, "  {name}: {n}");

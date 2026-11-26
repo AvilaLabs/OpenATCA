@@ -296,7 +296,7 @@ fn alert(a: u32, b: u32, start_s: i64, flags: u16, ground: u8, current: u32) -> 
     }
 }
 
-// REQ: OA-CA-015, OA-CA-025
+// REQ: OA-CA-011, OA-CA-015, OA-CA-025
 #[test]
 fn the_files_are_deterministic_and_the_summary_counts_flags_hours_states_and_shortfalls() {
     let s = parse_config(DEV_CFG).unwrap();
@@ -398,6 +398,17 @@ fn the_files_are_deterministic_and_the_summary_counts_flags_hours_states_and_sho
     assert!(t.contains("  RUNNING: 3598\n") && t.contains("  DEGRADED: BUDGET EXCEEDED: 2\n"));
     assert!(t.contains("altitude lost (a track that had an altitude and lost it): 2 (on the ground when lost: 1, not: 1)"));
     assert!(t.contains("net state: complete"));
+    let overflow = input(
+        &[],
+        CycleStats {
+            count_overflow: true,
+            ..ok
+        },
+        0,
+        0,
+    );
+    assert!(overflow.contains("net state: DEGRADED"));
+    assert!(overflow.contains("lifetime counter overflow (totals incomplete): 1"));
     assert!(t.contains(
         "bad-row reason counts below overlap; they are subsets of bad rows and must not be added"
     ));

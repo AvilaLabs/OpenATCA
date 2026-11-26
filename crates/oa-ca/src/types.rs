@@ -305,6 +305,11 @@ pub struct CycleStats {
     pub rows_lost_upstream: u64,
     /// Of `alerts_dropped`: alerts ended by [`crate::ca_finish`], after the last report.
     pub finish_dropped: u64,
+    /// At least one lifetime counter saturated while aggregating cycles or upstream loss.
+    /// Counts remain at `u64::MAX`; consumers must treat the totals as incomplete.
+    pub count_overflow: bool,
 }
 
-const _: () = assert!(core::mem::size_of::<CycleStats>() == 320);
+// A7.1: add one explicit aggregate-overflow flag (8 bytes including alignment, 320 -> 328) so
+// lifetime counter saturation cannot be reported as a complete run.
+const _: () = assert!(core::mem::size_of::<CycleStats>() == 328);
