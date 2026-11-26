@@ -137,8 +137,8 @@
 | OA-CA-032 | conflict_alert | HZ-CA-001 | Test | test: tools/oa-ca/tests/nas_hour.rs#the_census_counts_distinct_airborne_addresses_by_hour_and_minute | DRAFT_NOT_ASSESSED |
 | OA-CA-033 | conflict_alert | HZ-CA-001 | Test | test: crates/oa-ca/src/grid.rs#the_chord_is_never_longer_than_the_arc_at_any_latitude | DRAFT_NOT_ASSESSED |
 | OA-CA-034 | conflict_alert | HZ-CA-001 | Test | test: crates/oa-ca/src/grid.rs#the_chord_is_finite_symmetric_and_not_negative_and_flat_validity_only_narrows | DRAFT_NOT_ASSESSED |
-| OA-CA-035 | conflict_alert | HZ-CA-001 | Test | test: crates/oa-ca/tests/ca.rs#an_area_inhibit_uses_its_altitude_and_half_open_time_window_for_conflict_alert; test: crates/oa-ca/tests/ca.rs#pair_suppression_keeps_the_detected_conflict_and_reveals_the_same_alert_after_expiry | DRAFT_NOT_ASSESSED |
-| OA-CA-036 | conflict_alert | HZ-CA-001 | Test | test: crates/oa-ca/src/preset.rs#runtime_applies_exact_issued_facility_preset_values_before_configuration_check; test: tools/oa-adapt/src/manifest.rs#v3_issued_facility_preset_roundtrips_exact_body_and_refuses_identity_damage; test: tools/oa-ca/src/run.rs#verified_issued_preset_loads_into_runtime_settings_before_ca_cycle | DRAFT_NOT_ASSESSED |
+| OA-CA-035 | conflict_alert | HZ-CA-001 | Test | test: crates/oa-ca/tests/ca.rs#pair_suppression_keeps_the_detected_conflict_and_reveals_the_same_alert_after_expiry | DRAFT_NOT_ASSESSED |
+| OA-CA-036 | conflict_alert | HZ-CA-001 | Test | test: tools/oa-ca/src/run.rs#verified_issued_preset_loads_into_runtime_settings_before_ca_cycle | DRAFT_NOT_ASSESSED |
 | OA-CORE-006 | navigation_and_adaptation_data | HZ-AIRSPACE-001 | Test | test: tools/oa-adapt/tests/cli.rs#build_writes_the_snapshot_and_report_and_a_rebuild_is_byte_identical | DRAFT_NOT_ASSESSED |
 | OA-CORE-007 | navigation_and_adaptation_data | HZ-AIRSPACE-001 | Test | test: crates/oa-time-window/src/lib.rs#half_open_and_empty_windows_keep_their_boundaries | DRAFT_NOT_ASSESSED |
 | OA-CSV-001 | surveillance_and_structured_feed_ingestion | HZ-FEED-001 | Test | test: crates/oa-csv/tests/csv.rs#plain_fields_lf_and_crlf | DRAFT_NOT_ASSESSED |
@@ -231,6 +231,11 @@
 | OA-DSP-076 | traffic_and_safety_status_display | HZ-DISPLAY-001 | Test | test: crates/oa-scope-replay/tests/publication.rs#publisher_lock_excludes_a_second_writer_and_releases_after_abort | DRAFT_NOT_ASSESSED |
 | OA-DSP-077 | traffic_and_safety_status_display | HZ-DISPLAY-001 | Test | test: crates/oa-display/tests/alert_markers.rs#caution_warning_and_protection_lost_have_distinct_alert_primitives_and_header | DRAFT_NOT_ASSESSED |
 | OA-DSP-078 | traffic_and_safety_status_display | HZ-DISPLAY-001 | Test | test: crates/oa-display/tests/safety.rs#safety_banner_respects_additional_reserved_operator_header | DRAFT_NOT_ASSESSED |
+| OA-DSP-079 | traffic_and_safety_status_display | HZ-DISPLAY-001 | Test | test: crates/oa-display/src/core/metering.rs#scheduled_and_sixty_second_boundaries_are_inside_window | DRAFT_NOT_ASSESSED |
+| OA-DSP-080 | traffic_and_safety_status_display | HZ-DISPLAY-001 | Test | test: crates/oa-display/src/core/metering.rs#early_and_late_beyond_one_minute_are_signed_and_distinct | DRAFT_NOT_ASSESSED |
+| OA-DSP-081 | traffic_and_safety_status_display | HZ-DISPLAY-001 | Test | test: crates/oa-display/src/core/metering.rs#missing_fields_are_not_zero_and_schedule_change_recomputes | DRAFT_NOT_ASSESSED |
+| OA-DSP-082 | traffic_and_safety_status_display | HZ-DISPLAY-001 | Test | test: crates/oa-display/src/core/metering.rs#difference_overflow_is_explicit | DRAFT_NOT_ASSESSED |
+| OA-DSP-083 | traffic_and_safety_status_display | HZ-DISPLAY-001 | Test | test: crates/oa-display/src/core/metering.rs#meter_list_is_bounded_and_reusable | DRAFT_NOT_ASSESSED |
 | OA-FEED-001 | surveillance_and_structured_feed_ingestion | HZ-FEED-001 | Test | test: crates/oa-feed/src/shell/tests.rs#frame_round_trip_every_kind_and_field | DRAFT_NOT_ASSESSED |
 | OA-FEED-002 | surveillance_and_structured_feed_ingestion | HZ-FEED-001 | Test | test: crates/oa-feed/src/shell/tests.rs#golden_vector_from_the_java_encoder | DRAFT_NOT_ASSESSED |
 | OA-FEED-003 | surveillance_and_structured_feed_ingestion | HZ-FEED-001 | Test | test: crates/oa-feed/src/shell/tests.rs#chunking_at_every_byte_boundary_gives_identical_frames | DRAFT_NOT_ASSESSED |
@@ -387,6 +392,7 @@
 | OA-IWXXM-002 | weather_and_pressure_altitude_inputs | HZ-WEATHER-001 | Test | test: crates/oa-iwxxm/src/tests.rs#refuses_hazard_fields_instead_of_silently_dropping_them | DRAFT_NOT_ASSESSED |
 | OA-IWXXM-003 | weather_and_pressure_altitude_inputs | HZ-WEATHER-001 | Test | test: crates/oa-iwxxm/src/tests.rs#rejects_wrong_units_malformed_time_and_oversized_document | DRAFT_NOT_ASSESSED |
 | OA-IWXXM-004 | weather_and_pressure_altitude_inputs | HZ-WEATHER-001 | Test | test: crates/oa-iwxxm/src/tests.rs#accepts_supported_utc_z_timestamps_and_refuses_offsets | DRAFT_NOT_ASSESSED |
+| OA-IWXXM-005 | weather_and_pressure_altitude_inputs | HZ-WEATHER-001 | Test | test: crates/oa-iwxxm/src/tests.rs#official_wmo_full_report_set_decodes_or_refuses_by_named_construct | DRAFT_NOT_ASSESSED |
 | OA-J2K-001 | terrain_obstacle_and_minimum_altitude_data | HZ-TERRAIN-001 | Test | test: crates/oa-j2k/src/tests.rs#mq_decoder_reads_the_jbig2_annex_h_test_sequence | DRAFT_NOT_ASSESSED |
 | OA-J2K-002 | terrain_obstacle_and_minimum_altitude_data | HZ-TERRAIN-001 | Test | test: crates/oa-j2k/src/tests.rs#tag_tree_decodes_a_hand_written_bit_string | DRAFT_NOT_ASSESSED |
 | OA-J2K-003 | terrain_obstacle_and_minimum_altitude_data | HZ-TERRAIN-001 | Test | test: crates/oa-j2k/src/tests.rs#header_bits_stuff_after_ff_and_end_on_a_byte | DRAFT_NOT_ASSESSED |
@@ -608,6 +614,8 @@
 | OA-NAM-033 | acc_to_acc_flight_coordination_interface | HZ-COORDINATION-001 | Test | test: crates/oa-nam/tests/session.rs#message_number_arithmetic_cannot_overflow_from_any_field_value | DRAFT_NOT_ASSESSED |
 | OA-NAM-034 | acc_to_acc_flight_coordination_interface | HZ-COORDINATION-001 | Test | test: crates/oa-nam/tests/session.rs#wrapped_number_still_pending_is_refused_without_advancing_sequence | DRAFT_NOT_ASSESSED |
 | OA-NAM-035 | acc_to_acc_flight_coordination_interface | HZ-COORDINATION-001 | Test | test: validation/oa-alloc-check/src/nam_window.rs#the_script_reaches_every_state_and_bound_it_claims | DRAFT_NOT_ASSESSED |
+| OA-NAM-036 | flight_plan_and_coordination_message_ingestion | HZ-FLIGHTDATA-001 | Test | test: crates/oa-nam/tests/icao_item15.rs#fpl_chg_and_cnl_item15_handling_is_confined_to_defined_messages | DRAFT_NOT_ASSESSED |
+| OA-NAM-037 | flight_plan_and_coordination_message_ingestion | HZ-FLIGHTDATA-001 | Test | test: crates/oa-nam/tests/icao_item15.rs#dla_uses_public_appendix3_fields_and_carries_no_route_update | DRAFT_NOT_ASSESSED |
 | OA-NASR-001 | navigation_and_adaptation_data | HZ-AIRSPACE-001 | Test | test: crates/oa-nasr/tests/parsers.rs#structure_files_parse_into_schemas | DRAFT_NOT_ASSESSED |
 | OA-NASR-002 | navigation_and_adaptation_data | HZ-AIRSPACE-001 | Test | test: crates/oa-nasr/tests/parsers.rs#arb_base_has_zau_with_computed_position | DRAFT_NOT_ASSESSED |
 | OA-NASR-003 | navigation_and_adaptation_data | HZ-AIRSPACE-001 | Test | test: crates/oa-nasr/tests/parsers.rs#dms_conversion_signs_and_ranges | DRAFT_NOT_ASSESSED |
@@ -671,6 +679,12 @@
 | OA-RTE-005 | navigation_and_adaptation_data | HZ-AIRSPACE-001 | Test | test: crates/oa-airspace/tests/route_conversion.rs#malformed_columns_work_and_step_limits_refuse_atomically | DRAFT_NOT_ASSESSED |
 | OA-RTE-010 | navigation_and_adaptation_data | HZ-AIRSPACE-001 | Test | test: tools/oa-adapt/tests/route_cli.rs#normalized_instructions_preserve_full_keys_and_reject_truncation | DRAFT_NOT_ASSESSED |
 | OA-RTE-011 | navigation_and_adaptation_data | HZ-AIRSPACE-001 | Test | test: tools/oa-adapt/tests/route_cli.rs#parser_refusal_accounts_for_the_unexamined_suffix_and_byte_cap_is_unknown | DRAFT_NOT_ASSESSED |
+| OA-RWY-014 | geodetic_and_navigation_geometry | HZ-GEOMETRY-001 | Test | test: crates/oa-runway/src/final_monitor.rs#kord_parallel_pair_uses_public_runway_geometry | DRAFT_NOT_ASSESSED |
+| OA-RWY-015 | conflict_alert | HZ-CA-001 | Test | test: crates/oa-display/tests/alert_markers.rs#final_monitor_hook_renders_caution_warning_and_degraded_status | DRAFT_NOT_ASSESSED |
+| OA-RWY-016 | conflict_alert | HZ-CA-001 | Test | test: crates/oa-runway/src/final_monitor.rs#thirty_degree_blunder_caution_within_prediction | DRAFT_NOT_ASSESSED |
+| OA-RWY-017 | safety_net_state_and_display | HZ-NET-STATE-001 | Test | test: crates/oa-runway/src/final_monitor.rs#stale_prediction_sets_degraded | DRAFT_NOT_ASSESSED |
+| OA-RWY-018 | conflict_alert | HZ-CA-001 | Test | test: crates/oa-runway/src/final_monitor.rs#close_parallel_finals_are_refused | DRAFT_NOT_ASSESSED |
+| OA-RWY-019 | conflict_alert | HZ-CA-001 | Test | test: crates/oa-runway/src/final_monitor.rs#predicted_zone_entry_beyond_final_endpoint_is_clear | DRAFT_NOT_ASSESSED |
 | OA-SAF-001 | safety_net_state_and_display | HZ-NET-STATE-001 | Test | test: crates/oa-safety/tests/safety.rs#a_net_that_never_reported_or_stopped_reporting_is_unavailable | DRAFT_NOT_ASSESSED |
 | OA-SAF-002 | safety_net_state_and_display | HZ-NET-STATE-001 | Test | test: crates/oa-safety/tests/safety.rs#the_staleness_limit_comes_from_configuration_and_reports_cannot_go_back | DRAFT_NOT_ASSESSED |
 | OA-SAF-003 | safety_net_state_and_display | HZ-NET-STATE-001 | Test | test: crates/oa-safety/tests/safety.rs#each_state_is_reported_with_its_reason_area_count_and_age | DRAFT_NOT_ASSESSED |
@@ -692,8 +706,8 @@
 | OA-SAF-019 | safety_net_state_and_display | HZ-NET-STATE-001 | Test | test: crates/oa-safety/tests/safety.rs#lost_suppressions_mark_only_their_net_degraded_until_the_log_is_cleared | DRAFT_NOT_ASSESSED |
 | OA-SAF-020 | safety_net_state_and_display | HZ-NET-STATE-001 | Test | test: crates/oa-safety/tests/monitor.rs#synthetic_mutations_separate_detected_missed_and_unavailable_evidence | DRAFT_NOT_ASSESSED |
 | OA-SAF-021 | conflict_alert | HZ-CA-001 | Test | test: crates/oa-safety/tests/safety.rs#pair_suppression_acknowledges_only_the_named_alert_instance | DRAFT_NOT_ASSESSED |
-| OA-SAF-022 | conflict_alert | HZ-CA-001 | Test | test: crates/oa-safety/tests/safety.rs#group_suppression_refuses_disabled_facility_policy_and_nonmilitary_purpose; test: crates/oa-safety/tests/safety.rs#group_suppression_requires_both_aircraft_to_belong_to_the_selected_set | DRAFT_NOT_ASSESSED |
-| OA-SAF-023 | conflict_alert | HZ-CA-001 | Test | test: crates/oa-safety/tests/safety.rs#group_suppression_requires_both_aircraft_to_belong_to_the_selected_set; test: crates/oa-safety/tests/safety.rs#pair_suppression_acknowledges_only_the_named_alert_instance | DRAFT_NOT_ASSESSED |
+| OA-SAF-022 | conflict_alert | HZ-CA-001 | Test | test: crates/oa-safety/tests/safety.rs#group_suppression_refuses_disabled_facility_policy_and_nonmilitary_purpose | DRAFT_NOT_ASSESSED |
+| OA-SAF-023 | conflict_alert | HZ-CA-001 | Test | test: crates/oa-safety/tests/safety.rs#group_suppression_requires_both_aircraft_to_belong_to_the_selected_set | DRAFT_NOT_ASSESSED |
 | OA-STD-001 | flight_plan_and_coordination_message_ingestion | HZ-FLIGHTDATA-001 | Test | test: crates/oa-stdds/tests/stdds.rs#every_fixture_kind_is_classified_by_root_and_namespace | DRAFT_NOT_ASSESSED |
 | OA-STD-002 | flight_plan_and_coordination_message_ingestion | HZ-FLIGHTDATA-001 | Test | test: crates/oa-stdds/tests/stdds.rs#unknown_kinds_are_counted_with_their_root_and_are_not_errors | DRAFT_NOT_ASSESSED |
 | OA-STD-003 | flight_plan_and_coordination_message_ingestion | HZ-FLIGHTDATA-001 | Test | test: crates/oa-stdds/tests/stdds.rs#a_full_tais_message_parses_every_field_in_its_unit | DRAFT_NOT_ASSESSED |
