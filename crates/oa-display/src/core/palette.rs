@@ -246,10 +246,14 @@ mod tests {
         } else {
             (29.0_f64 / 3.0).powi(3) * relative_y
         };
+        // FAA-HF-STD-010A §5.7 specifies these four-decimal D65 reference coordinates.
+        // They intentionally differ slightly from u'v' derived from the full-precision XYZ white.
+        const FAA_D65_U_PRIME_N: f64 = 0.1978;
+        const FAA_D65_V_PRIME_N: f64 = 0.4683;
         [
             lightness,
-            13.0 * lightness * (u_prime - 0.1978),
-            13.0 * lightness * (v_prime - 0.4683),
+            13.0 * lightness * (u_prime - FAA_D65_U_PRIME_N),
+            13.0 * lightness * (v_prime - FAA_D65_V_PRIME_N),
         ]
     }
 
@@ -439,12 +443,34 @@ mod tests {
         // minimum peak-white hardware requirement; ambient reflection remains a measured-device input.
         let white = [255, 255, 255];
         let black = [0, 0, 0];
-        // A neutral sRGB gray lies on the D65 white axis. This checks the rounded
-        // matrix against the independently specified CIE D65 whitepoint.
-        let gray_y = xyz([128, 128, 128], 200.0)[1] / 200.0;
-        assert!((gray_y - linear(128.0)).abs() < 1.0e-14);
+        // CIE D65's full-precision XYZ reference white. The independent chromaticity
+        // calculation below checks neutral RGB against the matrix whitepoint, while
+        // CIELUV still uses FAA §5.7's mandated four-decimal u'n/v'n values.
+        let d65_xyz = [0.950_47, 1.0, 1.088_83];
+        let d65_denominator = d65_xyz[0] + 15.0 * d65_xyz[1] + 3.0 * d65_xyz[2];
+        let d65_u_prime = 4.0 * d65_xyz[0] / d65_denominator;
+        let d65_v_prime = 9.0 * d65_xyz[1] / d65_denominator;
+        let [gray_x, gray_y, gray_z] = xyz([128, 128, 128], 200.0);
+        let gray_denominator = gray_x + 15.0 * gray_y + 3.0 * gray_z;
+        assert!((gray_y / 200.0 - linear(128.0)).abs() < 1.0e-14);
+        assert!((4.0 * gray_x / gray_denominator - d65_u_prime).abs() < 1.0e-15);
+        assert!((9.0 * gray_y / gray_denominator - d65_v_prime).abs() < 1.0e-15);
         assert!((delta_e_ab(white, black, 200.0) - 100.0).abs() < 1.0e-8);
-        assert!((delta_uv_sc(white, black, 200.0, 60.0) - 100.0).abs() < 1.0e-8);
+        let white_luv = cieluv(white, 200.0);
+        let expected_white_luv = [
+            100.0,
+            1300.0 * (d65_u_prime - 0.1978),
+            1300.0 * (d65_v_prime - 0.4683),
+        ];
+        for (actual, expected) in white_luv.into_iter().zip(expected_white_luv) {
+            assert!((actual - expected).abs() < 1.0e-12);
+        }
+        let expected_white_black_delta =
+            (100.0_f64.powi(2) + expected_white_luv[1].powi(2) + expected_white_luv[2].powi(2))
+                .sqrt();
+        let white_black_delta = delta_uv_sc(white, black, 200.0, 60.0);
+        assert!(white_black_delta > 100.0);
+        assert!((white_black_delta - expected_white_black_delta).abs() < 1.0e-12);
         assert_eq!(uv_size_coefficients(60.0), Some([1.0; 3]));
         assert_eq!(uv_size_coefficients(0.0), None);
         assert_eq!(uv_size_coefficients(f64::NAN), None);
