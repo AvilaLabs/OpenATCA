@@ -41,7 +41,7 @@ pub struct RunwayAidPacket {
     /// Rows excluded due to absent/stale/invalid prediction evidence; never silently treated clear.
     pub unavailable_tracks: u16,
 }
-const _: () = assert!(core::mem::size_of::<RunwayAidPacket>() == 40);
+const _: () = assert!(core::mem::size_of::<RunwayAidPacket>() == 48);
 
 /// One accepted assignment from the runtime's full-key operator boundary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
