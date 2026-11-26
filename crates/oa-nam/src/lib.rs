@@ -55,7 +55,7 @@ pub mod shell;
 
 pub use crate::core::session;
 pub use crate::shell::{
-    error, field, frame, lrm, message, model, schema, transport_epoch, workload,
+    error, field, frame, item15, lrm, message, model, schema, transport_epoch, workload,
 };
 
 pub use error::{ErrorKind, NamError, NO_OFFSET};

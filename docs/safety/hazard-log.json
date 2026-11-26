@@ -1106,7 +1106,8 @@
     "OA-L23-005",
     "OA-RWY-020",
     "OA-RWY-021",
-    "OA-ENC-023"
+    "OA-ENC-023",
+    "OA-NAM-038"
   ],
   "non_safety_requirement_assessments": [
     {
@@ -11691,6 +11692,7 @@
         "OA-FIXM-027",
         "OA-NAM-036",
         "OA-NAM-037",
+        "OA-NAM-038",
         "OA-STD-001",
         "OA-STD-002",
         "OA-STD-003",
@@ -11791,6 +11793,10 @@
         {
           "document": "REQUIREMENTS.md",
           "locator": "OA-NAM-037"
+        },
+        {
+          "document": "REQUIREMENTS.md",
+          "locator": "OA-NAM-038"
         }
       ],
       "verification_refs": [
@@ -11938,6 +11944,41 @@
           "requirement_id": "OA-NAM-037",
           "file": "crates/oa-nam/tests/icao_item15.rs",
           "test_name": "dla_uses_public_appendix3_fields_and_carries_no_route_update"
+        },
+        {
+          "requirement_id": "OA-NAM-038",
+          "file": "crates/oa-airspace/tests/icao_item15_resolution.rs",
+          "test_name": "item15_airway_enumeration_expands_source_legs_and_refuses_unknown_endpoints"
+        },
+        {
+          "requirement_id": "OA-NAM-038",
+          "file": "crates/oa-airspace/tests/icao_item15_resolution.rs",
+          "test_name": "item15_preserves_full_identity_and_refuses_direct_ambiguity"
+        },
+        {
+          "requirement_id": "OA-NAM-038",
+          "file": "crates/oa-airspace/tests/icao_item15_resolution.rs",
+          "test_name": "item15_selects_cifp_sid_by_departure_airport_and_expands_its_route"
+        },
+        {
+          "requirement_id": "OA-NAM-038",
+          "file": "crates/oa-airspace/tests/icao_item15_resolution.rs",
+          "test_name": "bearing_distance_needs_explicit_variation_and_retains_source_provenance"
+        },
+        {
+          "requirement_id": "OA-NAM-038",
+          "file": "crates/oa-airspace/tests/icao_item15_resolution.rs",
+          "test_name": "item15_parses_high_levels_metric_and_cruise_climb_without_saturation"
+        },
+        {
+          "requirement_id": "OA-NAM-038",
+          "file": "crates/oa-nam/tests/icao_item15.rs",
+          "test_name": "item15_refusal_catalogue_uses_route_field_codes"
+        },
+        {
+          "requirement_id": "OA-NAM-038",
+          "file": "crates/oa-nam/tests/icao_item15.rs",
+          "test_name": "item15_semantic_refusal_builds_correlated_lrm"
         },
         {
           "requirement_id": "OA-STD-001",
@@ -22755,6 +22796,12 @@
       "function": "conflict_alert",
       "hazard_id": "HZ-CA-001",
       "rationale": "Engineering safety candidate: a false Clear from the shared route-profile conflict or active-airspace probe could contribute to a missed conflict or an unrecognized airspace entry if a downstream user relies on it. Route-vertex and merged-timeline samples reduce the chance that a straight segment spans a modeled turn, but the probe remains piecewise-linear between emitted samples. The implementation is explicitly offline, uses caller-supplied identity, schedule and geometry, and has synthetic tests only; no live warning, operational separation assurance, independent trajectory truth, or authority acceptance is claimed. Register clause: The offline A8 probe obtains each active plan's positions only from the shared route walk in `tools/oa-legacy-traj/src/core/trajectory.rs`: the established `issue_trajectory` API and the bounded `trajectory_profile_offsets` plus `issue_trajectory_samples` APIs use the same route-walk implementation. Each profile contains its state epoch, the complete 20-minute horizon at 30-second intervals, and the rounded-millisecond arrival time of every active filed route vertex within that horizon; a partial horizon or any sample gap over 30 seconds is invalid. The established 5-, 10- and 20-minute outputs remain equal to the sampled API at those durations. Pair profiles are evaluated only when their state epochs match; different epochs return `Unavailable` instead of aligning relative durations. Equal-epoch profiles are merged into one sorted absolute-time pair timeline, and both plans are reevaluated at every merged duration. Unavailable or degraded horizons, nonzero `over_capacity_unexamined`, mismatched identity, missing altitude or invalid time axes produce `Unavailable`, never a fallback forecast. For an aircraft pair, adjacent aligned samples are joined by the shared probe's stated segment approximation: project both aircraft into an azimuthal-equidistant chart centred at the first aircraft's segment-start position, then use straight-line relative motion. Actual filed route vertices are included so a pair segment does not span a modeled route turn; between samples this remains a piecewise-linear probe approximation, not an independent route or aircraft-performance model. The probe uses strict `< 9,260 m` horizontal and `< 1,000 ft` vertical limits over the fully covered 20-minute window, reports the earliest integer millisecond inside both strict loss intervals, and reports the minimum horizontal CPA and its corresponding vertical separation over all examined adjacent sample pairs (ties retain the earlier pair). A detached trial-plan input is evaluated against the other active plan without mutating either active input; only the route/plan revision may differ, while the candidate must retain the active aircraft's GUFI, address, centre, observed track, cutoff, ownership, clearance, ETA target and age policy. A caller-supplied SUA geometry with an authoritative half-open active-time interval and MSL floor/ceiling is evaluated only against a complete 20-minute profile with gaps no greater than 30 seconds. The airspace core checks geodesically interpolated positions and linearly interpolated MSL altitude at samples no more than 30 seconds apart. It reports `Entry` only for an interior sampled point inside the geometry and altitude band; a boundary-quantized point, unresolved/tangent segment, schedule coverage beyond a truncated tail, or any other uncertified interval returns `Unavailable`, never `Clear`. Unknown schedule/altitude and oversized geometry also return `Unavailable`. These are offline screening results, not operational separation assurance or independent trajectory truth."
+    },
+    {
+      "id": "OA-NAM-038",
+      "function": "flight_plan_and_coordination_message_ingestion",
+      "hazard_id": "HZ-FLIGHTDATA-001",
+      "rationale": "Engineering safety candidate: incorrect Field 15 resolution, airway/procedure expansion, or altitude constraint handling could present an incomplete or wrong route. The resolver accepts only exact current-model identities and returns explicit refusals for unsupported or ambiguous cases. This does not claim runtime intake of FPL/CHG/DLA/CNL, authoritative or current navigation data, or operational route approval."
     }
   ],
   "unresolved_requirement_assessments": []

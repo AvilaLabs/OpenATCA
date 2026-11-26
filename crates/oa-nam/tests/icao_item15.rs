@@ -1,7 +1,12 @@
 //! ICAO Doc 4444 Appendix 2 Item 15 forms used by the NAM FPL and CHG adapters.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use oa_nam::{field::parse_f15, lrm::lrm, *};
+use oa_nam::{
+    field::parse_f15,
+    item15::{filed_change, lrm_reply, FiledChange, Item15Reject},
+    lrm::lrm,
+    *,
+};
 
 // REQ: OA-NAM-036
 #[test]
@@ -59,6 +64,42 @@ fn fpl_chg_and_cnl_item15_handling_is_confined_to_defined_messages() {
     assert!(parse(cnl).unwrap().f15.is_none());
 }
 
+// REQ: OA-NAM-036, OA-NAM-037
+#[test]
+fn filed_change_classifies_fpl_chg_dla_and_cnl_route_effects() {
+    let fpl = parse(b"(FPLCZUL/KZBW043-N12345-IG-C172/L-SD/C-CYST2055-N0120F350 CYSC DCT KMPV-KMPV0053-EET/KZBW0003)").unwrap();
+    assert!(matches!(filed_change(&fpl), Ok(FiledChange::Replace(_))));
+    let mut chg_without_15 = fpl.clone();
+    chg_without_15.header.kind = Kind::Chg;
+    assert_eq!(
+        filed_change(&chg_without_15),
+        Ok(FiledChange::NoRouteChange)
+    );
+    let chg = parse(b"(CHGKZMP/CZWG776KZMP/CZWG603-AAL72-KSEA2042-CYOW-RMK/ROUTE UPDATE-15/N0120F350 KSEA DCT CYOW)").unwrap();
+    assert!(matches!(filed_change(&chg), Ok(FiledChange::Replace(_))));
+    let mut duplicate_chg = chg.clone();
+    let amended = duplicate_chg
+        .f22
+        .iter()
+        .find_map(|amendment| match &amendment.data {
+            AmendData::F15(field) => Some(field.clone()),
+            _ => None,
+        })
+        .unwrap();
+    duplicate_chg.f22.push(Amendment {
+        padded: false,
+        data: AmendData::F15(amended),
+    });
+    assert_eq!(
+        filed_change(&duplicate_chg),
+        Err(Item15Reject::DuplicateItem15Amendment)
+    );
+    let dla = parse(b"(DLAKZMP/CZWG776KZMP/CZWG603-KLM671-LIRF0900-LYDU-0)").unwrap();
+    assert!(matches!(filed_change(&dla), Ok(FiledChange::Delay { .. })));
+    let cnl = parse(b"(CNLKZHU/MMZT776KZHU/MMZT603-UAL1021-KIAD0818-MMEX-0)").unwrap();
+    assert_eq!(filed_change(&cnl), Ok(FiledChange::Cancel));
+}
+
 // REQ: OA-NAM-037
 #[test]
 fn dla_uses_public_appendix3_fields_and_carries_no_route_update() {
@@ -109,4 +150,80 @@ fn high_altitude_and_duplicate_names_remain_bounded_syntax_without_guessed_resol
         vec!["ABC"; MAX_ROUTE_ELEMENTS + 1].join(" ")
     );
     assert_eq!(parse_f15(long_route.as_bytes()).unwrap_err().field, 15);
+}
+
+fn facility(value: &str) -> Facility {
+    Facility(value.as_bytes().try_into().unwrap())
+}
+
+fn bare_fpl() -> Message {
+    bare(Header {
+        kind: Kind::Fpl,
+        id: MsgId {
+            sender: facility("KAAA"),
+            receiver: facility("KBBB"),
+            number: 12,
+        },
+        reference: None,
+    })
+}
+
+// REQ: OA-NAM-038
+#[test]
+fn item15_refusal_catalogue_uses_route_field_codes() {
+    assert_eq!(
+        Item15Reject::MalformedGroup.lrm(Profile::default(), Kind::Fpl),
+        (40, 15)
+    );
+    assert_eq!(
+        Item15Reject::UnknownPoint.lrm(Profile::default(), Kind::Fpl),
+        (43, 15)
+    );
+    assert_eq!(
+        Item15Reject::UnknownAirway.lrm(Profile::default(), Kind::Fpl),
+        (41, 15)
+    );
+    assert_eq!(
+        Item15Reject::DuplicateItem15Amendment.lrm(Profile::default(), Kind::Chg),
+        (50, 22)
+    );
+    assert_eq!(
+        Item15Reject::MissingRouteLevel.lrm(Profile::default(), Kind::Fpl),
+        (30, 15)
+    );
+    assert_eq!(
+        Item15Reject::AltitudeBelowMea.lrm(Profile::default(), Kind::Fpl),
+        (29, 15)
+    );
+}
+
+// REQ: OA-NAM-038
+#[test]
+fn item15_semantic_refusal_builds_correlated_lrm() {
+    let reply = lrm_reply(
+        &bare_fpl(),
+        Profile::default(),
+        13,
+        Item15Reject::AmbiguousPoint,
+    )
+    .unwrap();
+    assert_eq!(reply.header.kind, Kind::Lrm);
+    assert_eq!(reply.header.id.sender, facility("KBBB"));
+    assert_eq!(reply.header.id.receiver, facility("KAAA"));
+    assert_eq!(
+        reply.header.reference,
+        Some(MsgId {
+            sender: facility("KAAA"),
+            receiver: facility("KBBB"),
+            number: 12
+        })
+    );
+    assert!(matches!(&reply.f18, Some(Field18::Items(_))));
+    let text = match &reply.f18 {
+        Some(Field18::Items(items)) => items.first().map(|item| item.text.as_str()).unwrap_or(""),
+        _ => "",
+    };
+    assert!(text.starts_with("43/15/"));
+    let bytes = encode(&reply).unwrap();
+    assert_eq!(parse(&bytes).unwrap(), reply);
 }

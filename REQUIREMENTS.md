@@ -5059,6 +5059,15 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   NASR/CIFP model.
 - **OA-NAM-037** The field codec parses and round-trips the ICAO Appendix 3 DLA message fields
   3, 7, 13, 16 and 18. A DLA updates departure time and does not create, replace or amend Item 15.
+- **OA-NAM-038** Given syntactically parsed ICAO Item 15 route elements and the current NASR/CIFP
+  model, resolve named, coordinate and bearing-distance points only to exact model identities;
+  preserve full point identity while expanding ATS routes and coded SID/STAR paths; enforce
+  available airway MEA values; require explicit source-backed magnetic variation for
+  bearing-distance points; and return stable Field 15 refusals for missing, ambiguous,
+  disconnected, unsupported, invalid-source or over-capacity cases without inventing a point or
+  selecting an arbitrary candidate. Semantic refusals map to correlated LRM replies under the
+  active NAM profile. Intake of NAM FPL/CHG/DLA/CNL messages into the regional runtime is a
+  separate caller integration.
 
 ## ACC-to-ACC framed-byte peer fixture (A7)
 - **OA-A7-001** Two active facility sessions exchange Rev G RTI, RLA, RTA and LAM messages through

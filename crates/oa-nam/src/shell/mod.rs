@@ -5,6 +5,7 @@
 pub mod error;
 pub mod field;
 pub mod frame;
+pub mod item15;
 pub mod lrm;
 pub mod message;
 pub mod model;
