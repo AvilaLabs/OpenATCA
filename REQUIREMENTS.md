@@ -7743,6 +7743,16 @@ claims; a match is explicitly unverified.
   them. This does not prove availability, controller authorization, or operational cutover. H5
   continuity requires separate measured drill evidence from source-backed consumer observations.
 
+- **OA-MIG-208** Before each candidate selection or rollback, the selector appends one bounded plain
+  coordination record for every configured interfaced facility, binding the recipient, unit,
+  output sequence, transition time, source/destination and reason. The records are appended before
+  the selected output changes. Promotion refuses unless capacity remains for both its own records
+  and the immediate rollback records for every recipient; coordination-capacity refusal leaves the
+  selected output and trace unchanged. This core only produces local records: it does not send
+  messages, contact facilities, or prove acknowledgement. Facility IDs are nonzero, unique and
+  bounded at selector construction; an empty set means no interfaced facility was configured for
+  that unit.
+
 ## Migration drill harness (M3, H5)
 
 - **OA-MIG-301** The synthetic selector drill calls the production `oa-migration-switch` API for

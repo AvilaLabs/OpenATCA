@@ -569,8 +569,14 @@ fn local_process_failover_delivers_selected_payload_and_preserves_consumer_seque
         window_start_ns: start_ns,
         window_end_ns: start_ns + 30_000_000_000,
     };
-    let mut selector = new_selector(unit, policy, EvidenceKind::Synthetic, start_ns)
-        .expect("empty M3 selector fixture");
+    let mut selector = new_selector(
+        unit,
+        policy,
+        EvidenceKind::Synthetic,
+        start_ns,
+        &[1001, 1002],
+    )
+    .expect("empty M3 selector fixture");
     let epoch_ns = start_ns + 10;
     let wall_origin = Instant::now();
 

@@ -14,6 +14,10 @@ pub const MAX_FLIGHTS: usize = 64;
 pub const MAX_HANDOFFS: usize = 64;
 pub const MAX_ALERTS: usize = 64;
 pub const MAX_TRACE: usize = 128;
+// One record per configured recipient for every possible output-transition trace slot.
+pub const MAX_INTERFACED_FACILITIES: usize = 16;
+// C2: this exact product prevents notification-record capacity from trailing trace capacity.
+pub const MAX_COORDINATION_RECORDS: usize = MAX_TRACE * MAX_INTERFACED_FACILITIES;
 pub const MAX_DIFFS: usize = (MAX_TRACKS + MAX_FLIGHTS + MAX_HANDOFFS + MAX_ALERTS) * 2;
 
 // M1's accepted S1->S2 transition requires FacilitySupervisor and IndependentAssessor.
@@ -284,6 +288,7 @@ pub enum Refusal {
     OutputGap,
     OutputDuplicate,
     TraceFull,
+    CoordinationFull,
     ContinuityExceeded,
     TimeOverflow,
 }
@@ -413,6 +418,36 @@ pub struct TraceRecord {
     pub reason: u8,
 }
 
+/// Plain pre-switch notification record for one configured interfaced facility.
+/// This core records the required notification; it does not transmit it.
+// A7.2: cold struct, size guard waived; one audit record per facility per output transition.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
+pub struct CoordinationRecord {
+    pub output_sequence: u64,
+    pub unit: SwapUnitKey,
+    pub at_ns: i64,
+    pub facility_id: u32,
+    pub from: Output,
+    pub to: Output,
+    pub reason: u8,
+}
+
+const EMPTY_COORDINATION_RECORD: CoordinationRecord = CoordinationRecord {
+    output_sequence: 0,
+    unit: SwapUnitKey {
+        function_id: 0,
+        scope_id: 0,
+        window_start_ns: 0,
+        window_end_ns: 0,
+    },
+    at_ns: 0,
+    facility_id: 0,
+    from: Output::Legacy,
+    to: Output::Legacy,
+    reason: 0,
+};
+
 #[derive(Debug, Eq, PartialEq)]
 #[repr(C)]
 pub struct Selector {
@@ -430,6 +465,10 @@ pub struct Selector {
     pending_delivery: bool,
     trace_len: u16,
     trace: [Option<TraceRecord>; MAX_TRACE],
+    interfaced_facilities: [u32; MAX_INTERFACED_FACILITIES],
+    interfaced_facility_count: u8,
+    coordination_len: u16,
+    coordination: [CoordinationRecord; MAX_COORDINATION_RECORDS],
 }
 
 const _: () = assert!(core::mem::size_of::<SwapUnitKey>() == 24);
@@ -446,8 +485,9 @@ const _: () = assert!(core::mem::size_of::<Diff>() == 64);
 const _: () = assert!(core::mem::size_of::<ReconcileReport>() == 32_808);
 const _: () = assert!(core::mem::size_of::<CandidateReadiness>() == 336);
 const _: () = assert!(core::mem::size_of::<TraceRecord>() == 64);
+const _: () = assert!(core::mem::size_of::<CoordinationRecord>() == 48);
 const _: () = assert!(core::mem::size_of::<PromotionIntentRequest>() == 56);
-const _: () = assert!(core::mem::size_of::<Selector>() == 90_104);
+const _: () = assert!(core::mem::size_of::<Selector>() == 188_480);
 
 pub const fn valid_unit(unit: SwapUnitKey) -> bool {
     unit.function_id != 0 && unit.scope_id != 0 && unit.window_start_ns < unit.window_end_ns
@@ -472,10 +512,12 @@ pub fn new_selector(
     policy: UnitPolicy,
     evidence: EvidenceKind,
     start_ns: i64,
+    interfaced_facilities: &[u32],
 ) -> Result<Selector, Refusal> {
     if !valid_unit(unit)
         || start_ns < unit.window_start_ns
         || !in_window(unit, start_ns)
+        || interfaced_facilities.len() > MAX_INTERFACED_FACILITIES
         || policy.policy_version == 0
         || policy.policy_digest == [0; 32]
         || policy.source_epoch_digest == [0; 32]
@@ -501,6 +543,19 @@ pub fn new_selector(
     {
         return Err(Refusal::InvalidUnit);
     }
+    let mut configured_facilities = [0; MAX_INTERFACED_FACILITIES];
+    for (index, facility_id) in interfaced_facilities.iter().copied().enumerate() {
+        if facility_id == 0
+            || interfaced_facilities
+                .get(..index)
+                .is_some_and(|previous| previous.contains(&facility_id))
+        {
+            return Err(Refusal::InvalidUnit);
+        }
+        *configured_facilities
+            .get_mut(index)
+            .ok_or(Refusal::InvalidUnit)? = facility_id;
+    }
     Ok(Selector {
         unit,
         policy,
@@ -516,6 +571,11 @@ pub fn new_selector(
         pending_delivery: false,
         trace_len: 0,
         trace: [None; MAX_TRACE],
+        interfaced_facilities: configured_facilities,
+        interfaced_facility_count: u8::try_from(interfaced_facilities.len())
+            .map_err(|_| Refusal::InvalidUnit)?,
+        coordination_len: 0,
+        coordination: [EMPTY_COORDINATION_RECORD; MAX_COORDINATION_RECORDS],
     })
 }
 
@@ -1428,6 +1488,49 @@ fn record_switch(selector: &mut Selector, switch: SwitchRecord) -> Result<(), Re
     if i >= MAX_TRACE {
         return Err(Refusal::TraceFull);
     }
+    let coordination_start = usize::from(selector.coordination_len);
+    let coordination_count = usize::from(selector.interfaced_facility_count);
+    let needed = coordination_start
+        .checked_add(coordination_count)
+        .ok_or(Refusal::CoordinationFull)?;
+    // A promotion leaves room for every configured facility to receive the immediate rollback
+    // record as well. Otherwise it could switch successfully and then strand rollback evidence.
+    let reserved = if to == Output::Candidate {
+        coordination_count
+    } else {
+        0
+    };
+    let required = needed
+        .checked_add(reserved)
+        .ok_or(Refusal::CoordinationFull)?;
+    if required > MAX_COORDINATION_RECORDS {
+        return Err(Refusal::CoordinationFull);
+    }
+    // Append one bounded plain record per configured facility before changing the selected side.
+    let mut facility_index = 0usize;
+    while facility_index < coordination_count {
+        let facility_id = *selector
+            .interfaced_facilities
+            .get(facility_index)
+            .ok_or(Refusal::CoordinationFull)?;
+        let record = CoordinationRecord {
+            output_sequence: sequence,
+            unit: selector.unit,
+            at_ns,
+            facility_id,
+            from: selector.selected,
+            to,
+            reason,
+        };
+        *selector
+            .coordination
+            .get_mut(coordination_start + facility_index)
+            .ok_or(Refusal::CoordinationFull)? = record;
+        facility_index = facility_index
+            .checked_add(1)
+            .ok_or(Refusal::CoordinationFull)?;
+    }
+    selector.coordination_len = u16::try_from(needed).map_err(|_| Refusal::CoordinationFull)?;
     *selector.trace.get_mut(i).ok_or(Refusal::TraceFull)? = Some(TraceRecord {
         sequence,
         authority_sequence,
@@ -1454,6 +1557,14 @@ pub fn selected(selector: &Selector) -> Output {
 }
 pub fn trace(selector: &Selector) -> (&[Option<TraceRecord>; MAX_TRACE], u16) {
     (&selector.trace, selector.trace_len)
+}
+
+/// Returns coordination notices in deterministic append order. These records are emitted as
+/// local evidence only; sending anything to an interfaced facility is outside this core.
+pub fn coordination_records(
+    selector: &Selector,
+) -> (&[CoordinationRecord; MAX_COORDINATION_RECORDS], u16) {
+    (&selector.coordination, selector.coordination_len)
 }
 
 /// Records a delivered consumer sequence observation. This is evidence supplied by a drill/feed
@@ -1921,7 +2032,8 @@ mod tests {
         });
         c.alerts = l.alerts;
         c.alerts[0].as_mut().unwrap().source_identity.stream = 2;
-        let selector = new_selector(unit, policy, EvidenceKind::Synthetic, 10).unwrap();
+        let selector =
+            new_selector(unit, policy, EvidenceKind::Synthetic, 10, &[1001, 1002]).unwrap();
         (selector, l, c)
     }
 
@@ -1937,6 +2049,13 @@ mod tests {
         let intent = intent(&s, &ready, &authorization, 1, 24);
         select_candidate(&mut s, &ready, &authorization, &intent, 25, 100).unwrap();
         assert_eq!(selected(&s), Output::Candidate);
+        let (notices, notice_count) = coordination_records(&s);
+        assert_eq!(notice_count, 2);
+        assert_eq!(notices[0].facility_id, 1001);
+        assert_eq!(notices[1].facility_id, 1002);
+        assert_eq!(notices[0].to, Output::Candidate);
+        assert_eq!(notices[0].output_sequence, 1);
+        assert_eq!(notices[1].output_sequence, 1);
         observe_delivery(&mut s, 1, Output::Candidate, 1, 26).unwrap();
         let unit = s.unit;
         rollback(
@@ -1969,6 +2088,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(selected(&s), Output::Legacy);
+        let (notices, notice_count) = coordination_records(&s);
+        assert_eq!(notice_count, 4);
+        assert_eq!(notices[2].facility_id, 1001);
+        assert_eq!(notices[3].facility_id, 1002);
+        assert_eq!(notices[2].to, Output::Legacy);
+        assert_eq!(notices[2].reason, 2);
+        assert_eq!(notices[2].output_sequence, 2);
         assert_eq!(
             select_candidate(&mut s, &ready, &authorization, &intent, 28, 100),
             Err(Refusal::Unauthorized)
@@ -1992,6 +2118,28 @@ mod tests {
             Err(Refusal::OutputGap)
         );
         observe_delivery(&mut s, 1, Output::Legacy, 2, 28).unwrap();
+    }
+
+    // REQ: OA-MIG-208
+    #[test]
+    fn coordination_capacity_refuses_flip_before_any_notice_or_selection() {
+        let (mut s, l, c) = fixture();
+        ingest(&mut s, l, 25, 100).unwrap();
+        ingest(&mut s, c, 25, 100).unwrap();
+        let (_, ready) = prepare_candidate(&s, 25, 100).unwrap();
+        let authorization = promotion(&s, 24);
+        let intent = intent(&s, &ready, &authorization, 1, 24);
+        s.coordination_len = u16::try_from(MAX_COORDINATION_RECORDS - 3).unwrap();
+        assert_eq!(
+            select_candidate(&mut s, &ready, &authorization, &intent, 25, 100),
+            Err(Refusal::CoordinationFull)
+        );
+        assert_eq!(selected(&s), Output::Legacy);
+        assert_eq!(trace(&s).1, 0);
+        assert_eq!(
+            coordination_records(&s).1,
+            u16::try_from(MAX_COORDINATION_RECORDS - 3).unwrap()
+        );
     }
 
     // REQ: OA-MIG-202, OA-MIG-203

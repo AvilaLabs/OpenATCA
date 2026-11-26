@@ -476,7 +476,13 @@ pub(crate) fn drill_state(
         window_end_ns: end_ns,
     };
     let policy = drill_policy();
-    let mut selector = new_selector(unit, policy, EvidenceKind::Synthetic, start_ns)?;
+    let mut selector = new_selector(
+        unit,
+        policy,
+        EvidenceKind::Synthetic,
+        start_ns,
+        &[1001, 1002],
+    )?;
     let now_ns = start_ns.checked_add(10).ok_or(Refusal::TimeOverflow)?;
     let variation = index % 8;
     ingest(
@@ -746,7 +752,13 @@ fn fault_suite() -> Result<u32, Refusal> {
             .ok_or(Refusal::TimeOverflow)?,
     };
     let policy = drill_policy();
-    let mut incomplete = new_selector(unit, policy, EvidenceKind::Synthetic, start_ns)?;
+    let mut incomplete = new_selector(
+        unit,
+        policy,
+        EvidenceKind::Synthetic,
+        start_ns,
+        &[1001, 1002],
+    )?;
     let observed_ns = start_ns.checked_add(10).ok_or(Refusal::TimeOverflow)?;
     let mut partial = snapshot(unit, policy, Side::Legacy, observed_ns, 0)?;
     partial.alert_coverage = FamilyCoverage::Partial;
@@ -778,7 +790,13 @@ fn sustained_trace_capacity_case() -> Result<(), Refusal> {
         window_end_ns: end_ns,
     };
     let policy = drill_policy();
-    let mut selector = new_selector(unit, policy, EvidenceKind::Synthetic, start_ns)?;
+    let mut selector = new_selector(
+        unit,
+        policy,
+        EvidenceKind::Synthetic,
+        start_ns,
+        &[1001, 1002],
+    )?;
     let window_grant = window_authorization(&selector, unit, policy, start_ns + 10)?;
     let mut cycle = 0u32;
     while cycle < 65 {
