@@ -969,12 +969,12 @@ struct TrackTxn {
     ring_len: u8,
     ring_head: u8,
 }
-// Budget: two 664-byte filters, twelve 72-byte measurements, 480-byte statistics (328 before
+// Budget: two 664-byte filters, twelve 72-byte measurements, 488-byte statistics (328 before
 // the eighteen large-move counters of RT-239), six 8-byte times, 8-byte category, 4-byte update
 // count and four byte fields.
-// A7.1: +8 bytes carry the named count of same-time source beacon-code conflicts.
+// A7.1: +16 bytes carry a source Mode 3/A range-refusal counter and same-time conflict counter.
 // One bounded stack checkpoint; no track key changes during an update or its replay.
-const _: () = assert!(core::mem::size_of::<TrackTxn>() == 2736);
+const _: () = assert!(core::mem::size_of::<TrackTxn>() == 2744);
 
 /// The pool entry of a move with no snapshot.
 const NO_SNAP: u32 = u32::MAX;
