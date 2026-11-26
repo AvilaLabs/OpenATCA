@@ -36,6 +36,7 @@ pub struct RegionalRuntime {
     centre: [u8; 4],
     frame_sequence: u64,
     failed: bool,
+    presentation_pending_sequence: Option<u64>,
     session_namespace: u16,
     quarantine_queue: QuarantineQueue,
     interaction: oa_display::interaction::InteractionState,
@@ -54,6 +55,8 @@ pub struct RegionalRunProfile {
     pub max_flights: usize,
     pub max_flight_log_entries: usize,
     pub max_total_events: usize,
+    /// Enables one in-flight rendered frame; the shared raster cannot be reused before ACK.
+    pub stream_presentations: bool,
 }
 
 impl RegionalRunProfile {
@@ -80,6 +83,7 @@ impl RegionalRunProfile {
             max_flights: 8192,
             max_flight_log_entries: MAX_DRIVER_LOG_ENTRIES,
             max_total_events: crate::session::MAX_RECORDED_PROFILE_EVENTS,
+            stream_presentations: false,
         }
     }
 
@@ -93,6 +97,7 @@ impl RegionalRunProfile {
         profile.max_flights = profile.surveillance.max_tracks;
         profile.surveillance.max_presentation_updates = surveillance::MAX_PRESENTATION_UPDATES;
         profile.surveillance.render_scope = true;
+        profile.stream_presentations = false;
         profile
     }
 
@@ -113,6 +118,7 @@ impl RegionalRunProfile {
         profile.max_flights = 16;
         profile.max_flight_log_entries = 256;
         profile.max_total_events = 552_960;
+        profile.stream_presentations = true;
         profile
     }
 }
@@ -122,6 +128,7 @@ pub const DEFAULT_REGIONAL_RUN_PROFILE: RegionalRunProfile = RegionalRunProfile 
     max_flights: MAX_DRIVER_FLIGHTS,
     max_flight_log_entries: MAX_DRIVER_LOG_ENTRIES,
     max_total_events: crate::session::MAX_SESSION_EVENTS,
+    stream_presentations: false,
 };
 
 // A3/C6: cold offline evidence rows/frame are bounded by the selected flight profile capacity
@@ -484,6 +491,7 @@ fn regional_new_with_profile_and_namespace(
         || profile.max_flight_log_entries > MAX_DRIVER_LOG_ENTRIES
         || profile.max_total_events == 0
         || profile.max_total_events > crate::session::MAX_RECORDED_PROFILE_EVENTS
+        || (profile.stream_presentations && !profile.surveillance.render_scope)
         || (profile.surveillance.render_scope
             && profile.max_flights > profile.surveillance.max_tracks)
     {
@@ -512,6 +520,7 @@ fn regional_new_with_profile_and_namespace(
         centre,
         frame_sequence: 0,
         failed: false,
+        presentation_pending_sequence: None,
         session_namespace,
         quarantine_queue: oa_quarantine::queue_new(),
         interaction: oa_display::interaction::interaction_new(),
@@ -865,8 +874,20 @@ fn regional_step_inner(
     if runtime.failed {
         return Err("session failed; reconstruct from the admitted input prefix".into());
     }
+    if runtime.profile.stream_presentations {
+        if let Some(sequence) = runtime.presentation_pending_sequence {
+            return Err(format!(
+                "rendered frame {sequence} must be acknowledged before the next step"
+            ));
+        }
+    }
     match execute(runtime, batch, performance) {
-        Ok(frame) => Ok(frame),
+        Ok(frame) => {
+            if runtime.profile.stream_presentations && frame.surveillance.raster_rendered {
+                runtime.presentation_pending_sequence = Some(frame.sequence);
+            }
+            Ok(frame)
+        }
         Err(error) => {
             runtime.failed = true;
             Err(error)
@@ -890,8 +911,16 @@ pub fn regional_ack_presentation(
     if runtime.failed {
         return Err("cannot acknowledge presentation after session failure".into());
     }
+    if !runtime.profile.stream_presentations {
+        return Err("presentation acknowledgements require a streaming profile".into());
+    }
+    if runtime.presentation_pending_sequence != Some(frame_sequence) {
+        return Err("presentation acknowledgement does not match the in-flight frame".into());
+    }
     let sequence = usize::try_from(frame_sequence).map_err(|_| "presentation sequence width")?;
-    surveillance::surveillance_ack_presentation(&mut runtime.surveillance, sequence)
+    surveillance::surveillance_ack_presentation(&mut runtime.surveillance, sequence)?;
+    runtime.presentation_pending_sequence = None;
+    Ok(())
 }
 
 pub fn regional_presentation_counts(runtime: &RegionalRuntime) -> (usize, u64) {
@@ -906,6 +935,9 @@ pub fn regional_select(
     generation: u32,
     identity: Option<oa_display::interaction::FlightIdentity>,
 ) -> Result<[u8; 32], String> {
+    if runtime.profile.stream_presentations && runtime.presentation_pending_sequence.is_some() {
+        return Err("pending rendered frame must be acknowledged before selection".into());
+    }
     if runtime.failed || runtime.frame_sequence == 0 {
         return Err("selection requires a completed regional frame".into());
     }
@@ -932,6 +964,9 @@ pub fn regional_select(
             return Err(reason);
         }
     };
+    if runtime.profile.stream_presentations {
+        runtime.presentation_pending_sequence = Some(runtime.frame_sequence);
+    }
     match outcome {
         oa_display::interaction::InteractionResult::Applied => Ok(digest),
         other => Err(format!("selection: {other:?}")),
@@ -944,6 +979,9 @@ pub fn regional_console_overlay(
     runtime: &mut RegionalRuntime,
     text: &str,
 ) -> Result<[u8; 32], String> {
+    if runtime.profile.stream_presentations && runtime.presentation_pending_sequence.is_some() {
+        return Err("pending rendered frame must be acknowledged before console update".into());
+    }
     if runtime.failed || runtime.frame_sequence == 0 {
         return Err("console presentation requires a completed regional frame".into());
     }
@@ -957,7 +995,12 @@ pub fn regional_console_overlay(
         &runtime.interaction,
         &runtime.console_text,
     ) {
-        Ok(digest) => Ok(digest),
+        Ok(digest) => {
+            if runtime.profile.stream_presentations {
+                runtime.presentation_pending_sequence = Some(runtime.frame_sequence);
+            }
+            Ok(digest)
+        }
         Err(reason) => {
             runtime.failed = true;
             Err(reason)
@@ -967,6 +1010,9 @@ pub fn regional_console_overlay(
 
 /// Clear only operator selection; captured authority requests retain their own full identity.
 pub fn regional_clear_selection(runtime: &mut RegionalRuntime) -> Result<[u8; 32], String> {
+    if runtime.profile.stream_presentations && runtime.presentation_pending_sequence.is_some() {
+        return Err("pending rendered frame must be acknowledged before clearing selection".into());
+    }
     if runtime.failed || runtime.frame_sequence == 0 {
         return Err("selection clearing requires a completed regional frame".into());
     }
@@ -976,7 +1022,12 @@ pub fn regional_clear_selection(runtime: &mut RegionalRuntime) -> Result<[u8; 32
         &runtime.interaction,
         &runtime.console_text,
     ) {
-        Ok(digest) => Ok(digest),
+        Ok(digest) => {
+            if runtime.profile.stream_presentations {
+                runtime.presentation_pending_sequence = Some(runtime.frame_sequence);
+            }
+            Ok(digest)
+        }
         Err(reason) => {
             runtime.failed = true;
             Err(reason)
@@ -1088,10 +1139,27 @@ mod transaction_tests {
         runtime_with_model(synthetic_model().unwrap())
     }
 
+    fn streaming_runtime() -> RegionalRuntime {
+        let model = synthetic_model().unwrap();
+        let snapshot = oa_airspace::core::snapshot::encode(&model).unwrap();
+        regional_new_with_profile(
+            model,
+            oa_sha256::sha256(&snapshot),
+            *b"ZAU1",
+            SurveillanceConfig {
+                centre_lat_e7: 410_000_000,
+                centre_lon_e7: -870_000_000,
+                range_nm: 180.0,
+            },
+            RegionalRunProfile::paced_d2_soak(),
+        )
+        .unwrap()
+    }
+
     // REQ: OA-REG-021
     #[test]
     fn regional_presentation_ack_releases_only_delivered_frame_capacity() {
-        let mut engine = runtime();
+        let mut engine = streaming_runtime();
         let batch = ReceiptBatch {
             receipt_ns: 1_000_000_000,
             source_clock_regressions: 0,
@@ -1105,6 +1173,43 @@ mod transaction_tests {
         assert_eq!(regional_presentation_counts(&engine), (0, 1));
         assert!(regional_ack_presentation(&mut engine, frame.sequence).is_err());
         assert_eq!(regional_presentation_counts(&engine), (0, 1));
+    }
+
+    // REQ: OA-REG-021
+    #[test]
+    fn unacknowledged_frame_blocks_step_before_shared_pixels_can_be_overwritten() {
+        let mut engine = streaming_runtime();
+        let first_batch = ReceiptBatch {
+            receipt_ns: 1_000_000_000,
+            source_clock_regressions: 0,
+            events: Vec::new(),
+        };
+        let first = regional_step(&mut engine, &first_batch).unwrap();
+        let retained_pixels = regional_pixels(&engine).unwrap().to_vec();
+        let next_batch = ReceiptBatch {
+            receipt_ns: 6_000_000_000,
+            source_clock_regressions: 0,
+            events: Vec::new(),
+        };
+        assert!(regional_step(&mut engine, &next_batch)
+            .unwrap_err()
+            .contains("must be acknowledged"));
+        assert!(regional_console_overlay(&mut engine, "blocked")
+            .unwrap_err()
+            .contains("must be acknowledged"));
+        assert!(regional_clear_selection(&mut engine)
+            .unwrap_err()
+            .contains("must be acknowledged"));
+        assert!(regional_select(&mut engine, 0, 0, None)
+            .unwrap_err()
+            .contains("must be acknowledged"));
+        assert!(!engine.failed);
+        assert_eq!(regional_pixels(&engine).unwrap(), retained_pixels);
+        assert_eq!(regional_presentation_counts(&engine), (1, 1));
+        regional_ack_presentation(&mut engine, first.sequence).unwrap();
+        let second = regional_step(&mut engine, &next_batch).unwrap();
+        assert_eq!(second.sequence, first.sequence + 1);
+        assert_eq!(regional_presentation_counts(&engine), (1, 2));
     }
 
     fn runtime_with_model(model: Model) -> RegionalRuntime {
@@ -1286,6 +1391,7 @@ mod transaction_tests {
         assert_eq!(rendered.max_total_events, recorded.max_total_events);
         assert_eq!(rendered.max_flights, rendered.surveillance.max_tracks);
         assert!(rendered.surveillance.render_scope);
+        assert!(!rendered.stream_presentations);
         assert_eq!(
             rendered.surveillance.max_presentation_updates,
             surveillance::MAX_PRESENTATION_UPDATES

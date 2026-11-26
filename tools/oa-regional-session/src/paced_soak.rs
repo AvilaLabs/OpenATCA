@@ -14,25 +14,31 @@ use oa_sha256::{to_hex, Sha256};
 use std::env;
 use std::ffi::OsString;
 use std::fs::{self, DirBuilder, File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-const SCHEMA: &str = "openatca-d2-paced-soak/1";
+const SCHEMA: &str = "openatca-d2-paced-soak/2";
 const TICK_NS: i64 = 5_000_000_000;
 const TICK_DURATION: Duration = Duration::from_secs(5);
 const FRAME_COUNT: u64 = 34_560;
 const RUN_DURATION: Duration = Duration::from_secs(48 * 60 * 60);
+const WARMUP_FRAMES: u64 = 2;
+const EXPECTED_STEADY_FRAMES: u64 = FRAME_COUNT - WARMUP_FRAMES - FEED_FAULT_TICKS;
 const FIRST_ISSUE_NS: i64 = 1_000_000_000;
 const AIRCRAFT_COUNT: usize = 16;
 const SEQUENCE_STRIDE: u64 = 32;
 const FEED_FAULT_START_TICK: u64 = 12_000;
 const FEED_FAULT_TICKS: u64 = 2;
+const FEED_FAULT_END_TICK: u64 = FEED_FAULT_START_TICK + FEED_FAULT_TICKS;
 const SCHEDULE_LATE_THRESHOLD_NS: u64 = 250_000_000;
+const MIN_ACTUAL_FRAME_GAP_NS: u64 = 4_750_000_000;
+const MAX_ACTUAL_FRAME_GAP_NS: u64 = 5_250_000_000;
+const MAX_UTC_MONOTONIC_DRIFT_NS: u64 = 250_000_000;
 const MAX_PROGRESS_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_EXECUTABLE_BYTES: u64 = 128 * 1024 * 1024;
 const PROGRESS_SYNC_FRAMES: u64 = 12;
-const PROFILE_BYTES: &[u8] = b"D2-PACED-SOAK-V1;duration_ns=172800000000000;tick_ns=5000000000;frames=34560;tracks=16;grid_e7=250000;renderer=regional-base-raster-and-control-overlay-every-frame;profile=bounded-recorded-peak-derived;synthetic-model=public-test-fixture;feed-outage-start-tick=12000;feed-outage-ticks=2;schedule-late-threshold-ns=250000000;presentation-ack=ordered-after-progress-write;max-pending-presentations=8192";
+const PROFILE_BYTES: &[u8] = b"D2-PACED-SOAK-V2;duration_ns=172800000000000;tick_ns=5000000000;frames=34560;tracks=16;grid_e7=250000;renderer=regional-base-raster-and-control-overlay-every-frame;profile=bounded-recorded-peak-derived;synthetic-model=public-test-fixture;feed-outage-start-tick=12000;feed-outage-ticks=2;schedule-late-max-ns=250000000;actual-gap-min-ns=4750000000;actual-gap-max-ns=5250000000;utc-monotonic-gap-drift-max-ns=250000000;steady-tracks-min=16;warmup-frames=2;feed-recovery-required=true;single-inflight-presentation=true;pending-ledger-cap=8192;presentation-ack=ordered-after-progress-write";
 
 fn clean_reason(reason: &str) -> String {
     reason
@@ -59,8 +65,16 @@ struct Counts {
     late_frames: u64,
     max_lateness_ns: u64,
     max_actual_gap_ns: u64,
+    min_actual_gap_ns: u64,
     max_processing_ns: u64,
-    min_confirmed_tracks: usize,
+    max_utc_monotonic_drift_ns: u64,
+    timing_violations: u64,
+    steady_frames: u64,
+    min_steady_tracks: usize,
+    last_lateness_ns: u64,
+    last_actual_gap_ns: u64,
+    last_utc_monotonic_drift_ns: Option<u64>,
+    last_tracks: usize,
     max_tracks: usize,
     max_open_alerts: usize,
     closed_alerts: u64,
@@ -73,6 +87,7 @@ struct Counts {
     feed_fault_start_utc_ns: Option<u128>,
     feed_fault_start_elapsed_ns: Option<u64>,
     feed_recovered_elapsed_ns: Option<u64>,
+    feed_recovery_tracks: Option<usize>,
 }
 
 fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Arguments, String> {
@@ -129,6 +144,59 @@ fn elapsed_ns(start: Instant, now: Instant) -> Result<u64, String> {
     .map_err(|_| "monotonic elapsed time exceeds u64".into())
 }
 
+fn clock_pair_deltas(
+    utc_ns: u128,
+    monotonic_ns: u64,
+    previous: Option<(u128, u64)>,
+) -> Result<Option<(u64, u64, u64)>, String> {
+    let Some((previous_utc_ns, previous_monotonic_ns)) = previous else {
+        return Ok(None);
+    };
+    let utc_gap_ns = utc_ns
+        .checked_sub(previous_utc_ns)
+        .ok_or("UTC clock regressed")?;
+    let monotonic_gap_ns = monotonic_ns
+        .checked_sub(previous_monotonic_ns)
+        .ok_or("monotonic clock regressed")?;
+    let drift_ns = utc_gap_ns.abs_diff(u128::from(monotonic_gap_ns));
+    Ok(Some((
+        u64::try_from(utc_gap_ns).map_err(|_| "UTC sample gap exceeds u64")?,
+        monotonic_gap_ns,
+        u64::try_from(drift_ns).map_err(|_| "UTC/monotonic drift exceeds u64")?,
+    )))
+}
+
+fn timing_violation(
+    tick: u64,
+    lateness_ns: u64,
+    actual_gap_ns: u64,
+    utc_monotonic_drift_ns: Option<u64>,
+) -> Option<&'static str> {
+    if lateness_ns > SCHEDULE_LATE_THRESHOLD_NS {
+        return Some("schedule_lateness_exceeded_predeclared_limit");
+    }
+    if tick > 0 && !(MIN_ACTUAL_FRAME_GAP_NS..=MAX_ACTUAL_FRAME_GAP_NS).contains(&actual_gap_ns) {
+        return Some("actual_frame_gap_outside_predeclared_limits");
+    }
+    if utc_monotonic_drift_ns.is_some_and(|drift| drift > MAX_UTC_MONOTONIC_DRIFT_NS) {
+        return Some("utc_monotonic_drift_exceeded_predeclared_limit");
+    }
+    None
+}
+
+fn completion_evidence_valid(counts: &Counts) -> bool {
+    counts.frames == FRAME_COUNT
+        && counts.steady_frames == EXPECTED_STEADY_FRAMES
+        && counts.min_steady_tracks == AIRCRAFT_COUNT
+        && counts.feed_fault_start_utc_ns.is_some()
+        && counts.feed_fault_start_elapsed_ns.is_some()
+        && counts.feed_recovery_tracks == Some(AIRCRAFT_COUNT)
+        && counts.feed_recovered_elapsed_ns.is_some()
+        && counts.presentation_updates_total == FRAME_COUNT
+        && counts.presentation_pending_current == 0
+        && counts.timing_violations == 0
+}
+
 fn hash_file(path: &Path, cap: u64) -> Result<[u8; 32], String> {
     let (mut file, length) = oa_sealed::open_regular(path).map_err(|error| error.to_string())?;
     if length > cap {
@@ -148,8 +216,12 @@ fn hash_file(path: &Path, cap: u64) -> Result<[u8; 32], String> {
         if bytes > cap {
             return Err("executable grew beyond its byte cap".into());
         }
-        hash.update(&buffer[..read])
-            .map_err(|error| error.to_string())?;
+        hash.update(
+            buffer
+                .get(..read)
+                .ok_or("executable read length exceeds buffer")?,
+        )
+        .map_err(|error| error.to_string())?;
     }
     if bytes != length {
         return Err("executable length changed while hashing".into());
@@ -191,6 +263,23 @@ fn write_new(path: &Path, bytes: &[u8]) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
+fn write_progress_row(file: &mut File, committed_len: u64, row: &[u8]) -> Result<(), String> {
+    if let Err(first_error) = file.write_all(row) {
+        file.set_len(committed_len)
+            .map_err(|error| format!("cannot roll back partial progress row: {error}"))?;
+        file.seek(SeekFrom::Start(committed_len))
+            .map_err(|error| format!("cannot restore progress cursor: {error}"))?;
+        let restored_len = file.metadata().map_err(|error| error.to_string())?.len();
+        if restored_len != committed_len {
+            return Err("progress row rollback did not restore committed length".into());
+        }
+        file.write_all(row).map_err(|retry_error| {
+            format!("progress row retry failed after {first_error}: {retry_error}")
+        })?;
+    }
+    Ok(())
+}
+
 fn stop_requested(path: &Path) -> Result<bool, String> {
     match fs::symlink_metadata(path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
@@ -213,17 +302,21 @@ fn stop_requested(path: &Path) -> Result<bool, String> {
 }
 
 fn make_batch(tick: u64) -> Result<ReceiptBatch, String> {
+    make_batch_with_fault(tick, FEED_FAULT_START_TICK)
+}
+
+fn make_batch_with_fault(tick: u64, fault_start_tick: u64) -> Result<ReceiptBatch, String> {
     let tick_i64 = i64::try_from(tick).map_err(|_| "tick index width")?;
     let receipt_ns = FIRST_ISSUE_NS
         .checked_add(tick_i64.checked_mul(TICK_NS).ok_or("issue time overflow")?)
         .ok_or("issue time overflow")?;
-    let feed_down = (FEED_FAULT_START_TICK
-        ..FEED_FAULT_START_TICK
+    let feed_down = (fault_start_tick
+        ..fault_start_tick
             .checked_add(FEED_FAULT_TICKS)
             .ok_or("feed fault interval overflow")?)
         .contains(&tick);
     let feed_up = tick
-        == FEED_FAULT_START_TICK
+        == fault_start_tick
             .checked_add(FEED_FAULT_TICKS)
             .ok_or("feed recovery tick overflow")?;
     let mut events = Vec::with_capacity(AIRCRAFT_COUNT + if feed_down || feed_up { 1 } else { 0 });
@@ -321,7 +414,7 @@ fn started_json(
     start_utc_ns: u128,
 ) -> String {
     format!(
-        "{{\"schema\":\"{SCHEMA}\",\"status\":\"RUNNING\",\"candidate_commit\":\"{candidate}\",\"executable_sha256\":\"{}\",\"synthetic_adaptation_sha256\":\"{}\",\"configuration_sha256\":\"{}\",\"synthetic_input_profile_sha256\":\"{}\",\"started_utc_unix_ns\":{start_utc_ns},\"planned_duration_ns\":{},\"cadence_ns\":{TICK_NS},\"frame_count\":{FRAME_COUNT},\"track_count\":{AIRCRAFT_COUNT},\"renderer\":\"regional base raster each frame; no live display\",\"recorded_or_live_inputs\":false}}\n",
+        "{{\"schema\":\"{SCHEMA}\",\"status\":\"RUNNING\",\"candidate_commit\":\"{candidate}\",\"executable_sha256\":\"{}\",\"synthetic_adaptation_sha256\":\"{}\",\"configuration_sha256\":\"{}\",\"synthetic_input_profile_sha256\":\"{}\",\"started_utc_unix_ns\":{start_utc_ns},\"planned_duration_ns\":{},\"cadence_ns\":{TICK_NS},\"schedule_lateness_max_ns\":{SCHEDULE_LATE_THRESHOLD_NS},\"actual_frame_gap_min_ns\":{MIN_ACTUAL_FRAME_GAP_NS},\"actual_frame_gap_max_ns\":{MAX_ACTUAL_FRAME_GAP_NS},\"utc_monotonic_gap_drift_max_ns\":{MAX_UTC_MONOTONIC_DRIFT_NS},\"warmup_frames\":{WARMUP_FRAMES},\"min_steady_tracks\":{AIRCRAFT_COUNT},\"steady_frames_expected\":{EXPECTED_STEADY_FRAMES},\"feed_fault_start_tick\":{FEED_FAULT_START_TICK},\"feed_fault_ticks\":{FEED_FAULT_TICKS},\"feed_recovery_tracks_required\":{AIRCRAFT_COUNT},\"streaming_presentation_inflight_limit\":1,\"ledger_hard_cap\":8192,\"frame_count\":{FRAME_COUNT},\"track_count\":{AIRCRAFT_COUNT},\"renderer\":\"regional base raster and control overlay each frame; no live display\",\"recorded_or_live_inputs\":false}}\n",
         to_hex(executable_sha),
         to_hex(snapshot_sha),
         to_hex(config_sha),
@@ -330,18 +423,32 @@ fn started_json(
     )
 }
 
-fn summary_json(
-    candidate: &str,
-    executable_sha: &[u8; 32],
-    snapshot_sha: &[u8; 32],
-    config_sha: &[u8; 32],
-    input_sha: &[u8; 32],
+struct SummaryInput<'a> {
+    candidate: &'a str,
+    executable_sha: &'a [u8; 32],
+    snapshot_sha: &'a [u8; 32],
+    config_sha: &'a [u8; 32],
+    input_sha: &'a [u8; 32],
     started_utc_ns: u128,
     ended_utc_ns: u128,
     elapsed_ns: u64,
-    counts: &Counts,
-    output_sha: &[u8; 32],
-) -> String {
+    counts: &'a Counts,
+    output_sha: &'a [u8; 32],
+}
+
+fn summary_json(summary: SummaryInput<'_>) -> String {
+    let SummaryInput {
+        candidate,
+        executable_sha,
+        snapshot_sha,
+        config_sha,
+        input_sha,
+        started_utc_ns,
+        ended_utc_ns,
+        elapsed_ns,
+        counts,
+        output_sha,
+    } = summary;
     let fault_start_utc = counts
         .feed_fault_start_utc_ns
         .map_or_else(|| "null".to_string(), |value| value.to_string());
@@ -351,15 +458,19 @@ fn summary_json(
     let feed_recovery_elapsed = counts
         .feed_recovered_elapsed_ns
         .map_or_else(|| "null".to_string(), |value| value.to_string());
+    let feed_recovery_tracks = counts
+        .feed_recovery_tracks
+        .map_or_else(|| "null".to_string(), |value| value.to_string());
     format!(
-        "{{\"schema\":\"{SCHEMA}\",\"status\":\"COMPLETED_SYNTHETIC_STABILITY_RUN\",\"qualification\":\"NONE\",\"candidate_commit\":\"{candidate}\",\"executable_sha256\":\"{}\",\"synthetic_adaptation_sha256\":\"{}\",\"configuration_sha256\":\"{}\",\"synthetic_input_profile_sha256\":\"{}\",\"started_utc_unix_ns\":{started_utc_ns},\"ended_utc_unix_ns\":{ended_utc_ns},\"monotonic_elapsed_ns\":{elapsed_ns},\"planned_duration_ns\":{},\"frames_expected\":{FRAME_COUNT},\"frames_completed\":{},\"tracks_min_after_warmup\":{},\"tracks_max\":{},\"ca_open_max\":{},\"ca_closed_total\":{},\"measurement_rejections\":{},\"quarantine_records\":{},\"incomplete_ca_frames\":{},\"presentation_updates_total\":{},\"presentation_pending_current\":{},\"presentation_pending_max\":{},\"schedule_late_threshold_ns\":{SCHEDULE_LATE_THRESHOLD_NS},\"late_frames_over_threshold\":{},\"max_schedule_lateness_ns\":{},\"max_actual_frame_gap_ns\":{},\"max_frame_processing_ns\":{},\"feed_fault_start_utc_ns\":{fault_start_utc},\"feed_fault_start_elapsed_ns\":{fault_start_elapsed},\"feed_recovered_elapsed_ns\":{feed_recovery_elapsed},\"progress_log_bytes\":{},\"progress_log_sha256\":\"{}\",\"recorded_or_live_inputs\":false,\"limitations\":[\"synthetic public-model workload\",\"feed-loss/reacquisition only; no process supervisor or restart recovery claim\",\"no independent thread or availability/MTBF claim\",\"no recorded-traffic or field-shadow claim\",\"no operator or live display\"]}}\n",
+        "{{\"schema\":\"{SCHEMA}\",\"status\":\"COMPLETED_SYNTHETIC_STABILITY_RUN\",\"qualification\":\"NONE\",\"candidate_commit\":\"{candidate}\",\"executable_sha256\":\"{}\",\"synthetic_adaptation_sha256\":\"{}\",\"configuration_sha256\":\"{}\",\"synthetic_input_profile_sha256\":\"{}\",\"started_utc_unix_ns\":{started_utc_ns},\"ended_utc_unix_ns\":{ended_utc_ns},\"monotonic_elapsed_ns\":{elapsed_ns},\"planned_duration_ns\":{},\"frames_expected\":{FRAME_COUNT},\"frames_completed\":{},\"steady_frames_expected\":{EXPECTED_STEADY_FRAMES},\"steady_frames_completed\":{},\"min_steady_tracks\":{},\"tracks_max\":{},\"ca_open_max\":{},\"ca_closed_total\":{},\"measurement_rejections\":{},\"quarantine_records\":{},\"incomplete_ca_frames\":{},\"presentation_updates_total\":{},\"presentation_pending_current\":{},\"presentation_pending_max\":{},\"schedule_late_threshold_ns\":{SCHEDULE_LATE_THRESHOLD_NS},\"actual_frame_gap_min_ns\":{MIN_ACTUAL_FRAME_GAP_NS},\"actual_frame_gap_max_ns\":{MAX_ACTUAL_FRAME_GAP_NS},\"utc_monotonic_gap_drift_max_ns\":{MAX_UTC_MONOTONIC_DRIFT_NS},\"timing_violations\":{},\"late_frames_over_threshold\":{},\"max_schedule_lateness_ns\":{},\"min_actual_frame_gap_ns\":{},\"max_actual_frame_gap_ns\":{},\"max_utc_monotonic_drift_ns\":{},\"max_frame_processing_ns\":{},\"feed_fault_start_utc_ns\":{fault_start_utc},\"feed_fault_start_elapsed_ns\":{fault_start_elapsed},\"feed_recovered_elapsed_ns\":{feed_recovery_elapsed},\"feed_recovery_tracks\":{feed_recovery_tracks},\"progress_log_bytes\":{},\"progress_log_sha256\":\"{}\",\"recorded_or_live_inputs\":false,\"limitations\":[\"synthetic public-model workload\",\"feed-loss/reacquisition only; no process supervisor or restart recovery claim\",\"no independent thread or availability/MTBF claim\",\"no recorded-traffic or field-shadow claim\",\"no operator or live display\"]}}\n",
         to_hex(executable_sha),
         to_hex(snapshot_sha),
         to_hex(config_sha),
         to_hex(input_sha),
         RUN_DURATION.as_nanos(),
         counts.frames,
-        counts.min_confirmed_tracks,
+        counts.steady_frames,
+        counts.min_steady_tracks,
         counts.max_tracks,
         counts.max_open_alerts,
         counts.closed_alerts,
@@ -369,9 +480,12 @@ fn summary_json(
         counts.presentation_updates_total,
         counts.presentation_pending_current,
         counts.presentation_pending_max,
+        counts.timing_violations,
         counts.late_frames,
         counts.max_lateness_ns,
+        counts.min_actual_gap_ns,
         counts.max_actual_gap_ns,
+        counts.max_utc_monotonic_drift_ns,
         counts.max_processing_ns,
         counts.progress_bytes,
         to_hex(output_sha),
@@ -387,12 +501,24 @@ fn write_interruption(
     counts: &Counts,
 ) -> Result<(), String> {
     let now = Instant::now();
+    let last_clock_drift = counts
+        .last_utc_monotonic_drift_ns
+        .map_or_else(|| "null".to_string(), |value| value.to_string());
+    let recovery_tracks = counts
+        .feed_recovery_tracks
+        .map_or_else(|| "null".to_string(), |value| value.to_string());
     let body = format!(
-        "{{\"schema\":\"{SCHEMA}\",\"status\":\"INTERRUPTED_INCOMPLETE\",\"candidate_commit\":\"{candidate}\",\"reason\":\"{}\",\"started_utc_unix_ns\":{start_utc_ns},\"interrupted_utc_unix_ns\":{},\"monotonic_elapsed_ns\":{},\"frames_completed\":{},\"late_frames_over_threshold\":{},\"presentation_pending_current\":{},\"presentation_pending_max\":{},\"presentation_updates_total\":{},\"complete_result_published\":false}}\n",
+        "{{\"schema\":\"{SCHEMA}\",\"status\":\"INTERRUPTED_INCOMPLETE\",\"candidate_commit\":\"{candidate}\",\"reason\":\"{}\",\"started_utc_unix_ns\":{start_utc_ns},\"interrupted_utc_unix_ns\":{},\"monotonic_elapsed_ns\":{},\"frames_completed\":{},\"timing_violations\":{},\"last_schedule_lateness_ns\":{},\"last_actual_frame_gap_ns\":{},\"last_utc_monotonic_drift_ns\":{last_clock_drift},\"last_tracks\":{},\"steady_frames_completed\":{},\"min_steady_tracks\":{},\"feed_recovery_tracks\":{recovery_tracks},\"late_frames_over_threshold\":{},\"presentation_pending_current\":{},\"presentation_pending_max\":{},\"presentation_updates_total\":{},\"complete_result_published\":false}}\n",
         clean_reason(reason).replace(['\\', '"'], " "),
         unix_ns()?,
         elapsed_ns(started, now)?,
         counts.frames,
+        counts.timing_violations,
+        counts.last_lateness_ns,
+        counts.last_actual_gap_ns,
+        counts.last_tracks,
+        counts.steady_frames,
+        counts.min_steady_tracks,
         counts.late_frames,
         counts.presentation_pending_current,
         counts.presentation_pending_max,
@@ -441,20 +567,23 @@ pub fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), String> {
     )?;
     let progress_path = args.output.join("progress.tsv");
     let mut progress = create_new_file(&progress_path)?;
-    let header = b"tick\tutc_unix_ns\tmonotonic_elapsed_ns\tissue_time_ns\tactual_gap_ns\tschedule_lateness_ns\tprocessing_ns\tfeed_state\ttracks\tca_open\tca_closed\tmeasurement_rejections\tquarantine_records\tpresentation_pending\tpresentation_total\tpixels_sha256\tframe_sha256\n";
+    let header = b"tick\tutc_unix_ns\tmonotonic_elapsed_ns\tissue_time_ns\tactual_gap_ns\tutc_gap_ns\tutc_monotonic_drift_ns\tschedule_lateness_ns\tprocessing_ns\tfeed_state\ttracks\tca_open\tca_closed\tmeasurement_rejections\tquarantine_records\tpresentation_pending\tpresentation_total\tpixels_sha256\tframe_sha256\n";
     progress
         .write_all(header)
         .and_then(|()| progress.sync_all())
         .map_err(|error| error.to_string())?;
 
-    let mut counts = Counts::default();
-    counts.min_confirmed_tracks = usize::MAX;
+    let mut counts = Counts {
+        min_steady_tracks: usize::MAX,
+        min_actual_gap_ns: u64::MAX,
+        ..Counts::default()
+    };
     let mut progress_hash = Sha256::new();
     progress_hash
         .update(header)
         .map_err(|error| error.to_string())?;
     counts.progress_bytes = u64::try_from(header.len()).map_err(|_| "header length width")?;
-    let mut previous_tick: Option<Instant> = None;
+    let mut previous_clock_pair: Option<(u128, u64)> = None;
 
     for tick in 0..FRAME_COUNT {
         let due = started
@@ -469,27 +598,97 @@ pub fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), String> {
             std::thread::sleep(due.duration_since(now));
         }
         let actual = Instant::now();
+        let actual_utc_ns = match unix_ns() {
+            Ok(value) => value,
+            Err(error) => {
+                write_interruption(
+                    &args.output,
+                    &args.candidate_commit,
+                    "utc_clock_unavailable",
+                    start_utc_ns,
+                    started,
+                    &counts,
+                )?;
+                return Err(error);
+            }
+        };
+        let monotonic_sample_ns = match elapsed_ns(started, actual) {
+            Ok(value) => value,
+            Err(error) => {
+                write_interruption(
+                    &args.output,
+                    &args.candidate_commit,
+                    "monotonic_clock_unavailable",
+                    start_utc_ns,
+                    started,
+                    &counts,
+                )?;
+                return Err(error);
+            }
+        };
         let lateness = actual
             .checked_duration_since(due)
             .map(|duration| u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX))
             .unwrap_or(0);
         counts.max_lateness_ns = counts.max_lateness_ns.max(lateness);
+        counts.last_lateness_ns = lateness;
         if lateness > SCHEDULE_LATE_THRESHOLD_NS {
             counts.late_frames = counts
                 .late_frames
                 .checked_add(1)
                 .ok_or("late-frame count overflow")?;
         }
-        let actual_gap = match previous_tick {
-            Some(previous) => elapsed_ns(previous, actual)?,
-            None => 0,
-        };
+        let pair_deltas =
+            match clock_pair_deltas(actual_utc_ns, monotonic_sample_ns, previous_clock_pair) {
+                Ok(value) => value,
+                Err(error) => {
+                    counts.timing_violations = counts
+                        .timing_violations
+                        .checked_add(1)
+                        .ok_or("timing violation count overflow")?;
+                    write_interruption(
+                        &args.output,
+                        &args.candidate_commit,
+                        &format!("clock_pair_invalid:{error}"),
+                        start_utc_ns,
+                        started,
+                        &counts,
+                    )?;
+                    return Err(error);
+                }
+            };
+        let utc_gap_ns = pair_deltas.map(|(wall_gap, _, _)| wall_gap);
+        let actual_gap = pair_deltas.map_or(0, |(_, monotonic_gap, _)| monotonic_gap);
+        let utc_mono_drift = pair_deltas.map(|(_, _, drift)| drift);
+        counts.last_actual_gap_ns = actual_gap;
+        counts.last_utc_monotonic_drift_ns = utc_mono_drift;
+        if let Some(drift) = utc_mono_drift {
+            counts.max_utc_monotonic_drift_ns = counts.max_utc_monotonic_drift_ns.max(drift);
+        }
+        if let Some(reason) = timing_violation(tick, lateness, actual_gap, utc_mono_drift) {
+            counts.timing_violations = counts
+                .timing_violations
+                .checked_add(1)
+                .ok_or("timing violation count overflow")?;
+            write_interruption(
+                &args.output,
+                &args.candidate_commit,
+                reason,
+                start_utc_ns,
+                started,
+                &counts,
+            )?;
+            return Err(reason.into());
+        }
+        previous_clock_pair = Some((actual_utc_ns, monotonic_sample_ns));
         counts.max_actual_gap_ns = counts.max_actual_gap_ns.max(actual_gap);
-        previous_tick = Some(actual);
+        if tick > 0 {
+            counts.min_actual_gap_ns = counts.min_actual_gap_ns.min(actual_gap);
+        }
 
         if tick == FEED_FAULT_START_TICK {
-            counts.feed_fault_start_utc_ns = Some(unix_ns()?);
-            counts.feed_fault_start_elapsed_ns = Some(elapsed_ns(started, actual)?);
+            counts.feed_fault_start_utc_ns = Some(actual_utc_ns);
+            counts.feed_fault_start_elapsed_ns = Some(monotonic_sample_ns);
         }
         let batch = make_batch(tick)?;
         let frame = match regional_step(&mut runtime, &batch) {
@@ -550,9 +749,7 @@ pub fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), String> {
         counts.max_processing_ns = counts.max_processing_ns.max(processing_ns);
         let frame_sha = frame.surveillance.frame_sha256;
         let tracks = frame.surveillance.tracks.len();
-        if tick == FEED_FAULT_START_TICK + FEED_FAULT_TICKS && tracks == AIRCRAFT_COUNT {
-            counts.feed_recovered_elapsed_ns = Some(elapsed_ns(started, actual)?);
-        }
+        counts.last_tracks = tracks;
         let (presentation_pending, presentation_total) = regional_presentation_counts(&runtime);
         if presentation_pending != 1 || presentation_total != frame.sequence {
             write_interruption(
@@ -579,8 +776,43 @@ pub fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), String> {
             return Err("cumulative presentation count regressed".into());
         }
         counts.presentation_updates_total = presentation_total;
-        if tick >= 2 {
-            counts.min_confirmed_tracks = counts.min_confirmed_tracks.min(tracks);
+        let feed_down = (FEED_FAULT_START_TICK..FEED_FAULT_END_TICK).contains(&tick);
+        if tick >= WARMUP_FRAMES && !feed_down {
+            counts.steady_frames = counts
+                .steady_frames
+                .checked_add(1)
+                .ok_or("steady-frame count overflow")?;
+            counts.min_steady_tracks = counts.min_steady_tracks.min(tracks);
+            if tracks != AIRCRAFT_COUNT {
+                write_interruption(
+                    &args.output,
+                    &args.candidate_commit,
+                    "steady_track_count_below_required_16",
+                    start_utc_ns,
+                    started,
+                    &counts,
+                )?;
+                return Err(format!(
+                    "steady frame {tick} had {tracks} tracks; expected {AIRCRAFT_COUNT}"
+                ));
+            }
+        }
+        if tick == FEED_FAULT_END_TICK {
+            counts.feed_recovery_tracks = Some(tracks);
+            if tracks != AIRCRAFT_COUNT {
+                write_interruption(
+                    &args.output,
+                    &args.candidate_commit,
+                    "runtime_feed_recovery_track_count_incomplete",
+                    start_utc_ns,
+                    started,
+                    &counts,
+                )?;
+                return Err(format!(
+                    "feed recovery had {tracks} tracks; expected {AIRCRAFT_COUNT}"
+                ));
+            }
+            counts.feed_recovered_elapsed_ns = Some(monotonic_sample_ns);
         }
         counts.max_tracks = counts.max_tracks.max(tracks);
         counts.max_open_alerts = counts.max_open_alerts.max(frame.surveillance.ca_open.len());
@@ -609,18 +841,23 @@ pub fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), String> {
                 .ok_or("incomplete CA count overflow")?;
         }
 
+        let utc_gap_cell = utc_gap_ns.map_or_else(|| "null".to_owned(), |gap| gap.to_string());
+        let drift_cell =
+            utc_mono_drift.map_or_else(|| "null".to_owned(), |drift| drift.to_string());
         let row = format!(
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
             tick,
-            unix_ns()?,
-            elapsed_ns(started, actual)?,
+            actual_utc_ns,
+            monotonic_sample_ns,
             batch.receipt_ns,
             actual_gap,
+            utc_gap_cell,
+            drift_cell,
             lateness,
             processing_ns,
-            if tick >= FEED_FAULT_START_TICK && tick < FEED_FAULT_START_TICK + FEED_FAULT_TICKS {
+            if (FEED_FAULT_START_TICK..FEED_FAULT_END_TICK).contains(&tick) {
                 "DOWN"
-            } else if tick == FEED_FAULT_START_TICK + FEED_FAULT_TICKS {
+            } else if tick == FEED_FAULT_END_TICK {
                 "REACQUIRED"
             } else {
                 "UP"
@@ -636,11 +873,12 @@ pub fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), String> {
             to_hex(&frame_sha),
         );
         let row_bytes = row.as_bytes();
-        counts.progress_bytes = counts
+        let committed_progress_bytes = counts.progress_bytes;
+        let next_progress_bytes = counts
             .progress_bytes
             .checked_add(u64::try_from(row_bytes.len()).map_err(|_| "progress row width")?)
             .ok_or("progress byte count overflow")?;
-        if counts.progress_bytes > MAX_PROGRESS_BYTES {
+        if next_progress_bytes > MAX_PROGRESS_BYTES {
             write_interruption(
                 &args.output,
                 &args.candidate_commit,
@@ -651,7 +889,7 @@ pub fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), String> {
             )?;
             return Err("bounded progress output exceeded 16 MiB".into());
         }
-        if let Err(error) = progress.write_all(row_bytes) {
+        if let Err(error) = write_progress_row(&mut progress, committed_progress_bytes, row_bytes) {
             let reason = format!("progress_sink_refused:{error}");
             write_interruption(
                 &args.output,
@@ -663,6 +901,7 @@ pub fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), String> {
             )?;
             return Err(reason);
         }
+        counts.progress_bytes = next_progress_bytes;
         if let Err(error) = progress_hash.update(row_bytes) {
             let reason = format!("progress_digest_refused:{error}");
             write_interruption(
@@ -766,19 +1005,34 @@ pub fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), String> {
     progress.sync_all().map_err(|error| error.to_string())?;
     let ended_utc_ns = unix_ns()?;
     let elapsed = elapsed_ns(started, Instant::now())?;
+    let minimum_duration_ns =
+        u64::try_from(RUN_DURATION.as_nanos()).map_err(|_| "run duration exceeds u64")?;
+    if elapsed < minimum_duration_ns || !completion_evidence_valid(&counts) {
+        write_interruption(
+            &args.output,
+            &args.candidate_commit,
+            "completion_evidence_incomplete",
+            start_utc_ns,
+            started,
+            &counts,
+        )?;
+        return Err(
+            "duration, steady tracks, feed recovery, timing, or ACK evidence was incomplete".into(),
+        );
+    }
     let input_digest = progress_hash.finalize();
-    let result = summary_json(
-        &args.candidate_commit,
-        &executable_sha,
-        &snapshot_sha,
-        &config_sha,
-        &input_sha,
-        start_utc_ns,
+    let result = summary_json(SummaryInput {
+        candidate: &args.candidate_commit,
+        executable_sha: &executable_sha,
+        snapshot_sha: &snapshot_sha,
+        config_sha: &config_sha,
+        input_sha: &input_sha,
+        started_utc_ns: start_utc_ns,
         ended_utc_ns,
-        elapsed,
-        &counts,
-        &input_digest,
-    );
+        elapsed_ns: elapsed,
+        counts: &counts,
+        output_sha: &input_digest,
+    });
     write_new(&args.output.join("RESULT.json"), result.as_bytes())?;
     let result_sha = to_hex(&oa_sha256::sha256(result.as_bytes()));
     write_new(
@@ -793,11 +1047,16 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::{
-        make_batch, AIRCRAFT_COUNT, FEED_FAULT_START_TICK, FEED_FAULT_TICKS, FRAME_COUNT,
-        RUN_DURATION, TICK_NS,
+        clock_pair_deltas, completion_evidence_valid, make_batch, make_batch_with_fault,
+        regional_ack_presentation, regional_new_with_profile, regional_presentation_counts,
+        regional_step, timing_violation, Counts, AIRCRAFT_COUNT, FEED_FAULT_END_TICK,
+        FEED_FAULT_START_TICK, FEED_FAULT_TICKS, FRAME_COUNT, MAX_ACTUAL_FRAME_GAP_NS,
+        MAX_UTC_MONOTONIC_DRIFT_NS, MIN_ACTUAL_FRAME_GAP_NS, RUN_DURATION,
+        SCHEDULE_LATE_THRESHOLD_NS, TICK_NS,
     };
     use oa_regional_session::input::EventKind;
     use oa_regional_session::runtime::RegionalRunProfile;
+    use oa_regional_session::{cli::synthetic_model, surveillance::SurveillanceConfig};
     use std::time::Duration;
 
     // REQ: OA-REG-021
@@ -832,6 +1091,7 @@ mod tests {
                 <= recorded.surveillance.max_ca_work_per_frame
         );
         assert!(profile.surveillance.render_scope);
+        assert!(profile.stream_presentations);
         let generated_events = usize::try_from(FRAME_COUNT).unwrap() * AIRCRAFT_COUNT
             - usize::try_from(FEED_FAULT_TICKS).unwrap() * AIRCRAFT_COUNT
             + usize::try_from(FEED_FAULT_TICKS).unwrap()
@@ -868,7 +1128,7 @@ mod tests {
     fn feed_fault_window_is_explicit_and_reacquisition_restores_all_synthetic_tracks() {
         let down = make_batch(FEED_FAULT_START_TICK).unwrap();
         let down_next = make_batch(FEED_FAULT_START_TICK + 1).unwrap();
-        let recovered = make_batch(FEED_FAULT_START_TICK + FEED_FAULT_TICKS).unwrap();
+        let recovered = make_batch(FEED_FAULT_END_TICK).unwrap();
         assert_eq!(down.events.len(), 1);
         assert_eq!(down_next.events.len(), 1);
         assert!(down.events.first().is_some_and(|event| matches!(
@@ -886,9 +1146,146 @@ mod tests {
             }
         )));
         assert_eq!(recovered.events.len(), AIRCRAFT_COUNT + 1);
-        assert!(recovered
-            .events
-            .windows(2)
-            .all(|pair| pair[0].sequence < pair[1].sequence));
+        assert!(recovered.events.windows(2).all(|pair| {
+            pair.first()
+                .zip(pair.get(1))
+                .is_some_and(|(first, second)| first.sequence < second.sequence)
+        }));
+    }
+
+    // REQ: OA-REG-021
+    #[test]
+    fn actual_regional_runtime_recovers_all_tracks_after_injected_feed_outage() {
+        let model = synthetic_model().unwrap();
+        let snapshot = oa_airspace::core::snapshot::encode(&model).unwrap();
+        let mut runtime = regional_new_with_profile(
+            model,
+            oa_sha256::sha256(&snapshot),
+            *b"ZAU1",
+            SurveillanceConfig {
+                centre_lat_e7: 410_000_000,
+                centre_lon_e7: -870_000_000,
+                range_nm: 180.0,
+            },
+            RegionalRunProfile::paced_d2_soak(),
+        )
+        .unwrap();
+
+        let mut initial_addresses = None;
+        for tick in 0..=5 {
+            let batch = make_batch_with_fault(tick, 2).unwrap();
+            let frame = regional_step(&mut runtime, &batch).unwrap();
+            if tick == 1 {
+                initial_addresses = Some(
+                    frame
+                        .surveillance
+                        .tracks
+                        .iter()
+                        .map(|track| track.address)
+                        .collect::<std::collections::BTreeSet<_>>(),
+                );
+                assert_eq!(
+                    initial_addresses.as_ref().map_or(0, |set| set.len()),
+                    AIRCRAFT_COUNT
+                );
+            }
+            if tick == 4 || tick == 5 {
+                assert_eq!(frame.surveillance.tracks.len(), AIRCRAFT_COUNT);
+                let recovered_addresses = frame
+                    .surveillance
+                    .tracks
+                    .iter()
+                    .map(|track| track.address)
+                    .collect::<std::collections::BTreeSet<_>>();
+                let initial = initial_addresses.as_ref().unwrap();
+                assert_eq!(&recovered_addresses, initial);
+            }
+            regional_ack_presentation(&mut runtime, frame.sequence).unwrap();
+        }
+        assert_eq!(regional_presentation_counts(&runtime), (0, 6));
+    }
+
+    // REQ: OA-REG-021
+    #[test]
+    fn cadence_and_clock_pair_accept_only_predeclared_boundaries() {
+        assert_eq!(
+            clock_pair_deltas(6_100_000_000, 5_000_000_000, Some((1_000_000_000, 0))),
+            Ok(Some((5_100_000_000, 5_000_000_000, 100_000_000)))
+        );
+        assert!(clock_pair_deltas(999_999_999, 1, Some((1_000_000_000, 0))).is_err());
+        assert_eq!(
+            timing_violation(
+                1,
+                SCHEDULE_LATE_THRESHOLD_NS,
+                MIN_ACTUAL_FRAME_GAP_NS,
+                Some(MAX_UTC_MONOTONIC_DRIFT_NS),
+            ),
+            None
+        );
+        assert_eq!(
+            timing_violation(1, 0, MAX_ACTUAL_FRAME_GAP_NS, Some(0)),
+            None
+        );
+        assert_eq!(
+            timing_violation(
+                1,
+                SCHEDULE_LATE_THRESHOLD_NS + 1,
+                MIN_ACTUAL_FRAME_GAP_NS,
+                None
+            ),
+            Some("schedule_lateness_exceeded_predeclared_limit")
+        );
+        assert_eq!(
+            timing_violation(1, 0, MIN_ACTUAL_FRAME_GAP_NS - 1, None),
+            Some("actual_frame_gap_outside_predeclared_limits")
+        );
+        assert_eq!(
+            timing_violation(1, 0, MAX_ACTUAL_FRAME_GAP_NS + 1, None),
+            Some("actual_frame_gap_outside_predeclared_limits")
+        );
+        assert_eq!(
+            timing_violation(
+                1,
+                0,
+                MIN_ACTUAL_FRAME_GAP_NS,
+                Some(MAX_UTC_MONOTONIC_DRIFT_NS + 1)
+            ),
+            Some("utc_monotonic_drift_exceeded_predeclared_limit")
+        );
+    }
+
+    // REQ: OA-REG-021
+    #[test]
+    fn completion_gate_refuses_missing_recovery_tracks_or_ack_timing_evidence() {
+        let valid = || Counts {
+            frames: FRAME_COUNT,
+            steady_frames: FRAME_COUNT - 2 - FEED_FAULT_TICKS,
+            min_steady_tracks: AIRCRAFT_COUNT,
+            feed_fault_start_utc_ns: Some(1),
+            feed_fault_start_elapsed_ns: Some(0),
+            feed_recovered_elapsed_ns: Some(1),
+            feed_recovery_tracks: Some(AIRCRAFT_COUNT),
+            presentation_updates_total: FRAME_COUNT,
+            presentation_pending_current: 0,
+            timing_violations: 0,
+            ..Counts::default()
+        };
+        assert!(completion_evidence_valid(&valid()));
+        assert!(!completion_evidence_valid(&Counts {
+            feed_recovery_tracks: None,
+            ..valid()
+        }));
+        assert!(!completion_evidence_valid(&Counts {
+            min_steady_tracks: AIRCRAFT_COUNT - 1,
+            ..valid()
+        }));
+        assert!(!completion_evidence_valid(&Counts {
+            presentation_pending_current: 1,
+            ..valid()
+        }));
+        assert!(!completion_evidence_valid(&Counts {
+            timing_violations: 1,
+            ..valid()
+        }));
     }
 }

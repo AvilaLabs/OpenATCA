@@ -1214,39 +1214,41 @@ mod tests {
     // REQ: OA-REG-021
     #[test]
     fn presentation_stream_requires_ordered_ack_and_reuses_only_consumed_capacity() {
-        let mut stream = PresentationLedger::new(2);
-        let first_total = stream.preflight().unwrap();
-        stream.record(1, first_total);
-        let second_total = stream.preflight().unwrap();
-        stream.record(2, second_total);
-        assert_eq!(stream.pending.len(), 2);
+        let mut stream = PresentationLedger::new(MAX_PRESENTATION_UPDATES);
+        for sequence in 1_usize..=MAX_PRESENTATION_UPDATES {
+            let total = stream.preflight().unwrap();
+            stream.record(sequence, total);
+        }
+        assert_eq!(stream.pending.len(), MAX_PRESENTATION_UPDATES);
         assert!(
             stream.preflight().is_err(),
-            "full pending store must block producer"
+            "the 8,193rd outstanding presentation must refuse"
         );
 
         // An attempted consumer failure is represented by withholding ACK; it cannot free space.
-        assert!(
-            stream.acknowledge(2).is_err(),
-            "out-of-order ACK must refuse"
-        );
-        assert_eq!(stream.pending.len(), 2);
+        assert!(stream.acknowledge(MAX_PRESENTATION_UPDATES).is_err());
+        assert_eq!(stream.pending.len(), MAX_PRESENTATION_UPDATES);
         stream.acknowledge(1).unwrap();
-        assert_eq!(stream.pending.len(), 1);
-        stream.acknowledge(2).unwrap();
+        assert_eq!(stream.pending.len(), MAX_PRESENTATION_UPDATES - 1);
+        let replacement_total = stream.preflight().unwrap();
+        stream.record(MAX_PRESENTATION_UPDATES + 1, replacement_total);
+        assert_eq!(stream.pending.len(), MAX_PRESENTATION_UPDATES);
+        for sequence in 2_usize..=MAX_PRESENTATION_UPDATES + 1 {
+            stream.acknowledge(sequence).unwrap();
+        }
         assert_eq!(stream.pending.len(), 0);
-        assert!(
-            stream.acknowledge(2).is_err(),
-            "repeated drain must be empty"
-        );
+        assert!(stream.acknowledge(MAX_PRESENTATION_UPDATES + 1).is_err());
 
-        for sequence in 3..=8_195 {
+        for sequence in MAX_PRESENTATION_UPDATES + 2..=MAX_PRESENTATION_UPDATES * 2 + 2 {
             let total = stream.preflight().unwrap();
             stream.record(sequence, total);
             stream.acknowledge(sequence).unwrap();
         }
         assert_eq!(stream.pending.len(), 0);
-        assert_eq!(stream.total, 8_195);
+        assert_eq!(
+            stream.total,
+            u64::try_from(MAX_PRESENTATION_UPDATES * 2 + 2).unwrap()
+        );
 
         stream.total = u64::MAX;
         assert!(
