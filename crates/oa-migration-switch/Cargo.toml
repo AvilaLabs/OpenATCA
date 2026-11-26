@@ -10,6 +10,9 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
+# F1 / steer41: this pure core dependency supplies only plain receipt/event values. The shell
+# owns durable append and verification; the selector imports no filesystem or clock capability.
+oa-audit-core = { path = "../oa-audit-core" }
 # User approved the one-way typed lifecycle-decision edge on 2026-11-26.
 # M2 consumes opaque M1 results; M1 never depends on or selects M2 output (F1).
 oa-migration = { path = "../oa-migration" }

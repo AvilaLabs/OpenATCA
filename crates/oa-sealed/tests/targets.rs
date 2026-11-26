@@ -357,7 +357,9 @@ const ALLOW: &str = "seal-allow:";
 // seal-checked OASD asset include; none authorizes unguarded external input reads.
 // G2 fleet: one guarded report-directory enumeration with each child checked before use.
 // L3 H2: one additional guarded create-new aggregate output.
-const ALLOW_COUNT: usize = 216;
+// Two reviewed, descriptor-verified audit-log shell opens: one anchored append destination and
+// one guarded parent-directory descriptor used for anchored creation and sync.
+const ALLOW_COUNT: usize = 218;
 
 /// Text that names the real data root: a file that holds one must read through `oa_sealed`.
 /// Written in two pieces so this file does not name the root itself.

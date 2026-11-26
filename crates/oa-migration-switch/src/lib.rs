@@ -78,6 +78,8 @@ pub struct RollbackReceipt {
     pub kind: RollbackKind,
     pub principal_id: [u8; 32],
     pub principal_role_id: u8,
+    /// Plain audit-log principal identifier; it is a caller claim, not authentication.
+    pub audit_principal_id: u64,
     pub policy_version: u32,
     pub policy_digest: [u8; 32],
     pub source_epoch_digest: [u8; 32],
@@ -291,6 +293,9 @@ pub enum Refusal {
     CoordinationFull,
     ContinuityExceeded,
     TimeOverflow,
+    StorageAllocationFailed,
+    CapacityExceeded,
+    AuditRequired,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -460,6 +465,8 @@ pub struct Selector {
     output_sequence: u64,
     delivered_sequence: u64,
     last_authority_sequence: u64,
+    last_audit_sequence: u64,
+    last_audit_digest: [u8; 32],
     last_output_time_ns: i64,
     last_delivery_time_ns: i64,
     pending_delivery: bool,
@@ -473,7 +480,9 @@ pub struct Selector {
 
 const _: () = assert!(core::mem::size_of::<SwapUnitKey>() == 24);
 const _: () = assert!(core::mem::size_of::<UnitPolicy>() == 256);
-const _: () = assert!(core::mem::size_of::<RollbackReceipt>() == 304);
+// A7.1: carries the caller-claimed audit principal needed to bind rollback authorization to the
+// durable shell receipt; the record grows by one u64 plus alignment padding.
+const _: () = assert!(core::mem::size_of::<RollbackReceipt>() == 320);
 const _: () = assert!(core::mem::size_of::<SourceIdentity>() == 24);
 const _: () = assert!(core::mem::size_of::<BusinessKey>() == 48);
 const _: () = assert!(core::mem::size_of::<TrackState>() == 160);
@@ -487,7 +496,8 @@ const _: () = assert!(core::mem::size_of::<CandidateReadiness>() == 336);
 const _: () = assert!(core::mem::size_of::<TraceRecord>() == 64);
 const _: () = assert!(core::mem::size_of::<CoordinationRecord>() == 48);
 const _: () = assert!(core::mem::size_of::<PromotionIntentRequest>() == 56);
-const _: () = assert!(core::mem::size_of::<Selector>() == 188_480);
+// A7.2: selector is a cold control record; row/receipt capacity resides in startup-reserved buffers.
+const _: () = assert!(core::mem::size_of::<Selector>() == 188_520);
 
 pub const fn valid_unit(unit: SwapUnitKey) -> bool {
     unit.function_id != 0 && unit.scope_id != 0 && unit.window_start_ns < unit.window_end_ns
@@ -566,6 +576,8 @@ pub fn new_selector(
         output_sequence: 0,
         delivered_sequence: 0,
         last_authority_sequence: 0,
+        last_audit_sequence: 0,
+        last_audit_digest: [0; 32],
         last_output_time_ns: start_ns,
         last_delivery_time_ns: start_ns,
         pending_delivery: false,
@@ -1272,6 +1284,145 @@ fn rollback_event_key_used(selector: &Selector, event_key: [u8; 32]) -> bool {
     false
 }
 
+fn switch_audit_event(
+    selector: &Selector,
+    action: oa_audit_core::Action,
+    event_key: [u8; 32],
+    principal: u64,
+    time_ns: i64,
+    authority_sequence: u64,
+) -> Result<oa_audit_core::Event, Refusal> {
+    let time_ns = u64::try_from(time_ns).map_err(|_| Refusal::TimeOverflow)?;
+    let (target, target_len) = oa_audit_core::digest_target(&event_key);
+    let mut payload = [0u8; 108];
+    let mut pos = 0usize;
+    append_audit_bytes(
+        &mut payload,
+        &mut pos,
+        &u32::to_le_bytes(selector.unit.function_id),
+    )?;
+    append_audit_bytes(
+        &mut payload,
+        &mut pos,
+        &u32::to_le_bytes(selector.unit.scope_id),
+    )?;
+    append_audit_bytes(
+        &mut payload,
+        &mut pos,
+        &i64::to_le_bytes(selector.unit.window_start_ns),
+    )?;
+    append_audit_bytes(
+        &mut payload,
+        &mut pos,
+        &i64::to_le_bytes(selector.unit.window_end_ns),
+    )?;
+    append_audit_bytes(
+        &mut payload,
+        &mut pos,
+        &u32::to_le_bytes(selector.policy.policy_version),
+    )?;
+    append_audit_bytes(&mut payload, &mut pos, &selector.policy.policy_digest)?;
+    append_audit_bytes(&mut payload, &mut pos, &selector.policy.source_epoch_digest)?;
+    append_audit_bytes(
+        &mut payload,
+        &mut pos,
+        &u64::to_le_bytes(authority_sequence),
+    )?;
+    let (details, details_len) =
+        oa_audit_core::details(payload.get(..pos).ok_or(Refusal::AuditRequired)?)
+            .map_err(|_| Refusal::AuditRequired)?;
+    Ok(oa_audit_core::Event {
+        principal,
+        role: oa_audit_core::Role::Configure,
+        action,
+        target,
+        target_len,
+        time_ns,
+        details,
+        details_len,
+    })
+}
+
+fn append_audit_bytes(dst: &mut [u8], pos: &mut usize, bytes: &[u8]) -> Result<(), Refusal> {
+    let end = pos.checked_add(bytes.len()).ok_or(Refusal::AuditRequired)?;
+    dst.get_mut(*pos..end)
+        .ok_or(Refusal::AuditRequired)?
+        .copy_from_slice(bytes);
+    *pos = end;
+    Ok(())
+}
+
+/// Construct the exact plain audit intent a shell must durably append before selection.
+pub fn candidate_audit_event(
+    selector: &Selector,
+    intent: &PromotionIntent,
+    now_ns: i64,
+) -> Result<oa_audit_core::Event, Refusal> {
+    if intent.sequence == 0
+        || intent.principal_id == 0
+        || intent.principal_role_id != M1_PROMOTION_SUPERVISOR_ROLE_ID
+        || intent.event_key == [0; 32]
+    {
+        return Err(Refusal::Unauthorized);
+    }
+    switch_audit_event(
+        selector,
+        oa_audit_core::Action::MigrationFlip,
+        intent.event_key,
+        u64::from(intent.principal_id),
+        now_ns,
+        intent.sequence,
+    )
+}
+
+/// Construct the exact plain audit intent a shell must durably append before rollback.
+pub fn rollback_audit_event(
+    selector: &Selector,
+    cause: RollbackReceipt,
+    now_ns: i64,
+) -> Result<oa_audit_core::Event, Refusal> {
+    if cause.event_id == [0; 32] || cause.audit_principal_id == 0 {
+        return Err(Refusal::Unauthorized);
+    }
+    switch_audit_event(
+        selector,
+        oa_audit_core::Action::MigrationRollback,
+        cause.event_id,
+        cause.audit_principal_id,
+        now_ns,
+        cause.sequence,
+    )
+}
+
+fn validate_switch_audit(
+    selector: &Selector,
+    receipt: &oa_audit_core::AuditReceipt,
+    event: oa_audit_core::Event,
+) -> Result<(), Refusal> {
+    let next_sequence = selector
+        .last_audit_sequence
+        .checked_add(1)
+        .ok_or(Refusal::AuditRequired)?;
+    if receipt.sequence() != next_sequence
+        || receipt.previous() != selector.last_audit_digest
+        || receipt.action() != event.action
+        || receipt.role() != oa_audit_core::Role::Configure
+        || receipt.principal() != event.principal
+        || !oa_audit_core::receipt_matches(receipt, event)
+    {
+        return Err(Refusal::AuditRequired);
+    }
+    Ok(())
+}
+
+/// Expected predecessor for the selector's dedicated migration audit chain.
+pub fn audit_checkpoint(selector: &Selector) -> oa_audit_core::Checkpoint {
+    oa_audit_core::Checkpoint {
+        count: selector.last_audit_sequence,
+        tail: selector.last_audit_digest,
+    }
+}
+
 /// Selects the candidate for one fresh M2 intent under an accepted M1 window grant.
 /// M1 authorization can be reused within its window; each M2 intent has its own replay-checked
 /// sequence and readiness generation.
@@ -1282,7 +1433,12 @@ pub fn select_candidate(
     intent: &PromotionIntent,
     now_ns: i64,
     max_age_ns: i64,
+    audit: oa_audit_core::AuditReceipt,
 ) -> Result<(), Refusal> {
+    let audit_event = candidate_audit_event(selector, intent, now_ns)?;
+    validate_switch_audit(selector, &audit, audit_event)?;
+    selector.last_audit_sequence = audit.sequence();
+    selector.last_audit_digest = audit.digest();
     if selector.selected != Output::Legacy {
         return Err(Refusal::StateMismatch);
     }
@@ -1360,7 +1516,12 @@ pub fn rollback(
     cause: RollbackReceipt,
     now_ns: i64,
     max_age_ns: i64,
+    audit: oa_audit_core::AuditReceipt,
 ) -> Result<(), Refusal> {
+    let audit_event = rollback_audit_event(selector, cause, now_ns)?;
+    validate_switch_audit(selector, &audit, audit_event)?;
+    selector.last_audit_sequence = audit.sequence();
+    selector.last_audit_digest = audit.digest();
     if selector.selected != Output::Candidate {
         return Err(Refusal::StateMismatch);
     }
@@ -1624,6 +1785,8 @@ pub fn observe_delivery(
     clippy::indexing_slicing
 )]
 mod tests {
+    extern crate std;
+
     use super::*;
     use oa_migration::{
         AuthorityApproval as M1Approval, AuthorityRole as M1Role, Comparison as M1Comparison,
@@ -1632,6 +1795,60 @@ mod tests {
         Stage as M1Stage, SwapUnitKey as M1Key, TransitionInput as M1Input,
         TransitionPolicy as M1Policy,
     };
+
+    fn test_audit_receipt(
+        selector: &Selector,
+        event: oa_audit_core::Event,
+    ) -> Result<oa_audit_core::AuditReceipt, Refusal> {
+        let expected = audit_checkpoint(selector);
+        let sequence = expected
+            .count
+            .checked_add(1)
+            .ok_or(Refusal::AuditRequired)?;
+        let mut digest = [0; 32];
+        digest
+            .get_mut(..8)
+            .ok_or(Refusal::AuditRequired)?
+            .copy_from_slice(&u64::to_le_bytes(sequence));
+        Ok(oa_audit_core::receipt_claim(
+            sequence,
+            digest,
+            expected.tail,
+            event,
+        ))
+    }
+
+    fn audited_select_candidate(
+        selector: &mut Selector,
+        readiness: &CandidateReadiness,
+        authorization: &WindowAuthorization,
+        intent: &PromotionIntent,
+        now_ns: i64,
+        max_age_ns: i64,
+    ) -> Result<(), Refusal> {
+        let event = candidate_audit_event(selector, intent, now_ns)?;
+        let audit = test_audit_receipt(selector, event)?;
+        super::select_candidate(
+            selector,
+            readiness,
+            authorization,
+            intent,
+            now_ns,
+            max_age_ns,
+            audit,
+        )
+    }
+
+    fn audited_rollback(
+        selector: &mut Selector,
+        cause: RollbackReceipt,
+        now_ns: i64,
+        max_age_ns: i64,
+    ) -> Result<(), Refusal> {
+        let event = rollback_audit_event(selector, cause, now_ns)?;
+        let audit = test_audit_receipt(selector, event)?;
+        super::rollback(selector, cause, now_ns, max_age_ns, audit)
+    }
 
     fn m1_key(key: SwapUnitKey) -> M1Key {
         M1Key {
@@ -2037,7 +2254,7 @@ mod tests {
         (selector, l, c)
     }
 
-    // REQ: OA-MIG-201, OA-MIG-203, OA-MIG-204, OA-MIG-205
+    // REQ: OA-MIG-201, OA-MIG-203, OA-MIG-204, OA-MIG-205, OA-AUDIT-003, OA-AUDIT-004, OA-AUDIT-005
     #[test]
     fn h1_h5_make_before_break_and_rollback() {
         let (mut s, l, c) = fixture();
@@ -2047,7 +2264,33 @@ mod tests {
         let (_, ready) = prepare_candidate(&s, 25, 100).unwrap();
         let authorization = promotion(&s, 24);
         let intent = intent(&s, &ready, &authorization, 1, 24);
-        select_candidate(&mut s, &ready, &authorization, &intent, 25, 100).unwrap();
+        let event = candidate_audit_event(&s, &intent, 25).unwrap();
+        let mut wrong_event = event;
+        if let Some(first) = wrong_event.target.first_mut() {
+            *first = b'X';
+        }
+        let wrong_receipt =
+            oa_audit_core::receipt_claim(1, [1; 32], oa_audit_core::genesis().tail, wrong_event);
+        assert_eq!(
+            select_candidate(
+                &mut s,
+                &ready,
+                &authorization,
+                &intent,
+                25,
+                100,
+                wrong_receipt
+            ),
+            Err(Refusal::AuditRequired)
+        );
+        assert_eq!(selected(&s), Output::Legacy);
+        assert_eq!(trace(&s).1, 0);
+        let audit = test_audit_receipt(&s, event).unwrap();
+        select_candidate(&mut s, &ready, &authorization, &intent, 25, 100, audit).unwrap();
+        assert_eq!(
+            select_candidate(&mut s, &ready, &authorization, &intent, 25, 100, audit),
+            Err(Refusal::AuditRequired)
+        );
         assert_eq!(selected(&s), Output::Candidate);
         let (notices, notice_count) = coordination_records(&s);
         assert_eq!(notice_count, 2);
@@ -2058,13 +2301,14 @@ mod tests {
         assert_eq!(notices[1].output_sequence, 1);
         observe_delivery(&mut s, 1, Output::Candidate, 1, 26).unwrap();
         let unit = s.unit;
-        rollback(
+        audited_rollback(
             &mut s,
             RollbackReceipt {
                 unit,
                 kind: RollbackKind::ControllerRequest,
                 principal_id: [8; 32],
                 principal_role_id: 1,
+                audit_principal_id: 11,
                 policy_version: 1,
                 policy_digest: [3; 32],
                 source_epoch_digest: [4; 32],
@@ -2096,11 +2340,11 @@ mod tests {
         assert_eq!(notices[2].reason, 2);
         assert_eq!(notices[2].output_sequence, 2);
         assert_eq!(
-            select_candidate(&mut s, &ready, &authorization, &intent, 28, 100),
+            audited_select_candidate(&mut s, &ready, &authorization, &intent, 28, 100),
             Err(Refusal::Unauthorized)
         );
         assert_eq!(
-            select_candidate(&mut s, &ready, &authorization, &intent, 28, 100),
+            audited_select_candidate(&mut s, &ready, &authorization, &intent, 28, 100),
             Err(Refusal::Unauthorized)
         );
         let (records, count) = trace(&s);
@@ -2131,7 +2375,7 @@ mod tests {
         let intent = intent(&s, &ready, &authorization, 1, 24);
         s.coordination_len = u16::try_from(MAX_COORDINATION_RECORDS - 3).unwrap();
         assert_eq!(
-            select_candidate(&mut s, &ready, &authorization, &intent, 25, 100),
+            audited_select_candidate(&mut s, &ready, &authorization, &intent, 25, 100),
             Err(Refusal::CoordinationFull)
         );
         assert_eq!(selected(&s), Output::Legacy);
@@ -2203,7 +2447,7 @@ mod tests {
         ingest(&mut s, l_next, 30, 100).unwrap();
         ingest(&mut s, c_next, 30, 100).unwrap();
         assert_eq!(
-            select_candidate(&mut s, &ready, &authorization, &stale_intent, 30, 100),
+            audited_select_candidate(&mut s, &ready, &authorization, &stale_intent, 30, 100),
             Err(Refusal::TokenStale)
         );
     }
@@ -2221,7 +2465,7 @@ mod tests {
         changed.source_epoch = 99;
         s.candidate = Some(changed);
         assert_eq!(
-            select_candidate(&mut s, &ready, &authorization, &intent, 25, 100),
+            audited_select_candidate(&mut s, &ready, &authorization, &intent, 25, 100),
             Err(Refusal::TokenStale)
         );
     }
@@ -2235,16 +2479,18 @@ mod tests {
         let (_, first_ready) = prepare_candidate(&s, 25, 100).unwrap();
         let authorization = promotion(&s, 24);
         let first_intent = intent(&s, &first_ready, &authorization, 1, 24);
-        select_candidate(&mut s, &first_ready, &authorization, &first_intent, 25, 100).unwrap();
+        audited_select_candidate(&mut s, &first_ready, &authorization, &first_intent, 25, 100)
+            .unwrap();
         observe_delivery(&mut s, 1, Output::Candidate, 1, 26).unwrap();
         let unit = s.unit;
-        rollback(
+        audited_rollback(
             &mut s,
             RollbackReceipt {
                 unit,
                 kind: RollbackKind::HealthFault,
                 principal_id: [8; 32],
                 principal_role_id: 1,
+                audit_principal_id: 11,
                 policy_version: 1,
                 policy_digest: [3; 32],
                 source_epoch_digest: [4; 32],
@@ -2285,7 +2531,7 @@ mod tests {
             Err(Refusal::Unauthorized)
         );
         let second_intent = intent(&s, &second_ready, &authorization, 3, 28);
-        select_candidate(
+        audited_select_candidate(
             &mut s,
             &second_ready,
             &authorization,
@@ -2300,6 +2546,7 @@ mod tests {
             kind: RollbackKind::HealthFault,
             principal_id: [8; 32],
             principal_role_id: 1,
+            audit_principal_id: 11,
             policy_version: 1,
             policy_digest: [3; 32],
             source_epoch_digest: [4; 32],
@@ -2319,11 +2566,11 @@ mod tests {
             observed_ns: 30,
         };
         assert_eq!(
-            rollback(&mut s, repeated_rollback, 30, 100),
+            audited_rollback(&mut s, repeated_rollback, 30, 100),
             Err(Refusal::Unauthorized)
         );
         repeated_rollback.event_id = [9; 32];
-        rollback(&mut s, repeated_rollback, 30, 100).unwrap();
+        audited_rollback(&mut s, repeated_rollback, 30, 100).unwrap();
         let (records, count) = trace(&s);
         assert_eq!(count, 4);
         assert_eq!(records[0].map(|record| record.m1_window_sequence), Some(2));
@@ -2341,13 +2588,14 @@ mod tests {
         let (_, ready) = prepare_candidate(&s, 25, 100).unwrap();
         let authorization = promotion(&s, 24);
         let intent = intent(&s, &ready, &authorization, 1, 24);
-        select_candidate(&mut s, &ready, &authorization, &intent, 25, 100).unwrap();
+        audited_select_candidate(&mut s, &ready, &authorization, &intent, 25, 100).unwrap();
         let unit = s.unit;
         let cause = RollbackReceipt {
             unit,
             kind: RollbackKind::HealthFault,
             principal_id: [8; 32],
             principal_role_id: 1,
+            audit_principal_id: 11,
             policy_version: 1,
             policy_digest: [3; 32],
             source_epoch_digest: [4; 32],
@@ -2369,16 +2617,16 @@ mod tests {
         let mut unhealthy = cause;
         unhealthy.legacy_health = Health::Unknown;
         assert_eq!(
-            rollback(&mut s, unhealthy, 25, 100),
+            audited_rollback(&mut s, unhealthy, 25, 100),
             Err(Refusal::Unhealthy)
         );
         let mut unavailable = cause;
         unavailable.legacy_source_available = false;
         assert_eq!(
-            rollback(&mut s, unavailable, 25, 100),
+            audited_rollback(&mut s, unavailable, 25, 100),
             Err(Refusal::Unhealthy)
         );
-        rollback(&mut s, cause, 25, 100).unwrap();
+        audited_rollback(&mut s, cause, 25, 100).unwrap();
         assert_eq!(selected(&s), Output::Legacy);
         assert_eq!(observe_delivery(&mut s, 1, Output::Legacy, 1, 26), Ok(()));
     }
@@ -2402,7 +2650,7 @@ mod tests {
         let valid_intent = intent(&s, &ready, &valid, 1, 24);
         let other_grant = promotion(&s, 23);
         assert_eq!(
-            select_candidate(&mut s, &ready, &other_grant, &valid_intent, 25, 100),
+            audited_select_candidate(&mut s, &ready, &other_grant, &valid_intent, 25, 100),
             Err(Refusal::Unauthorized)
         );
         assert_eq!(
@@ -2437,7 +2685,7 @@ mod tests {
         );
         let window_end_ns = s.unit.window_end_ns;
         assert_eq!(
-            select_candidate(&mut s, &ready, &valid, &valid_intent, window_end_ns, 100),
+            audited_select_candidate(&mut s, &ready, &valid, &valid_intent, window_end_ns, 100),
             Err(Refusal::Unauthorized)
         );
         let refused_m1 = m1_transition(&s, 24, None, None, None, true);
@@ -2449,16 +2697,17 @@ mod tests {
             authorize_window(&s, &refused_m1),
             Err(Refusal::Unauthorized)
         );
-        select_candidate(&mut s, &ready, &valid, &valid_intent, 25, 100).unwrap();
+        audited_select_candidate(&mut s, &ready, &valid, &valid_intent, 25, 100).unwrap();
         observe_delivery(&mut s, 1, Output::Candidate, 1, 26).unwrap();
         let unit = s.unit;
-        rollback(
+        audited_rollback(
             &mut s,
             RollbackReceipt {
                 unit,
                 kind: RollbackKind::HealthFault,
                 principal_id: [8; 32],
                 principal_role_id: 1,
+                audit_principal_id: 11,
                 policy_version: 1,
                 policy_digest: [3; 32],
                 source_epoch_digest: [4; 32],
@@ -2482,7 +2731,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            select_candidate(&mut s, &ready, &valid, &valid_intent, 28, 100),
+            audited_select_candidate(&mut s, &ready, &valid, &valid_intent, 28, 100),
             Err(Refusal::Unauthorized)
         );
     }
@@ -2509,7 +2758,7 @@ mod tests {
         s.trace_len = u16::try_from(MAX_TRACE - 2).unwrap();
         let authorization = promotion(&s, 24);
         let intent = intent(&s, &ready, &authorization, 1, 24);
-        select_candidate(&mut s, &ready, &authorization, &intent, 25, 100).unwrap();
+        audited_select_candidate(&mut s, &ready, &authorization, &intent, 25, 100).unwrap();
         assert_eq!(usize::from(s.trace_len), MAX_TRACE - 1);
         assert_eq!(
             s.trace[MAX_TRACE - 2].map(|r| r.m1_window_sequence),
@@ -2520,6 +2769,7 @@ mod tests {
             kind: RollbackKind::HealthFault,
             principal_id: [8; 32],
             principal_role_id: 1,
+            audit_principal_id: 11,
             policy_version: 1,
             policy_digest: [3; 32],
             source_epoch_digest: [4; 32],
@@ -2538,7 +2788,7 @@ mod tests {
             event_id: [6; 32],
             observed_ns: 25,
         };
-        rollback(&mut s, rollback_receipt, 25, 100).unwrap();
+        audited_rollback(&mut s, rollback_receipt, 25, 100).unwrap();
         assert_eq!(selected(&s), Output::Legacy);
         assert_eq!(usize::from(s.trace_len), MAX_TRACE);
         assert_eq!(
@@ -2550,7 +2800,7 @@ mod tests {
             Some(0)
         );
         assert_eq!(
-            select_candidate(&mut s, &ready, &authorization, &intent, 26, 100),
+            audited_select_candidate(&mut s, &ready, &authorization, &intent, 26, 100),
             Err(Refusal::TraceFull)
         );
     }
@@ -2567,7 +2817,7 @@ mod tests {
         let (_, ready) = prepare_candidate(&s, 25, 100).unwrap();
         let authorization = promotion(&s, 24);
         let intent = intent(&s, &ready, &authorization, 1, 24);
-        select_candidate(&mut s, &ready, &authorization, &intent, 25, 100).unwrap();
+        audited_select_candidate(&mut s, &ready, &authorization, &intent, 25, 100).unwrap();
         assert_eq!(
             observe_delivery(&mut s, 9, Output::Candidate, 1, 26),
             Err(Refusal::WrongUnit)

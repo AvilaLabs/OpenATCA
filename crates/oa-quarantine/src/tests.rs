@@ -5,6 +5,8 @@
     clippy::indexing_slicing
 )]
 
+extern crate std;
+
 use super::*;
 
 fn outcome(source: InputSource, item_id: u64, refusal_reasons: u16) -> InputOutcome {
@@ -226,7 +228,7 @@ fn full_source_queue_returns_counted_manual_event_without_blocking_other_sources
     assert_eq!(healthy_surveillance, Disposition::Accepted);
 }
 
-// REQ: OA-QUAR-002
+// REQ: OA-QUAR-002, OA-QUAR-004, OA-AUDIT-002, OA-AUDIT-003, OA-AUDIT-005
 #[test]
 fn acknowledgement_is_explicit_and_invalid_timing_never_mutates_queue() {
     let mut queue = queue_new();
@@ -249,7 +251,42 @@ fn acknowledgement_is_explicit_and_invalid_timing_never_mutates_queue() {
     let before = queue_front(&queue, InputSource::Surveillance)
         .expect("queue front")
         .expect("event present");
-    let acknowledged = queue_acknowledge(&mut queue, InputSource::Surveillance)
+    let (wrong_target, wrong_target_len) =
+        oa_audit_core::target(b"Q:wrong").expect("valid audit target");
+    let (empty_details, empty_details_len) = oa_audit_core::details(&[]).expect("empty details");
+    let wrong_event = oa_audit_core::Event {
+        principal: 11,
+        role: oa_audit_core::Role::Operate,
+        action: oa_audit_core::Action::QuarantineRelease,
+        target: wrong_target,
+        target_len: wrong_target_len,
+        time_ns: 200,
+        details: empty_details,
+        details_len: empty_details_len,
+    };
+    let genesis = oa_audit_core::genesis();
+    let wrong_receipt = oa_audit_core::receipt_claim(1, [1; 32], genesis.tail, wrong_event);
+    assert_eq!(
+        queue_acknowledge(&mut queue, InputSource::Surveillance, wrong_receipt),
+        Err(QuarantineError::AuditRequired)
+    );
+    assert_eq!(
+        queue_front(&queue, InputSource::Surveillance).expect("queue unchanged"),
+        Some(before)
+    );
+    let (target, target_len) = release_audit_target(before);
+    let event = oa_audit_core::Event {
+        principal: 11,
+        role: oa_audit_core::Role::Configure,
+        action: oa_audit_core::Action::QuarantineRelease,
+        target,
+        target_len,
+        time_ns: 201,
+        details: empty_details,
+        details_len: empty_details_len,
+    };
+    let receipt = oa_audit_core::receipt_claim(1, [2; 32], genesis.tail, event);
+    let acknowledged = queue_acknowledge(&mut queue, InputSource::Surveillance, receipt)
         .expect("explicit manual responsibility handoff");
     assert_eq!(acknowledged, before);
     assert_eq!(
@@ -262,6 +299,26 @@ fn acknowledgement_is_explicit_and_invalid_timing_never_mutates_queue() {
             .acknowledged,
         1
     );
+    route_input(
+        &mut queue,
+        outcome(InputSource::Surveillance, 702, REASON_SURVEILLANCE_INVALID),
+    )
+    .expect("same source-local identity may be requeued after prior handoff");
+    assert_eq!(
+        queue_acknowledge(&mut queue, InputSource::Surveillance, receipt),
+        Err(QuarantineError::AuditRequired)
+    );
+    assert_eq!(
+        queue_front(&queue, InputSource::Surveillance).expect("requeued event remains"),
+        Some(before)
+    );
+    let release_checkpoint = oa_audit_core::Checkpoint {
+        count: 1,
+        tail: receipt.digest(),
+    };
+    let fresh_receipt = oa_audit_core::receipt_claim(2, [3; 32], release_checkpoint.tail, event);
+    queue_acknowledge(&mut queue, InputSource::Surveillance, fresh_receipt)
+        .expect("fresh intent releases requeued item");
 }
 
 // REQ: OA-QUAR-004

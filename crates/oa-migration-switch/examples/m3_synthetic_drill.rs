@@ -3,6 +3,7 @@
 //! snapshot producer and bounded input contract are available.
 #![forbid(unsafe_code)]
 
+use oa_audit_core::{AuditReceipt, Event};
 use oa_migration::{
     self as m1, AuthorityApproval, AuthorityRole, Comparison, EvidenceQuality, MetricCriterion,
     MetricEvidence, RollbackRule, RollbackTriggerPolicy, Stage, SwapUnitKey as M1Key,
@@ -453,6 +454,7 @@ pub(crate) fn rollback_receipt(
         kind: RollbackKind::ControllerRequest,
         principal_id: [8; 32],
         principal_role_id: 1,
+        audit_principal_id: 11,
         policy_version: policy.policy_version,
         policy_digest: policy.policy_digest,
         source_epoch_digest: policy.source_epoch_digest,
@@ -531,7 +533,7 @@ fn run_cycle(index: u32) -> Result<(u128, u128, u128, u128, u128), Refusal> {
     let authorization = window_authorization(&selector, unit, policy, now_ns)?;
     let intent = promotion_intent(&selector, &readiness, &authorization, 1, now_ns)?;
     let promotion_started = Instant::now();
-    select_candidate(
+    audited_select_candidate(
         &mut selector,
         &readiness,
         &authorization,
@@ -556,7 +558,7 @@ fn run_cycle(index: u32) -> Result<(u128, u128, u128, u128, u128), Refusal> {
         .checked_add(DECISION_TO_DELIVERY_NS)
         .ok_or(Refusal::TimeOverflow)?;
     let rollback_started = Instant::now();
-    rollback(
+    audited_rollback(
         &mut selector,
         rollback_receipt(unit, policy, 2, 1, 1, rollback_at, rollback_at),
         rollback_at,
@@ -623,7 +625,7 @@ fn fault_suite() -> Result<u32, Refusal> {
     let epoch_attempt_at = now_ns.checked_add(20).ok_or(Refusal::TimeOverflow)?;
     let authorization = window_authorization(&selector, unit, policy, now_ns)?;
     let intent = promotion_intent(&selector, &readiness, &authorization, 1, epoch_attempt_at)?;
-    select_candidate(
+    audited_select_candidate(
         &mut selector,
         &readiness,
         &authorization,
@@ -681,7 +683,7 @@ fn fault_suite() -> Result<u32, Refusal> {
         .ok_or(Refusal::TimeOverflow)?;
     let stale_health_time = now_ns.checked_add(1).ok_or(Refusal::TimeOverflow)?;
     let stale_health = rollback_receipt(unit, policy, 2, 1, 1, stale_now, stale_health_time);
-    if rollback(&mut selector, stale_health, stale_now, MAX_AGE_NS) != Err(Refusal::Stale) {
+    if audited_rollback(&mut selector, stale_health, stale_now, MAX_AGE_NS) != Err(Refusal::Stale) {
         return Err(Refusal::StateMismatch);
     }
     cases = cases.checked_add(1).ok_or(Refusal::TimeOverflow)?;
@@ -700,7 +702,7 @@ fn fault_suite() -> Result<u32, Refusal> {
         1,
         pending_now,
     )?;
-    select_candidate(
+    audited_select_candidate(
         &mut pending,
         &pending_ready,
         &pending_authorization,
@@ -711,7 +713,7 @@ fn fault_suite() -> Result<u32, Refusal> {
     let rollback_time = pending_now
         .checked_add(DECISION_TO_DELIVERY_NS)
         .ok_or(Refusal::TimeOverflow)?;
-    rollback(
+    audited_rollback(
         &mut pending,
         rollback_receipt(
             pending_unit,
@@ -851,7 +853,7 @@ fn sustained_trace_capacity_case() -> Result<(), Refusal> {
             now_ns,
         )?;
         if cycle == 64 {
-            if select_candidate(
+            if audited_select_candidate(
                 &mut selector,
                 &readiness,
                 &window_grant,
@@ -879,7 +881,7 @@ fn sustained_trace_capacity_case() -> Result<(), Refusal> {
             );
             return Ok(());
         }
-        select_candidate(
+        audited_select_candidate(
             &mut selector,
             &readiness,
             &window_grant,
@@ -908,7 +910,7 @@ fn sustained_trace_capacity_case() -> Result<(), Refusal> {
         let rollback_at = candidate_delivery
             .checked_add(DECISION_TO_DELIVERY_NS)
             .ok_or(Refusal::TimeOverflow)?;
-        rollback(
+        audited_rollback(
             &mut selector,
             rollback_receipt(
                 unit,
@@ -1012,6 +1014,57 @@ fn main() -> Result<(), Refusal> {
         return Err(Refusal::Incomplete);
     }
     Ok(())
+}
+
+// The drill is a pure selector model; durable shell append behavior is qualified separately in
+// oa-audit-log tests. This produces only a synthetic receipt value for the core API.
+fn m3_audit_receipt(
+    selector: &oa_migration_switch::Selector,
+    event: Event,
+) -> Result<AuditReceipt, Refusal> {
+    let expected = oa_migration_switch::audit_checkpoint(selector);
+    let sequence = expected
+        .count
+        .checked_add(1)
+        .ok_or(Refusal::AuditRequired)?;
+    Ok(oa_audit_core::receipt_claim(
+        sequence,
+        [0; 32],
+        expected.tail,
+        event,
+    ))
+}
+
+fn audited_select_candidate(
+    selector: &mut oa_migration_switch::Selector,
+    readiness: &oa_migration_switch::CandidateReadiness,
+    authorization: &oa_migration_switch::WindowAuthorization,
+    intent: &oa_migration_switch::PromotionIntent,
+    now_ns: i64,
+    max_age_ns: i64,
+) -> Result<(), Refusal> {
+    let event = oa_migration_switch::candidate_audit_event(selector, intent, now_ns)?;
+    let receipt = m3_audit_receipt(selector, event)?;
+    select_candidate(
+        selector,
+        readiness,
+        authorization,
+        intent,
+        now_ns,
+        max_age_ns,
+        receipt,
+    )
+}
+
+fn audited_rollback(
+    selector: &mut oa_migration_switch::Selector,
+    cause: RollbackReceipt,
+    now_ns: i64,
+    max_age_ns: i64,
+) -> Result<(), Refusal> {
+    let event = oa_migration_switch::rollback_audit_event(selector, cause, now_ns)?;
+    let receipt = m3_audit_receipt(selector, event)?;
+    rollback(selector, cause, now_ns, max_age_ns, receipt)
 }
 
 #[cfg(test)]

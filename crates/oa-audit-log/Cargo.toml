@@ -1,0 +1,22 @@
+[package]
+name = "oa-audit-log"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+description = "Bounded append-only privileged action audit log"
+
+[lints]
+workspace = true
+
+[dependencies]
+# F1 / steer39: OA-AUDIT-006 requires the shared production sealed-path guard before audit I/O.
+oa-sealed = { path = "../oa-sealed" }
+# F1 / steer33L13(a): the user explicitly named oa-sha256 for canonical chain hashing.
+oa-sha256 = { path = "../oa-sha256" }
+# F1 / steer41: pure event/receipt data and validation live in the zero-dependency core package.
+oa-audit-core = { path = "../oa-audit-core" }
+
+[package.metadata.openatca]
+class = "shell"

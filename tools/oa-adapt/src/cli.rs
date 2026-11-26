@@ -11,6 +11,9 @@
 //!                 --previous-manifest-sha256 <hex> --release <id> --facility <ARTCC>
 //!                 --change-ref <record> --change-class initial|routine|field-change
 //!                 --issuer <principal-id> --approver <principal-id> --reason <text>
+//!                 --audit-log <file> --audit-count <n> --audit-tail <sha256>
+//!                 --audit-principal <numeric-id> --audit-role monitor|operate|configure
+//!                 --audit-time-ns <n>
 //! oa-adapt fleet-check --issued-package-root <dir> --expected-manifest-sha256 <hex>
 //!                       --expected <processor-list.tsv> --reports-dir <dir>
 //!                       --previous-epoch <number> --epoch <number> --clock-domain-id <number>
@@ -96,6 +99,9 @@ pub const USAGE: &str = "usage:
                  --previous-manifest-sha256 <hex> --release <id> --facility <ARTCC>
                  --change-ref <record> --change-class initial|routine|field-change
                  --issuer <principal-id> --approver <principal-id> --reason <text>
+                 --audit-log <file> --audit-count <n> --audit-tail <sha256>
+                 --audit-principal <numeric-id> --audit-role monitor|operate|configure
+                 --audit-time-ns <n>
   oa-adapt fleet-check --issued-package-root <dir> --expected-manifest-sha256 <hex>
                        --expected <processor-list.tsv> --reports-dir <dir>
                        --previous-epoch <number> --epoch <number> --clock-domain-id <number>
@@ -361,7 +367,7 @@ pub fn run_package(args: &[String], out: &mut dyn Write) -> Result<(), CliError>
             _ => {
                 return Err(CliError::Usage(format!(
                     "unknown package argument {flag:?}"
-                )))
+                )));
             }
         };
         if slot.replace(value.clone()).is_some() {
@@ -396,7 +402,7 @@ pub fn run_package(args: &[String], out: &mut dyn Write) -> Result<(), CliError>
 
 /// `issue`: create a bounded v2 or v3 manifest at the next version after verifying the prior pin.
 pub fn run_issue(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
-    const FIELDS: [&str; 11] = [
+    const FIELDS: [&str; 17] = [
         "--snapshot",
         "--out-root",
         "--previous-package-root",
@@ -408,10 +414,16 @@ pub fn run_issue(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
         "--issuer",
         "--approver",
         "--reason",
+        "--audit-log",
+        "--audit-count",
+        "--audit-tail",
+        "--audit-principal",
+        "--audit-role",
+        "--audit-time-ns",
     ];
     if args.len() < FIELDS.len() * 2 || args.len() > (FIELDS.len() + 1) * 2 || args.len() % 2 != 0 {
         return Err(CliError::Usage(
-            "issue requires exactly twelve flag/value pairs".into(),
+            "issue requires exactly seventeen flag/value pairs".into(),
         ));
     }
     if args
@@ -451,47 +463,117 @@ pub fn run_issue(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
         other => {
             return Err(CliError::Usage(format!(
                 "unsupported --change-class {other:?}"
-            )))
+            )));
         }
     };
     let snapshot_path = PathBuf::from(get("--snapshot")?);
     let output_root = PathBuf::from(get("--out-root")?);
     let previous_root = PathBuf::from(get("--previous-package-root")?);
+    let release = get("--release")?;
+    let facility = get("--facility")?;
+    let change_ref = get("--change-ref")?;
+    let issuer = get("--issuer")?;
+    let approver = get("--approver")?;
+    let reason = get("--reason")?;
     let previous_pin = crate::manifest::parse_pin(get("--previous-manifest-sha256")?)
         .map_err(|e| CliError::Usage(e.to_string()))?;
     let snapshot_bytes = read_snapshot(&snapshot_path)?;
-    let issued = if let Some(path) = values.get("--ca-preset") {
-        let preset = read_bounded_file(Path::new(path), oa_ca::CA_PRESET_MAX_BYTES, "CA preset")?;
-        crate::manifest::issue_new_package_with_ca_preset(
-            &output_root,
-            &snapshot_bytes,
-            &preset,
-            get("--release")?,
-            get("--facility")?,
-            get("--change-ref")?,
-            &previous_root,
-            previous_pin,
-            change_class,
-            get("--issuer")?,
-            get("--approver")?,
-            get("--reason")?,
-        )
-    } else {
-        crate::manifest::issue_new_package(
-            &output_root,
-            &snapshot_bytes,
-            get("--release")?,
-            get("--facility")?,
-            get("--change-ref")?,
-            &previous_root,
-            previous_pin,
-            change_class,
-            get("--issuer")?,
-            get("--approver")?,
-            get("--reason")?,
-        )
+    let ca_preset = values
+        .get("--ca-preset")
+        .map(|path| read_bounded_file(Path::new(path), oa_ca::CA_PRESET_MAX_BYTES, "CA preset"))
+        .transpose()?;
+    let audit_principal = get("--audit-principal")?
+        .parse::<u64>()
+        .map_err(|_| CliError::Usage("--audit-principal must be a positive numeric ID".into()))?;
+    let audit_time = get("--audit-time-ns")?
+        .parse::<u64>()
+        .map_err(|_| CliError::Usage("--audit-time-ns must be a positive integer".into()))?;
+    let audit_role = match get("--audit-role")? {
+        "monitor" => oa_audit_core::Role::Monitor,
+        "operate" => oa_audit_core::Role::Operate,
+        "configure" => oa_audit_core::Role::Configure,
+        other => {
+            return Err(CliError::Usage(format!(
+                "unsupported --audit-role {other:?}"
+            )));
+        }
     };
-    let (version, digest) = issued.map_err(|e| failed("adaptation issue", e))?;
+    let audit_count = get("--audit-count")?
+        .parse::<u64>()
+        .map_err(|_| CliError::Usage("--audit-count must be an unsigned integer".into()))?;
+    let audit_tail = crate::manifest::parse_pin(get("--audit-tail")?)
+        .map_err(|e| CliError::Usage(format!("invalid --audit-tail: {e}")))?;
+    let (target, target_len) = oa_audit_core::target(facility.as_bytes())
+        .map_err(|e| CliError::Usage(format!("invalid audit target: {e:?}")))?;
+    let details = encode_issue_audit_details(&[
+        release,
+        facility,
+        change_ref,
+        get("--change-class")?,
+        approver,
+        reason,
+    ])?;
+    let (details, details_len) = oa_audit_core::details(&details)
+        .map_err(|e| CliError::Usage(format!("adaptation issue audit details invalid: {e:?}")))?;
+    let event = oa_audit_core::Event {
+        principal: audit_principal,
+        role: audit_role,
+        action: oa_audit_core::Action::AdaptationIssue,
+        target,
+        target_len,
+        time_ns: audit_time,
+        details,
+        details_len,
+    };
+    let expected = oa_audit_core::Checkpoint {
+        count: audit_count,
+        tail: audit_tail,
+    };
+    let log_path = PathBuf::from(get("--audit-log")?);
+    oa_sealed::Sealed::production()
+        .check(&log_path)
+        .map_err(|refusal| failed("adaptation audit path", refusal))?;
+    let (next_audit, (version, digest)) =
+        match oa_audit_log::shell::append_before_commit(&log_path, expected, event, || {
+            if let Some(preset) = &ca_preset {
+                crate::manifest::issue_new_package_with_ca_preset(
+                    &output_root,
+                    &snapshot_bytes,
+                    preset,
+                    release,
+                    facility,
+                    change_ref,
+                    &previous_root,
+                    previous_pin,
+                    change_class,
+                    issuer,
+                    approver,
+                    reason,
+                )
+            } else {
+                crate::manifest::issue_new_package(
+                    &output_root,
+                    &snapshot_bytes,
+                    release,
+                    facility,
+                    change_ref,
+                    &previous_root,
+                    previous_pin,
+                    change_class,
+                    issuer,
+                    approver,
+                    reason,
+                )
+            }
+        }) {
+            Ok(result) => result,
+            Err(oa_audit_log::shell::CommitError::Audit(error)) => {
+                return Err(failed("adaptation audit append", format!("{error:?}")));
+            }
+            Err(oa_audit_log::shell::CommitError::Action(error)) => {
+                return Err(failed("adaptation issue", error));
+            }
+        };
     writeln!(
         out,
         "adaptation_issue_status\tissued_unverified_for_activation"
@@ -499,12 +581,37 @@ pub fn run_issue(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
     .map_err(|e| failed("write output", e))?;
     writeln!(out, "adaptation_version\t{version}").map_err(|e| failed("write output", e))?;
     writeln!(out, "manifest_sha256\t{}", to_hex(&digest)).map_err(|e| failed("write output", e))?;
+    writeln!(out, "audit_count\t{}", next_audit.count).map_err(|e| failed("write output", e))?;
+    writeln!(out, "audit_tail\t{}", to_hex(&next_audit.tail))
+        .map_err(|e| failed("write output", e))?;
     writeln!(
         out,
         "integrity_scope\tsha256 consistency only; principal IDs are not authenticated"
     )
     .map_err(|e| failed("write output", e))?;
     Ok(())
+}
+
+fn encode_issue_audit_details(fields: &[&str]) -> Result<Vec<u8>, CliError> {
+    let total = fields
+        .iter()
+        .try_fold(0usize, |size, field| {
+            size.checked_add(2)?.checked_add(field.len())
+        })
+        .ok_or_else(|| CliError::Usage("adaptation issue audit details are too large".into()))?;
+    if total > oa_audit_core::DETAILS_CAPACITY {
+        return Err(CliError::Usage(
+            "adaptation issue audit details exceed the bounded record".into(),
+        ));
+    }
+    let mut bytes = Vec::with_capacity(total);
+    for field in fields {
+        let len = u16::try_from(field.len())
+            .map_err(|_| CliError::Usage("adaptation issue audit field is too large".into()))?;
+        bytes.extend_from_slice(&len.to_le_bytes());
+        bytes.extend_from_slice(field.as_bytes());
+    }
+    Ok(bytes)
 }
 
 /// Dispatches on the first argument; `args` excludes the program name.
@@ -547,6 +654,7 @@ mod tests {
 
     static NEXT: AtomicU64 = AtomicU64::new(0);
 
+    // REQ: OA-AUDIT-003, OA-AUDIT-005
     #[test]
     fn issue_command_computes_next_version_and_records_field_change() {
         let serial = NEXT.fetch_add(1, Ordering::Relaxed);
@@ -587,6 +695,9 @@ mod tests {
         .expect("first issue establishes version one");
 
         let candidate_root = root.join("candidate");
+        let audit_path = root.join("audit.log");
+        let audit_path_text = audit_path.to_str().expect("audit path is utf8");
+        let empty_audit_tail = "00".repeat(32);
         let first_pin_hex = oa_sha256::to_hex(&first_pin);
         let args = [
             "issue",
@@ -612,6 +723,18 @@ mod tests {
             "approver-4",
             "--reason",
             "sector field correction",
+            "--audit-log",
+            audit_path_text,
+            "--audit-count",
+            "0",
+            "--audit-tail",
+            empty_audit_tail.as_str(),
+            "--audit-principal",
+            "103",
+            "--audit-role",
+            "configure",
+            "--audit-time-ns",
+            "100",
         ]
         .into_iter()
         .map(str::to_owned)
@@ -637,6 +760,25 @@ mod tests {
         assert_eq!(issue.issuer_principal_id, "issuer-3");
         assert_eq!(issue.approver_principal_id, "approver-4");
         assert_eq!(issue.reason, "sector field correction");
+
+        let mut wrong_role_args = args.clone();
+        let role_flag = wrong_role_args
+            .iter()
+            .position(|arg| arg == "--audit-role")
+            .expect("role flag exists");
+        if let Some(role) = wrong_role_args.get_mut(role_flag + 1) {
+            *role = "operate".to_owned();
+        }
+        let wrong_output = root.join("wrong-role");
+        let output_flag = wrong_role_args
+            .iter()
+            .position(|arg| arg == "--out-root")
+            .expect("output flag exists");
+        if let Some(path) = wrong_role_args.get_mut(output_flag + 1) {
+            *path = wrong_output.to_str().expect("path is utf8").to_owned();
+        }
+        assert!(run(&wrong_role_args, &mut Vec::new()).is_err());
+        assert!(!wrong_output.exists());
         let _ = std::fs::remove_dir_all(root);
     }
 }

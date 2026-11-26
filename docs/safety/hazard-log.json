@@ -102,6 +102,12 @@
     "OA-ASP-076",
     "OA-ASP-077",
     "OA-ASP-078",
+    "OA-AUDIT-001",
+    "OA-AUDIT-002",
+    "OA-AUDIT-003",
+    "OA-AUDIT-004",
+    "OA-AUDIT-005",
+    "OA-AUDIT-006",
     "OA-AWC-001",
     "OA-AWC-002",
     "OA-AWC-003",
@@ -8709,6 +8715,11 @@
       "type": "TODO-PROSE",
       "id": "VERIFICATION-CREDIT",
       "detail": "Trace references identify existing source tests or proofs; this log does not establish that they passed in a qualification run or provide independent verification."
+    },
+    {
+      "type": "UNMET",
+      "id": "OA-AUDIT-005-RUNTIME-SHELL-INTEGRATION",
+      "detail": "At this source snapshot, tools/oa-adapt issue is the only production privileged-action shell caller. No runtime migration flip/rollback or quarantine-release command consumes the durable audit append API; L12 certification integration is still in a separate branch. Pure receipt constructors and synthetic tests do not close these integrations."
     }
   ],
   "hazards": [
@@ -10157,7 +10168,13 @@
         "OA-MIG-302",
         "OA-MIG-303",
         "OA-MIG-304",
-        "OA-MIG-305"
+        "OA-MIG-305",
+        "OA-AUDIT-001",
+        "OA-AUDIT-002",
+        "OA-AUDIT-003",
+        "OA-AUDIT-004",
+        "OA-AUDIT-005",
+        "OA-AUDIT-006"
       ],
       "source_refs": [
         {
@@ -10230,6 +10247,61 @@
           "requirement_id": "OA-MIG-305",
           "file": "crates/oa-migration-switch/tests/m3_synthetic_drill.rs",
           "test_name": "local_process_failover_delivers_selected_payload_and_preserves_consumer_sequence"
+        },
+        {
+          "requirement_id": "OA-AUDIT-001",
+          "file": "crates/oa-audit-log/src/shell/mod.rs",
+          "test_name": "append_verifies_trusted_tail_and_detects_deletion_reorder_and_tamper"
+        },
+        {
+          "requirement_id": "OA-AUDIT-002",
+          "file": "crates/oa-audit-core/src/tests.rs",
+          "test_name": "bounded_event_registry_and_exact_receipt_binding"
+        },
+        {
+          "requirement_id": "OA-AUDIT-003",
+          "file": "crates/oa-audit-log/src/shell/mod.rs",
+          "test_name": "audit_failure_does_not_run_committed_action"
+        },
+        {
+          "requirement_id": "OA-AUDIT-004",
+          "file": "crates/oa-audit-log/src/shell/mod.rs",
+          "test_name": "truncated_record_and_missing_expected_tail_fail_closed"
+        },
+        {
+          "requirement_id": "OA-AUDIT-005",
+          "file": "crates/oa-migration-switch/src/lib.rs",
+          "test_name": "h1_h5_make_before_break_and_rollback"
+        },
+        {
+          "requirement_id": "OA-AUDIT-006",
+          "file": "crates/oa-audit-log/src/shell/mod.rs",
+          "test_name": "protected_aliases_are_refused_before_log_io"
+        },
+        {
+          "requirement_id": "OA-AUDIT-006",
+          "file": "crates/oa-audit-log/src/shell/mod.rs",
+          "test_name": "append_open_stays_anchored_to_verified_parent_after_rename_and_replacement"
+        },
+        {
+          "requirement_id": "OA-AUDIT-006",
+          "file": "crates/oa-audit-log/src/shell/mod.rs",
+          "test_name": "append_refuses_leaf_symlinks_without_touching_the_target"
+        },
+        {
+          "requirement_id": "OA-AUDIT-003",
+          "file": "crates/oa-audit-log/src/shell/mod.rs",
+          "test_name": "lock_contention_fails_before_commit_without_waiting"
+        },
+        {
+          "requirement_id": "OA-AUDIT-005",
+          "file": "tools/oa-adapt/src/cli.rs",
+          "test_name": "issue_command_computes_next_version_and_records_field_change"
+        },
+        {
+          "requirement_id": "OA-AUDIT-005",
+          "file": "crates/oa-quarantine/src/tests.rs",
+          "test_name": "acknowledgement_is_explicit_and_invalid_timing_never_mutates_queue"
         }
       ],
       "proof_refs": []
@@ -23024,6 +23096,42 @@
       "function": "flight_plan_and_coordination_message_ingestion",
       "hazard_id": "HZ-FLIGHTDATA-001",
       "rationale": "Engineering safety candidate: an invalid or out-of-order NAM application could bind a route or departure update to the wrong flight. The runtime requires opaque session-admitted deliveries, a supplied full positive key, and exact source context; route conversion and plan updates stage before commit and explicit refusals return catalogued LRMs. Tests are synthetic; this does not establish live transport, authoritative adaptation/restrictions, facility qualification, or operational approval."
+    },
+    {
+      "id": "OA-AUDIT-001",
+      "function": "migration_selector_and_rollback",
+      "hazard_id": "HZ-CUTOVER-001",
+      "rationale": "Engineering safety candidate: malformed, reordered, or altered action evidence can obscure whether a migration output change was properly recorded. The test verifies canonical chain integrity relative to the supplied trusted checkpoint; it does not authenticate the principal or prevent replacement of both history and checkpoint."
+    },
+    {
+      "id": "OA-AUDIT-002",
+      "function": "migration_selector_and_rollback",
+      "hazard_id": "HZ-CUTOVER-001",
+      "rationale": "Engineering safety candidate: an incorrect role-to-action decision could permit a migration flip or rollback under an insufficient role claim. Tests verify the role registry and caller-supplied role claims only; no credentials, identity, or operational authority are authenticated."
+    },
+    {
+      "id": "OA-AUDIT-003",
+      "function": "migration_selector_and_rollback",
+      "hazard_id": "HZ-CUTOVER-001",
+      "rationale": "Engineering safety candidate: allowing a migration mutation after an audit append, lock, or sync failure could leave the output changed without a durable intent record. Shell tests exercise fail-closed pre-commit behavior and bounded durable append; the core receipt is a plain value and not an unforgeable proof."
+    },
+    {
+      "id": "OA-AUDIT-004",
+      "function": "migration_selector_and_rollback",
+      "hazard_id": "HZ-CUTOVER-001",
+      "rationale": "Engineering safety candidate: accepting a shortened, reordered, altered, or truncated audit history could obscure whether a migration change was recorded. Verification tests compare against the supplied trusted count and tail; they do not prevent full history and checkpoint replacement."
+    },
+    {
+      "id": "OA-AUDIT-005",
+      "function": "migration_selector_and_rollback",
+      "hazard_id": "HZ-CUTOVER-001",
+      "rationale": "Engineering safety candidate: a privileged migration change without its preceding audit intent could leave the selected output changed without a durable record. Direct tests cover the selector receipt gate and adaptation shell pre-commit behavior; migration and quarantine currently expose core receipt-gated APIs without a production shell action caller, so their runtime integration remains unmet."
+    },
+    {
+      "id": "OA-AUDIT-006",
+      "function": "migration_selector_and_rollback",
+      "hazard_id": "HZ-CUTOVER-001",
+      "rationale": "Engineering safety candidate: a log read or append directed through an unverified path could invalidate the audit gate used for a migration change. Synthetic path-refusal, descriptor, rename, and symlink tests exercise fail-closed shell behavior; no protected recording is read and no authenticated-origin claim is made."
     }
   ],
   "unresolved_requirement_assessments": []

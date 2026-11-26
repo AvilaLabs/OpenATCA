@@ -9,6 +9,8 @@ members = [
     "crates/oa-math",
     "crates/oa-nasr",
     "crates/oa-quarantine",
+    "crates/oa-audit-core",
+    "crates/oa-audit-log",
     "crates/oa-arinc424",
     "crates/oa-sha256",
     "crates/oa-zip",
