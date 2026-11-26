@@ -101,7 +101,8 @@ fn write_synthetic_adsb(path: &Path) {
             &payload,
         )
         .expect("encode synthetic OAF frame");
-        file.write_all(&frame[..bytes]).expect("write synthetic frame");
+        file.write_all(&frame[..bytes])
+            .expect("write synthetic frame");
         receive_ns += SYNTHETIC_STEP_NS;
     }
     file.sync_all().expect("sync synthetic OAF fixture");
@@ -148,8 +149,14 @@ fn recorded_stream_runs_100_paired_m2_flip_rollback_bins_and_consumer_applies_ea
     assert!(report.per_update_consumer.updates > 100);
     assert!(report.per_update_consumer.virtual_gap_samples > 0);
     assert_eq!(report.per_update_consumer.virtual_gap_exceeded, 0);
-    assert_eq!(report.per_update_consumer.decision_to_first_output_samples, 100);
-    assert_eq!(report.per_update_consumer.decision_to_first_output_exceeded, 0);
+    assert_eq!(
+        report.per_update_consumer.decision_to_first_output_samples,
+        100
+    );
+    assert_eq!(
+        report.per_update_consumer.decision_to_first_output_exceeded,
+        0
+    );
     assert!(report.replay_output_ack_count > 0);
     assert!(report.cycles.iter().any(|cycle| {
         cycle.selected_display_block_rows.unwrap_or(0) > 0
@@ -164,7 +171,10 @@ fn recorded_stream_runs_100_paired_m2_flip_rollback_bins_and_consumer_applies_ea
     assert_eq!(report.window_start_ns, H5_MEASUREMENT_START_NS);
     assert_eq!(report.window_end_ns, H5_MEASUREMENT_END_NS);
     assert_eq!(report.capture_start_ns, H5_CAPTURE_START_NS);
-    assert_eq!(report.qualification, "LOCAL_FIXTURE_M2_AND_PER_UPDATE_MECHANISM_ONLY");
+    assert_eq!(
+        report.qualification,
+        "LOCAL_FIXTURE_M2_AND_PER_UPDATE_MECHANISM_ONLY"
+    );
     assert_eq!(
         report.authority_mode,
         "LOCAL_SYNTHETIC_M1_AND_EMPTY_CONTROL_INPUT_FIXTURE_NOT_AUTHENTICATED"
