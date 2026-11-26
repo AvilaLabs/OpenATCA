@@ -4,8 +4,8 @@ use oa_airspace::core::{model, snapshot};
 use oa_migration_switch::EndpointClass;
 use oa_regional_session::migration_drill::{
     regional_replay_finish_observed, regional_replay_new_with_warmup,
-    regional_replay_push_observed, run_recorded_stream, RecordedRunOptions, H5_CAPTURE_START_NS,
-    H5_MEASUREMENT_END_NS, H5_MEASUREMENT_START_NS,
+    regional_replay_push_observed, run_recorded_stream, RecordedAuditOptions, RecordedRunOptions,
+    H5_CAPTURE_START_NS, H5_MEASUREMENT_END_NS, H5_MEASUREMENT_START_NS,
 };
 use oa_regional_session::recordings_reader::RecordingSource;
 use oa_regional_session::recordings_stream::StreamInput;
