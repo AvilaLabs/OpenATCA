@@ -23439,7 +23439,7 @@
       "id": "OA-AUDIT-005",
       "function": "migration_selector_and_rollback",
       "hazard_id": "HZ-CUTOVER-001",
-      "rationale": "Engineering safety candidate: a privileged migration change without its preceding audit intent could leave the selected output changed without a durable record. Direct tests cover the selector receipt gate, adaptation shell pre-commit behavior, and regional-session quarantine append-before-ack path. Migration still has no normal shell action caller in this snapshot; the quarantine path covers only an explicit in-process queue-front handoff."
+      "rationale": "Engineering safety candidate: a privileged migration change without its preceding audit intent could leave the selected output changed without a durable record. Direct tests cover the selector receipt gate, adaptation shell pre-commit behavior, and regional-session quarantine append-before-ack path. The regional recorded-drill shell appends a registry-authorized migration intent before its selector flip or rollback, and the quarantine and adaptation CLIs append before their respective commits. Principal and role remain caller claims, not credentials."
     },
     {
       "id": "OA-AUDIT-006",
@@ -23505,17 +23505,19 @@
       "id": "OA-CERT-010",
       "function": "migration_comparison_and_safety_evidence",
       "hazard_id": "HZ-EVIDENCE-001",
-      "rationale": "Engineering safety candidate: reporting an outcome before durable audit commit, or omitting a failed append, could leave a reviewer with an uncommitted or incomplete certification record. The CLI requires the append receipt after file and directory sync and emits no committed result on failure; this does not authenticate principal or timestamp claims or establish operational certification.",
+      "rationale": "Engineering safety candidate: reporting an outcome before durable audit commit, or omitting a failed append, could leave a reviewer with an uncommitted or incomplete certification record. The CLI requires the append receipt after file and directory sync and emits no committed result on failure; this does not authenticate principal or timestamp claims or establish operational certification."
+    },
+    {
       "id": "OA-AUDIT-007",
       "function": "migration_selector_and_rollback",
       "hazard_id": "HZ-CUTOVER-001",
-      "rationale": "Engineering safety candidate: a malformed, duplicated, disabled, or insufficient local role entry could reject a valid privileged action or permit an action under an incorrect role claim. Core tests cover the fixed-table parser, exact ID lookup, disabled refusal, and the three-role action matrix, including compatible I1 V1 parsing. This registry validates local configuration only; it does not authenticate a person, credential, origin, or authority, and production callers still need to use the shared loader."
+      "rationale": "Engineering safety candidate: a malformed, duplicated, disabled, or insufficient local role entry could reject a valid privileged action or permit an action under an incorrect role claim. Core tests cover the fixed-table parser, exact ID lookup, disabled refusal, and the three-role action matrix, including compatible I1 V1 parsing. This registry validates local configuration only; it does not authenticate a person, credential, origin, or authority, and production callers use the shared pinned loader before privileged actions while treating principal provenance as unauthenticated."
     },
     {
       "id": "OA-AUDIT-008",
       "function": "migration_selector_and_rollback",
       "hazard_id": "HZ-CUTOVER-001",
-      "rationale": "Engineering safety candidate: using an unverified or changed local registry could make a privileged action depend on stale or altered role configuration. Shell tests verify a separately supplied digest pin, fixed byte cap, and refusal of a sealed path before reading. This does not authenticate the pin's publisher, registry author, or caller, and no production CLI integration is claimed by these tests."
+      "rationale": "Engineering safety candidate: using an unverified or changed local registry could make a privileged action depend on stale or altered role configuration. Shell tests verify a separately supplied digest pin, fixed byte cap, and refusal of a sealed path before reading. This does not authenticate the pin's publisher, registry author, or caller, and the regional-session and oa-adapt CLIs load the pinned registry before deriving an action role; the trusted pin publisher remains external."
     }
   ],
   "unresolved_requirement_assessments": []

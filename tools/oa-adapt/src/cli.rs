@@ -707,7 +707,7 @@ mod tests {
 
     static NEXT: AtomicU64 = AtomicU64::new(0);
 
-    // REQ: OA-AUDIT-003, OA-AUDIT-005
+    // REQ: OA-AUDIT-003, OA-AUDIT-005, OA-AUDIT-007, OA-AUDIT-008
     #[test]
     fn issue_command_computes_next_version_and_records_field_change() {
         let serial = NEXT.fetch_add(1, Ordering::Relaxed);
