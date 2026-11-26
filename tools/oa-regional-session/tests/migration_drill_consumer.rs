@@ -7,6 +7,7 @@ mod synthetic;
 use oa_migration_switch::{
     observe_delivery, prepare_candidate, rollback, select_candidate, Output,
 };
+use oa_regional_session::migration_drill::H5_MEASUREMENT_START_NS;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::time::Instant;
