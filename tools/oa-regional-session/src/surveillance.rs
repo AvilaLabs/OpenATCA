@@ -1054,6 +1054,18 @@ pub fn surveillance_finish(
 }
 
 /// Pixels are borrowed only while the completed immutable frame is being published by the shell.
+/// Read the tracker’s current filtered prediction for one observed address at an explicit scan
+/// time. This is an estimate from the shared tracker, not a separate constant-velocity model.
+pub fn surveillance_track_forecast(
+    s: &Surveillance,
+    address: u32,
+    at_ns: i64,
+) -> Result<(oa_track::OutRow, bool, i64), String> {
+    oa_track::tracker_forecast(&s.tracker, address, at_ns)
+        .map(|(row, confirmed, newest_ns, _)| (row, confirmed, newest_ns))
+        .map_err(|error| format!("tracker forecast refused: {error:?}"))
+}
+
 pub fn surveillance_pixels(s: &Surveillance) -> Result<&[u8], String> {
     if !s.profile.render_scope || s.frames == 0 || s.failed || !s.completed {
         return Err("no publishable pixels for an incomplete or failed frame".into());

@@ -173,6 +173,7 @@ struct AtpaFlightInput {
 fn evaluate_assigned_atpa(
     aid: &RunwayAidRuntime,
     assignments: &[ActiveRunwayAssignment],
+    surveillance: &surveillance::Surveillance,
     tracks: &[crate::surveillance::ObservedTrack],
     scan_time_ns: i64,
     scratch: &mut AtpaScratch,
@@ -210,9 +211,13 @@ fn evaluate_assigned_atpa(
             omitted = omitted.saturating_add(1);
             continue;
         };
-        if !scan_time_ns
-            .checked_sub(track.newest_source_ns)
-            .is_some_and(|age| (0..4_800_000_000).contains(&age))
+        let (row, confirmed, newest_ns) =
+            surveillance::surveillance_track_forecast(surveillance, track.address, scan_time_ns)
+                .ok()?;
+        if !confirmed
+            || !scan_time_ns
+                .checked_sub(newest_ns)
+                .is_some_and(|age| (0..4_800_000_000).contains(&age))
         {
             omitted = omitted.saturating_add(1);
             continue;
@@ -220,8 +225,8 @@ fn evaluate_assigned_atpa(
         let point = oa_runway::plane::to_local(
             &local_plane,
             oa_runway::plane::Geo {
-                lat_deg: f64::from(track.lat_e7) / 10_000_000.0,
-                lon_deg: f64::from(track.lon_e7) / 10_000_000.0,
+                lat_deg: f64::from(row.lat_e7) / 10_000_000.0,
+                lon_deg: f64::from(row.lon_e7) / 10_000_000.0,
             },
         )?;
         let Some(slot) = flights.get_mut(flight_count) else {
@@ -230,8 +235,8 @@ fn evaluate_assigned_atpa(
         *slot = Some(AtpaFlightInput {
             assignment: *assignment,
             point,
-            east_speed_mps: f64::from(track.east_mmps) / 1_000.0,
-            north_speed_mps: f64::from(track.north_mmps) / 1_000.0,
+            east_speed_mps: f64::from(row.vel_east_mps),
+            north_speed_mps: f64::from(row.vel_north_mps),
         });
         flight_count += 1;
     }
@@ -466,6 +471,7 @@ fn runway_aid_packets(
     aids: &mut [RunwayAidRuntime],
     assignments: &[ActiveRunwayAssignment],
     atpa_scratch: &mut AtpaScratch,
+    surveillance: &surveillance::Surveillance,
     tracks: &[crate::surveillance::ObservedTrack],
     crda_ghosts: &mut Vec<oa_display::core::runway_aids::CrdaGhostPacket>,
     scan_time_ns: i64,
@@ -526,19 +532,32 @@ fn runway_aid_packets(
         if let Some(local_plane) = local_plane.filter(|_| !invalid) {
             let mut previous_address = 0u32;
             for track in tracks {
-                let age = scan_time_ns.checked_sub(track.newest_source_ns);
-                let fresh = age.is_some_and(|delta| (0..4_800_000_000).contains(&delta));
-                let point = oa_runway::plane::to_local(
-                    &local_plane,
-                    oa_runway::plane::Geo {
-                        lat_deg: f64::from(track.lat_e7) / 10_000_000.0,
-                        lon_deg: f64::from(track.lon_e7) / 10_000_000.0,
-                    },
+                let forecast = surveillance::surveillance_track_forecast(
+                    surveillance,
+                    track.address,
+                    scan_time_ns,
                 );
+                let forecast = match forecast {
+                    Ok((row, true, newest_ns)) => Some((row, newest_ns)),
+                    _ => None,
+                };
+                let age = forecast.and_then(|(_, newest_ns)| scan_time_ns.checked_sub(newest_ns));
+                let fresh = age.is_some_and(|delta| (0..4_800_000_000).contains(&delta));
+                let row = forecast.map(|(row, _)| row);
+                let point = row.and_then(|row| {
+                    oa_runway::plane::to_local(
+                        &local_plane,
+                        oa_runway::plane::Geo {
+                            lat_deg: f64::from(row.lat_e7) / 10_000_000.0,
+                            lon_deg: f64::from(row.lon_e7) / 10_000_000.0,
+                        },
+                    )
+                });
                 if !fresh
                     || track.address == 0
                     || track.address <= previous_address
                     || point.is_none()
+                    || row.is_none()
                 {
                     omitted = omitted.saturating_add(1);
                     if track.address != 0 && track.address <= previous_address {
@@ -547,6 +566,7 @@ fn runway_aid_packets(
                     continue;
                 }
                 let Some(point) = point else { continue };
+                let Some(row) = row else { continue };
                 let Some((address, e, n, vx, vy, speed, uncertainty, latitude, longitude)) =
                     addresses
                         .get_mut(included)
@@ -583,12 +603,12 @@ fn runway_aid_packets(
                 *address = track.address;
                 *e = point.east_m;
                 *n = point.north_m;
-                *vx = f64::from(track.east_mmps) / 1_000.0;
-                *vy = f64::from(track.north_mmps) / 1_000.0;
+                *vx = f64::from(row.vel_east_mps);
+                *vy = f64::from(row.vel_north_mps);
                 *speed = oa_math::hypot(*vx, *vy);
-                *uncertainty = f64::from(track.r95_mm) / 1_000.0;
-                *latitude = track.lat_e7;
-                *longitude = track.lon_e7;
+                *uncertainty = oa_track::r95_m_of(&row.pos_cov_m2);
+                *latitude = row.lat_e7;
+                *longitude = row.lon_e7;
                 previous_address = track.address;
                 included += 1;
                 if let Ok(source_ns) = u64::try_from(track.newest_source_ns) {
@@ -719,7 +739,14 @@ fn runway_aid_packets(
         let atpa = if invalid {
             None
         } else {
-            evaluate_assigned_atpa(aid, assignments, tracks, scan_time_ns, atpa_scratch)
+            evaluate_assigned_atpa(
+                aid,
+                assignments,
+                surveillance,
+                tracks,
+                scan_time_ns,
+                atpa_scratch,
+            )
         };
         if atpa.is_none() {
             invalid = true;
@@ -776,6 +803,7 @@ mod runway_aid_packet_tests {
             &mut [],
             &[],
             &mut scratch,
+            &runtime().surveillance,
             &[],
             &mut ghosts,
             1_000_000_000,
@@ -1836,6 +1864,7 @@ fn execute(
         &mut runtime.runway_aids,
         &runtime.runway_assignments,
         &mut runtime.atpa_scratch,
+        &runtime.surveillance,
         &surveillance.tracks,
         &mut crda_ghosts,
         surveillance.time_ns,
