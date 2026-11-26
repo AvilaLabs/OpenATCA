@@ -5,9 +5,16 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 authors.workspace = true
+description = "Pure half-open Unix-millisecond time windows for bounded decoders"
+documentation = "https://github.com/AvilaLabs/OpenATCA/blob/main/docs/core-api/foundations/time-window.md"
+readme = "README.md"
 
 [package.metadata.openatca]
 class = "core"
+candidate_package_name = "openatca-time-window"
+release_profile = "0.1-supporting-candidate"
+api_tier = "preview"
+api_document = "docs/core-api/foundations/time-window.md"
 
 [lints]
 workspace = true

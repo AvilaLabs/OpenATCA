@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 authors.workspace = true
+description = "JPEG 2000 decoding support used by GRIB2"
+documentation = "https://github.com/AvilaLabs/OpenATCA/blob/main/docs/core-api/formats/grib2-winds.md"
+readme = "README.md"
 
 [lints]
 workspace = true
@@ -13,3 +16,7 @@ workspace = true
 
 [package.metadata.openatca]
 class = "shell"
+candidate_package_name = "openatca-j2k"
+release_profile = "0.1-supporting-candidate"
+api_tier = "preview"
+api_document = "docs/core-api/formats/grib2-winds.md"

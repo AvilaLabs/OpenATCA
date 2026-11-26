@@ -5,6 +5,8 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 authors.workspace = true
+description = "Bit-defined IEEE-754 elementary functions for deterministic calculations"
+documentation = "https://github.com/AvilaLabs/OpenATCA/blob/main/docs/core-api/foundations/math-ieee.md"
 
 [lints]
 workspace = true
@@ -15,3 +17,7 @@ oa-ieee = { path = "../oa-ieee" }
 
 [package.metadata.openatca]
 class = "core"
+candidate_package_name = "openatca-math"
+release_profile = "0.1-candidate"
+api_tier = "preview"
+api_document = "docs/core-api/foundations/math-ieee.md"

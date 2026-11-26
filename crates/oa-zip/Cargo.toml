@@ -5,9 +5,16 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 authors.workspace = true
+description = "Bounded read-only ZIP archive access"
+documentation = "https://github.com/AvilaLabs/OpenATCA/blob/main/docs/core-api/foundations/containers.md"
+readme = "README.md"
 
 [lints]
 workspace = true
 
 [package.metadata.openatca]
 class = "shell"
+candidate_package_name = "openatca-zip"
+release_profile = "0.1-candidate"
+api_tier = "preview"
+api_document = "docs/core-api/foundations/containers.md"

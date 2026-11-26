@@ -33,6 +33,7 @@ an Experimental feature included in a release.
 |---|---|---|---|
 | `oa-ieee` + `oa-math` | Preview | [math-ieee.md](foundations/math-ieee.md) | Per-function special-value contract; `oa-ieee::sqrt(-x)` NaN payload varies by target; aarch64 and §8 evidence remain. |
 | `oa-geo` | Preview per operation | [geo.md](foundations/geo.md) | Intersections absent; boundary/topology caveats; examples/vectors and cross-target evidence incomplete. |
+| `oa-time-window` | Preview supporting value | [time-window.md](foundations/time-window.md) | Unix-millisecond half-open intervals only; decoder policy is caller-supplied; 64-bit targets only. Supporting dependency, not a separate 0.1 feature commitment. |
 | `oa-sha256` | Preview, integrity-only | [integrity.md](foundations/integrity.md) | Digest is not authentication. FIPS 180-4 implementation vectors do not establish FIPS 140 module validation. |
 | `oa-deflate`, `oa-zip`, `oa-tar` | Preview by codec | [containers.md](foundations/containers.md) | Keep writer, untrusted-input readers, container subsets and extraction/path policy distinct; `oa-zip` depends on internal `oa-sealed`. |
 | `oa-xml`, `oa-json`, `oa-csv` | Preview by grammar | [text.md](foundations/text.md) | Exact grammar, refusal policy, limits and caller-significant duplicate/partial behavior need public vectors and bindings. |

@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 authors.workspace = true
+description = "Airspace and procedure models used by documented NOTAM geometry operations"
+documentation = "https://github.com/AvilaLabs/OpenATCA/blob/main/docs/core-api/modules/airspace.md"
+readme = "README.md"
 
 [lints]
 workspace = true
@@ -22,3 +25,7 @@ oa-ieee = { path = "../oa-ieee" }
 
 [package.metadata.openatca]
 class = "split"
+candidate_package_name = "openatca-airspace"
+release_profile = "supporting-dependency-candidate"
+api_tier = "preview"
+api_document = "docs/core-api/modules/airspace.md"

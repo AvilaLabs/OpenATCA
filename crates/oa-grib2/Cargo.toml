@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 authors.workspace = true
+description = "GRIB Edition 2 decoder for documented wind-grid templates"
+documentation = "https://github.com/AvilaLabs/OpenATCA/blob/main/docs/core-api/formats/grib2-winds.md"
+readme = "README.md"
 
 [lints]
 workspace = true
@@ -23,3 +26,7 @@ oa-sealed = { path = "../oa-sealed" }
 
 [package.metadata.openatca]
 class = "shell"
+candidate_package_name = "openatca-grib2"
+release_profile = "0.1-candidate"
+api_tier = "preview"
+api_document = "docs/core-api/formats/grib2-winds.md"

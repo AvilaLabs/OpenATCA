@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 authors.workspace = true
+description = "FAA CIFP parser for the documented ARINC 424-18 subset"
+documentation = "https://github.com/AvilaLabs/OpenATCA/blob/main/docs/core-api/formats/arinc424.md"
+readme = "README.md"
 
 [lints]
 workspace = true
@@ -13,3 +16,7 @@ workspace = true
 
 [package.metadata.openatca]
 class = "shell"
+candidate_package_name = "openatca-arinc424"
+release_profile = "0.1-candidate"
+api_tier = "preview"
+api_document = "docs/core-api/formats/arinc424.md"

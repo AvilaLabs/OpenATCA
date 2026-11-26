@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 authors.workspace = true
+description = "SHA-256 digest operations for integrity and content identity"
+documentation = "https://github.com/AvilaLabs/OpenATCA/blob/main/docs/core-api/foundations/integrity.md"
+readme = "README.md"
 
 [lints]
 workspace = true
@@ -13,3 +16,7 @@ workspace = true
 
 [package.metadata.openatca]
 class = "split"
+candidate_package_name = "openatca-sha256"
+release_profile = "0.1-candidate"
+api_tier = "preview"
+api_document = "docs/core-api/foundations/integrity.md"

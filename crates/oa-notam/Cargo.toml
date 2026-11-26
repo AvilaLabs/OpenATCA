@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 authors.workspace = true
+description = "FAA FNS AIXM 5.1 profile NOTAM decoder"
+documentation = "https://github.com/AvilaLabs/OpenATCA/blob/main/docs/core-api/formats/aixm-notam.md"
+readme = "README.md"
 
 [lints]
 workspace = true
@@ -20,3 +23,7 @@ oa-sealed = { path = "../oa-sealed" }
 
 [package.metadata.openatca]
 class = "shell"
+candidate_package_name = "openatca-notam"
+release_profile = "0.1-candidate"
+api_tier = "preview"
+api_document = "docs/core-api/formats/aixm-notam.md"
