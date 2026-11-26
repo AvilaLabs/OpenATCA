@@ -16,6 +16,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(1);
 const SYNTHETIC_STEP_NS: i64 = 4_000_000_000;
+const SYNTHETIC_BIN_NS: i64 = 36_000_000_000;
 
 struct FixtureFile(PathBuf);
 
@@ -126,25 +127,40 @@ fn write_synthetic_sfdps(path: &Path) {
     while receive_ns < H5_MEASUREMENT_END_NS {
         sequence += 1;
         let elapsed_seconds = (receive_ns - H5_CAPTURE_START_NS) / 1_000_000_000;
-        let second_of_day = 20 * 3_600 + 50 * 60 + elapsed_seconds;
-        let hour = (second_of_day / 3_600) % 24;
-        let minute = (second_of_day / 60) % 60;
-        let second = second_of_day % 60;
-        let xml = format!(
-            r#"<ns5:MessageCollection xmlns:ns5="http://www.faa.aero/nas/3.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><message xsi:type="ns5:FlightMessageType"><flight xsi:type="ns5:NasFlightType" centre="ZAU1" source="TH" system="SLC" timestamp="2026-11-19T{hour:02}:{minute:02}:{second:02}.000Z"><gufi codeSpace="urn:uuid">11111111-2222-3333-4444-555555555555</gufi><controllingUnit unitIdentifier="ZAU1"/><aircraftDescription xsi:type="ns5:NasAircraftType" equipmentQualifier="L" aircraftAddress="ABCDEF" registration="N1TST" wakeTurbulence="M"/></flight></message></ns5:MessageCollection>"#
-        );
-        let frame_receive_ns = receive_ns
-            .checked_add(1)
-            .expect("synthetic receipt-time increment");
-        let mut frame = vec![0; oa_feed::HEADER_LEN + xml.len() + oa_feed::TRAILER_LEN];
+        let is_flight_update = elapsed_seconds % (SYNTHETIC_BIN_NS / 1_000_000_000)
+            == SYNTHETIC_STEP_NS / 1_000_000_000;
+        let (kind, payload) = if is_flight_update {
+            let second_of_day = 20 * 3_600 + 50 * 60 + elapsed_seconds;
+            let hour = (second_of_day / 3_600) % 24;
+            let minute = (second_of_day / 60) % 60;
+            let second = second_of_day % 60;
+            let xml = format!(
+                r#"<ns5:MessageCollection xmlns:ns5="http://www.faa.aero/nas/3.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><message xsi:type="ns5:FlightMessageType"><flight xsi:type="ns5:NasFlightType" centre="ZAU1" source="TH" system="SLC" timestamp="2026-11-19T{hour:02}:{minute:02}:{second:02}.000Z"><gufi codeSpace="urn:uuid">11111111-2222-3333-4444-555555555555</gufi><controllingUnit unitIdentifier="ZAU1"/><aircraftDescription xsi:type="ns5:NasAircraftType" equipmentQualifier="L" aircraftAddress="ABCDEF" registration="N1TST" wakeTurbulence="M"/></flight></message></ns5:MessageCollection>"#
+            );
+            let payload = xml.into_bytes();
+            (oa_feed::Kind::Message as u8, payload)
+        } else {
+            (
+                oa_feed::Kind::Status as u8,
+                b"synthetic status heartbeat".to_vec(),
+            )
+        };
+        let frame_receive_ns = if is_flight_update {
+            receive_ns
+                .checked_add(1)
+                .expect("synthetic receipt-time increment")
+        } else {
+            receive_ns
+        };
+        let mut frame = vec![0; oa_feed::HEADER_LEN + payload.len() + oa_feed::TRAILER_LEN];
         let bytes = oa_feed::encode_frame(
             &mut frame,
-            oa_feed::Kind::Message as u8,
+            kind,
             0,
             sequence,
             frame_receive_ns,
             frame_receive_ns / 1_000_000,
-            xml.as_bytes(),
+            &payload,
         )
         .expect("encode synthetic SFDPS OAF frame");
         file.write_all(frame.get(..bytes).expect("encoded frame slice"))
@@ -196,6 +212,13 @@ fn recorded_stream_runs_100_paired_m2_flip_rollback_bins_and_consumer_applies_ea
     )
     .expect("paired synthetic recorded stream completes");
 
+    // `gs_dkt=100` is 10 knots and the 2,500 e-7-degree eastward step is about 20.6 m
+    // at this latitude per four-second ADS-B interval.
+    let latitude_rad = 41.9_f64.to_radians();
+    let measured_step_m =
+        2_500.0 / 10_000_000.0 * std::f64::consts::PI / 180.0 * 6_371_000.0 * latitude_rad.cos();
+    let expected_step_m = 10.0 * 1_852.0 / 3_600.0 * 4.0;
+    assert!((measured_step_m - expected_step_m).abs() < 0.25);
     let m2_refusals = report
         .cycles
         .iter()
@@ -220,6 +243,7 @@ fn recorded_stream_runs_100_paired_m2_flip_rollback_bins_and_consumer_applies_ea
         .all(|cycle| cycle.flip_rollback_attempted && cycle.consumer_frame_updates > 0));
     assert!(report.per_update_consumer.updates > 100);
     assert!(report.flight_input_count > 0);
+    assert!(report.flight_input_count < 500);
     assert!(report.cycles.iter().any(|cycle| cycle.flight_inputs > 0));
     assert!(report.per_update_consumer.virtual_gap_samples > 0);
     assert_eq!(report.per_update_consumer.virtual_gap_exceeded, 0);
