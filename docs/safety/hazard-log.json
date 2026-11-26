@@ -659,6 +659,8 @@
     "OA-REG-016",
     "OA-REG-017",
     "OA-REG-018",
+    "OA-REG-019",
+    "OA-REG-020",
     "OA-RPL-027",
     "OA-RPL-028",
     "OA-RPL-029",
@@ -10382,12 +10384,18 @@
         "OA-MIG-405",
         "OA-MIG-406",
         "OA-MIG-601",
-        "OA-MIG-602"
+        "OA-MIG-602",
+        "OA-REG-019",
+        "OA-REG-020"
       ],
       "source_refs": [
         {
           "document": "REQUIREMENTS.md",
           "locator": "OA-MIG-401 through OA-MIG-602 in the owning functional sections"
+        },
+        {
+          "document": "REQUIREMENTS.md",
+          "locator": "OA-REG-019 through OA-REG-020"
         }
       ],
       "verification_refs": [
@@ -10430,6 +10438,36 @@
           "requirement_id": "OA-MIG-602",
           "file": "tools/oa-trace/src/hazard_trace.rs",
           "test_name": "declared_hazard_requirement_and_test_links_resolve"
+        },
+        {
+          "requirement_id": "OA-REG-019",
+          "file": "tools/oa-regional-session/src/runtime.rs",
+          "test_name": "explicit_rendered_recording_profile_processes_more_than_default_track_capacity"
+        },
+        {
+          "requirement_id": "OA-REG-019",
+          "file": "tools/oa-regional-session/src/runtime.rs",
+          "test_name": "recorded_render_profile_refuses_candidate_capacity_below_its_track_pair_bound"
+        },
+        {
+          "requirement_id": "OA-REG-019",
+          "file": "tools/oa-regional-session/tests/cli.rs",
+          "test_name": "explicit_recorded_peak_profile_is_persisted_and_publishes_bound_frames"
+        },
+        {
+          "requirement_id": "OA-REG-020",
+          "file": "tools/oa-regional-session/tests/cli.rs",
+          "test_name": "explicit_recorded_peak_profile_is_persisted_and_publishes_bound_frames"
+        },
+        {
+          "requirement_id": "OA-REG-020",
+          "file": "tools/test_j2_portability.py",
+          "test_name": "test_recorded_profile_is_bound_through_export_reimport_and_replay_selector"
+        },
+        {
+          "requirement_id": "OA-REG-020",
+          "file": "tools/test_j2_portability.py",
+          "test_name": "test_sidecars_must_match_the_recording_import_manifest"
         }
       ],
       "proof_refs": []
@@ -16229,6 +16267,18 @@
       "function": "navigation_and_adaptation_data",
       "hazard_id": "HZ-AIRSPACE-001",
       "rationale": "Engineering safety candidate: issuance metadata binds successive adaptation manifests and processor inventories; a wrong version, prior-manifest pin, or mismatch could allow an unintended adaptation package to be treated as current by downstream route conversion. The implementation records issuer/approver IDs as claims only, not authenticated authority, so this classification gives no approval or deployment credit. Register clause: `oa-adapt issue` writes one canonical, bounded issued-manifest schema that records the next positive adaptation version computed by the command, previous manifest SHA-256, change class (`initial`, `routine`, or `field-change`), distinct issuer and approver principal IDs, and a bounded reason. The first issue is version 1 with class `initial`; every subsequent issue must verify the previous package against its separately supplied manifest pin and increment exactly by one; the caller does not supply the new version. A field change uses this same command with class `field-change`. The returned manifest SHA-256 identifies those exact bytes; recorded principal IDs are claims, not authenticated approval. Startup and on-demand processor inventories compare each processor's loaded and on-disk adaptation digest to the issued manifest digest, retaining every expected processor and any mismatch. The current `oa-techops::assess_inventory` result remains `ClaimsMatchUnverified` at best; it is integrity/status evidence, not an authenticated issuer, deployment attestation, or operational certification."
+    },
+    {
+      "id": "OA-REG-019",
+      "function": "migration_comparison_and_safety_evidence",
+      "hazard_id": "HZ-EVIDENCE-001",
+      "rationale": "Engineering safety candidate: an accidentally changed default or a replay profile that exceeds its declared bounds could make a recorded comparison incomplete or its resource behavior misleading. The explicit profile is bounded and leaves historical defaults unchanged; capacity exhaustion refuses. This is offline recorded-replay evidence, not operational runtime or traffic-capacity evidence."
+    },
+    {
+      "id": "OA-REG-020",
+      "function": "migration_comparison_and_safety_evidence",
+      "hazard_id": "HZ-EVIDENCE-001",
+      "rationale": "Engineering safety candidate: losing or changing the selected replay profile while exporting, reimporting, or selecting a recording could make a comparison use different settings than its declared evidence. Settings/profile binding and sidecar-to-manifest checks constrain that mismatch; absent metadata retains the historical default. This offline reproducibility path does not authenticate the recording, prove input completeness, or establish operational behavior."
     },
     {
       "id": "OA-RTE-001",
