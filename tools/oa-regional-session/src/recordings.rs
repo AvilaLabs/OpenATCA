@@ -3269,7 +3269,8 @@ mod tests {
     #[test]
     fn native_flight_operations_use_explicit_oa_rs_v2_and_round_trip() {
         use crate::input::{
-            FlightAltitude, FlightHandoff, FlightLifecycle, FlightOperation, MAX_EVENT_LINE_BYTES,
+            FlightAltitude, FlightHandoff, FlightLifecycle, FlightOperation, HandoffOperation,
+            MAX_EVENT_LINE_BYTES,
         };
         let operations = [
             FlightOperation::Lifecycle(FlightLifecycle::Depart),
@@ -3287,6 +3288,10 @@ mod tests {
                 to: *b"NEXT\0\0\0\0",
             }),
             FlightOperation::HandoffEvent(FlightHandoff::Retract),
+            FlightOperation::Handoff {
+                operation: HandoffOperation::Update,
+                unit: *b"OLDUNIT\0",
+            },
         ];
         let events: Vec<_> = operations
             .into_iter()

@@ -414,7 +414,7 @@ fn parse_flight(parts: &[&str], version: &str) -> Result<EventKind, InputError> 
             operation: HandoffOperation::Offer,
             unit: field::<8>(part(parts, 10)?)?,
         },
-        "HO_UPDATE" if parts.len() == 11 => FlightOperation::Handoff {
+        "HO_UPDATE" if version == "v1" && parts.len() == 11 => FlightOperation::Handoff {
             operation: HandoffOperation::Update,
             unit: field::<8>(part(parts, 10)?)?,
         },
