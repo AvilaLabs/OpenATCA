@@ -23,8 +23,7 @@ fn old_snapshot(version: u32) -> Vec<u8> {
     let pfr_start = bytes
         .windows(4)
         .position(|tag| tag == b"PFRS")
-        .expect("PFRS table")
-        - 1;
+        .expect("PFRS table");
     bytes.truncate(pfr_start);
     let table_start = bytes
         .windows(4)
