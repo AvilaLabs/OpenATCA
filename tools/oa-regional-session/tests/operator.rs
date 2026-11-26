@@ -50,7 +50,9 @@ fn verify_closed_bundle(output: &std::path::Path) {
     for line in manifest.lines() {
         let fields: Vec<_> = line.split('\t').collect();
         match fields.as_slice() {
-            ["settings", name, digest] | ["operator_journal", name, digest] => {
+            ["settings", name, digest]
+            | ["operator_journal", name, digest]
+            | ["processor_report", name, digest] => {
                 let bytes = fs::read(output.join(*name)).unwrap();
                 assert_eq!(*digest, oa_sha256::to_hex(&oa_sha256::sha256(&bytes)));
                 listed.insert((*name).to_owned());
@@ -71,6 +73,7 @@ fn verify_closed_bundle(output: &std::path::Path) {
     }
     assert!(listed.contains("settings.tsv"));
     assert!(listed.contains("operator.tsv"));
+    assert!(listed.contains("processor-report.tsv"));
     let actual: std::collections::BTreeSet<_> = fs::read_dir(output)
         .unwrap()
         .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())

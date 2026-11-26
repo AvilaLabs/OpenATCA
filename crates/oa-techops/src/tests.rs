@@ -8,6 +8,47 @@
 // H2: tests use assertion panic paths intentionally so fault-matrix failures identify the violated contract.
 use crate::*;
 
+// REQ: OA-TECHOPS-001, OA-TECHOPS-002
+#[test]
+fn adaptation_identity_comparison_keeps_unavailable_and_mismatched_fields_distinct() {
+    let matched = compare_adaptation_identity(
+        [1; 32],
+        Some([2; 32]),
+        Some([1; 32]),
+        Some([2; 32]),
+        Some([2; 32]),
+    );
+    assert_eq!(matched.state, AdaptationIdentityState::Match);
+    assert_eq!(matched.issued_manifest_matches, Some(true));
+    assert_eq!(matched.loaded_matches_issued, Some(true));
+    assert_eq!(matched.disk_matches_issued, Some(true));
+
+    let unavailable =
+        compare_adaptation_identity([1; 32], Some([2; 32]), Some([1; 32]), Some([2; 32]), None);
+    assert_eq!(unavailable.state, AdaptationIdentityState::Incomplete);
+    assert_eq!(unavailable.disk_matches_issued, None);
+    assert_eq!(unavailable.loaded_matches_disk, None);
+
+    let changed_disk = compare_adaptation_identity(
+        [1; 32],
+        Some([2; 32]),
+        Some([3; 32]),
+        Some([2; 32]),
+        Some([4; 32]),
+    );
+    assert_eq!(changed_disk.state, AdaptationIdentityState::Mismatch);
+    assert_eq!(changed_disk.issued_manifest_matches, Some(false));
+    assert_eq!(changed_disk.disk_matches_issued, Some(false));
+    assert_eq!(changed_disk.loaded_matches_disk, Some(false));
+
+    let unavailable_and_mismatch =
+        compare_adaptation_identity([1; 32], Some([2; 32]), None, Some([3; 32]), None);
+    assert_eq!(
+        unavailable_and_mismatch.state,
+        AdaptationIdentityState::IncompleteAndMismatch
+    );
+}
+
 fn inventory_query(
     previous_epoch: Option<ServiceEpoch>,
     freshness_limit_ns: i64,

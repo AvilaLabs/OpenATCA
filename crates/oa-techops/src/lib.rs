@@ -70,6 +70,81 @@ pub struct ProfileId(pub u32);
 #[repr(transparent)]
 pub struct MetricId(pub u16);
 
+/// Three-valued result of comparing the issued adaptation pin with the process and disk.
+/// Missing observations remain explicit; this comparison never authenticates a reporter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum AdaptationIdentityState {
+    Match = 1,
+    Mismatch = 2,
+    Incomplete = 3,
+    IncompleteAndMismatch = 4,
+}
+
+/// Pure comparison result for the adaptation loaded by a runtime and the package on disk.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AdaptationIdentityComparison {
+    pub issued_manifest_matches: Option<bool>,
+    pub loaded_matches_issued: Option<bool>,
+    pub disk_matches_issued: Option<bool>,
+    pub loaded_matches_disk: Option<bool>,
+    pub state: AdaptationIdentityState,
+}
+
+/// Compare observed adaptation identity with an independently supplied issue pin.
+///
+/// `None` means that a value was unavailable, not that it matched. Principal IDs and digests
+/// remain claims; this pure function authenticates neither the issuer nor the processor.
+pub fn compare_adaptation_identity(
+    issued_manifest: [u8; 32],
+    expected_adaptation: Option<[u8; 32]>,
+    observed_manifest: Option<[u8; 32]>,
+    loaded_runtime_adaptation: Option<[u8; 32]>,
+    disk_adaptation: Option<[u8; 32]>,
+) -> AdaptationIdentityComparison {
+    let issued_manifest_matches = observed_manifest.map(|observed| observed == issued_manifest);
+    let loaded_matches_issued = match (loaded_runtime_adaptation, expected_adaptation) {
+        (Some(loaded), Some(expected)) => Some(loaded == expected),
+        _ => None,
+    };
+    let disk_matches_issued = match (disk_adaptation, expected_adaptation) {
+        (Some(disk), Some(expected)) => Some(disk == expected),
+        _ => None,
+    };
+    let loaded_matches_disk = match (loaded_runtime_adaptation, disk_adaptation) {
+        (Some(loaded), Some(disk)) => Some(loaded == disk),
+        _ => None,
+    };
+    let comparisons = [
+        issued_manifest_matches,
+        loaded_matches_issued,
+        disk_matches_issued,
+        loaded_matches_disk,
+    ];
+    let mut incomplete = false;
+    let mut mismatch = false;
+    for comparison in comparisons {
+        match comparison {
+            Some(true) => {}
+            Some(false) => mismatch = true,
+            None => incomplete = true,
+        }
+    }
+    let state = match (incomplete, mismatch) {
+        (false, false) => AdaptationIdentityState::Match,
+        (false, true) => AdaptationIdentityState::Mismatch,
+        (true, false) => AdaptationIdentityState::Incomplete,
+        (true, true) => AdaptationIdentityState::IncompleteAndMismatch,
+    };
+    AdaptationIdentityComparison {
+        issued_manifest_matches,
+        loaded_matches_issued,
+        disk_matches_issued,
+        loaded_matches_disk,
+        state,
+    }
+}
+
 /// Assessment class. No variant represents an operational PASS.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]

@@ -10,6 +10,7 @@ use crate::nam_flight::{self, NamFlightContext, NamFlightResult, NamFlightRuntim
 use crate::route::{self, RouteStore};
 use crate::session::{summarize_input_batch, FrameEvidence, ReceiptBatch, MAX_EVENTS_PER_RECEIPT};
 use crate::surveillance::{self, Surveillance, SurveillanceConfig, SurveillanceFrame};
+use oa_adapt::manifest::VerifiedPackage;
 use oa_airspace::core::model::Model;
 use oa_legacy_traj::core::trajectory::{
     PerformanceEnvelope, TrajectoryIssueOutput, VerticalProfileOutput,
@@ -31,6 +32,8 @@ const MAX_RUNTIME_ITEM_WORK: u32 =
 // A7.2: cold subsystem composition. All core memory belongs to its originating subsystem.
 pub struct RegionalRuntime {
     model: Model,
+    adaptation_sha256: [u8; 32],
+    issued_manifest_sha256: Option<[u8; 32]>,
     flights: FlightDriver,
     surveillance: Surveillance,
     routes: RouteStore,
@@ -373,6 +376,47 @@ pub fn regional_new(
     )
 }
 
+/// Construct the runtime from the exact model verified from an independently pinned issue.
+/// The model and identity enter as one `VerifiedPackage`; callers cannot pair a caller-supplied
+/// model with a claimed digest. The runtime recomputes and checks the model fingerprint before
+/// accepting the package identity.
+pub fn regional_new_from_issued_package(
+    package: VerifiedPackage,
+    centre: [u8; 4],
+    cfg: SurveillanceConfig,
+    profile: RegionalRunProfile,
+) -> Result<RegionalRuntime, String> {
+    regional_new_from_issued_package_with_audit_checkpoint(
+        package,
+        centre,
+        cfg,
+        profile,
+        oa_audit_core::genesis(),
+    )
+}
+
+/// Construct from a verified issued package while preserving the caller's durable audit-chain
+/// checkpoint for subsequent quarantine maintenance.
+pub fn regional_new_from_issued_package_with_audit_checkpoint(
+    package: VerifiedPackage,
+    centre: [u8; 4],
+    cfg: SurveillanceConfig,
+    profile: RegionalRunProfile,
+    audit_checkpoint: oa_audit_core::Checkpoint,
+) -> Result<RegionalRuntime, String> {
+    let identity = package.identity();
+    regional_new_with_source_identity_and_checkpoint(
+        package.model().clone(),
+        identity.snapshot_sha256,
+        Some(identity.manifest_sha256),
+        centre,
+        cfg,
+        profile,
+        DEFAULT_SESSION_NAMESPACE,
+        audit_checkpoint,
+    )
+}
+
 /// Construct a runtime with an explicit nonzero namespace for normalized-item quarantine IDs.
 pub fn regional_new_with_namespace(
     model: Model,
@@ -572,9 +616,10 @@ fn regional_new_with_profile_and_namespace(
     profile: RegionalRunProfile,
     session_namespace: u16,
 ) -> Result<RegionalRuntime, String> {
-    regional_new_with_profile_and_namespace_and_audit_checkpoint(
+    regional_new_with_source_identity_and_checkpoint(
         model,
         snapshot_sha256,
+        None,
         centre,
         cfg,
         profile,
@@ -586,6 +631,28 @@ fn regional_new_with_profile_and_namespace(
 fn regional_new_with_profile_and_namespace_and_audit_checkpoint(
     model: Model,
     snapshot_sha256: [u8; 32],
+    centre: [u8; 4],
+    cfg: SurveillanceConfig,
+    profile: RegionalRunProfile,
+    session_namespace: u16,
+    audit_checkpoint: oa_audit_core::Checkpoint,
+) -> Result<RegionalRuntime, String> {
+    regional_new_with_source_identity_and_checkpoint(
+        model,
+        snapshot_sha256,
+        None,
+        centre,
+        cfg,
+        profile,
+        session_namespace,
+        audit_checkpoint,
+    )
+}
+
+fn regional_new_with_source_identity_and_checkpoint(
+    model: Model,
+    expected_snapshot_sha256: [u8; 32],
+    issued_manifest_sha256: Option<[u8; 32]>,
     centre: [u8; 4],
     cfg: SurveillanceConfig,
     profile: RegionalRunProfile,
@@ -609,6 +676,12 @@ fn regional_new_with_profile_and_namespace_and_audit_checkpoint(
     {
         return Err("regional profile exceeds fixed runtime bounds".into());
     }
+    let encoded_model = oa_airspace::core::snapshot::encode(&model)
+        .map_err(|error| format!("runtime model fingerprint encode: {error:?}"))?;
+    let adaptation_sha256 = oa_sha256::sha256(&encoded_model);
+    if adaptation_sha256 != expected_snapshot_sha256 {
+        return Err("runtime model fingerprint does not match its admitted source identity".into());
+    }
     let nam_flights = nam_flight::nam_flight_runtime_new(profile.max_flights)
         .ok_or("NAM flight-plan runtime capacity is invalid")?;
     Ok(RegionalRuntime {
@@ -618,6 +691,8 @@ fn regional_new_with_profile_and_namespace_and_audit_checkpoint(
             profile.surveillance,
         )?,
         model,
+        adaptation_sha256,
+        issued_manifest_sha256,
         flights: flight::flight_driver_new_bounded(
             FlightDriverConfig {
                 flight_capacity: profile.max_flights,
@@ -627,7 +702,7 @@ fn regional_new_with_profile_and_namespace_and_audit_checkpoint(
             profile.max_flights,
         )
         .map_err(|e| format!("flight startup: {e:?}"))?,
-        routes: route::route_store_new(snapshot_sha256),
+        routes: route::route_store_new(adaptation_sha256),
         nam_flights,
         centre,
         frame_sequence: 0,
@@ -648,6 +723,16 @@ pub fn regional_quarantine_stats(
     runtime: &RegionalRuntime,
 ) -> Result<[SourceStats; oa_quarantine::INPUT_SOURCE_COUNT], String> {
     quarantine_stats(&runtime.quarantine_queue)
+}
+
+/// Fingerprint captured from the model accepted by the runtime constructor.
+pub fn regional_adaptation_sha256(runtime: &RegionalRuntime) -> [u8; 32] {
+    runtime.adaptation_sha256
+}
+
+/// Independent issued manifest pin retained with this runtime, if startup used an issued package.
+pub fn regional_issued_manifest_sha256(runtime: &RegionalRuntime) -> Option<[u8; 32]> {
+    runtime.issued_manifest_sha256
 }
 
 fn execute(

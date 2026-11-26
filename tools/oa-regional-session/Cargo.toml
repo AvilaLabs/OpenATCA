@@ -34,6 +34,9 @@ oa-airspace = { path = "../../crates/oa-airspace" }
 oa-ieee = { path = "../../crates/oa-ieee" }
 # Bind inputs, adaptation, source, executable and output evidence to exact bytes.
 oa-sha256 = { path = "../../crates/oa-sha256" }
+# F1a: the existing shell adaptation verifier supplies the exact issued model at startup and
+# bounded on-demand disk identity checks; the regional runtime consumes its verified model.
+oa-adapt = { path = "../oa-adapt" }
 # Check every input/output path and every source/receipt timestamp before admission.
 oa-sealed = { path = "../../crates/oa-sealed" }
 # F1: Connor explicitly approved these runtime links on 2026-11-24 (nine-link question).

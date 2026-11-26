@@ -3,7 +3,8 @@
 //! recomputes state and does not claim a live or distributed process checkpoint.
 
 use crate::runtime::{
-    regional_acknowledge_quarantine_before_commit, regional_new, regional_new_with_profile,
+    regional_acknowledge_quarantine_before_commit, regional_adaptation_sha256,
+    regional_new_from_issued_package_with_audit_checkpoint,
     regional_new_with_profile_and_quarantine_audit_checkpoint, regional_pixels,
     regional_quarantine_stats, regional_step, QuarantineMaintenanceRequest, RegionalRunProfile,
     DEFAULT_REGIONAL_RUN_PROFILE,
@@ -23,6 +24,21 @@ const MAX_FRAME_REPORT_BYTES: usize = 512 * 1024;
 pub enum ModelSource {
     Snapshot(PathBuf),
     Synthetic,
+    IssuedPackage {
+        root: PathBuf,
+        expected_manifest_sha256: [u8; 32],
+        processor_id: u32,
+    },
+}
+
+impl ModelSource {
+    fn evidence_label(&self) -> &'static str {
+        match self {
+            Self::Snapshot(_) => "SUPPLIED_UNPINNED_SNAPSHOT",
+            Self::Synthetic => "PUBLIC_SYNTHETIC",
+            Self::IssuedPackage { .. } => "ISSUED_PACKAGE_PIN_VERIFIED",
+        }
+    }
 }
 
 pub enum MsawSource {
@@ -229,16 +245,6 @@ pub fn run_session_with_profile_options_and_quarantine_release(
         return Err("normalized input exceeds byte limit".into());
     }
     oa_sealed::refuse(output)?;
-    let model_bytes = match source {
-        ModelSource::Snapshot(path) => read_guarded(path, MAX_SNAPSHOT_BYTES)?,
-        ModelSource::Synthetic => oa_airspace::core::snapshot::encode(&synthetic_model()?)
-            .map_err(|e| format!("synthetic snapshot: {e:?}"))?,
-    };
-    let model = oa_airspace::core::snapshot::decode(&model_bytes)
-        .map_err(|e| format!("snapshot: {e:?}"))?;
-    let snapshot_sha = oa_sha256::sha256(&model_bytes);
-    let executable = std::env::current_exe().map_err(|e| e.to_string())?;
-    let executable_sha = oa_sha256::sha256(&read_guarded(&executable, MAX_EXECUTABLE_BYTES)?);
     // Explicit synthetic-development settings, not FAA separation minima or facility sizing.
     let cfg = SurveillanceConfig {
         centre_lat_e7: 410_000_000,
@@ -246,20 +252,93 @@ pub fn run_session_with_profile_options_and_quarantine_release(
         range_nm: 180.0,
     };
     let profile = regional_cli_runtime_profile(selected_profile);
-    let mut runtime = match quarantine_release {
-        Some(request) => regional_new_with_profile_and_quarantine_audit_checkpoint(
-            model,
-            snapshot_sha,
-            *b"ZAU1",
-            cfg,
-            profile,
-            request.audit_checkpoint,
-        )?,
-        None if selected_profile == RegionalCliProfile::Default => {
-            regional_new(model, snapshot_sha, *b"ZAU1", cfg)?
+    let audit_checkpoint =
+        quarantine_release.map_or_else(oa_audit_core::genesis, |request| request.audit_checkpoint);
+    let mut activation = None;
+    let mut startup_processor_report = None;
+    let mut runtime = match source {
+        ModelSource::Snapshot(path) => {
+            let model_bytes = read_guarded(path, MAX_SNAPSHOT_BYTES)?;
+            let model = oa_airspace::core::snapshot::decode(&model_bytes)
+                .map_err(|e| format!("snapshot: {e:?}"))?;
+            let snapshot_sha = oa_sha256::sha256(&model_bytes);
+            regional_new_with_profile_and_quarantine_audit_checkpoint(
+                model,
+                snapshot_sha,
+                *b"ZAU1",
+                cfg,
+                profile,
+                audit_checkpoint,
+            )?
         }
-        None => regional_new_with_profile(model, snapshot_sha, *b"ZAU1", cfg, profile)?,
+        ModelSource::Synthetic => {
+            let model_bytes = oa_airspace::core::snapshot::encode(&synthetic_model()?)
+                .map_err(|e| format!("synthetic snapshot: {e:?}"))?;
+            let model = oa_airspace::core::snapshot::decode(&model_bytes)
+                .map_err(|e| format!("synthetic snapshot: {e:?}"))?;
+            let snapshot_sha = oa_sha256::sha256(&model_bytes);
+            regional_new_with_profile_and_quarantine_audit_checkpoint(
+                model,
+                snapshot_sha,
+                *b"ZAU1",
+                cfg,
+                profile,
+                audit_checkpoint,
+            )?
+        }
+        ModelSource::IssuedPackage {
+            root,
+            expected_manifest_sha256,
+            processor_id,
+        } => {
+            let (package, local_activation) = match oa_adapt::local_inventory::verify_local_startup(
+                root,
+                *expected_manifest_sha256,
+                *processor_id,
+            ) {
+                Ok(verified) => verified,
+                Err(_) => {
+                    fs::create_dir(output)
+                        .map_err(|error| format!("create startup refusal output: {error}"))?;
+                    let report = crate::processor_inventory::startup_refusal_report(
+                        *processor_id,
+                        *expected_manifest_sha256,
+                        crate::processor_inventory::observed_unix_time_ns(),
+                    );
+                    write_new(&output.join("processor-report.tsv"), report.as_bytes())?;
+                    return Err(
+                        "issued adaptation startup verification refused; no model activated".into(),
+                    );
+                }
+            };
+            let runtime = regional_new_from_issued_package_with_audit_checkpoint(
+                package,
+                *b"ZAU1",
+                cfg,
+                profile,
+                audit_checkpoint,
+            )?;
+            let report = crate::processor_inventory::check_active_runtime_adaptation(
+                &runtime,
+                &local_activation,
+                crate::processor_inventory::observed_unix_time_ns(),
+            )
+            .map_err(str::to_owned)?;
+            if report.status != oa_adapt::local_inventory::LocalInventoryStatus::Match {
+                return Err(format!(
+                    "issued adaptation startup disk recheck refused: {:?}\n{}",
+                    report.status,
+                    oa_adapt::local_inventory::render_processor_report_tsv("STARTUP", &report)
+                ));
+            }
+            activation = Some(local_activation);
+            startup_processor_report = Some(report);
+            runtime
+        }
     };
+    let snapshot_sha = regional_adaptation_sha256(&runtime);
+    let executable = std::env::current_exe().map_err(|e| e.to_string())?;
+    let executable_sha = oa_sha256::sha256(&read_guarded(&executable, MAX_EXECUTABLE_BYTES)?);
     let text = std::str::from_utf8(bytes).map_err(|_| "input not UTF-8")?;
     if text.lines().next() != Some("OA-RS\t1") {
         return Err("expected OA-RS header".into());
@@ -325,10 +404,14 @@ pub fn run_session_with_profile_options_and_quarantine_release(
     // Runtime failures precede final output publication. Temporary evidence is identifiable by
     // the absence of COMPLETE and is never accepted as a closed result.
     fs::create_dir(output).map_err(|e| format!("create new output: {e}"))?;
+    let mut processor_report = match &startup_processor_report {
+        Some(report) => oa_adapt::local_inventory::render_processor_report_tsv("STARTUP", report),
+        None => crate::processor_inventory::unpinned_source_report(),
+    };
     let mut settings = match selected_profile {
         // Preserve the prior default settings bytes and behavior exactly.
-        RegionalCliProfile::Default => format!("OA_REGIONAL_SETTINGS\t1\ncentre\tZAU1\nconfiguration\t{cfg:?}\ntracks\t32\nframes\t512\nframe_gap_max_ns\t60000000000\nCA_h_m\t1300\nCA_v_ft\t300\nCA_lookahead_ns\t120000000000\ntrajectory_track_age_max_ms\t5000\nnormalization\tpositive-address airborne positions\nmodel\t{}\n", match source { ModelSource::Synthetic => "SYNTHETIC", ModelSource::Snapshot(_) => "SUPPLIED_SNAPSHOT" }),
-        RegionalCliProfile::RecordedPeakRendered => format!("OA_REGIONAL_SETTINGS\t1\ncentre\tZAU1\nprofile\t{}\nconfiguration\t{cfg:?}\ntracks\t{}\nflights\t{}\nframes\t512\nsurveillance_max_frames\t{}\nmax_total_events\t{}\nmax_drain_rows\t{}\nmax_baro_evidence\t{}\nmax_open_alerts\t{}\nmax_candidate_pairs\t{}\nmax_ca_work_per_frame\t{}\nmax_flight_log_entries\t{}\nmax_presentation_updates\t{}\nrender_scope\t{}\nframe_gap_max_ns\t60000000000\nCA_h_m\t1300\nCA_v_ft\t300\nCA_lookahead_ns\t120000000000\ntrajectory_track_age_max_ms\t5000\nnormalization\tpositive-address airborne positions\nmodel\t{}\n", regional_cli_profile_id(selected_profile), profile.surveillance.max_tracks, profile.max_flights, profile.surveillance.max_frames, profile.max_total_events, profile.surveillance.max_drain_rows, profile.surveillance.max_baro_evidence, profile.surveillance.max_open_alerts, profile.surveillance.max_candidate_pairs, profile.surveillance.max_ca_work_per_frame, profile.max_flight_log_entries, profile.surveillance.max_presentation_updates, profile.surveillance.render_scope, match source { ModelSource::Synthetic => "SYNTHETIC", ModelSource::Snapshot(_) => "SUPPLIED_SNAPSHOT" }),
+        RegionalCliProfile::Default => format!("OA_REGIONAL_SETTINGS\t1\ncentre\tZAU1\nconfiguration\t{cfg:?}\ntracks\t32\nframes\t512\nframe_gap_max_ns\t60000000000\nCA_h_m\t1300\nCA_v_ft\t300\nCA_lookahead_ns\t120000000000\ntrajectory_track_age_max_ms\t5000\nnormalization\tpositive-address airborne positions\nmodel\t{}\n", source.evidence_label()),
+        RegionalCliProfile::RecordedPeakRendered => format!("OA_REGIONAL_SETTINGS\t1\ncentre\tZAU1\nprofile\t{}\nconfiguration\t{cfg:?}\ntracks\t{}\nflights\t{}\nframes\t512\nsurveillance_max_frames\t{}\nmax_total_events\t{}\nmax_drain_rows\t{}\nmax_baro_evidence\t{}\nmax_open_alerts\t{}\nmax_candidate_pairs\t{}\nmax_ca_work_per_frame\t{}\nmax_flight_log_entries\t{}\nmax_presentation_updates\t{}\nrender_scope\t{}\nframe_gap_max_ns\t60000000000\nCA_h_m\t1300\nCA_v_ft\t300\nCA_lookahead_ns\t120000000000\ntrajectory_track_age_max_ms\t5000\nnormalization\tpositive-address airborne positions\nmodel\t{}\n", regional_cli_profile_id(selected_profile), profile.surveillance.max_tracks, profile.max_flights, profile.surveillance.max_frames, profile.max_total_events, profile.surveillance.max_drain_rows, profile.surveillance.max_baro_evidence, profile.surveillance.max_open_alerts, profile.surveillance.max_candidate_pairs, profile.surveillance.max_ca_work_per_frame, profile.max_flight_log_entries, profile.surveillance.max_presentation_updates, profile.surveillance.render_scope, source.evidence_label()),
     };
     settings.push_str(match safety {
         MsawSource::Disabled => "msaw\tUNAVAILABLE_NOT_CONFIGURED\n",
@@ -439,6 +522,37 @@ pub fn run_session_with_profile_options_and_quarantine_release(
             oa_sha256::to_hex(&oa_sha256::sha256(report.as_bytes()))
         ));
     }
+    if let Some(local_activation) = activation.as_ref() {
+        let report = crate::processor_inventory::check_active_runtime_adaptation(
+            &runtime,
+            local_activation,
+            crate::processor_inventory::observed_unix_time_ns(),
+        )
+        .map_err(str::to_owned)?;
+        processor_report.push_str(&oa_adapt::local_inventory::render_processor_report_tsv(
+            "ON_DEMAND",
+            &report,
+        ));
+        if report.status != oa_adapt::local_inventory::LocalInventoryStatus::Match {
+            write_new(
+                &output.join("processor-report.tsv"),
+                processor_report.as_bytes(),
+            )?;
+            return Err(format!(
+                "on-demand issued adaptation check reported {:?}; loaded model retained and disk model not adopted",
+                report.status
+            ));
+        }
+    }
+    write_new(
+        &output.join("processor-report.tsv"),
+        processor_report.as_bytes(),
+    )?;
+    manifest.push_str(&format!(
+        "processor_report_sha256\t{}\n",
+        oa_sha256::to_hex(&oa_sha256::sha256(processor_report.as_bytes()))
+    ));
+
     write_new(&output.join("manifest.tsv"), manifest.as_bytes())?;
     let directory = oa_sealed::open(output).map_err(|e| e.to_string())?;
     directory.sync_all().map_err(|e| e.to_string())?;
