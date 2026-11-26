@@ -1008,7 +1008,7 @@ fn receive_decision(
     if message.header.id.sender.0 != current.to
         || message.header.id.receiver.0 != current.from
         || local_facility != current.from
-        || !same_context(current, context)
+        || !same_context(&current, context)
         || binding_view.is_some_and(|view| Some(view.address) != current.address)
     {
         return Err(PointOutError::WrongPeer);
