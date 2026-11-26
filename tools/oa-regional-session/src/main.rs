@@ -597,10 +597,12 @@ fn run() -> Result<(), CliError> {
             &output,
             &source,
             &safety,
-            performance.as_deref(),
-            profile,
-            quarantine_release.as_ref(),
-            runway_aids_package.as_ref(),
+            oa_regional_session::cli::RegionalSessionOptions {
+                performance: performance.as_deref(),
+                profile,
+                quarantine_release: quarantine_release.as_ref(),
+                runway_aids: runway_aids_package.as_ref(),
+            },
         )
         .map_err(CliError::Runtime),
         None => write_report(&output, &frames),

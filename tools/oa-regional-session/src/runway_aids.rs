@@ -130,10 +130,16 @@ fn reciprocal_end(name: &[u8; 3]) -> Result<[u8; 3], GeometryRefusal> {
         .map_err(|_| GeometryRefusal::UnsupportedRunwayEnd)?
         .trim_end_matches('\0');
     let bytes = text.as_bytes();
-    if bytes.len() < 2 || bytes.len() > 3 || !bytes[..2].iter().all(u8::is_ascii_digit) {
+    if !(2..=3).contains(&bytes.len()) {
         return Err(GeometryRefusal::UnsupportedRunwayEnd);
     }
-    let number = usize::from(bytes[0] - b'0') * 10 + usize::from(bytes[1] - b'0');
+    let Some([tens, ones]) = bytes.get(..2) else {
+        return Err(GeometryRefusal::UnsupportedRunwayEnd);
+    };
+    if !tens.is_ascii_digit() || !ones.is_ascii_digit() {
+        return Err(GeometryRefusal::UnsupportedRunwayEnd);
+    }
+    let number = usize::from(*tens - b'0') * 10 + usize::from(*ones - b'0');
     if !(1..=36).contains(&number) {
         return Err(GeometryRefusal::UnsupportedRunwayEnd);
     }

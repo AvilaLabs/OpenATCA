@@ -59,6 +59,14 @@ pub struct QuarantineReleaseOptions {
     pub time_ns: u64,
 }
 
+/// Optional inputs and limits for one composed regional session run.
+pub struct RegionalSessionOptions<'a> {
+    pub performance: Option<&'a Path>,
+    pub profile: RegionalCliProfile,
+    pub quarantine_release: Option<&'a QuarantineReleaseOptions>,
+    pub runway_aids: Option<&'a RunwayAidPackageOptions>,
+}
+
 /// Persisted CLI profile selection. The absent/default option remains the historical 32-track
 /// rendered run; the recorded profile is an explicit bounded high-volume ADS-B replay variant.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -276,10 +284,12 @@ pub fn run_session_with_profile_options_and_quarantine_release(
         output,
         source,
         safety,
-        performance,
-        selected_profile,
-        quarantine_release,
-        None,
+        RegionalSessionOptions {
+            performance,
+            profile: selected_profile,
+            quarantine_release,
+            runway_aids: None,
+        },
     )
 }
 
@@ -289,11 +299,14 @@ pub fn run_session_with_profile_options_and_runway_aids(
     output: &Path,
     source: &ModelSource,
     safety: &MsawSource,
-    performance: Option<&Path>,
-    selected_profile: RegionalCliProfile,
-    quarantine_release: Option<&QuarantineReleaseOptions>,
-    runway_aids: Option<&RunwayAidPackageOptions>,
+    options: RegionalSessionOptions<'_>,
 ) -> Result<(), String> {
+    let RegionalSessionOptions {
+        performance,
+        profile: selected_profile,
+        quarantine_release,
+        runway_aids,
+    } = options;
     if bytes.len() > 16 * 1024 * 1024 {
         return Err("normalized input exceeds byte limit".into());
     }

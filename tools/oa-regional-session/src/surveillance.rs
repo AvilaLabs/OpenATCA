@@ -896,7 +896,7 @@ pub fn surveillance_finish_with_mode(
     if mode_evidence.len() > s.profile.max_tracks
         || mode_evidence
             .windows(2)
-            .any(|pair| pair[0].address >= pair[1].address)
+            .any(|pair| matches!(pair, [first, second] if first.address >= second.address))
         || mode_evidence
             .iter()
             .any(|item| item.state_ns != time_ns || item.controller_initiated_coast > 1)

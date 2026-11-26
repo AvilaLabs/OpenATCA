@@ -78,6 +78,15 @@ struct AtpaScratch {
     seconds_to_loss_milli: Vec<u32>,
 }
 
+struct RunwayAidFrame<'a> {
+    assignments: &'a [ActiveRunwayAssignment],
+    surveillance: Option<&'a surveillance::Surveillance>,
+    tracks: &'a [crate::surveillance::ObservedTrack],
+    ghosts: &'a mut Vec<oa_display::core::runway_aids::CrdaGhostPacket>,
+    scan_time_ns: i64,
+    scan_sequence: u64,
+}
+
 impl AtpaScratch {
     fn new(max_flights: usize) -> Result<Self, String> {
         let rows = max_flights.min(oa_runway::terminal_aids::MAX_CRDA_ROWS);
@@ -205,10 +214,10 @@ fn evaluate_assigned_atpa(
         }
         let mut matching_track = None;
         for track in tracks {
-            if track.address == assignment.identity.aircraft_address {
-                if matching_track.replace(track).is_some() {
-                    return None;
-                }
+            if track.address == assignment.identity.aircraft_address
+                && matching_track.replace(track).is_some()
+            {
+                return None;
             }
         }
         let Some(track) = matching_track else {
@@ -233,9 +242,7 @@ fn evaluate_assigned_atpa(
                 lon_deg: f64::from(row.lon_e7) / 10_000_000.0,
             },
         )?;
-        let Some(slot) = flights.get_mut(flight_count) else {
-            return None;
-        };
+        let slot = flights.get_mut(flight_count)?;
         *slot = Some(AtpaFlightInput {
             assignment: *assignment,
             point,
@@ -253,13 +260,9 @@ fn evaluate_assigned_atpa(
     scratch.trail_speed_mps.clear();
     scratch.minimum_spacing_m.clear();
     for left in 0..flight_count {
-        let Some(first) = flights.get(left).copied().flatten() else {
-            return None;
-        };
+        let first = flights.get(left).copied().flatten()?;
         for right in left.saturating_add(1)..flight_count {
-            let Some(second) = flights.get(right).copied().flatten() else {
-                return None;
-            };
+            let second = flights.get(right).copied().flatten()?;
             if first.assignment.runway_id != second.assignment.runway_id
                 || first.assignment.end_name != second.assignment.end_name
             {
@@ -473,14 +476,17 @@ pub const MAX_PERFORMANCE_ENVELOPES: usize = MAX_DRIVER_FLIGHTS;
 
 fn runway_aid_packets(
     aids: &mut [RunwayAidRuntime],
-    assignments: &[ActiveRunwayAssignment],
     atpa_scratch: &mut AtpaScratch,
-    surveillance: Option<&surveillance::Surveillance>,
-    tracks: &[crate::surveillance::ObservedTrack],
-    crda_ghosts: &mut Vec<oa_display::core::runway_aids::CrdaGhostPacket>,
-    scan_time_ns: i64,
-    scan_sequence: u64,
+    frame: RunwayAidFrame<'_>,
 ) -> Vec<oa_display::core::runway_aids::RunwayAidPacket> {
+    let RunwayAidFrame {
+        assignments,
+        surveillance,
+        tracks,
+        ghosts: crda_ghosts,
+        scan_time_ns,
+        scan_sequence,
+    } = frame;
     use oa_display::core::runway_aids::{Availability, CrdaGhostPacket, RunwayAidPacket, Severity};
     use oa_runway::final_monitor::{
         self, FinalAlertBuffer, FinalSeverity, PredictedTracks, MAX_TRACKS,
@@ -807,20 +813,33 @@ mod runway_aid_packet_tests {
     // REQ: OA-RWY-022
     #[test]
     fn unconfigured_runtime_emits_explicit_unavailable_packet() {
-        let mut scratch = AtpaScratch::new(1).expect("small bounded ATPA scratch");
+        let scratch_result = AtpaScratch::new(1);
+        assert!(
+            scratch_result.is_ok(),
+            "small bounded ATPA scratch allocation"
+        );
+        let Ok(mut scratch) = scratch_result else {
+            return;
+        };
         let mut ghosts = Vec::new();
         let packets = runway_aid_packets(
             &mut [],
-            &[],
             &mut scratch,
-            None,
-            &[],
-            &mut ghosts,
-            1_000_000_000,
-            1,
+            RunwayAidFrame {
+                assignments: &[],
+                surveillance: None,
+                tracks: &[],
+                ghosts: &mut ghosts,
+                scan_time_ns: 1_000_000_000,
+                scan_sequence: 1,
+            },
         );
         assert_eq!(packets.len(), 1);
-        let packet = packets.first().expect("one unavailable packet");
+        let packet_result = packets.first();
+        assert!(packet_result.is_some(), "one unavailable packet is emitted");
+        let Some(packet) = packet_result else {
+            return;
+        };
         assert_eq!(packet.availability, Availability::Unavailable);
         assert_eq!(packet.scan_sequence, 1);
         assert_eq!(packet.first_runway_id, 0);
@@ -1904,13 +1923,15 @@ fn execute(
         .map_err(|_| "CRDA ghost output allocation refused")?;
     let runway_aids = runway_aid_packets(
         &mut runtime.runway_aids,
-        &runtime.runway_assignments,
         &mut runtime.atpa_scratch,
-        Some(&runtime.surveillance),
-        &surveillance.tracks,
-        &mut crda_ghosts,
-        surveillance.time_ns,
-        runtime.frame_sequence,
+        RunwayAidFrame {
+            assignments: &runtime.runway_assignments,
+            surveillance: Some(&runtime.surveillance),
+            tracks: &surveillance.tracks,
+            ghosts: &mut crda_ghosts,
+            scan_time_ns: surveillance.time_ns,
+            scan_sequence: runtime.frame_sequence,
+        },
     );
     Ok(RegionalFrame {
         sequence: runtime.frame_sequence,
