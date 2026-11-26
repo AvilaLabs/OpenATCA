@@ -186,8 +186,6 @@ fn processor_report(local: LocalInventoryReport, context: ProcessorContext) -> P
 
 fn local_status(
     issued: Digest,
-    expected_pin: Digest,
-    expected_adaptation: Digest,
     loaded: Digest,
     disk_manifest: Option<Digest>,
     disk_adaptation: Option<Digest>,
@@ -195,12 +193,8 @@ fn local_status(
     match (disk_manifest, disk_adaptation) {
         (None, None) => Ok(LocalInventoryStatus::PackageRefused),
         (Some(disk_pin), Some(disk_digest)) => {
-            if issued != expected_pin || disk_pin != expected_pin {
+            if disk_pin != issued {
                 Ok(LocalInventoryStatus::IssuedManifestMismatch)
-            } else if disk_digest != expected_adaptation {
-                Err(FleetError::Failed(
-                    "disk adaptation digest conflicts with the issued manifest".into(),
-                ))
             } else if loaded != disk_digest {
                 Ok(LocalInventoryStatus::LoadedDiskMismatch)
             } else {
@@ -213,12 +207,7 @@ fn local_status(
     }
 }
 
-fn read_report(
-    path: &Path,
-    expected_id: u32,
-    expected_pin: Digest,
-    expected_adaptation: Digest,
-) -> Result<ReportRow, FleetError> {
+fn read_report(path: &Path, expected_id: u32) -> Result<ReportRow, FleetError> {
     let bytes = read_bounded(path, MAX_REPORT_BYTES)?;
     let text = std::str::from_utf8(&bytes)
         .map_err(|_| FleetError::Failed("processor report is not UTF-8".into()))?;
@@ -255,14 +244,7 @@ fn read_report(
             "processor report must retain provenance_unverified=true".into(),
         ));
     }
-    let status = local_status(
-        issued_pin,
-        expected_pin,
-        expected_adaptation,
-        loaded,
-        disk_manifest,
-        disk_adaptation,
-    )?;
+    let status = local_status(issued_pin, loaded, disk_manifest, disk_adaptation)?;
     if field_value(&row, 6)? != local_status_name(status) {
         return Err(FleetError::Failed(
             "local inventory status does not match its digest fields".into(),
@@ -457,7 +439,7 @@ pub fn run(args: &[String], out: &mut dyn Write) -> Result<(), FleetError> {
         .try_reserve_exact(report_paths.len())
         .map_err(|_| FleetError::Failed("report allocation refused".into()))?;
     for (id, path) in report_paths {
-        let row = read_report(&path, id, expected_pin, expected_adaptation)?;
+        let row = read_report(&path, id)?;
         local_by_id.push((id, row.local.status));
         let is_expected = expected.iter().any(|item| item.processor_id.0 == id);
         if row.local.status != LocalInventoryStatus::PackageRefused || !is_expected {
@@ -641,7 +623,7 @@ mod tests {
         status: LocalInventoryStatus,
     ) -> String {
         format!(
-            "{}\t{}\t{}\t{}\t{}\ttrue\t{}\t{}\t7\t9\t1\t1000\t{}\t{}\t0\n",
+            "{}\t{}\t{}\t{}\t{}\ttrue\t{}\t{}\t9\t7\t1\t1000\t{}\t{}\t0\n",
             id,
             oa_sha256::to_hex(&pin),
             oa_sha256::to_hex(&loaded),
@@ -714,7 +696,7 @@ mod tests {
         }
         let (result, output) = run_case(&case);
         assert!(result.is_ok());
-        assert!(output.contains("aggregate\tstate="));
+        assert!(output.contains("aggregate\tstate=ClaimsMatchUnverified"));
         assert!(output.contains("provenance_unverified=true"));
         assert!(!output.contains("PASS"));
         assert_eq!(output.lines().count(), 3);
@@ -806,17 +788,15 @@ mod tests {
     #[test]
     fn g2_field_change_end_to_end() {
         let mut case = setup("field-change", &[1, 2, 3]);
-        let base_root = case.root.join("base-package");
-        let base_pin = write_new_package(&base_root, &case.snapshot, "base-0", "ZAU", "G2-BASE")
-            .expect("write base package");
-        let old_root = case.root.join("old-issued");
-        let (old_version, old_pin) = issue_new_package(
-            &old_root,
+        let base_pin = case.pin;
+        let v1_root = case.root.join("issued-v1");
+        let (v1, v1_pin) = issue_new_package(
+            &v1_root,
             &case.snapshot,
             "issued-1",
             "ZAU",
             "G2-INITIAL",
-            &base_root,
+            &case.package_root,
             base_pin,
             ChangeClass::Initial,
             "issuer-1",
@@ -824,32 +804,47 @@ mod tests {
             "synthetic initial issue",
         )
         .expect("issue initial v1 package");
-        assert_eq!(old_version, 1);
-        let mut activations = Vec::new();
-        for id in [1, 2] {
+        assert_eq!(v1, 1);
+        let mut local_roots = Vec::new();
+        let mut v1_activations = Vec::new();
+        for id in [1, 2, 3] {
+            let local_root = case.root.join(format!("processor-{id}"));
+            fs::create_dir_all(&local_root).expect("create synthetic processor package root");
+            fs::copy(
+                v1_root.join("manifest.oag2"),
+                local_root.join("manifest.oag2"),
+            )
+            .expect("copy v1 manifest to processor");
+            fs::copy(
+                v1_root.join("airspace.snapshot"),
+                local_root.join("airspace.snapshot"),
+            )
+            .expect("copy v1 snapshot to processor");
             let (_, activation) =
-                crate::local_inventory::verify_local_startup(&old_root, old_pin, id)
+                crate::local_inventory::verify_local_startup(&local_root, v1_pin, id)
                     .expect("processor starts on v1");
-            activations.push((id, activation));
+            local_roots.push((id, local_root));
+            v1_activations.push((id, activation));
         }
+
         let changed = snapshot(92_601);
-        let changed_root = case.root.join("changed-issued");
-        let (version, changed_pin) = issue_new_package(
+        let changed_root = case.root.join("issued-v2");
+        let (v2, v2_pin) = issue_new_package(
             &changed_root,
             &changed,
             "issued-2",
             "ZAU",
             "G2-CHANGE",
-            &old_root,
-            old_pin,
+            &v1_root,
+            v1_pin,
             ChangeClass::FieldChange,
             "issuer-1",
             "approver-2",
             "synthetic field change",
         )
         .expect("issue v2 field change");
-        assert_eq!(version, 2);
-        let changed_digest = sha256(&changed);
+        assert_eq!(v2, 2);
+        let v2_digest = sha256(&changed);
         let mut expected_text = String::new();
         for id in [1, 2, 3] {
             expected_text.push_str(&format!(
@@ -857,75 +852,153 @@ mod tests {
                 id + 100,
                 "11".repeat(32),
                 "22".repeat(32),
-                oa_sha256::to_hex(&changed_digest),
+                oa_sha256::to_hex(&v2_digest),
             ));
         }
-        fs::write(&case.expected_path, expected_text).expect("replace expected package identity");
-        fs::copy(
-            changed_root.join("manifest.oag2"),
-            case.package_root.join("manifest.oag2"),
-        )
-        .expect("replace central issued manifest");
-        fs::copy(
-            changed_root.join("airspace.snapshot"),
-            case.package_root.join("airspace.snapshot"),
-        )
-        .expect("replace central issued snapshot");
-        case.pin = changed_pin;
-        fs::copy(
-            changed_root.join("manifest.oag2"),
-            old_root.join("manifest.oag2"),
-        )
-        .expect("replace processors 1 and 2 disk manifest");
-        fs::copy(
-            changed_root.join("airspace.snapshot"),
-            old_root.join("airspace.snapshot"),
-        )
-        .expect("replace processors 1 and 2 disk snapshot");
-        let (_, processor3) =
-            crate::local_inventory::verify_local_startup(&changed_root, changed_pin, 3)
-                .expect("processor 3 activates v2");
-        for (id, activation) in activations {
-            let local = crate::local_inventory::verify_local_inventory(&activation);
-            assert_eq!(local.status, LocalInventoryStatus::IssuedManifestMismatch);
+        fs::write(&case.expected_path, expected_text).expect("replace expected with v2 inventory");
+        for name in ["manifest.oag2", "airspace.snapshot"] {
+            fs::copy(changed_root.join(name), case.package_root.join(name))
+                .expect("install issued v2 central package");
+        }
+        case.pin = v2_pin;
+
+        // Phase one: processors 1 and 2 activate v2; processor 3 remains active on v1.
+        // The local package roots are independent, so changing 1/2 cannot silently update 3.
+        let mut v2_activations = Vec::new();
+        for id in [1, 2] {
+            let local_root = local_roots
+                .iter()
+                .find(|(processor_id, _)| *processor_id == id)
+                .map(|(_, root)| root)
+                .expect("processor root exists");
+            for name in ["manifest.oag2", "airspace.snapshot"] {
+                fs::copy(changed_root.join(name), local_root.join(name))
+                    .expect("install v2 on processor");
+            }
+            let (_, activation) =
+                crate::local_inventory::verify_local_startup(local_root, v2_pin, id)
+                    .expect("processor activates v2");
+            v2_activations.push((id, activation));
+        }
+        for (id, activation) in &v2_activations {
+            let local = crate::local_inventory::verify_local_inventory(activation);
+            assert_eq!(local.status, LocalInventoryStatus::Match);
             write_report(
                 &case,
-                id,
+                *id,
                 &report_line(
-                    id,
-                    old_pin,
+                    *id,
+                    v2_pin,
                     local.loaded_adaptation_sha256,
-                    Some(changed_pin),
-                    Some(changed_digest),
-                    LocalInventoryStatus::IssuedManifestMismatch,
+                    Some(v2_pin),
+                    Some(v2_digest),
+                    LocalInventoryStatus::Match,
                 ),
             );
         }
-        let local3 = crate::local_inventory::verify_local_inventory(&processor3);
-        assert_eq!(local3.status, LocalInventoryStatus::Match);
+        let v1_activation3 = v1_activations
+            .iter()
+            .find(|(id, _)| *id == 3)
+            .map(|(_, activation)| activation)
+            .expect("processor 3 v1 activation exists");
+        let local3_v1 = crate::local_inventory::verify_local_inventory(v1_activation3);
+        assert_eq!(local3_v1.status, LocalInventoryStatus::Match);
         write_report(
             &case,
             3,
             &report_line(
                 3,
-                changed_pin,
-                local3.loaded_adaptation_sha256,
-                Some(changed_pin),
-                Some(changed_digest),
+                v1_pin,
+                local3_v1.loaded_adaptation_sha256,
+                Some(v1_pin),
+                Some(local3_v1.disk_adaptation_sha256.expect("v1 disk digest")),
                 LocalInventoryStatus::Match,
             ),
         );
-        let (result, output) = run_case(&case);
-        assert!(result.is_err());
+        let (phase_one, output_one) = run_case(&case);
+        assert!(phase_one.is_err());
         assert!(
-            output.contains("processor\t1\tlocal=issued_manifest_mismatch"),
-            "{result:?}; {output}"
+            output_one.contains("processor\t1\tlocal=match"),
+            "{output_one}"
         );
         assert!(
-            output.contains("processor\t2\tlocal=issued_manifest_mismatch"),
-            "{output}"
+            output_one.contains("processor\t2\tlocal=match"),
+            "{output_one}"
         );
-        assert!(output.contains("processor\t3\tlocal=match"), "{output}");
+        assert!(
+            output_one.contains("processor\t3\tlocal=match"),
+            "{output_one}"
+        );
+        assert!(
+            output_one.contains("processor\t1\tlocal=match\tflags=0x00000000"),
+            "{output_one}"
+        );
+        assert!(
+            output_one.contains("processor\t2\tlocal=match\tflags=0x00000000"),
+            "{output_one}"
+        );
+        let processor3_row = output_one
+            .lines()
+            .find(|line| line.starts_with("processor\t3\t"))
+            .expect("processor 3 assessment row");
+        assert!(!processor3_row.contains("flags=0x00000000"), "{output_one}");
+        assert!(
+            output_one.contains("release_manifest_mismatches=1"),
+            "{output_one}"
+        );
+        assert!(
+            output_one.contains("loaded_adaptation_mismatches=1"),
+            "{output_one}"
+        );
+        assert!(
+            output_one.contains("disk_adaptation_mismatches=1"),
+            "{output_one}"
+        );
+
+        // Phase two: processor 3 activates v2; the complete claimed fleet now matches.
+        let local_root3 = local_roots
+            .iter()
+            .find(|(id, _)| *id == 3)
+            .map(|(_, root)| root)
+            .expect("processor 3 root exists");
+        for name in ["manifest.oag2", "airspace.snapshot"] {
+            fs::copy(changed_root.join(name), local_root3.join(name))
+                .expect("install v2 on processor 3");
+        }
+        let (_, activation3_v2) =
+            crate::local_inventory::verify_local_startup(local_root3, v2_pin, 3)
+                .expect("processor 3 activates v2");
+        let local3_v2 = crate::local_inventory::verify_local_inventory(&activation3_v2);
+        assert_eq!(local3_v2.status, LocalInventoryStatus::Match);
+        write_report(
+            &case,
+            3,
+            &report_line(
+                3,
+                v2_pin,
+                local3_v2.loaded_adaptation_sha256,
+                Some(v2_pin),
+                Some(v2_digest),
+                LocalInventoryStatus::Match,
+            ),
+        );
+        let (phase_two, output_two) = run_case(&case);
+        assert!(phase_two.is_ok(), "{phase_two:?}; {output_two}");
+        for id in [1, 2, 3] {
+            assert!(
+                output_two.contains(&format!("processor\t{id}\tlocal=match")),
+                "{output_two}"
+            );
+        }
+        assert!(
+            output_two.contains("state=ClaimsMatchUnverified"),
+            "{output_two}"
+        );
+        assert!(
+            output_two.contains("provenance_unverified=true"),
+            "{output_two}"
+        );
+        assert!(!output_two.contains("PASS"));
         let _ = fs::remove_dir_all(case.root);
     }
 }
