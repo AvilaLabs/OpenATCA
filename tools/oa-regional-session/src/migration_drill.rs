@@ -1458,6 +1458,7 @@ fn snapshot_output_payloads(
         Output::Candidate => "Candidate",
     };
     let mut family_counts = [0u64; 4];
+    let mut joined_display_targets = 0usize;
     for row in snapshot.tracks.iter().flatten() {
         family_counts[0] = family_counts[0]
             .checked_add(1)
@@ -1478,12 +1479,20 @@ fn snapshot_output_payloads(
         }) {
             return Err("display target does not match its selected track row".into());
         }
+        if display.is_some() {
+            joined_display_targets = joined_display_targets
+                .checked_add(1)
+                .ok_or("display target join count overflow")?;
+        }
         let display = serialize_display_target(display.as_ref())?;
         payloads.push(format!(
             "H5STATE\t1\tselected={selected_side}\tTRACK\tkey={}\tordinal={}\tstatus={}\tlat_e7={}\tlon_e7={}\taltitude_ft={}\tdigest={}\t{}",
             hex_encode(&row.key.entity_key)?, row.key.ordinal, row.status as u8,
             row.lat_e7, row.lon_e7, row.altitude_ft, hex_encode(&row.projection_digest)?, display,
         ).into_bytes());
+    }
+    if joined_display_targets != display_targets.len() {
+        return Err("a rendered display target has no selected track row".into());
     }
     for row in snapshot.flights.iter().flatten() {
         family_counts[1] = family_counts[1]
@@ -4845,7 +4854,7 @@ pub fn run_recorded_stream(
     let m2_refusals = processor
         .cycles
         .iter()
-        .filter(|cycle| cycle.m2_refusal.is_some())
+        .filter(|cycle| cycle.m2_attempted && cycle.m2_refusal.is_some())
         .count();
     Ok(RecordedDrillReport {
         run_profile: profile,
@@ -5691,6 +5700,28 @@ mod tests {
         };
         let batch = snapshot_output_payloads(snapshot.view(), &[], Output::Legacy)?;
         assert_eq!(batch.family_counts, [1, 0, 0, 0]);
+        let rendered = oa_display::core::traffic::Target {
+            lat_e7: 385_000_000,
+            lon_e7: -935_000_000,
+            alt_ft: 1000,
+            addr: 7,
+            r95_m: 95.5,
+            trail: [(0, 0); oa_display::core::traffic::MAX_TRAIL],
+            callsign: *b"TEST123\0",
+            track_ddeg: 90,
+            gs_dkt: 1200,
+            reacq_age_s: 1,
+            flags: 0,
+            trail_len: 0,
+        };
+        let with_rendered =
+            snapshot_output_payloads(snapshot.view(), &[rendered], Output::Legacy)?;
+        assert_eq!(with_rendered.family_counts[0], 1);
+        let orphan = oa_display::core::traffic::Target {
+            addr: 8,
+            ..rendered
+        };
+        assert!(snapshot_output_payloads(snapshot.view(), &[orphan], Output::Legacy).is_err());
         let row = batch.rows.first().ok_or("selected state row missing")?;
         let mut pending = PendingAppliedState::new(0, 1, "Legacy", [1, 0, 0, 0])?;
         pending.push(1, &oa_sha256::to_hex(&oa_sha256::sha256(row)), row)?;

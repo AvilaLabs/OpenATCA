@@ -92,7 +92,7 @@ fn emit(report: &RecordedDrillReport) {
         .map(|cycle| cycle.active_ca_alerts)
         .sum::<u64>();
     println!(
-        "H5RECORDED\tversion=7\tmode=paired_single_pass_two_independent_same_implementation_runtimes\tprivileged_action_audit=UNAVAILABLE_PUBLISHED_M2_API\tauthority_mode={}\tqualification={}\tcentre={}\tendpoint_class={}\tmeasurement_start_ns={}\tmeasurement_end_ns={}\tcapture_start_ns={}\twarmup_events={}\tupdate_interval_ns={}\tdecision_limit_ns={}\tcycles_defined=100\tm2_ingest_attempts={}\tm2_cycles_refused={}\tflip_rollback_cycles_attempted={}\tflip_rollback_cycles_completed={}\taudit_events_written=0\tmax_retained_snapshot_bytes_per_replica={}\tdrill_runtime_cap_s=300\tphysical_input_byte_cap={}\tinput_frame_cap={}\tinput_stream_cap={}\tnormalized_event_cap={}\tconsumer_event_frame_cap_bytes={}\tnormalized_events={}\tposition_inputs={}\tflight_inputs={}\thandoff_operations={}\tactive_ca_alert_frame_rows={}\tquarantine_records={}\tmanual_handling_required={}\tinput_worker_hash_echo_acks={}\twarmup_worker_hash_echo_acks={}\tselected_state_apply_ack_rows={}\treplay_projection_equal_cycles={}\tmodel_sha256={}\tmap_centre_lat_e7={}\tmap_centre_lon_e7={}\tmap_range_nm={}\tprofile_max_frames={}\tprofile_max_tracks={}\tprofile_max_flights={}\tprofile_max_total_events={}\tprofile_max_baro_evidence={}\tprofile_max_drain_rows={}\tprofile_max_ca_candidates={}\tprofile_max_open_alerts={}\tprofile_max_ca_work_per_frame={}\tworker_input_gaps=UNMEASURED\tworker_input_duplicates=UNMEASURED\tworker_input_out_of_order=UNMEASURED\tworker_output_gaps=0\tworker_output_duplicates=0\tworker_output_out_of_order=0\tconsumer_scope=local_worker_applies_each_selected_typed_snapshot_and_ACKs_its_exact_digest_no_external_endpoint_or_source_completeness_claim\ttrack_output_loss=typed_snapshot_digest_ACK\tactive_alert_state=typed_CA_rows_ACK_ACK_SUPPRESSION_UNKNOWN\tdata_block_loss=existing_renderer_Target_rows_in_typed_snapshot\thandoff_state=typed_flight_handoff_rows_ACK\tstate_families_available={},{},{},{}",
+        "H5RECORDED\tversion=7\tmode=paired_single_pass_two_independent_same_implementation_runtimes\tprivileged_action_audit=UNAVAILABLE_PUBLISHED_M2_API\tauthority_mode={}\tqualification={}\tcentre={}\tendpoint_class={}\tmeasurement_start_ns={}\tmeasurement_end_ns={}\tcapture_start_ns={}\twarmup_events={}\tupdate_interval_ns={}\tdecision_limit_ns={}\tcycles_defined=100\tm2_ingest_attempts={}\tm2_cycles_refused={}\tflip_rollback_cycles_attempted={}\tflip_rollback_cycles_completed={}\taudit_events_written=0\tmax_retained_snapshot_bytes_per_replica={}\tdrill_runtime_cap_s=300\tphysical_input_byte_cap={}\tinput_frame_cap={}\tinput_stream_cap={}\tnormalized_event_cap={}\tconsumer_event_frame_cap_bytes={}\tnormalized_events={}\tposition_inputs={}\tflight_inputs={}\thandoff_operations={}\tactive_ca_alert_frame_rows={}\tactive_ca_alert_frame_denominator={}\thandoff_state_frame_denominator={}\tquarantine_records={}\tmanual_handling_required={}\tinput_delivery=single_stream_callback_to_two_independent_runtimes\tselected_state_apply_ack_rows={}\treplay_projection_equal_cycles={}\tmodel_sha256={}\tmap_centre_lat_e7={}\tmap_centre_lon_e7={}\tmap_range_nm={}\tprofile_max_frames={}\tprofile_max_tracks={}\tprofile_max_flights={}\tprofile_max_total_events={}\tprofile_max_baro_evidence={}\tprofile_max_drain_rows={}\tprofile_max_ca_candidates={}\tprofile_max_open_alerts={}\tprofile_max_ca_work_per_frame={}\tconsumer_output_order=monotonic_generation_checked\tconsumer_scope=local_worker_applies_each_selected_typed_snapshot_and_ACKs_its_exact_digest_no_external_endpoint_or_source_completeness_claim\ttrack_output_integrity=typed_snapshot_digest_ACK\tactive_alert_projection=typed_CA_rows_ACK_ack_suppression_unknown\tdisplay_block_projection=existing_renderer_Target_rows_joined_to_track_state\thandoff_projection=typed_flight_handoff_rows_ACK\tstate_families_available={},{},{},{}",
         report.authority_mode,
         report.qualification,
         report.centre,
@@ -118,10 +118,10 @@ fn emit(report: &RecordedDrillReport) {
         report.flight_input_count,
         report.handoff_operation_count,
         alert_rows,
+        report.per_update_consumer.updates,
+        report.per_update_consumer.updates,
         report.quarantine_record_count,
         report.manual_handling_required_count,
-        report.input_ack_count,
-        report.warmup_input_ack_count,
         report.replay_output_ack_count,
         report
             .cycles
@@ -243,17 +243,13 @@ fn emit(report: &RecordedDrillReport) {
     }
     for cycle in &report.cycles {
         println!(
-            "CYCLE\tindex={}\tstart_ns={}\tend_ns={}\tposition_inputs={}\tflight_inputs={}\thandoff_operations={}\tinput_worker_hash_echo_acks={}\tinput_max_hash_echo_ns={}\tselected_output={}\tselected_output_state_apply_ack_rows={}\tselected_output_apply_batch_ack_ns={}\tdecision_to_selected_output_ack_ns={}\trollback_output_apply_ack_ns={}\tflip_rollback_attempted={}\tselected_state_generation={}\tselected_state_family_counts={:?}\tselected_display_block_rows={}\tselected_state_sha256={}\tprojections_equal={}\tdisplay_targets_equal={}\tconsumer_frame_updates={}\tconsumer_max_virtual_gap_ns={}\tconsumer_max_apply_ack_ns={}\tbaseline_frames={}\tcandidate_frames={}\tbaseline_tracks={}\tcandidate_tracks={}\tbaseline_display_target_rows={}\tcandidate_display_target_rows={}\tbaseline_flights={}\tcandidate_flights={}\tbaseline_handoffs={}\tcandidate_handoffs={}\tbaseline_alerts={}\tcandidate_alerts={}\tbaseline_export_dropped={:?}\tcandidate_export_dropped={:?}\tbaseline_projection_sha256={}\tcandidate_projection_sha256={}\tm2_ingest_refusal={}\tm2_validation_ns={}\tm1_transition_refusal={}\tm1_validation_ns={}\tflip_rollback_status={}\tunavailable={}",
+            "CYCLE\tindex={}\tstart_ns={}\tend_ns={}\tposition_inputs={}\tflight_inputs={}\thandoff_operations={}\texternal_input_worker=NOT_USED\tselected_output={}\tselected_output_state_apply_ack_rows={}\tselected_output_apply_batch_ack_ns={}\tdecision_to_first_output_ack_ns={}\trollback_output_apply_ack_ns={}\tflip_rollback_attempted={}\tselected_state_generation={}\tselected_state_family_counts={:?}\tselected_display_block_rows={}\tselected_state_sha256={}\tprojections_equal={}\tdisplay_targets_equal={}\tconsumer_frame_updates={}\tconsumer_max_virtual_gap_ns={}\tconsumer_max_apply_ack_ns={}\tbaseline_frames={}\tcandidate_frames={}\tbaseline_tracks={}\tcandidate_tracks={}\tbaseline_display_target_rows={}\tcandidate_display_target_rows={}\tbaseline_flights={}\tcandidate_flights={}\tbaseline_handoffs={}\tcandidate_handoffs={}\tbaseline_alerts={}\tcandidate_alerts={}\tbaseline_export_dropped={:?}\tcandidate_export_dropped={:?}\tbaseline_projection_sha256={}\tcandidate_projection_sha256={}\tm2_ingest_refusal={}\tm2_validation_ns={}\tm1_transition_refusal={}\tm1_validation_ns={}\tflip_rollback_status={}\tunavailable={}",
             cycle.index,
             cycle.start_ns,
             cycle.end_ns,
             cycle.position_inputs,
             cycle.flight_inputs,
             cycle.handoff_operations,
-            cycle.consumer_acks,
-            cycle
-                .consumer_max_ack_ns
-                .map_or_else(|| "UNAVAILABLE".into(), |v| v.to_string()),
             cycle.selected_output,
             cycle.replay_output_acks,
             cycle.replay_output_max_ack_ns,
