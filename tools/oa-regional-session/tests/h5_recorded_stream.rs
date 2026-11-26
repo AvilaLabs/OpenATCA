@@ -344,9 +344,8 @@ fn known_good_adsb_and_fixm_smoke_reaches_runtime_and_rendered_snapshot() {
     );
 }
 
-// REQ: OA-MIG-414
+// REQ: OA-MIG-414, OA-AUDIT-005, OA-AUDIT-007, OA-AUDIT-008
 #[test]
-// REQ: OA-AUDIT-005, OA-AUDIT-007, OA-AUDIT-008
 fn recorded_stream_runs_100_paired_m2_flip_rollback_bins_and_consumer_applies_each_update() {
     let id = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
     let path = std::env::temp_dir().join(format!(
