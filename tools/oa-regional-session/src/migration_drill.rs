@@ -4190,7 +4190,7 @@ impl LivePairProcessor<'_> {
                                 .map_err(|_| "rollback cycle conversion overflow")?
                                 .to_le_bytes(),
                         );
-                        let rollback = RollbackReceipt {
+                        let rollback_receipt = RollbackReceipt {
                             unit,
                             kind: RollbackKind::ControllerRequest,
                             principal_id: [8; 32],
@@ -4215,7 +4215,7 @@ impl LivePairProcessor<'_> {
                         };
                         rollback(
                             &mut selector,
-                            rollback,
+                            rollback_receipt,
                             candidate_ack_ns,
                             self.policy.max_snapshot_age_ns,
                         )
@@ -4679,7 +4679,7 @@ pub fn run_recorded_stream(
     if legacy_cycles.len() != CYCLES || candidate_cycles.len() != CYCLES {
         return Err("regional replay cycle aggregate count differs from fixed H5 bins".into());
     }
-    consumer.finish()?;
+    processor.consumer.finish()?;
     if run_started.elapsed() > MAX_RUNTIME {
         return Err("recorded H5 runtime cap exceeded after paired replay".into());
     }
