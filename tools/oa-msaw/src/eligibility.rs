@@ -98,16 +98,7 @@ pub fn basis_of(a: &Answer, requested: bool) -> Basis {
         return Basis::Request;
     }
     if a.flight {
-        let by_address = a.key == Key::Address;
-        return if a.assigned.form == oa_flight::ALT_VFR {
-            Basis::VfrPlan
-        } else if !a.active {
-            Basis::NotActive
-        } else if by_address {
-            Basis::Address
-        } else {
-            Basis::Callsign
-        };
+        return live_flight_basis(a.active, a.assigned.form, a.key == Key::Address);
     }
     let several_addr = matches!(
         a.addr,
@@ -118,6 +109,29 @@ pub fn basis_of(a: &Answer, requested: bool) -> Basis {
         Basis::Ambiguous
     } else {
         Basis::NoFlight
+    }
+}
+
+/// The shared alert-basis policy for a flight view joined by the live regional caller.
+/// `ALT_VFR_ON_TOP_PLUS` and every non-VFR altitude form remain IFR bases.
+pub fn live_flight_basis(active: bool, assigned_form: u8, by_address: bool) -> Basis {
+    if assigned_form == oa_flight::ALT_VFR {
+        Basis::VfrPlan
+    } else if !active {
+        Basis::NotActive
+    } else if by_address {
+        Basis::Address
+    } else {
+        Basis::Callsign
+    }
+}
+
+/// Apply the same explicit pilot-request override and VFR-beacon policy to a live basis.
+pub fn live_source_basis(basis: Basis, requested: bool, vfr_code: bool) -> Basis {
+    if requested {
+        Basis::Request
+    } else {
+        with_beacon(basis, vfr_code)
     }
 }
 

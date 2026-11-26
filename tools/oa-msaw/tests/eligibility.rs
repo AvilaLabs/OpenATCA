@@ -11,7 +11,9 @@ use oa_encounter_run::join::{AddrResult, Answer, CallsignObs, CsReject, CsResult
 use oa_flight::{Alt, ALT_SIMPLE, ALT_VFR, ALT_VFR_ON_TOP_PLUS};
 use oa_msaw::{Alert, FloorKind, Grade};
 use oa_msaw_run::config::{parse_config, RequestSpec, Requester};
-use oa_msaw_run::eligibility::{basis_of, judge, requested, with_beacon, Basis, Inputs};
+use oa_msaw_run::eligibility::{
+    basis_of, judge, live_flight_basis, live_source_basis, requested, with_beacon, Basis, Inputs,
+};
 
 const DEV_CFG: &str = include_str!("../testdata/dev.cfg");
 
@@ -113,6 +115,28 @@ fn a_track_with_no_flight_is_alerted_unless_its_beacon_code_is_a_vfr_code() {
     assert_eq!(s.vfr_codes, vec![1200, 1202]);
     assert_eq!(parse_config(DEV_CFG).unwrap().vfr_codes, vec![1200]);
     assert!(parse_config(&format!("{DEV_CFG}\nvfr_beacon_code = 1280\n")).is_err());
+}
+
+// REQ: OA-MSAW-083
+#[test]
+fn live_basis_keeps_vfr_on_top_ifr_and_does_not_treat_missing_flight_data_as_no_flight() {
+    assert_eq!(live_flight_basis(true, ALT_SIMPLE, true), Basis::Address);
+    assert_eq!(
+        live_flight_basis(true, ALT_VFR_ON_TOP_PLUS, true),
+        Basis::Address
+    );
+    assert_eq!(live_flight_basis(true, ALT_VFR, true), Basis::VfrPlan);
+    assert_eq!(live_flight_basis(false, ALT_SIMPLE, true), Basis::NotActive);
+    assert_eq!(
+        live_source_basis(Basis::NotJudged, false, true),
+        Basis::NotJudged,
+        "a beacon cannot convert a missing live flight source into a no-flight finding"
+    );
+    assert_eq!(
+        live_source_basis(Basis::VfrPlan, true, false),
+        Basis::Request,
+        "an explicit service request overrides VFR inhibition"
+    );
 }
 
 #[test]
