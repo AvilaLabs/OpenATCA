@@ -252,10 +252,8 @@ fn evidence(
     }
 }
 
-fn manifest_hash(
-    cutoff_ms: i64,
-    sources: &[RegionalSourceEvidence],
-    limits: RegionalDataLimits,
+// A7.2: one-shot manifest identity, immediately encoded into a digest.
+struct RegionalManifestProfile {
     terrain_dir_present: bool,
     mva_dir_present: bool,
     cifp_present: bool,
@@ -263,30 +261,37 @@ fn manifest_hash(
     cifp_corridor_count: usize,
     dof_file_count: usize,
     metar_file_count: usize,
+}
+
+fn manifest_hash(
+    cutoff_ms: i64,
+    sources: &[RegionalSourceEvidence],
+    limits: RegionalDataLimits,
+    profile: RegionalManifestProfile,
 ) -> [u8; 32] {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(b"OA-MSAW-REGIONAL-DATA-v1\0");
     bytes.extend_from_slice(&cutoff_ms.to_le_bytes());
-    bytes.push(u8::from(terrain_dir_present));
-    bytes.push(u8::from(mva_dir_present));
-    bytes.push(u8::from(cifp_present));
+    bytes.push(u8::from(profile.terrain_dir_present));
+    bytes.push(u8::from(profile.mva_dir_present));
+    bytes.push(u8::from(profile.cifp_present));
     bytes.extend_from_slice(
-        &u64::try_from(mva_chart_count)
+        &u64::try_from(profile.mva_chart_count)
             .unwrap_or(u64::MAX)
             .to_le_bytes(),
     );
     bytes.extend_from_slice(
-        &u64::try_from(cifp_corridor_count)
+        &u64::try_from(profile.cifp_corridor_count)
             .unwrap_or(u64::MAX)
             .to_le_bytes(),
     );
     bytes.extend_from_slice(
-        &u64::try_from(dof_file_count)
+        &u64::try_from(profile.dof_file_count)
             .unwrap_or(u64::MAX)
             .to_le_bytes(),
     );
     bytes.extend_from_slice(
-        &u64::try_from(metar_file_count)
+        &u64::try_from(profile.metar_file_count)
             .unwrap_or(u64::MAX)
             .to_le_bytes(),
     );
@@ -785,13 +790,15 @@ pub fn load_regional_data(
         weather.cutoff_ms,
         &sources,
         limits,
-        paths.terrain_dir.is_some(),
-        paths.mva_dir.is_some(),
-        paths.cifp_file.is_some(),
-        mva_chart_files,
-        cifp_corridors.len(),
-        paths.dof_files.len(),
-        paths.metar_files.len(),
+        RegionalManifestProfile {
+            terrain_dir_present: paths.terrain_dir.is_some(),
+            mva_dir_present: paths.mva_dir.is_some(),
+            cifp_present: paths.cifp_file.is_some(),
+            mva_chart_count: mva_chart_files,
+            cifp_corridor_count: cifp_corridors.len(),
+            dof_file_count: paths.dof_files.len(),
+            metar_file_count: paths.metar_files.len(),
+        },
     );
     let provenance = RegionalProvenance {
         cutoff_ms: weather.cutoff_ms,
