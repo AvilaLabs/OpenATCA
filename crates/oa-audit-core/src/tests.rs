@@ -31,3 +31,33 @@ fn bounded_event_registry_and_exact_receipt_binding() {
         event(Action::MigrationRollback, Role::Configure)
     ));
 }
+
+// REQ: OA-AUDIT-002
+#[test]
+fn registry_action_matrix_keeps_added_actions_at_the_declared_levels() {
+    for action in [
+        Action::QuarantineRelease,
+        Action::VulnerabilityIntake,
+        Action::RunwayAssignment,
+        Action::AlertAcknowledge,
+    ] {
+        assert_eq!(
+            authorize(Role::Monitor, action),
+            Err(AuditError::RoleDenied)
+        );
+        assert_eq!(authorize(Role::Operate, action), Ok(()));
+        assert_eq!(authorize(Role::Configure, action), Ok(()));
+    }
+    assert_eq!(
+        authorize(Role::Monitor, Action::VulnerabilityDisposition),
+        Err(AuditError::RoleDenied)
+    );
+    assert_eq!(
+        authorize(Role::Operate, Action::VulnerabilityDisposition),
+        Err(AuditError::RoleDenied)
+    );
+    assert_eq!(
+        authorize(Role::Configure, Action::VulnerabilityDisposition),
+        Ok(())
+    );
+}
