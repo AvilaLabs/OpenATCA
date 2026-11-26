@@ -4848,7 +4848,7 @@
       "id": "OA-ASDI-002",
       "function": "synthetic_truth_and_offline_scoring",
       "rationale": "This defines generated truth, reference alignment, or study scoring; those values are evaluation inputs, never operational identity or track inputs.",
-      "register_clause": "Type 1 is accepted as a header-only heartbeat only when compressed and decompressed sizes are zero, per the public 2010 TFMS-to-ASDI ICD \u00a73.2.1.3.2.2.10. Type 2 is not decoded; `inspect_packet` returns the typed `XmlCompressedNotDecoded` status after validating exact declared packet length."
+      "register_clause": "Type 1 is accepted as a header-only heartbeat only when compressed and decompressed sizes are zero, per the public 2010 TFMS-to-ASDI ICD section 3.2.1.3.2.2.10. Type 2 is not decoded; `inspect_packet` returns the typed `XmlCompressedNotDecoded` status after validating exact declared packet length."
     },
     {
       "id": "OA-ASDI-003",
@@ -5766,7 +5766,7 @@
       "id": "OA-CPR-202",
       "function": "offline_comparison_protocol_and_evaluator",
       "rationale": "This defines cohort pairing, metrics, provenance, and qualification reports over saved data.",
-      "register_clause": "Competitive thresholds remain fixed at position RMS ratio \u22640.70, p99 position error ratio \u22640.80, p99 receive-to-usable latency ratio \u22640.50, and throughput ratio \u22652.0, with equal quality and resource envelope required; mutation fails protocol validation."
+      "register_clause": "Competitive thresholds remain fixed at position RMS ratio <=0.70, p99 position error ratio <=0.80, p99 receive-to-usable latency ratio <=0.50, and throughput ratio >=2.0, with equal quality and resource envelope required; mutation fails protocol validation."
     },
     {
       "id": "OA-CPR-203",
@@ -5778,7 +5778,7 @@
       "id": "OA-CPR-204",
       "function": "offline_comparison_protocol_and_evaluator",
       "rationale": "This defines cohort pairing, metrics, provenance, and qualification reports over saved data.",
-      "register_clause": "Qualification declares at least 10,000 simulated aircraft-hours and a seed \u00d7 aircraft \u00d7 duration allocation whose arithmetic exactly matches the declared total, with the 100 qualification seeds assigned 20 each to the five nominal scenarios and zero to dropout."
+      "register_clause": "Qualification declares at least 10,000 simulated aircraft-hours and a seed * aircraft * duration allocation whose arithmetic exactly matches the declared total, with the 100 qualification seeds assigned 20 each to the five nominal scenarios and zero to dropout."
     },
     {
       "id": "OA-CPR-205",
@@ -6294,7 +6294,7 @@
       "id": "OA-CPR-214",
       "function": "offline_comparison_protocol_and_evaluator",
       "rationale": "This defines cohort pairing, metrics, provenance, and qualification reports over saved data.",
-      "register_clause": "Nominal scenarios straight, turn, acceleration, crossing, and delayed require post-initialization usable coverage \u22650.999 and candidate coverage no lower than baseline."
+      "register_clause": "Nominal scenarios straight, turn, acceleration, crossing, and delayed require post-initialization usable coverage >=0.999 and candidate coverage no lower than baseline."
     },
     {
       "id": "OA-CPR-215",
@@ -6360,13 +6360,13 @@
       "id": "OA-ACC-152",
       "function": "offline_track_set_scoring_and_motion_study",
       "rationale": "This defines set-level scoring and synthetic study accounting; it does not make operational identity decisions.",
-      "register_clause": "Training runs exactly three candidate settings across seeds 1\u20133, six v1 scenarios and onset-exit (63 candidate run cases), with 20 aircraft for 300 seconds; each is paired to frozen default and winner selection follows the preregistered pooled nominal RMS rule subject to all gates."
+      "register_clause": "Training runs exactly three candidate settings across seeds 1-3, six v1 scenarios and onset-exit (63 candidate run cases), with 20 aircraft for 300 seconds; each is paired to frozen default and winner selection follows the preregistered pooled nominal RMS rule subject to all gates."
     },
     {
       "id": "OA-ACC-153",
       "function": "offline_track_set_scoring_and_motion_study",
       "rationale": "This defines set-level scoring and synthetic study accounting; it does not make operational identity decisions.",
-      "register_clause": "Seeds 4\u20136 are used only once for the selected candidate paired with the frozen-default control across all six v1 scenarios and onset-exit; no other experimental setting is run, and results cannot retune or replace the selected candidate."
+      "register_clause": "Seeds 4-6 are used only once for the selected candidate paired with the frozen-default control across all six v1 scenarios and onset-exit; no other experimental setting is run, and results cannot retune or replace the selected candidate."
     },
     {
       "id": "OA-ACC-154",
@@ -6564,13 +6564,13 @@
       "id": "OA-ACC-075",
       "function": "offline_track_set_scoring_and_motion_study",
       "rationale": "This defines set-level scoring and synthetic study accounting; it does not make operational identity decisions.",
-      "register_clause": "Each unmatched truth contributes c\u00b2/2 to squared GOSPA cost."
+      "register_clause": "Each unmatched truth contributes c^2/2 to squared GOSPA cost."
     },
     {
       "id": "OA-ACC-076",
       "function": "offline_track_set_scoring_and_motion_study",
       "rationale": "This defines set-level scoring and synthetic study accounting; it does not make operational identity decisions.",
-      "register_clause": "Each unmatched output contributes c\u00b2/2 to squared GOSPA cost."
+      "register_clause": "Each unmatched output contributes c^2/2 to squared GOSPA cost."
     },
     {
       "id": "OA-ACC-077",
@@ -8430,7 +8430,7 @@
       "id": "OA-MODE-004",
       "function": "offline_encounter_and_migration_evaluation",
       "rationale": "This evaluates saved or synthetic evidence and has no direct runtime control effect.",
-      "register_clause": "For DF17 and DF18 CF=0 or CF=6, type codes 1\u20134 decode category and eight supported IA-5 subset characters. Eight zero codes mean absent identification; an unsupported character code is a typed error. Unimplemented body formats remain available as raw bytes with their type code. DF18 CF=4 is identified as reserved TIS-B management, but its body remains uninterpreted."
+      "register_clause": "For DF17 and DF18 CF=0 or CF=6, type codes 1-4 decode category and eight supported IA-5 subset characters. Eight zero codes mean absent identification; an unsupported character code is a typed error. Unimplemented body formats remain available as raw bytes with their type code. DF18 CF=4 is identified as reserved TIS-B management, but its body remains uninterpreted."
     },
     {
       "id": "OA-MODE-005",
@@ -8448,13 +8448,13 @@
       "id": "OA-MODE-007",
       "function": "offline_encounter_and_migration_evaluation",
       "rationale": "This evaluates saved or synthetic evidence and has no direct runtime control effect.",
-      "register_clause": "For DF17 and DF18 CF=0 or CF=6 airborne position messages (TC 9\u201318), an all-zero 12-bit altitude subfield is reported as unavailable. With Q=1, the decoder extracts N from the 11 altitude bits and reports the encoded value as `25*N - 1000` feet, including the code range endpoints -1000 and 50175 ft. This one-frame API does not establish the altitude's datum/source. Q=0 (100-foot Mode C/Gillham encoding) is retained raw and explicitly marked unsupported; no altitude is fabricated. TC 20\u201322 and other CF families remain uninterpreted for altitude."
+      "register_clause": "For DF17 and DF18 CF=0 or CF=6 airborne position messages (TC 9-18), an all-zero 12-bit altitude subfield is reported as unavailable. With Q=1, the decoder extracts N from the 11 altitude bits and reports the encoded value as `25*N - 1000` feet, including the code range endpoints -1000 and 50175 ft. This one-frame API does not establish the altitude's datum/source. Q=0 (100-foot Mode C/Gillham encoding) is retained raw and explicitly marked unsupported; no altitude is fabricated. TC 20-22 and other CF families remain uninterpreted for altitude."
     },
     {
       "id": "OA-MODE-008",
       "function": "offline_encounter_and_migration_evaluation",
       "rationale": "This evaluates saved or synthetic evidence and has no direct runtime control effect.",
-      "register_clause": "For DF17 and DF18 CF=0 or CF=6 position messages, the decoder returns the raw CPR format flag and 17-bit latitude/longitude fields for surface TC 5\u20138 and airborne TC 9\u201318. These are encoded fields, not coordinates. The decoder does not pair even/odd frames, apply a local reference, infer a timestamp, or reconstruct a position."
+      "register_clause": "For DF17 and DF18 CF=0 or CF=6 position messages, the decoder returns the raw CPR format flag and 17-bit latitude/longitude fields for surface TC 5-8 and airborne TC 9-18. These are encoded fields, not coordinates. The decoder does not pair even/odd frames, apply a local reference, infer a timestamp, or reconstruct a position."
     },
     {
       "id": "OA-FFI-001",
@@ -8651,8 +8651,8 @@
     {
       "id": "OA-TRC-265",
       "function": "workspace_static_boundary_verification",
-      "rationale": "This pins the shape checked for a build script; it does not alter the generated runtime logic. Register clause: `oa-demo-wasm/build.rs` matches the reviewed guarded-input and two-output source shape. No additional file or process effects are accepted; a changed build script requires a deliberate update to the checker\u2019s pinned source and negative regressions.",
-      "register_clause": "`oa-demo-wasm/build.rs` matches the reviewed guarded-input and two-output source shape. No additional file or process effects are accepted; a changed build script requires a deliberate update to the checker\u2019s pinned source and negative regressions."
+      "rationale": "This pins the shape checked for a build script; it does not alter the generated runtime logic. Register clause: `oa-demo-wasm/build.rs` matches the reviewed guarded-input and two-output source shape. No additional file or process effects are accepted; a changed build script requires a deliberate update to the checker's pinned source and negative regressions.",
+      "register_clause": "`oa-demo-wasm/build.rs` matches the reviewed guarded-input and two-output source shape. No additional file or process effects are accepted; a changed build script requires a deliberate update to the checker's pinned source and negative regressions."
     },
     {
       "id": "OA-TRC-266",
@@ -9493,7 +9493,7 @@
         },
         {
           "document": "tools/oa-perf/tests/parallel_final.rs",
-          "locator": "synthetic radar-scan \u2192 tracker-output \u2192 final-monitor integration fixture"
+          "locator": "synthetic radar-scan -> tracker-output -> final-monitor integration fixture"
         }
       ],
       "verification_refs": [
@@ -17370,7 +17370,7 @@
       "id": "OA-REG-021",
       "function": "migration_comparison_and_safety_evidence",
       "hazard_id": "HZ-EVIDENCE-001",
-      "rationale": "Engineering safety candidate: a stability record with skipped frames, stale retained tracks mistaken for reacquisition, an unacknowledged presentation silently discarded, missing fault recovery, or an interrupted run marked complete could mislead a migration reviewer. The paced mode retains one regional runtime, blocks frame/redraw mutation while its single shared raster has an unacknowledged consumer frame, and requires ordered ACK after the row is written and hashed. Completion gates on all steady frames retaining 16 tracks refreshed by current-batch source timestamps for the expected addresses, and the actual runtime restoring those same fresh tracks at feed recovery, plus exact frame and ACK counts, fixed pre-run 250 ms lateness/clock-drift and 4.75–5.25 s gap limits, zero timing violations, and 48 monotonic hours. The 8,192 ledger ceiling is separately unit-tested; it is not a claim that multiple raster payloads are retained. All claims remain synthetic and qualification is NONE. This establishes neither facility capacity nor field availability, operational switching, independent-thread validation, or external acceptance."
+      "rationale": "Engineering safety candidate: a stability record with skipped frames, stale retained tracks mistaken for reacquisition, an unacknowledged presentation silently discarded, missing fault recovery, or an interrupted run marked complete could mislead a migration reviewer. The paced mode retains one regional runtime, blocks frame/redraw mutation while its single shared raster has an unacknowledged consumer frame, and requires ordered ACK after the row is written and hashed. Completion gates on all steady frames retaining 16 tracks refreshed by current-batch source timestamps for the expected addresses, and the actual runtime restoring those same fresh tracks at feed recovery, plus exact frame and ACK counts, fixed pre-run 250 ms lateness/clock-drift and 4.75-5.25 s gap limits, zero timing violations, and 48 monotonic hours. The 8,192 ledger ceiling is separately unit-tested; it is not a claim that multiple raster payloads are retained. All claims remain synthetic and qualification is NONE. This establishes neither facility capacity nor field availability, operational switching, independent-thread validation, or external acceptance."
     },
     {
       "id": "OA-RTE-001",
@@ -21054,7 +21054,7 @@
       "id": "OA-TRK-400",
       "function": "surveillance_track_state_and_numeric_integrity",
       "hazard_id": "HZ-SURV-STATE-001",
-      "rationale": "Engineering safety candidate: this register clause constrains surveillance_track_state_and_numeric_integrity; failure can contribute to the stated hazard. Register clause: OpenATCA's and ERAM's time offsets are fitted on the two-way common set, the passthrough's on the three-way set (P-008 \u00a71)."
+      "rationale": "Engineering safety candidate: this register clause constrains surveillance_track_state_and_numeric_integrity; failure can contribute to the stated hazard. Register clause: OpenATCA's and ERAM's time offsets are fitted on the two-way common set, the passthrough's on the three-way set (P-008 section 1)."
     },
     {
       "id": "OA-TRK-401",
@@ -21546,7 +21546,7 @@
       "id": "OA-CA-034",
       "function": "conflict_alert",
       "hazard_id": "HZ-CA-001",
-      "rationale": "Engineering safety candidate: this register clause constrains conflict_alert; failure can contribute to the stated hazard. Register clause: What is proved and what is tested for OA-CA-033: - Nothing in it is proved. Tested by deterministic random pairs in `grid::tests`: - the squared chord of two vectors with components in [-1, 1] is finite and not negative; - the chord is never longer than the exact distance the evaluation uses, on 200,000 pairs up to 85 degrees and 400 km apart, the smallest ratio being 1.000000068; - where the flat test is valid it accepts every pair the exact projection accepts; - the chord is symmetric and zero for one point; - the flat test's validity only narrows as a tangent or the radius grows. A proof of this did not finish in ten minutes. - Tested in `tests/ca.rs` through the full grid and cycle against an exact oracle: - a pair at its reach at the tangent point, up to 85 degrees, both hemispheres, three band sizes; - pairs across \u00b1180 degrees at 60, 75 and 84.9 degrees, found at 0.99 of their reach and not at 1.05. - The cell-search reach is shown numerically and by these tests, not by an analytic proof."
+      "rationale": "Engineering safety candidate: this register clause constrains conflict_alert; failure can contribute to the stated hazard. Register clause: What is proved and what is tested for OA-CA-033: - Nothing in it is proved. Tested by deterministic random pairs in `grid::tests`: - the squared chord of two vectors with components in [-1, 1] is finite and not negative; - the chord is never longer than the exact distance the evaluation uses, on 200,000 pairs up to 85 degrees and 400 km apart, the smallest ratio being 1.000000068; - where the flat test is valid it accepts every pair the exact projection accepts; - the chord is symmetric and zero for one point; - the flat test's validity only narrows as a tangent or the radius grows. A proof of this did not finish in ten minutes. - Tested in `tests/ca.rs` through the full grid and cycle against an exact oracle: - a pair at its reach at the tangent point, up to 85 degrees, both hemispheres, three band sizes; - pairs across +/-180 degrees at 60, 75 and 84.9 degrees, found at 0.99 of their reach and not at 1.05. - The cell-search reach is shown numerically and by these tests, not by an analytic proof."
     },
     {
       "id": "OA-STD-001",
@@ -22800,7 +22800,7 @@
       "id": "OA-MIG-101",
       "function": "migration_selector_and_rollback",
       "hazard_id": "HZ-CUTOVER-001",
-      "rationale": "Engineering safety candidate: this register clause constrains migration_selector_and_rollback; failure can contribute to the stated hazard. Register clause: The pure bounded lifecycle evaluator binds every swap unit, numeric evidence item, dependency receipt, approval and audit event to the exact function/scope/window, policy version and source-epoch digest. Metric evidence has a distinct observation interval, allowing valid prior S0/S1 observations to qualify an S2 window; sample counts cannot exceed denominators. For S2\u2013S5 measured exposure, evidence also binds the origin unit, actual stage activation and, when continued, exact prior-unit receipt; intervals cannot predate activation or exceed the origin window. S0\u2192S1 may be prepared before the window; S2\u2013S5 activations require the half-open declared unit window. Longer S3/S4 exposure uses a new unit window and an embedded dependency receipt from an opaque successful prior transition. It advances only adjacent S0\u2013S5 rungs; missing, stale, out-of-scope, failed or over-cap evidence and missing/rejected authority refuse without advancing the rung. Promotion requires distinct facility-supervisor and independent-assessor principals; S5 also requires a separate facility-retirement authority and cannot occur from a timer alone. S3 and S4 require unit windows of at least 48 hours and 7 days; leaving S3 and S4 requires evidence of at least 48 hours and 7 days, respectively. Each transition policy declares rollback triggers for blocking differences, controller requests, and health faults, plus permitted roles and a response-time target; M1 never asserts that an output switch occurred. The caller supplies deterministic evaluation time and retains returned audit events in bounded storage. Handles identify external records; they do not prove their contents or authenticate a principal, and the framework never connects to a live system or selects an output."
+      "rationale": "Engineering safety candidate: this register clause constrains migration_selector_and_rollback; failure can contribute to the stated hazard. Register clause: The pure bounded lifecycle evaluator binds every swap unit, numeric evidence item, dependency receipt, approval and audit event to the exact function/scope/window, policy version and source-epoch digest. Metric evidence has a distinct observation interval, allowing valid prior S0/S1 observations to qualify an S2 window; sample counts cannot exceed denominators. For S2-S5 measured exposure, evidence also binds the origin unit, actual stage activation and, when continued, exact prior-unit receipt; intervals cannot predate activation or exceed the origin window. S0->S1 may be prepared before the window; S2-S5 activations require the half-open declared unit window. Longer S3/S4 exposure uses a new unit window and an embedded dependency receipt from an opaque successful prior transition. It advances only adjacent S0-S5 rungs; missing, stale, out-of-scope, failed or over-cap evidence and missing/rejected authority refuse without advancing the rung. Promotion requires distinct facility-supervisor and independent-assessor principals; S5 also requires a separate facility-retirement authority and cannot occur from a timer alone. S3 and S4 require unit windows of at least 48 hours and 7 days; leaving S3 and S4 requires evidence of at least 48 hours and 7 days, respectively. Each transition policy declares rollback triggers for blocking differences, controller requests, and health faults, plus permitted roles and a response-time target; M1 never asserts that an output switch occurred. The caller supplies deterministic evaluation time and retains returned audit events in bounded storage. Handles identify external records; they do not prove their contents or authenticate a principal, and the framework never connects to a live system or selects an output."
     },
     {
       "id": "OA-MIG-202",
@@ -22818,7 +22818,7 @@
       "id": "OA-MIG-204",
       "function": "migration_selector_and_rollback",
       "hazard_id": "HZ-CUTOVER-001",
-      "rationale": "Engineering safety candidate: this register clause constrains migration_selector_and_rollback; failure can contribute to the stated hazard. Register clause: A readiness token binds the exact unit/policy, both source epochs, state versions and sequences. An accepted opaque M1 S1 Advisory \u2192 S2 Window result creates one reusable window grant bound to the same unit, policy/source digests and evidence/approval handles. Every candidate re-entry requires a new replay-checked M2 intent bound to a current readiness generation; the M1 lifecycle transition is not repeated for each switch. Rollback requires a fresh legacy mirror and typed, role-allowed rollback event with an explicit current legacy-health and source-availability observation bound to the mirrored epoch/version/sequence. These supplied observations are not authenticated by the core and do not certify live source health; no caller Boolean or count alone certifies readiness."
+      "rationale": "Engineering safety candidate: this register clause constrains migration_selector_and_rollback; failure can contribute to the stated hazard. Register clause: A readiness token binds the exact unit/policy, both source epochs, state versions and sequences. An accepted opaque M1 S1 Advisory -> S2 Window result creates one reusable window grant bound to the same unit, policy/source digests and evidence/approval handles. Every candidate re-entry requires a new replay-checked M2 intent bound to a current readiness generation; the M1 lifecycle transition is not repeated for each switch. Rollback requires a fresh legacy mirror and typed, role-allowed rollback event with an explicit current legacy-health and source-availability observation bound to the mirrored epoch/version/sequence. These supplied observations are not authenticated by the core and do not certify live source health; no caller Boolean or count alone certifies readiness."
     },
     {
       "id": "OA-MIG-206",
@@ -22854,7 +22854,7 @@
       "id": "OA-MIG-302",
       "function": "migration_selector_and_rollback",
       "hazard_id": "HZ-CUTOVER-001",
-      "rationale": "Engineering safety candidate: this register clause constrains migration_selector_and_rollback; failure can contribute to the stated hazard. Register clause: A sustained single-selector case retains its full trace across 64 distinct M2 promotion intents and rollback events under one reusable accepted M1 S2-window grant. The 64th rollback succeeds into the final trace slot, with the exact `Candidate`\u2192`Legacy` record checked. The next promotion reports `TraceFull` while the selected output stays Legacy; the drill reports this per-unit trace-capacity limit instead of resetting the ledger."
+      "rationale": "Engineering safety candidate: this register clause constrains migration_selector_and_rollback; failure can contribute to the stated hazard. Register clause: A sustained single-selector case retains its full trace across 64 distinct M2 promotion intents and rollback events under one reusable accepted M1 S2-window grant. The 64th rollback succeeds into the final trace slot, with the exact `Candidate`->`Legacy` record checked. The next promotion reports `TraceFull` while the selected output stays Legacy; the drill reports this per-unit trace-capacity limit instead of resetting the ledger."
     },
     {
       "id": "OA-MIG-303",
@@ -22920,7 +22920,7 @@
       "id": "OA-WS-004",
       "function": "traffic_and_safety_status_display",
       "hazard_id": "HZ-DISPLAY-001",
-      "rationale": "Engineering safety candidate: Incorrectly shared position preferences or misleading shared annotations/voice status can produce an incomplete or misunderstood display. This is a prototype display-state contract, not a deployed workstation presentation claim. Register clause: Display range and per-position data-block preferences remain local to each position, while the prototype annotation and voice status use their shared coordination state. Position preference storage is fixed at 32 records. Source test: `position_preferences_are_separate_while_annotations_are_shared`. ## M5 \u2014 Minimum safe altitude warning (oa-msaw, tools/oa-msaw) Build order step 7 of docs/M5_DESIGN.md. `oa-msaw` is a core crate; the shell lookups of terrain, obstacles and charts cross as plain values. Every configured value is a development value, not an FAA value."
+      "rationale": "Engineering safety candidate: Incorrectly shared position preferences or misleading shared annotations/voice status can produce an incomplete or misunderstood display. This is a prototype display-state contract, not a deployed workstation presentation claim. Register clause: Display range and per-position data-block preferences remain local to each position, while the prototype annotation and voice status use their shared coordination state. Position preference storage is fixed at 32 records. Source test: `position_preferences_are_separate_while_annotations_are_shared`. ## M5 -- Minimum safe altitude warning (oa-msaw, tools/oa-msaw) Build order step 7 of docs/M5_DESIGN.md. `oa-msaw` is a core crate; the shell lookups of terrain, obstacles and charts cross as plain values. Every configured value is a development value, not an FAA value."
     },
     {
       "id": "OA-CA-035",
@@ -22932,13 +22932,13 @@
       "id": "OA-SAF-021",
       "function": "conflict_alert",
       "hazard_id": "HZ-CA-001",
-      "rationale": "Engineering safety candidate: a malformed, stale, or overly broad pair suppression could remove a conflict warning from presentation. Exact alert-instance identity, canonical addresses, finite exclusive expiry, and refusal/counting constrain that effect. Reason, author and facility authorization remain caller claims, not authenticated evidence. Register clause: A pair suppression names two distinct nonzero aircraft addresses, one existing alert\u2019s exact start time, a finite start/end window, reason and author. Addresses are canonicalized; only that alert instance is suppressed. Invalid or overlong requests and a full bounded table are refused and counted; expiry is exclusive at the end instant."
+      "rationale": "Engineering safety candidate: a malformed, stale, or overly broad pair suppression could remove a conflict warning from presentation. Exact alert-instance identity, canonical addresses, finite exclusive expiry, and refusal/counting constrain that effect. Reason, author and facility authorization remain caller claims, not authenticated evidence. Register clause: A pair suppression names two distinct nonzero aircraft addresses, one existing alert's exact start time, a finite start/end window, reason and author. Addresses are canonicalized; only that alert instance is suppressed. Invalid or overlong requests and a full bounded table are refused and counted; expiry is exclusive at the end instant."
     },
     {
       "id": "OA-SAF-022",
       "function": "conflict_alert",
       "hazard_id": "HZ-CA-001",
-      "rationale": "Engineering safety candidate: an unauthorized group rule could suppress valid conflict warnings for aircraft outside the intended operation. The feature is limited to a caller-provided enabled facility adaptation and military-special-operation purpose, suppresses only pairs wholly inside the bounded member set, and refuses invalid, disabled, or nonmatching cases. Adaptation issuance, purpose, and caller authority are not independently authenticated here; operator policy and authorization evidence remain open. Register clause: Group suppression is available only when the facility\u2019s issued adaptation enables it and its purpose is a military special operation. Its bounded member set contains distinct nonzero addresses; an alert is suppressed only when both endpoints belong to that set, so every outsider pair remains active. Other purposes, a disabled facility policy, an invalid set or a full table are refused and counted."
+      "rationale": "Engineering safety candidate: an unauthorized group rule could suppress valid conflict warnings for aircraft outside the intended operation. The feature is limited to a caller-provided enabled facility adaptation and military-special-operation purpose, suppresses only pairs wholly inside the bounded member set, and refuses invalid, disabled, or nonmatching cases. Adaptation issuance, purpose, and caller authority are not independently authenticated here; operator policy and authorization evidence remain open. Register clause: Group suppression is available only when the facility's issued adaptation enables it and its purpose is a military special operation. Its bounded member set contains distinct nonzero addresses; an alert is suppressed only when both endpoints belong to that set, so every outsider pair remains active. Other purposes, a disabled facility policy, an invalid set or a full table are refused and counted."
     },
     {
       "id": "OA-SAF-023",
