@@ -1,6 +1,5 @@
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
-// REQ: OA-MIG-414
 use oa_airspace::core::{model, snapshot};
 use oa_migration_switch::EndpointClass;
 use oa_regional_session::migration_drill::{
@@ -249,6 +248,7 @@ fn write_tracker_smoke_inputs(adsb_path: &Path, sfdps_path: &Path) {
     sfdps_file.sync_all().expect("sync smoke SFDPS file");
 }
 
+// REQ: OA-MIG-415
 #[test]
 fn known_good_adsb_and_fixm_smoke_reaches_runtime_and_rendered_snapshot() {
     let scratch = std::env::temp_dir().join(format!(
@@ -331,6 +331,7 @@ fn known_good_adsb_and_fixm_smoke_reaches_runtime_and_rendered_snapshot() {
     );
 }
 
+// REQ: OA-MIG-414
 #[test]
 fn recorded_stream_runs_100_paired_m2_flip_rollback_bins_and_consumer_applies_each_update() {
     let id = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
