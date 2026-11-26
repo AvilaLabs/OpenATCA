@@ -19,7 +19,8 @@ pub use ffi::{
     oa_math_f32_binary, oa_math_f32_compare, oa_math_f32_is_sign_negative, oa_math_f32_ternary,
     oa_math_f32_unary, oa_math_f64_binary, oa_math_f64_compare, oa_math_f64_is_sign_negative,
     oa_math_f64_powi, oa_math_f64_sin_cos, oa_math_f64_ternary, oa_math_f64_unary,
-    oa_sha256_digest, oa_sha256_hex, oa_xml_decode_span, oa_xml_parse, OaErrorInfo, OaPolygon,
+    oa_sha256_digest, oa_sha256_hex, oa_xml_decode_span, oa_xml_parse, oa_deflate_raw_inflate,
+    OaErrorInfo, OaPolygon,
 };
 pub use text::{
     OaCsvCounts, OaCsvField, OaCsvRow, OaJsonCounts, OaJsonNode, OaTextError, OaXmlAttribute,

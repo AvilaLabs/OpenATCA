@@ -4,6 +4,7 @@
 use crate::text;
 use oa_geo::{wgs84, GeoError, LatLon, Polygon, RhumbInverse, Separation};
 use oa_sha256::{sha256, to_hex_into, MAX_MESSAGE_BYTES};
+use oa_zip::{InflateError, InflateLimits, Inflater, StreamError};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
 pub const ABI_VERSION_PROVISIONAL: u32 = 1;
@@ -21,6 +22,18 @@ pub const OA_STATUS_LENGTH_TOO_LARGE: u32 = 9;
 pub const OA_STATUS_BAD_OPERATION: u32 = 10;
 pub const OA_STATUS_ALLOCATION_FAILED: u32 = 11;
 pub const OA_STATUS_PARSE_ERROR: u32 = 12;
+pub const OA_STATUS_DEFLATE_ERROR: u32 = 13;
+pub const OA_STATUS_DEFLATE_TRUNCATED: u32 = 14;
+pub const OA_STATUS_DEFLATE_OUTPUT_LIMIT: u32 = 15;
+pub const OA_STATUS_DEFLATE_RATIO_LIMIT: u32 = 16;
+
+/// Hard ceiling for one compressed input slice accepted by the provisional C ABI.
+pub const MAX_DEFLATE_INPUT_BYTES: u64 = 64 * 1024 * 1024;
+/// Hard ceiling for one inflated output, matching ZIP's per-entry output limit.
+pub const MAX_DEFLATE_OUTPUT_BYTES: u64 = 256 * 1024 * 1024;
+/// Ratio cap and small-output exemption used by the ZIP entry inflater.
+pub const DEFLATE_MAX_RATIO: u64 = oa_zip::MAX_RATIO;
+pub const DEFLATE_RATIO_EXEMPT_BYTES: u64 = oa_zip::RATIO_EXEMPT_BYTES;
 
 pub const OA_LOCATION_NONE: u32 = 0;
 pub const OA_LOCATION_ARGUMENT: u32 = 1;
@@ -1450,6 +1463,126 @@ pub unsafe extern "C" fn oa_csv_parse(
     .0
 }
 
+fn map_inflate_error(error: InflateError) -> Failure {
+    match error {
+        InflateError::Truncated => Failure::general(OA_STATUS_DEFLATE_TRUNCATED),
+        InflateError::OutputLimit { .. } => Failure::general(OA_STATUS_DEFLATE_OUTPUT_LIMIT),
+        InflateError::RatioLimit { .. } => Failure::general(OA_STATUS_DEFLATE_RATIO_LIMIT),
+        InflateError::ReservedBlockType
+        | InflateError::StoredLengthMismatch
+        | InflateError::BadHuffmanTable(_)
+        | InflateError::InvalidCode
+        | InflateError::InvalidSymbol
+        | InflateError::DistanceTooFar => Failure::general(OA_STATUS_DEFLATE_ERROR),
+    }
+}
+
+/// Inflates one bounded raw-DEFLATE stream transactionally. Bytes after the final block are not
+/// consumed and are reported through `consumed`. On success, or `BUFFER_TOO_SMALL`, the exact
+/// output length and consumed input length are written; all other failures leave output storage
+/// and length metadata untouched. A zero output capacity with a null output pointer is a size
+/// query. The output is copied only after the complete stream passes all checks.
+///
+/// # Safety
+/// `input` must be readable for `input_length` bytes unless length is zero, in which case it may
+/// be null. `output` must be writable for `output_capacity` bytes unless capacity is zero, when it
+/// may be null. `output_length`, `consumed`, and `error` must be valid, aligned, writable and
+/// pairwise non-overlapping. All input, output and metadata regions must be pairwise non-overlapping.
+#[no_mangle]
+pub unsafe extern "C" fn oa_deflate_raw_inflate(
+    input: *const u8,
+    input_length: u64,
+    max_output: u64,
+    output: *mut u8,
+    output_capacity: u64,
+    output_length: *mut u64,
+    consumed: *mut u64,
+    error: *mut OaErrorInfo,
+) -> u32 {
+    let mut required_if_small = 0u64;
+    let mut consumed_if_small = 0u64;
+    let (status, result) = dispatch(error, || {
+        if output_length.is_null() {
+            return Err(Failure::argument(OA_STATUS_INVALID_ARGUMENT, 5));
+        }
+        if consumed.is_null() {
+            return Err(Failure::argument(OA_STATUS_INVALID_ARGUMENT, 6));
+        }
+        if input_length > MAX_DEFLATE_INPUT_BYTES {
+            return Err(Failure::argument(OA_STATUS_LENGTH_TOO_LARGE, 1));
+        }
+        if max_output > MAX_DEFLATE_OUTPUT_BYTES {
+            return Err(Failure::argument(OA_STATUS_LENGTH_TOO_LARGE, 2));
+        }
+        let input_length = usize::try_from(input_length)
+            .map_err(|_| Failure::argument(OA_STATUS_LENGTH_TOO_LARGE, 1))?;
+        if input_length != 0 && input.is_null() {
+            return Err(Failure::argument(OA_STATUS_INVALID_ARGUMENT, 0));
+        }
+        if output_capacity != 0 && output.is_null() {
+            return Err(Failure::argument(OA_STATUS_INVALID_ARGUMENT, 3));
+        }
+        let input = if input_length == 0 {
+            &[]
+        } else {
+            // SAFETY: the caller guarantees a readable, non-overlapping input region of this
+            // checked length; the ABI cannot validate an arbitrary C address.
+            unsafe { core::slice::from_raw_parts(input, input_length) }
+        };
+        let limits = InflateLimits {
+            max_output,
+            max_ratio: DEFLATE_MAX_RATIO,
+            ratio_exempt_bytes: DEFLATE_RATIO_EXEMPT_BYTES,
+        };
+        let mut inflater = Inflater::new(limits);
+        let mut decoded = Vec::new();
+        let mut sink = |run: &[u8]| -> Result<(), ()> {
+            decoded.try_reserve(run.len()).map_err(|_| ())?;
+            decoded.extend_from_slice(run);
+            Ok(())
+        };
+        let outcome = match inflater.push(input, &mut sink) {
+            Ok(outcome) => outcome,
+            Err(StreamError::Inflate(failure)) => return Err(map_inflate_error(failure)),
+            Err(StreamError::Sink(())) => {
+                return Err(Failure::general(OA_STATUS_ALLOCATION_FAILED));
+            }
+        };
+        if !outcome.finished {
+            return Err(Failure::general(OA_STATUS_DEFLATE_TRUNCATED));
+        }
+        let required = u64::try_from(decoded.len())
+            .map_err(|_| Failure::general(OA_STATUS_LENGTH_TOO_LARGE))?;
+        let consumed_bytes = u64::try_from(outcome.input)
+            .map_err(|_| Failure::general(OA_STATUS_LENGTH_TOO_LARGE))?;
+        if required > output_capacity {
+            required_if_small = required;
+            consumed_if_small = consumed_bytes;
+            return Err(Failure::general(OA_STATUS_BUFFER_TOO_SMALL));
+        }
+        Ok((decoded, consumed_bytes))
+    });
+    if let Some((decoded, consumed_bytes)) = result {
+        // SAFETY: validation above accepted the pointer/capacity; caller guarantees writable,
+        // aligned, pairwise non-overlapping regions. Empty output performs no pointer access.
+        unsafe {
+            if !decoded.is_empty() {
+                core::ptr::copy_nonoverlapping(decoded.as_ptr(), output, decoded.len());
+            }
+            output_length.write(decoded.len() as u64);
+            consumed.write(consumed_bytes);
+        }
+    } else if status == OA_STATUS_BUFFER_TOO_SMALL {
+        // SAFETY: non-null metadata pointers were validated and are pairwise non-overlapping by
+        // the caller's contract. Buffer-too-small is also the documented size-query result.
+        unsafe {
+            output_length.write(required_if_small);
+            consumed.write(consumed_if_small);
+        }
+    }
+    status
+}
+
 fn coordinate_argument(error: &GeoError, base: u64) -> u64 {
     match error {
         GeoError::NonFinite("longitude") | GeoError::LongitudeOutOfRange(_) => base + 1,
@@ -1472,6 +1605,10 @@ fn message(code: u32) -> &'static [u8] {
         OA_STATUS_BAD_OPERATION => b"operation code is not supported\0",
         OA_STATUS_ALLOCATION_FAILED => b"bounded allocation could not be reserved\0",
         OA_STATUS_PARSE_ERROR => b"bounded text parser refused input\0",
+        OA_STATUS_DEFLATE_ERROR => b"raw DEFLATE stream is malformed\0",
+        OA_STATUS_DEFLATE_TRUNCATED => b"raw DEFLATE stream is truncated\0",
+        OA_STATUS_DEFLATE_OUTPUT_LIMIT => b"raw DEFLATE output exceeded its limit\0",
+        OA_STATUS_DEFLATE_RATIO_LIMIT => b"raw DEFLATE output exceeded its ratio limit\0",
         _ => b"unknown status\0",
     }
 }

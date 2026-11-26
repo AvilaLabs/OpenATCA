@@ -34,3 +34,5 @@ oa-sha256 = { path = "../oa-sha256" }
 oa-csv = { path = "../oa-csv" }
 oa-json = { path = "../oa-json" }
 oa-xml = { path = "../oa-xml" }
+# F1a: expose the existing bounded raw-DEFLATE decoder without implementing a second inflater.
+oa-zip = { path = "../oa-zip" }

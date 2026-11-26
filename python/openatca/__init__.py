@@ -18,6 +18,8 @@ ABI_VERSION_PROVISIONAL: Final[int] = 1
 _MAX_MESSAGE_BYTES: Final[int] = 4096
 _MAX_POLYGON_VERTICES: Final[int] = 100_001
 _MAX_TEXT_OUTPUT_BYTES: Final[int] = 256 * 1024 * 1024
+_MAX_DEFLATE_INPUT_BYTES: Final[int] = 64 * 1024 * 1024
+_MAX_DEFLATE_OUTPUT_BYTES: Final[int] = 256 * 1024 * 1024
 
 
 class _ErrorInfo(ctypes.Structure):
@@ -42,6 +44,10 @@ _STATUS_NAMES: Final[dict[int, str]] = {
     10: "BAD_OPERATION",
     11: "ALLOCATION_FAILED",
     12: "PARSE_ERROR",
+    13: "DEFLATE_ERROR",
+    14: "DEFLATE_TRUNCATED",
+    15: "DEFLATE_OUTPUT_LIMIT",
+    16: "DEFLATE_RATIO_LIMIT",
 }
 
 
@@ -109,6 +115,12 @@ class SeparationResult:
     at_fraction: float
     geodesic_m: float
     rhumb_m: float
+
+
+@dataclass(frozen=True, slots=True)
+class RawInflateResult:
+    output: bytes
+    consumed: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -704,6 +716,7 @@ class Geodesy:
         self.math = ScalarMath(library)
         self.integrity = Integrity(library)
         self.text = TextBindings(library)
+        self.compression = Compression(library)
 
     def _bind(self) -> None:
         lib = self._library
@@ -712,6 +725,11 @@ class Geodesy:
 
         double_p = ctypes.POINTER(ctypes.c_double)
         error_p = ctypes.POINTER(_ErrorInfo)
+        byte_p = ctypes.POINTER(ctypes.c_uint8)
+        u64_p = ctypes.POINTER(ctypes.c_uint64)
+        lib.oa_deflate_raw_inflate.argtypes = [byte_p, ctypes.c_uint64, ctypes.c_uint64,
+            byte_p, ctypes.c_uint64, u64_p, u64_p, error_p]
+        lib.oa_deflate_raw_inflate.restype = ctypes.c_uint32
         lib.oa_geo_wgs84_inverse.argtypes = [
             ctypes.c_double, ctypes.c_double, ctypes.c_double, ctypes.c_double,
             double_p, double_p, double_p, error_p,
@@ -836,6 +854,38 @@ class Geodesy:
         return _native_message(self._library, status)
 
 
+class Compression:
+    """Bounded raw-DEFLATE decoding through the existing oa-zip implementation."""
+
+    def __init__(self, library: ctypes.CDLL) -> None:
+        self._library = library
+
+    def raw_inflate(self, data: bytes, *, max_output: int = _MAX_DEFLATE_OUTPUT_BYTES) -> RawInflateResult:
+        if not isinstance(data, bytes):
+            raise TypeError("data must be bytes")
+        if len(data) > _MAX_DEFLATE_INPUT_BYTES:
+            raise ValueError("data exceeds the native input limit")
+        if isinstance(max_output, bool) or not isinstance(max_output, int):
+            raise TypeError("max_output must be an integer")
+        if max_output < 0 or max_output > _MAX_DEFLATE_OUTPUT_BYTES:
+            raise ValueError("max_output is outside the native output limit")
+        input_buffer = (ctypes.c_uint8 * len(data)).from_buffer_copy(data) if data else None
+        output_length, consumed, error = ctypes.c_uint64(), ctypes.c_uint64(), _ErrorInfo()
+        status = int(self._library.oa_deflate_raw_inflate(
+            input_buffer, len(data), max_output, None, 0,
+            ctypes.byref(output_length), ctypes.byref(consumed), ctypes.byref(error)))
+        if status not in (0, 6):
+            _raise_if_error(self._library, status, error)
+        if status == 0:
+            return RawInflateResult(b"", consumed.value)
+        output_buffer = (ctypes.c_uint8 * output_length.value)() if output_length.value else None
+        status = int(self._library.oa_deflate_raw_inflate(
+            input_buffer, len(data), max_output, output_buffer, output_length.value,
+            ctypes.byref(output_length), ctypes.byref(consumed), ctypes.byref(error)))
+        _raise_if_error(self._library, status, error)
+        return RawInflateResult(bytes(output_buffer) if output_buffer is not None else b"", consumed.value)
+
+
 def load(library_path: os.PathLike[str] | str) -> Geodesy:
     """Explicit-path loader; this package does not bundle or build the native library."""
     return Geodesy.load(library_path)
@@ -843,6 +893,7 @@ def load(library_path: os.PathLike[str] | str) -> Geodesy:
 
 __all__ = [
     "CsvField",
+    "Compression",
     "CsvResult",
     "CsvRow",
     "DirectResult",
@@ -854,6 +905,7 @@ __all__ = [
     "InverseResult",
     "OpenAtcaError",
     "RhumbInverseResult",
+    "RawInflateResult",
     "ScalarMath",
     "SeparationResult",
     "TextBindings",

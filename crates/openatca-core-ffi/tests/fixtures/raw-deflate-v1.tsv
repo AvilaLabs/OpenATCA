@@ -1,0 +1,8 @@
+# case	input_hex	max_output	expected_status	output_capacity	expected_output_hex	expected_consumed
+empty	0300	8	0	8		2
+stored_abc	010300fcff616263	8	0	8	616263	8
+trailing_bytes	010300fcff616263010203	8	0	8	616263	8
+truncated_stored	010300fcff61	8	14	8		-1
+reserved_block	07	8	13	8		-1
+output_limit	010300fcff616263	2	15	8		-1
+capacity_query	010300fcff616263	8	6	0	616263	8

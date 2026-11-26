@@ -835,6 +835,7 @@ name = "openatca-core-ffi"
 version = "0.0.1"
 dependencies = [
  "oa-csv",
+ "oa-zip",
  "oa-geo",
  "oa-ieee",
  "oa-json",
