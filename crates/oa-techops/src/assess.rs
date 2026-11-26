@@ -296,6 +296,12 @@ pub fn assess_inventory(
                 *checked_mut(&mut last_time, index)? = report.sample_time_ns;
                 *checked_mut(&mut has_last_time, index)? = true;
             }
+            if report.sample_time_ns <= query_time_ns
+                && (row.newest_sample_time_ns < 0
+                    || report.sample_time_ns > row.newest_sample_time_ns)
+            {
+                row.newest_sample_time_ns = report.sample_time_ns;
+            }
         }
     }
 

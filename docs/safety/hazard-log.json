@@ -1098,7 +1098,12 @@
     "OA-RWY-019",
     "OA-RWY-014",
     "OA-RWY-017",
-    "OA-ENC-022"
+    "OA-ENC-022",
+    "OA-L23-001",
+    "OA-L23-002",
+    "OA-L23-003",
+    "OA-L23-004",
+    "OA-L23-005"
   ],
   "non_safety_requirement_assessments": [
     {
@@ -9365,7 +9370,8 @@
         "OA-RWY-019",
         "OA-SAF-021",
         "OA-SAF-022",
-        "OA-SAF-023"
+        "OA-SAF-023",
+        "OA-L23-002"
       ],
       "source_refs": [
         {
@@ -9399,6 +9405,10 @@
         {
           "document": "REQUIREMENTS.md",
           "locator": "OA-RWY-019"
+        },
+        {
+          "document": "REQUIREMENTS.md",
+          "locator": "OA-L23-002"
         }
       ],
       "verification_refs": [
@@ -9616,6 +9626,36 @@
           "requirement_id": "OA-SAF-023",
           "file": "crates/oa-safety/tests/safety.rs",
           "test_name": "group_suppression_requires_both_aircraft_to_belong_to_the_selected_set"
+        },
+        {
+          "requirement_id": "OA-L23-002",
+          "file": "crates/oa-techops/src/monitor.rs",
+          "test_name": "alarm_raise_ack_clear_is_idempotent_for_one_instance"
+        },
+        {
+          "requirement_id": "OA-SAF-022",
+          "file": "crates/oa-safety/tests/safety.rs",
+          "test_name": "group_suppression_requires_both_aircraft_to_belong_to_the_selected_set"
+        },
+        {
+          "requirement_id": "OA-SAF-023",
+          "file": "crates/oa-safety/tests/safety.rs",
+          "test_name": "pair_suppression_acknowledges_only_the_named_alert_instance"
+        },
+        {
+          "requirement_id": "OA-CA-035",
+          "file": "crates/oa-ca/tests/ca.rs",
+          "test_name": "an_area_inhibit_uses_its_altitude_and_half_open_time_window_for_conflict_alert"
+        },
+        {
+          "requirement_id": "OA-CA-036",
+          "file": "tools/oa-adapt/src/manifest.rs",
+          "test_name": "v3_issued_facility_preset_roundtrips_exact_body_and_refuses_identity_damage"
+        },
+        {
+          "requirement_id": "OA-CA-036",
+          "file": "crates/oa-ca/src/preset.rs",
+          "test_name": "runtime_applies_exact_issued_facility_preset_values_before_configuration_check"
         }
       ],
       "proof_refs": [
@@ -10532,7 +10572,10 @@
         "OA-MIG-602",
         "OA-REG-019",
         "OA-REG-020",
-        "OA-ENC-022"
+        "OA-ENC-022",
+        "OA-L23-003",
+        "OA-L23-004",
+        "OA-L23-005"
       ],
       "source_refs": [
         {
@@ -10550,6 +10593,18 @@
         {
           "document": "REQUIREMENTS.md",
           "locator": "OA-ENC-022"
+        },
+        {
+          "document": "REQUIREMENTS.md",
+          "locator": "OA-L23-003"
+        },
+        {
+          "document": "REQUIREMENTS.md",
+          "locator": "OA-L23-004"
+        },
+        {
+          "document": "REQUIREMENTS.md",
+          "locator": "OA-L23-005"
         }
       ],
       "verification_refs": [
@@ -10902,6 +10957,21 @@
           "requirement_id": "OA-ENC-022",
           "file": "tools/oa-encounter/tests/test_a3_rate_join.py",
           "test_name": "test_coverage_validation_rejects_nonfinite_and_reversed_timestamps"
+        },
+        {
+          "requirement_id": "OA-L23-003",
+          "file": "crates/oa-techops/src/monitor.rs",
+          "test_name": "wrong_role_and_out_of_range_thresholds_refuse"
+        },
+        {
+          "requirement_id": "OA-L23-004",
+          "file": "crates/oa-techops/src/monitor.rs",
+          "test_name": "latency_claim_is_fresh_ordered_and_limited"
+        },
+        {
+          "requirement_id": "OA-L23-005",
+          "file": "crates/oa-techops/src/monitor.rs",
+          "test_name": "resource_and_alarm_capacity_limits_are_enforced"
         }
       ],
       "proof_refs": []
@@ -13630,7 +13700,8 @@
         "OA-SAF-017",
         "OA-SAF-018",
         "OA-SAF-019",
-        "OA-SAF-020"
+        "OA-SAF-020",
+        "OA-L23-001"
       ],
       "source_refs": [
         {
@@ -13640,6 +13711,10 @@
         {
           "document": "REQUIREMENTS.md",
           "locator": "OA-RWY-017"
+        },
+        {
+          "document": "REQUIREMENTS.md",
+          "locator": "OA-L23-001"
         }
       ],
       "verification_refs": [
@@ -13747,6 +13822,11 @@
           "requirement_id": "OA-SAF-020",
           "file": "crates/oa-safety/tests/monitor.rs",
           "test_name": "synthetic_mutations_separate_detected_missed_and_unavailable_evidence"
+        },
+        {
+          "requirement_id": "OA-L23-001",
+          "file": "crates/oa-techops/src/monitor.rs",
+          "test_name": "monitor_states_and_stale_clock_become_unknown"
         }
       ],
       "proof_refs": []
@@ -22511,6 +22591,36 @@
       "function": "migration_comparison_and_safety_evidence",
       "hazard_id": "HZ-EVIDENCE-001",
       "rationale": "Engineering safety candidate: an incorrectly matched or over-credited offline A3 rate join could misstate evidence used in a migration or safety review. The join requires same-clip digest/profile binding, matches closed same-pair intervals, uses UTC half-open onset bins, and keeps unknown altitude, incomplete run summaries, unevaluated ticks, warmup gaps, and right-censored events unresolved for negative claims. Its results are ADS-B-derived encounter-volume coincidence proxies only; they are not independent FAA/human truth, controller intent, or facility false-alert qualification."
+    },
+    {
+      "id": "OA-L23-001",
+      "function": "safety_net_state_and_display",
+      "hazard_id": "HZ-NET-STATE-001",
+      "rationale": "Engineering safety candidate: stale, future, incomparable, or ambiguously keyed service/processor observations could conceal unavailable or degraded monitoring. The tagged test exercises an actual assess_inventory result through inventory_resource_inputs, including newest retained sample times and a service id equal to a processor id; kind plus parent service disambiguate them, and duplicate full keys refuse before output mutation. The monitor still evaluates caller-supplied inventory; this does not establish independent sensor/processor health. The oa-safety NetStatus shell adapter remains unapplied pending the regional-session-to-oa-techops F1 link."
+    },
+    {
+      "id": "OA-L23-002",
+      "function": "safety_net_state_and_display",
+      "hazard_id": "HZ-CA-001",
+      "rationale": "Engineering safety candidate: duplicated, ambiguously attached, prematurely cleared, or mis-acknowledged alarm instances can misstate an active warning. Each alarm binds the full resource key (kind, parent service, id) and explicit shared ClockDomainId; out-of-order and cross-domain transitions refuse without mutation, and per-instance repeats remain idempotent. The state is an in-memory local lifecycle, not alarm delivery, display integration, durable audit, or authenticated acknowledgement."
+    },
+    {
+      "id": "OA-L23-003",
+      "function": "migration_comparison_and_safety_evidence",
+      "hazard_id": "HZ-EVIDENCE-001",
+      "rationale": "Engineering safety candidate: treating a plain role enum or event-intent value as authenticated authority could overstate control evidence. Threshold validation is bounded, but role and action remain caller claims; the L13 registry, credential authentication, and durable audit integration are absent."
+    },
+    {
+      "id": "OA-L23-004",
+      "function": "migration_comparison_and_safety_evidence",
+      "hazard_id": "HZ-EVIDENCE-001",
+      "rationale": "Engineering safety candidate: stale, unordered, or over-limit caller-reported latency and tracks-per-scan values could mislead an assurance decision. The model retains supplied clock-domain/freshness values and refuses invalid percentile ordering or configured-limit exceedance; these remain self-reported claims, not measured SLOs or operational performance evidence."
+    },
+    {
+      "id": "OA-L23-005",
+      "function": "migration_comparison_and_safety_evidence",
+      "hazard_id": "HZ-EVIDENCE-001",
+      "rationale": "Engineering safety candidate: fixed-capacity resource/alarm handling that partially accepts excess entries could make a monitoring record incomplete. The bounded lists refuse before partial status. No display or Remote Maintenance Monitoring integration is implemented; RMM remains UNMET."
     }
   ],
   "unresolved_requirement_assessments": []

@@ -7810,6 +7810,44 @@ claims; a match is explicitly unverified.
   not authenticate the receiver or prove live source provenance. Conversion refuses beyond the
   published leap table's confirmed horizon. Results remain unverified claims about supplied sources.
 
+## L23 I2 — Monitor/control model (oa-techops)
+
+This bounded model consumes plain values prepared by adapters. It does not collect telemetry,
+authenticate users or reports, persist an audit log, render a display, or connect to an RMM service.
+The L13 role registry is not yet landed; roles below are plain caller-supplied categories only.
+
+- **OA-L23-001** A bounded service/processor snapshot uses `(kind, parent_service_id, resource_id)`
+  as the complete identity and preserves each resource's parent,
+  service, reported state, reason, timestamp and clock domain. Fresh values retain `Up`, `Degraded`,
+  `Down` or `Unknown`; stale, future or incomparable timestamps become `Unknown` with an explicit
+  stale/clock reason and are never converted to `Down`. A view reports bounded total, unknown and
+  degraded counts. `inventory_resource_inputs` converts an actual `assess_inventory` result into
+  these values, preserving the service evaluation time and each processor's newest valid sample
+  time in the assessment clock domain; missing or incomparable times remain Unknown. Numeric IDs
+  may be shared across resource kinds, while a duplicate full identity is refused before output is
+  written. Absence is Unknown.
+  The `oa-safety::NetStatus` shell adapter is not integrated because the regional-session →
+  oa-techops F1 link is still pending; this crate does not claim that safety-net wiring is complete.
+- **OA-L23-002** Alarm instances bind the full resource identity `(kind, parent_service_id,
+  resource_id)` and preserve severity, raise time, clear time and acknowledgement time
+  in one explicit caller-supplied monotonic clock domain. A repeated active observation for the same
+  instance does not raise it again; clear is idempotent, and a cleared instance cannot be re-raised.
+  Operate and Configure categories may acknowledge an active alarm instance once. Clear before
+  raise, clear before acknowledgement, acknowledgement before raise, or a clock-domain mismatch
+  is refused without changing the alarm record.
+- **OA-L23-003** The plain role enum is `Monitor`, `Operate`, or `Configure`: all three can view,
+  Operate and Configure can acknowledge, and only Configure can validate threshold changes.
+  Threshold configuration is bounded to p99 latency limits from 1 ms through 60 s and tracks-per-scan
+  limits from 1 through 1,000,000. A plain event-intent value can be produced for adapter-side audit
+  wiring; it is not authenticated or durable evidence.
+- **OA-L23-004** A B3 latency claim retains caller-supplied p50, p95, p99, maximum, tracks per scan,
+  sample time and clock domain. The model rejects unordered percentiles, stale or incomparable
+  samples, and claims exceeding configured p99 or tracks-per-scan limits. Claims remain unverified;
+  no latency, track count, clock, or authority is synthesized.
+- **OA-L23-005** Resource and alarm input/output state are fixed-capacity and refuse excess work
+  before partial status. The respective caps are 256 resources and 256 alarm instances. No display or
+  Remote Maintenance Monitoring integration is implemented; RMM remains UNMET.
+
 ## H2 normalized migration-shadow event comparison (oa-migration-shadow)
 
 - **OA-MIG-401** The pure bounded comparator accepts versioned normalized streams for handoffs, point-outs, sector assignments, flight-data amendments and alerts. It binds matching function, scope and half-open UTC window, preserves source-event and observed/receive clocks independently, requires explicit per-family coverage and source epoch hashes, compares stable caller-supplied business keys without replacing side-local source row identities, and uses the frozen `M4-H2-EXACT-1` policy (0 ns time margin and exact numeric values). `FIELD_PROJECTION_VERSION` 1 requires every family-defined operational field ID on each observed pair; explicit absent is distinct from an omitted field, and omitted projection fields are unobservable even when both sides omit them. Missing/invalid/ambiguous key, missing time, invalid or unsupported records, outside-window rows, duplicate keys, out-of-order event times, unknown/absent fields, mismatches, one-sided records and complete-empty families remain explicit and bounded; output capacity and record/field caps are checked before work. A complete-empty family is not evidence of a matched action.

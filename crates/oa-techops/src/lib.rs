@@ -225,7 +225,10 @@ pub struct ProcessorAssessment {
     pub telemetry_loss_events: u64,
     pub sequences_outside_window: u32,
     pub flags: u32,
+    /// Newest nonnegative, nonfuture sample time in the query clock domain; `-1` if absent.
+    pub newest_sample_time_ns: i64,
 }
+const _: () = assert!(core::mem::size_of::<ProcessorAssessment>() == 96);
 
 const EMPTY_PROCESSOR_ASSESSMENT: ProcessorAssessment = ProcessorAssessment {
     processor_id: ProcessorId(0),
@@ -249,6 +252,7 @@ const EMPTY_PROCESSOR_ASSESSMENT: ProcessorAssessment = ProcessorAssessment {
     telemetry_loss_events: 0,
     sequences_outside_window: 0,
     flags: 0,
+    newest_sample_time_ns: -1,
 };
 
 /// Complete bounded inventory assessment. `provenance_unverified` is always true in this crate.
@@ -387,6 +391,18 @@ pub use clock::{
     ClockError, ClockProcessorResult, ClockRowState, ClockSample, GpsInstant, ReferenceState,
     UbxGpsReference, UbxTimeGpsError, UtcInstant, GPS_EPOCH_UNIX_SECONDS, MAX_CLOCK_EXPECTED,
     MAX_CLOCK_SAMPLES,
+};
+
+mod monitor;
+pub use monitor::{
+    ack_alarm, configure_thresholds, event_intent, inventory_resource_inputs,
+    record_alarm_transition, validate_latency_claim, view_monitor, Alarm, AlarmSeverity,
+    AlarmState, AlarmTime, AlarmTransition, LatencyClaim, MonitorAction, MonitorError,
+    MonitorEventIntent, MonitorRole, MonitorView, ResourceInput, ResourceKey, ResourceKind,
+    ResourceOutput, ResourceState, ThresholdConfig, MAX_ALARMS, MAX_MONITOR_RESOURCES,
+    MAX_TRACKS_PER_SCAN, REASON_INVENTORY_CLAIM_UNVERIFIED, REASON_INVENTORY_INCOMPLETE,
+    REASON_INVENTORY_MISMATCH_OR_LOSS, REASON_INVENTORY_NO_REPORT,
+    REASON_STALE_OR_INCOMPARABLE_CLOCK,
 };
 
 #[cfg(test)]
