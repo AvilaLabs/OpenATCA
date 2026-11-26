@@ -406,9 +406,11 @@ pub fn regional_new_from_issued_package_with_audit_checkpoint(
 ) -> Result<RegionalRuntime, String> {
     let identity = package.identity();
     regional_new_with_source_identity_and_checkpoint(
-        package.model().clone(),
-        identity.snapshot_sha256,
-        Some(identity.manifest_sha256),
+        RegionalModelSource {
+            model: package.model().clone(),
+            expected_snapshot_sha256: identity.snapshot_sha256,
+            issued_manifest_sha256: Some(identity.manifest_sha256),
+        },
         centre,
         cfg,
         profile,
@@ -617,9 +619,11 @@ fn regional_new_with_profile_and_namespace(
     session_namespace: u16,
 ) -> Result<RegionalRuntime, String> {
     regional_new_with_source_identity_and_checkpoint(
-        model,
-        snapshot_sha256,
-        None,
+        RegionalModelSource {
+            model,
+            expected_snapshot_sha256: snapshot_sha256,
+            issued_manifest_sha256: None,
+        },
         centre,
         cfg,
         profile,
@@ -638,9 +642,11 @@ fn regional_new_with_profile_and_namespace_and_audit_checkpoint(
     audit_checkpoint: oa_audit_core::Checkpoint,
 ) -> Result<RegionalRuntime, String> {
     regional_new_with_source_identity_and_checkpoint(
-        model,
-        snapshot_sha256,
-        None,
+        RegionalModelSource {
+            model,
+            expected_snapshot_sha256: snapshot_sha256,
+            issued_manifest_sha256: None,
+        },
         centre,
         cfg,
         profile,
@@ -649,16 +655,25 @@ fn regional_new_with_profile_and_namespace_and_audit_checkpoint(
     )
 }
 
-fn regional_new_with_source_identity_and_checkpoint(
+struct RegionalModelSource {
     model: Model,
     expected_snapshot_sha256: [u8; 32],
     issued_manifest_sha256: Option<[u8; 32]>,
+}
+
+fn regional_new_with_source_identity_and_checkpoint(
+    source: RegionalModelSource,
     centre: [u8; 4],
     cfg: SurveillanceConfig,
     profile: RegionalRunProfile,
     session_namespace: u16,
     audit_checkpoint: oa_audit_core::Checkpoint,
 ) -> Result<RegionalRuntime, String> {
+    let RegionalModelSource {
+        model,
+        expected_snapshot_sha256,
+        issued_manifest_sha256,
+    } = source;
     if !centre.iter().all(u8::is_ascii_alphanumeric) {
         return Err("centre must be four ASCII alphanumeric bytes".into());
     }
