@@ -160,11 +160,11 @@ pub struct InteractionState {
     queue_intent: [Intent; COMMAND_CAPACITY],
     queue_len: u8,
 }
-// A7.1: 2,144 bytes includes the accepted-command clock anchor for monotonic timestamp evidence.
+// A7.1: bounded queue includes the accepted-command clock anchor and typed alert ACK identity.
 const _: () = assert!(core::mem::size_of::<InteractionState>() == 2400);
 const _: () =
     assert!(core::mem::size_of::<[FlightIdentity; COMMAND_CAPACITY]>() == 36 * COMMAND_CAPACITY);
-const _: () = assert!(core::mem::size_of::<[Intent; COMMAND_CAPACITY]>() == 8 * COMMAND_CAPACITY);
+const _: () = assert!(core::mem::size_of::<[Intent; COMMAND_CAPACITY]>() == 16 * COMMAND_CAPACITY);
 
 /// Empty operator state. Construction is fixed-size and performs no allocation.
 pub const fn interaction_new() -> InteractionState {
