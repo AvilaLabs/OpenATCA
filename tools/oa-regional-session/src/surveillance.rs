@@ -1617,4 +1617,62 @@ mod tests {
             .iter()
             .any(|audit| audit.alert_start_ns == SECOND_NS));
     }
+
+    #[test]
+    fn withheld_ca_frame_exports_closed_and_altitude_lost_alert_details() {
+        let mut s = new_surveillance();
+        let track = |addr, alt_ft| CaTrack {
+            lat_deg: 41.0,
+            lon_deg: -87.0,
+            addr,
+            vel_east_mps: 0.0,
+            vel_north_mps: 0.0,
+            r95_m: 0.0,
+            alt_ft,
+            vrate_fpm: 0.0,
+            flags: 0,
+            ground: AIRBORNE,
+        };
+        let initial = [track(0x123456, 10_000.0), track(0x123457, 10_000.0)];
+        ca_cycle(
+            &mut s.ca,
+            SECOND_NS,
+            &initial,
+            &mut s.alerts,
+            &mut s.events,
+            &mut s.states,
+        );
+        let altitude_loss = [track(0x123456, f32::NAN), track(0x123457, 10_000.0)];
+        let loss = ca_cycle(
+            &mut s.ca,
+            2 * SECOND_NS,
+            &altitude_loss,
+            &mut s.alerts,
+            &mut s.events,
+            &mut s.states,
+        );
+        assert_eq!(loss.stats.alt_lost, 1);
+
+        surveillance_begin(&mut s, 5 * SECOND_NS).expect("begin outage frame");
+        let frame = surveillance_finish_with_visibility(
+            &mut s,
+            None,
+            false,
+            Some(ProductUnavailableReason::SurveillanceFeedUnavailable),
+        )
+        .expect("outage frame retains closed and altitude-loss details");
+        assert_eq!(
+            frame.ca_product,
+            ProductAvailability::Withheld(ProductUnavailableReason::SurveillanceFeedUnavailable)
+        );
+        assert!(frame
+            .ca_closed
+            .iter()
+            .any(|alert| alert.start_ns == SECOND_NS));
+        assert!(frame
+            .ca_altitude_lost
+            .iter()
+            .any(|event| event.addr == 0x123456 && event.t_ns == 2 * SECOND_NS));
+        assert!(frame.withheld_ca_records >= 2);
+    }
 }

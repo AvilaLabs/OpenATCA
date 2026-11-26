@@ -34,6 +34,10 @@ const MAX_FLIGHT_KEY_SEARCH_STEPS: usize = 14;
 const MAX_FLIGHT_KEY_INSERT_MOVES: usize = flight::MAX_OFFLINE_DRIVER_FLIGHTS;
 /// C7 budget for retiring absent ledger keys when the view ledger reaches its configured capacity.
 const MAX_FLIGHT_KEY_RECLAIM_WORK: usize = flight::MAX_OFFLINE_DRIVER_FLIGHTS;
+/// C7 worst-case hash probes for that retirement pass: one `index_find` per outer key, each
+/// bounded by the exact `by_key.cells.len()` limit exposed by the flight adapter.
+const MAX_FLIGHT_KEY_RECLAIM_PROBE_WORK: usize =
+    MAX_FLIGHT_KEY_RECLAIM_WORK * flight::MAX_OFFLINE_DRIVER_KEY_INDEX_CELLS;
 /// C7 budget for exporting the current bounded full-key flight view list once per frame.
 const MAX_FLIGHT_DATA_VIEW_WORK: usize = flight::MAX_OFFLINE_DRIVER_FLIGHTS;
 const MAX_RUNTIME_ITEM_WORK: u32 =
@@ -393,6 +397,16 @@ fn reclaim_retired_flight_keys(runtime: &mut RegionalRuntime) -> Result<(), Stri
     let len = runtime.known_flights.len();
     if len > MAX_FLIGHT_KEY_RECLAIM_WORK {
         return Err("flight-key retirement scan exceeded its C7 bound".into());
+    }
+    let probes_per_key = flight::flight_driver_key_index_cells(&runtime.flights);
+    if probes_per_key > flight::MAX_OFFLINE_DRIVER_KEY_INDEX_CELLS {
+        return Err("flight-key index exceeds its declared C7 probe bound".into());
+    }
+    let maximum_probe_work = len
+        .checked_mul(probes_per_key)
+        .ok_or("flight-key retirement probe-work counter overflow")?;
+    if maximum_probe_work > MAX_FLIGHT_KEY_RECLAIM_PROBE_WORK {
+        return Err("flight-key retirement probe-work budget exceeded".into());
     }
     let mut write = 0usize;
     for read in 0..len {

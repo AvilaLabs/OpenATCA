@@ -17,6 +17,9 @@ use crate::input::{EventKind, FlightOperation, HandoffOperation, NormalizedEvent
 pub const MAX_DRIVER_FLIGHTS: usize = 32;
 /// Maximum opt-in offline table capacity; the default driver remains capped at 32.
 pub const MAX_OFFLINE_DRIVER_FLIGHTS: usize = 8192;
+/// `oa-flight` key-index cells at the maximum offline capacity: `next_power_of_two(2 * entries)`.
+pub const MAX_OFFLINE_DRIVER_KEY_INDEX_CELLS: usize =
+    (MAX_OFFLINE_DRIVER_FLIGHTS * 2).next_power_of_two();
 /// Maximum entries in either externally visible flight log.
 pub const MAX_DRIVER_LOG_ENTRIES: usize = 1024;
 
@@ -1046,6 +1049,12 @@ pub fn flight_view_for_key(
 /// counters. Used to reclaim retired keys from the bounded offline view ledger.
 pub fn flight_driver_has_key(driver: &FlightDriver, key: oa_flight::FlightKey) -> bool {
     flight_get(&driver.table, &key).is_some()
+}
+
+/// Maximum index probes one exact-key lookup can perform in this driver's allocated key index.
+/// `oa-flight::index_find` checks at most `cells.len()` cells before it returns.
+pub fn flight_driver_key_index_cells(driver: &FlightDriver) -> usize {
+    driver.table.by_key.cells.len()
 }
 
 fn view_for_flight(flight: &Flight, centre: [u8; 4]) -> Option<SharedFlightView> {
