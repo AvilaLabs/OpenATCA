@@ -6,6 +6,8 @@ version = 4
 name = "oa-adapt"
 version = "0.0.1"
 dependencies = [
+ "oa-audit-core",
+ "oa-audit-log",
  "oa-airspace",
  "oa-ca",
  "oa-nasr",
@@ -60,6 +62,19 @@ version = "0.0.1"
 [[package]]
 name = "oa-asterix"
 version = "0.0.1"
+
+[[package]]
+name = "oa-audit-core"
+version = "0.0.1"
+
+[[package]]
+name = "oa-audit-log"
+version = "0.0.1"
+dependencies = [
+ "oa-audit-core",
+ "oa-sealed",
+ "oa-sha256",
+]
 
 [[package]]
 name = "oa-awc"
@@ -375,6 +390,7 @@ version = "0.0.1"
 name = "oa-migration-switch"
 version = "0.0.1"
 dependencies = [
+ "oa-audit-core",
  "oa-migration",
 ]
 
@@ -467,6 +483,9 @@ dependencies = [
 [[package]]
 name = "oa-quarantine"
 version = "0.0.1"
+dependencies = [
+ "oa-audit-core",
+]
 
 [[package]]
 name = "oa-regional-session"

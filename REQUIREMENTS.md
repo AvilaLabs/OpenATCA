@@ -8128,3 +8128,45 @@ The L13 role registry is not yet landed; roles below are plain caller-supplied c
   are not compliance findings, an ATO, or FAA authorization.
 - **OA-E1-003** The deterministic generator produces Markdown and CSV counts by control family and
   evidence status. CI checks the generated files and rejects incomplete or duplicate inventories.
+
+## Privileged action audit log (E3, I10)
+
+- **OA-AUDIT-001** Each audit record binds a positive principal ID, one declared registry role,
+  action code, bounded ASCII target, positive caller-supplied nanosecond timestamp, bounded opaque
+  details, sequence number and previous digest. Version 1 uses fixed-width fields, little-endian
+  integers, zero-padded target/details, and the domain `OA-AUDIT-CHAIN-V1\0`; the record digest is
+  SHA-256 over that full canonical encoding with the digest field zeroed. The first sequence is 1
+  with an all-zero previous digest; each following sequence increments by one and binds the prior
+  digest. No alternate encoding is accepted.
+- **OA-AUDIT-002** The registry allows `monitor` to verify records, `operate` to release quarantine
+  items, and `configure` to issue adaptations, certify, flip migration output, or roll back
+  migration output. Higher roles may perform lower-level actions; a lower role is refused before
+  the action commit. Principal IDs, role claims and timestamps are caller inputs; this registry
+  provides no login, credential check, authenticated origin or authority validation.
+- **OA-AUDIT-003** The shell log uses fixed-size records and an OS-held nonblocking exclusive
+  lock on the opened log descriptor. Lock contention fails closed; closing the descriptor releases
+  the lock, so no stale sidecar lock needs recovery. The shell verifies the supplied count and tail
+  before appending, writes only at EOF, syncs the record and containing directory before returning
+  a plain receipt value, and fails closed on I/O, lock or sync errors. A privileged mutation must
+  consume the matching receipt value before commit; audit failure cannot invoke or commit that
+  mutation. The value is not unforgeable or authenticated; principal and role claims remain caller
+  inputs.
+- **OA-AUDIT-004** Verification checks records in sequence and reports the first malformed,
+  reordered, altered, deleted or truncated record. Every verify/read/append operation requires the
+  caller's trusted expected record count and tail digest and refuses a shorter or longer log than
+  that checkpoint. `oa-audit-verify` reports the first broken sequence and requires the checkpoint
+  on every invocation. The log is capped at 65,536 records. This detects changes relative to the
+  supplied checkpoint; a hash chain alone does not prevent full history rewriting together with
+  replacement of that checkpoint, and it does not authenticate who wrote a record.
+- **OA-AUDIT-005** Adaptation issue, certification, quarantine release, migration flip and
+  migration rollback append a bounded record before committing their action. If a later action
+  fails, its already-written intent remains visible for reconciliation; no failed action is
+  reported as committed solely because an audit record exists.
+- **OA-AUDIT-006** Every audit-log read, append destination, and parent directory synchronization
+  path is checked by the production `oa-sealed` guard before filesystem access; read and append
+  descriptors are verified after opening, and no append bytes are written until the destination
+  descriptor is verified. On Linux, append opens the destination through the retained verified
+  parent descriptor using `/proc/self/fd`, verifies and locks that same descriptor, and syncs that
+  same parent descriptor; its leaf open refuses symlinks with `O_NOFOLLOW`. Append refuses on
+  platforms without this directory anchoring. A sealed-path refusal or descriptor-verification
+  error fails the audit operation before the associated committed action.

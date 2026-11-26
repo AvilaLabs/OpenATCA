@@ -23,7 +23,8 @@
 //! receives fewer than 4.3e13 increments; checked `u64` counters retain ample margin. This is a
 //! sizing rationale, not a measured input-rate claim. Input validation is constant work; accounting
 //! examines at most nine reason bits. All capacities and bounds are checked before mutation. There
-//! is no allocator or external dependency.
+//! is no allocator; its only dependency supplies plain audit event/receipt values. Durable log
+//! access stays in the shell and occurs before a receipt-gated queue release.
 
 /// Maximum queued events per independent input class; a manual-triage backlog, not traffic storage.
 pub const MAX_PENDING_PER_SOURCE: usize = 128;
@@ -143,15 +144,19 @@ pub struct QuarantineQueue {
     heads: [u16; INPUT_SOURCE_COUNT],
     lengths: [u16; INPUT_SOURCE_COUNT],
     stats: [SourceStats; INPUT_SOURCE_COUNT],
+    last_release_audit_sequence: u64,
+    last_release_audit_digest: [u8; 32],
 }
 
 // A7.1: each event is 32 bytes and the 384 slots are 12 KiB. Long-lived u64 counters are sized
 // for 10,000 decisions/s and a 15-year envelope, including all nine reason bits per input.
+// A7.1: retain the last consumed release sequence and chain tail to reject replay or wrong-chain
+// receipts; these 40 bytes are cold audit metadata alongside the manual-triage queue.
 const _: () = assert!(core::mem::size_of::<InputIdentity>() == 16);
 const _: () = assert!(core::mem::size_of::<InputOutcome>() == 56);
 const _: () = assert!(core::mem::size_of::<QuarantineEvent>() == 32);
 const _: () = assert!(core::mem::size_of::<SourceStats>() == 104);
-const _: () = assert!(core::mem::size_of::<QuarantineQueue>() == 12_616);
+const _: () = assert!(core::mem::size_of::<QuarantineQueue>() == 12_656);
 
 /// Refusal from this core; arithmetic and invariant failures are explicit systemic errors.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -167,6 +172,7 @@ pub enum QuarantineError {
     CounterOverflow = 8,
     EmptyQueue = 9,
     CapacityInvariant = 10,
+    AuditRequired = 11,
 }
 
 fn checked_ref<T>(slice: &[T], index: usize) -> Result<&T, QuarantineError> {
@@ -211,6 +217,8 @@ pub fn queue_new() -> QuarantineQueue {
         heads: [0; INPUT_SOURCE_COUNT],
         lengths: [0; INPUT_SOURCE_COUNT],
         stats: [EMPTY_STATS; INPUT_SOURCE_COUNT],
+        last_release_audit_sequence: 0,
+        last_release_audit_digest: [0; 32],
     }
 }
 
@@ -352,6 +360,7 @@ pub fn queue_front(
 pub fn queue_acknowledge(
     queue: &mut QuarantineQueue,
     source: InputSource,
+    receipt: oa_audit_core::AuditReceipt,
 ) -> Result<QuarantineEvent, QuarantineError> {
     let source_ix = source_index(source);
     let head = *checked_ref(&queue.heads, source_ix)?;
@@ -361,6 +370,26 @@ pub fn queue_acknowledge(
     }
     let index = event_index(source_ix, head, 0)?;
     let event = *checked_ref(&queue.events, index)?;
+    let (expected_target, expected_target_len) = release_audit_target(event);
+    let next_audit_sequence = queue
+        .last_release_audit_sequence
+        .checked_add(1)
+        .ok_or(QuarantineError::CounterOverflow)?;
+    if oa_audit_core::validate_event(&receipt.event).is_err()
+        || receipt.action() != oa_audit_core::Action::QuarantineRelease
+        || !matches!(
+            receipt.role(),
+            oa_audit_core::Role::Operate | oa_audit_core::Role::Configure
+        )
+        || receipt.sequence() != next_audit_sequence
+        || receipt.previous() != queue.last_release_audit_digest
+        || receipt.target()
+            != expected_target
+                .get(..usize::from(expected_target_len))
+                .unwrap_or(&[])
+    {
+        return Err(QuarantineError::AuditRequired);
+    }
     let next_head = head
         .checked_add(1)
         .ok_or(QuarantineError::CounterOverflow)?
@@ -376,7 +405,54 @@ pub fn queue_acknowledge(
     *stored_head = next_head;
     *stored_length = next_length;
     *stored_stats = next_stats;
+    queue.last_release_audit_sequence = receipt.sequence();
+    queue.last_release_audit_digest = receipt.digest();
     Ok(event)
+}
+
+/// Canonical target for the required pre-commit quarantine release audit record.
+pub fn release_audit_target(event: QuarantineEvent) -> ([u8; oa_audit_core::TARGET_CAPACITY], u8) {
+    let mut target = [0u8; oa_audit_core::TARGET_CAPACITY];
+    let mut pos = 0usize;
+    for byte in b"Q:" {
+        if let Some(slot) = target.get_mut(pos) {
+            *slot = *byte;
+            pos += 1;
+        }
+    }
+    put_hex(
+        &mut target,
+        &mut pos,
+        u64::from(event.identity.source as u8),
+        2,
+    );
+    if let Some(slot) = target.get_mut(pos) {
+        *slot = b':';
+        pos += 1;
+    }
+    put_hex(
+        &mut target,
+        &mut pos,
+        u64::from(event.identity.source_instance),
+        4,
+    );
+    if let Some(slot) = target.get_mut(pos) {
+        *slot = b':';
+        pos += 1;
+    }
+    put_hex(&mut target, &mut pos, event.identity.item_id, 16);
+    (target, u8::try_from(pos).unwrap_or(0))
+}
+
+fn put_hex<const N: usize>(out: &mut [u8; N], pos: &mut usize, value: u64, digits: u32) {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    for digit in (0..digits).rev() {
+        let nibble = usize::try_from((value >> (digit * 4)) & 0x0f).unwrap_or(0);
+        if let (Some(slot), Some(byte)) = (out.get_mut(*pos), HEX.get(nibble)) {
+            *slot = *byte;
+            *pos += 1;
+        }
+    }
 }
 
 /// Return a copy of one source's counters.
