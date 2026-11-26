@@ -5,6 +5,94 @@
 /// Number of palette entries. Index 0 is the background.
 pub const PALETTE_LEN: usize = 16;
 
+/// One exact sRGB entry from FAA-HF-STD-010A Tables 5.13.1-I or 5.13.2-I.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SrgbColor {
+    pub name: &'static str,
+    pub rgb: [u8; 3],
+}
+
+/// FAA-HF-STD-010A Table 5.13.1-I defaults for critical foreground objects viewed below 40 lux.
+/// The names are the standard's suggestions, not required operational meanings.
+pub const FAA_HF_STD_010A_FOREGROUND: [SrgbColor; 11] = [
+    SrgbColor {
+        name: "White",
+        rgb: [255, 255, 255],
+    },
+    SrgbColor {
+        name: "Pink",
+        rgb: [246, 132, 216],
+    },
+    SrgbColor {
+        name: "Gray",
+        rgb: [179, 179, 179],
+    },
+    SrgbColor {
+        name: "Blue",
+        rgb: [94, 141, 246],
+    },
+    SrgbColor {
+        name: "Orange",
+        rgb: [254, 147, 13],
+    },
+    SrgbColor {
+        name: "Red",
+        rgb: [255, 19, 32],
+    },
+    SrgbColor {
+        name: "Green",
+        rgb: [35, 225, 98],
+    },
+    SrgbColor {
+        name: "Yellow",
+        rgb: [223, 243, 52],
+    },
+    SrgbColor {
+        name: "Magenta",
+        rgb: [216, 34, 255],
+    },
+    SrgbColor {
+        name: "Aqua",
+        rgb: [7, 205, 237],
+    },
+    SrgbColor {
+        name: "Brown",
+        rgb: [197, 149, 91],
+    },
+];
+
+/// FAA-HF-STD-010A Table 5.13.2-I defaults for weather severity viewed below 40 lux.
+/// Severity levels 1/2, 3/4, and 5/6 require pattern coding if all seven levels are shown.
+pub const FAA_HF_STD_010A_WEATHER: [SrgbColor; 4] = [
+    SrgbColor {
+        name: "Black",
+        rgb: [0, 0, 0],
+    },
+    SrgbColor {
+        name: "Wx-Green",
+        rgb: [23, 57, 40],
+    },
+    SrgbColor {
+        name: "Wx-Yellow",
+        rgb: [90, 74, 20],
+    },
+    SrgbColor {
+        name: "Wx-Red",
+        rgb: [93, 46, 89],
+    },
+];
+
+/// sRGB software request that a shell may translate to the workstation's display command.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HardwarePresetCommand {
+    SelectSrgbPreset,
+}
+
+/// The operator sRGB-preset action is represented as data for the impure display shell to send.
+pub const fn operator_srgb_preset_command() -> HardwarePresetCommand {
+    HardwarePresetCommand::SelectSrgbPreset
+}
+
 pub const BACKGROUND: u8 = 0;
 pub const TEXT: u8 = 1;
 pub const ARTCC_HIGH: u8 = 2;
@@ -113,6 +201,98 @@ mod tests {
         ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
     }
 
+    fn xyz(rgb: [u8; 3], peak_white_cd_m2: f64) -> [f64; 3] {
+        let [r, g, b] = rgb.map(|channel| linear(f64::from(channel)));
+        [
+            (0.412_456_4 * r + 0.357_576_1 * g + 0.180_437_5 * b) * peak_white_cd_m2,
+            (0.212_672_9 * r + 0.715_152_2 * g + 0.072_175_0 * b) * peak_white_cd_m2,
+            (0.019_333_9 * r + 0.119_192_0 * g + 0.950_304_1 * b) * peak_white_cd_m2,
+        ]
+    }
+
+    fn lab_f(value: f64) -> f64 {
+        const DELTA: f64 = 6.0 / 29.0;
+        if value > DELTA.powi(3) {
+            value.cbrt()
+        } else {
+            value / (3.0 * DELTA.powi(2)) + 4.0 / 29.0
+        }
+    }
+
+    fn cielab(rgb: [u8; 3], peak_white_cd_m2: f64) -> [f64; 3] {
+        let [x, y, z] = xyz(rgb, peak_white_cd_m2);
+        let fx = lab_f(x / (0.950_47 * peak_white_cd_m2));
+        let fy = lab_f(y / peak_white_cd_m2);
+        let fz = lab_f(z / (1.088_83 * peak_white_cd_m2));
+        [116.0 * fy - 16.0, 500.0 * (fx - fy), 200.0 * (fy - fz)]
+    }
+
+    fn cieluv(rgb: [u8; 3], peak_white_cd_m2: f64) -> [f64; 3] {
+        let [x, y, z] = xyz(rgb, peak_white_cd_m2);
+        let denominator = x + 15.0 * y + 3.0 * z;
+        let (u_prime, v_prime) = if denominator == 0.0 {
+            (0.0, 0.0)
+        } else {
+            (4.0 * x / denominator, 9.0 * y / denominator)
+        };
+        let relative_y = y / peak_white_cd_m2;
+        let lightness = if relative_y > (6.0_f64 / 29.0).powi(3) {
+            116.0 * relative_y.cbrt() - 16.0
+        } else {
+            (29.0_f64 / 3.0).powi(3) * relative_y
+        };
+        [
+            lightness,
+            13.0 * lightness * (u_prime - 0.1978),
+            13.0 * lightness * (v_prime - 0.4683),
+        ]
+    }
+
+    fn uv_size_coefficients(angle_arcmin: f64) -> Option<[f64; 3]> {
+        if !angle_arcmin.is_finite() || angle_arcmin <= 0.0 {
+            return None;
+        }
+        if angle_arcmin >= 60.0 {
+            return Some([1.0; 3]);
+        }
+        let kl = 1.0366 - (0.15263 - 0.05766 * angle_arcmin).exp();
+        let ku = if angle_arcmin <= 32.0 {
+            0.008991 * angle_arcmin - 0.0065
+        } else {
+            0.0257 * angle_arcmin - 0.5403
+        };
+        let kv = if angle_arcmin <= 32.0 {
+            0.005446 * angle_arcmin - 0.042
+        } else {
+            0.031 * angle_arcmin - 0.8594
+        };
+        Some([kl, ku, kv])
+    }
+
+    fn delta_uv_sc(a: [u8; 3], b: [u8; 3], peak_white_cd_m2: f64, angle_arcmin: f64) -> f64 {
+        let left = cieluv(a, peak_white_cd_m2);
+        let right = cieluv(b, peak_white_cd_m2);
+        let [kl, ku, kv] = uv_size_coefficients(angle_arcmin).unwrap();
+        ((kl * (left[0] - right[0])).powi(2)
+            + (ku * (left[1] - right[1])).powi(2)
+            + (kv * (left[2] - right[2])).powi(2))
+        .sqrt()
+    }
+
+    fn delta_e_ab(a: [u8; 3], b: [u8; 3], peak_white_cd_m2: f64) -> f64 {
+        dist(cielab(a, peak_white_cd_m2), cielab(b, peak_white_cd_m2))
+    }
+
+    fn minimum_pairwise<T>(colors: &[T], mut distance: impl FnMut(&T, &T) -> f64) -> f64 {
+        let mut minimum = f64::MAX;
+        for (index, left) in colors.iter().enumerate() {
+            for right in &colors[index + 1..] {
+                minimum = minimum.min(distance(left, right));
+            }
+        }
+        minimum
+    }
+
     // REQ: OA-DSP-016
     #[test]
     fn every_foreground_colour_has_aa_contrast_on_the_background() {
@@ -211,5 +391,65 @@ mod tests {
             PALETTE.iter().all(|c| c >> 24 == 0),
             "the unused byte is zero"
         );
+    }
+
+    // REQ: OA-DSP-016
+    #[test]
+    fn faa_hf_std_010a_palette_values_match_the_published_tables() {
+        let foreground = [
+            ("White", [255, 255, 255]),
+            ("Pink", [246, 132, 216]),
+            ("Gray", [179, 179, 179]),
+            ("Blue", [94, 141, 246]),
+            ("Orange", [254, 147, 13]),
+            ("Red", [255, 19, 32]),
+            ("Green", [35, 225, 98]),
+            ("Yellow", [223, 243, 52]),
+            ("Magenta", [216, 34, 255]),
+            ("Aqua", [7, 205, 237]),
+            ("Brown", [197, 149, 91]),
+        ];
+        let weather = [
+            ("Black", [0, 0, 0]),
+            ("Wx-Green", [23, 57, 40]),
+            ("Wx-Yellow", [90, 74, 20]),
+            ("Wx-Red", [93, 46, 89]),
+        ];
+        for (actual, (name, rgb)) in FAA_HF_STD_010A_FOREGROUND.iter().zip(foreground) {
+            assert_eq!((actual.name, actual.rgb), (name, rgb));
+        }
+        for (actual, (name, rgb)) in FAA_HF_STD_010A_WEATHER.iter().zip(weather) {
+            assert_eq!((actual.name, actual.rgb), (name, rgb));
+        }
+        assert_eq!(
+            operator_srgb_preset_command(),
+            HardwarePresetCommand::SelectSrgbPreset
+        );
+    }
+
+    // REQ: OA-DSP-016
+    #[test]
+    fn faa_difference_math_uses_cieluv_size_correction_and_cielab_thresholds() {
+        // White/black vectors anchor the CIE conversions. 200 cd/m² is the standard's
+        // minimum peak-white hardware requirement; ambient reflection remains a measured-device input.
+        let white = [255, 255, 255];
+        let black = [0, 0, 0];
+        assert!((delta_e_ab(white, black, 200.0) - 100.0).abs() < 1.0e-8);
+        assert!((delta_uv_sc(white, black, 200.0, 60.0) - 100.0).abs() < 1.0e-8);
+        assert_eq!(uv_size_coefficients(60.0), Some([1.0; 3]));
+        assert_eq!(uv_size_coefficients(0.0), None);
+        assert_eq!(uv_size_coefficients(f64::NAN), None);
+
+        // The standard's palette uses one pixel/luminance encoding for the role list; checking
+        // all pairs is conservative where the eventual scene's adjacency/search map is unavailable.
+        // These ideal-sRGB software calculations do not replace the required ambient/display measurements.
+        let foreground_rgb: Vec<[u8; 3]> = FAA_HF_STD_010A_FOREGROUND
+            .iter()
+            .map(|entry| entry.rgb)
+            .collect();
+        let min_search = minimum_pairwise(&foreground_rgb, |a, b| delta_uv_sc(*a, *b, 200.0, 60.0));
+        let min_adjacent = minimum_pairwise(&foreground_rgb, |a, b| delta_e_ab(*a, *b, 200.0));
+        assert!(min_search >= 28.0, "minimum ΔE*uv-sc is {min_search}");
+        assert!(min_adjacent >= 9.9, "minimum ΔE*ab is {min_adjacent}");
     }
 }
