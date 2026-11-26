@@ -60,7 +60,7 @@ pub struct AuralAlarmState {
     pub area_id: [u8; MAX_AURAL_AREA_ID_BYTES],
     pub area_id_len: u8,
 }
-const _: () = assert!(core::mem::size_of::<AuralAlarmState>() == 80);
+const _: () = assert!(core::mem::size_of::<AuralAlarmState>() == 88);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AuralReport {
@@ -883,28 +883,19 @@ mod tests {
     #[test]
     fn regional_aural_area_latches_one_request_per_alert_instance() {
         let mut service = regional_msaw_synthetic(32).unwrap();
-        service.settings.aural_areas.push(crate::config::AuralArea {
-            id: "TOWER".into(),
-            polygon: oa_safety::geom::polygon_new(&[
-                Vertex {
-                    lat_e7: 400_000_000,
-                    lon_e7: -880_000_000,
-                },
-                Vertex {
-                    lat_e7: 420_000_000,
-                    lon_e7: -880_000_000,
-                },
-                Vertex {
-                    lat_e7: 420_000_000,
-                    lon_e7: -860_000_000,
-                },
-                Vertex {
-                    lat_e7: 400_000_000,
-                    lon_e7: -860_000_000,
-                },
-            ])
-            .unwrap(),
-        });
+        service
+            .settings
+            .aural_areas
+            .push(oa_msaw_run::config::AuralArea {
+                id: "TOWER".into(),
+                polygon: oa_safety::geom::polygon_new(&[
+                    (400_000_000, -880_000_000),
+                    (420_000_000, -880_000_000),
+                    (420_000_000, -860_000_000),
+                    (400_000_000, -860_000_000),
+                ])
+                .unwrap(),
+            });
         let mut states = oa_safety::net::state_table_new(10_000_000_000, 0).unwrap();
         let mut inhibits = oa_safety::inhibit::inhibits_new();
         let first = regional_msaw_cycle(

@@ -300,7 +300,7 @@ fn apply(
         Intent::AcknowledgeMsaw { .. } => {
             return queued_refusal(
                 interaction,
-                "operator unit does not own the selected flight for MSAW acknowledgement",
+                "operator unit does not own the selected flight for MSAW acknowledgement".into(),
                 false,
             )
         }
