@@ -11,10 +11,10 @@ use crate::local_inventory::{LocalInventoryReport, LocalInventoryStatus};
 use crate::manifest::{parse_pin, verify_current};
 use oa_sha256::Digest;
 use oa_techops::{
-    assess_inventory, ClockDomainId, ExpectedProcessor, InventoryQuery, ProcessorId,
-    ProcessorReport, ServiceEpoch, SourceId, FLAG_DISK_ADAPTATION_MISMATCH,
-    FLAG_LOADED_ADAPTATION_MISMATCH, FLAG_MISSING_PROCESSOR, FLAG_MISSING_SEQUENCE,
-    FLAG_RELEASE_MANIFEST_MISMATCH,
+    assess_inventory, compare_adaptation_identity, ClockDomainId, ExpectedProcessor,
+    InventoryQuery, ProcessorId, ProcessorReport, ServiceEpoch, SourceId,
+    FLAG_DISK_ADAPTATION_MISMATCH, FLAG_LOADED_ADAPTATION_MISMATCH, FLAG_MISSING_PROCESSOR,
+    FLAG_MISSING_SEQUENCE, FLAG_RELEASE_MANIFEST_MISMATCH,
 };
 use std::fmt;
 use std::fs;
@@ -266,10 +266,19 @@ fn read_report(path: &Path, expected_id: u32) -> Result<ReportRow, FleetError> {
     let telemetry_loss_events = parse_u32(field_value(&row, 14)?, "reported telemetry loss")?;
     let local = LocalInventoryReport {
         processor_id,
+        observed_at_unix_ns: Some(sample_time_ns),
         issued_manifest_sha256: issued_pin,
+        expected_adaptation_sha256: None,
         loaded_adaptation_sha256: loaded,
         disk_manifest_sha256: disk_manifest,
         disk_adaptation_sha256: disk_adaptation,
+        comparison: compare_adaptation_identity(
+            issued_pin,
+            None,
+            disk_manifest,
+            Some(loaded),
+            disk_adaptation,
+        ),
         provenance_unverified: true,
         status,
     };
@@ -292,6 +301,7 @@ fn local_status_name(status: LocalInventoryStatus) -> &'static str {
     match status {
         LocalInventoryStatus::Match => "match",
         LocalInventoryStatus::IssuedManifestMismatch => "issued_manifest_mismatch",
+        LocalInventoryStatus::LoadedRuntimeMismatch => "loaded_runtime_mismatch",
         LocalInventoryStatus::LoadedDiskMismatch => "loaded_disk_mismatch",
         LocalInventoryStatus::PackageRefused => "package_refused",
     }

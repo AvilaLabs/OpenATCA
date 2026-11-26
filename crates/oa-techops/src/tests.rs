@@ -13,7 +13,7 @@ use crate::*;
 fn adaptation_identity_comparison_keeps_unavailable_and_mismatched_fields_distinct() {
     let matched = compare_adaptation_identity(
         [1; 32],
-        [2; 32],
+        Some([2; 32]),
         Some([1; 32]),
         Some([2; 32]),
         Some([2; 32]),
@@ -24,14 +24,14 @@ fn adaptation_identity_comparison_keeps_unavailable_and_mismatched_fields_distin
     assert_eq!(matched.disk_matches_issued, Some(true));
 
     let unavailable =
-        compare_adaptation_identity([1; 32], [2; 32], Some([1; 32]), Some([2; 32]), None);
+        compare_adaptation_identity([1; 32], Some([2; 32]), Some([1; 32]), Some([2; 32]), None);
     assert_eq!(unavailable.state, AdaptationIdentityState::Incomplete);
     assert_eq!(unavailable.disk_matches_issued, None);
     assert_eq!(unavailable.loaded_matches_disk, None);
 
     let changed_disk = compare_adaptation_identity(
         [1; 32],
-        [2; 32],
+        Some([2; 32]),
         Some([3; 32]),
         Some([2; 32]),
         Some([4; 32]),
@@ -42,7 +42,7 @@ fn adaptation_identity_comparison_keeps_unavailable_and_mismatched_fields_distin
     assert_eq!(changed_disk.loaded_matches_disk, Some(false));
 
     let unavailable_and_mismatch =
-        compare_adaptation_identity([1; 32], [2; 32], None, Some([3; 32]), None);
+        compare_adaptation_identity([1; 32], Some([2; 32]), None, Some([3; 32]), None);
     assert_eq!(
         unavailable_and_mismatch.state,
         AdaptationIdentityState::IncompleteAndMismatch

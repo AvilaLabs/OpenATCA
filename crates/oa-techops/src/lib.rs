@@ -97,15 +97,20 @@ pub struct AdaptationIdentityComparison {
 /// remain claims; this pure function authenticates neither the issuer nor the processor.
 pub fn compare_adaptation_identity(
     issued_manifest: [u8; 32],
-    expected_adaptation: [u8; 32],
+    expected_adaptation: Option<[u8; 32]>,
     observed_manifest: Option<[u8; 32]>,
     loaded_runtime_adaptation: Option<[u8; 32]>,
     disk_adaptation: Option<[u8; 32]>,
 ) -> AdaptationIdentityComparison {
     let issued_manifest_matches = observed_manifest.map(|observed| observed == issued_manifest);
-    let loaded_matches_issued =
-        loaded_runtime_adaptation.map(|loaded| loaded == expected_adaptation);
-    let disk_matches_issued = disk_adaptation.map(|disk| disk == expected_adaptation);
+    let loaded_matches_issued = match (loaded_runtime_adaptation, expected_adaptation) {
+        (Some(loaded), Some(expected)) => Some(loaded == expected),
+        _ => None,
+    };
+    let disk_matches_issued = match (disk_adaptation, expected_adaptation) {
+        (Some(disk), Some(expected)) => Some(disk == expected),
+        _ => None,
+    };
     let loaded_matches_disk = match (loaded_runtime_adaptation, disk_adaptation) {
         (Some(loaded), Some(disk)) => Some(loaded == disk),
         _ => None,

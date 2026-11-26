@@ -38,7 +38,7 @@ pub struct LocalInventoryReport {
     pub processor_id: u32,
     pub observed_at_unix_ns: Option<i64>,
     pub issued_manifest_sha256: Digest,
-    pub expected_adaptation_sha256: Digest,
+    pub expected_adaptation_sha256: Option<Digest>,
     pub loaded_adaptation_sha256: Digest,
     pub disk_manifest_sha256: Option<Digest>,
     pub disk_adaptation_sha256: Option<Digest>,
@@ -92,13 +92,13 @@ pub fn verify_local_inventory_at(
         processor_id: activation.processor_id,
         observed_at_unix_ns,
         issued_manifest_sha256: activation.issued_manifest_sha256,
-        expected_adaptation_sha256: activation.loaded_adaptation_sha256,
+        expected_adaptation_sha256: Some(activation.loaded_adaptation_sha256),
         loaded_adaptation_sha256: loaded_runtime_adaptation_sha256,
         disk_manifest_sha256: None,
         disk_adaptation_sha256: None,
         comparison: compare_adaptation_identity(
             activation.issued_manifest_sha256,
-            activation.loaded_adaptation_sha256,
+            Some(activation.loaded_adaptation_sha256),
             None,
             Some(loaded_runtime_adaptation_sha256),
             None,
@@ -126,7 +126,7 @@ pub fn verify_local_inventory_at(
     }
     report.comparison = compare_adaptation_identity(
         activation.issued_manifest_sha256,
-        activation.loaded_adaptation_sha256,
+        Some(activation.loaded_adaptation_sha256),
         report.disk_manifest_sha256,
         Some(loaded_runtime_adaptation_sha256),
         report.disk_adaptation_sha256,
@@ -174,10 +174,11 @@ pub fn render_processor_report_tsv(phase: &str, report: &LocalInventoryReport) -
         "issued_manifest_sha256\tOBSERVED\t{}\n",
         oa_sha256::to_hex(&report.issued_manifest_sha256)
     ));
-    out.push_str(&format!(
-        "expected_adaptation_sha256\tOBSERVED\t{}\n",
-        oa_sha256::to_hex(&report.expected_adaptation_sha256)
-    ));
+    push_optional_digest(
+        &mut out,
+        "expected_adaptation_sha256",
+        report.expected_adaptation_sha256,
+    );
     out.push_str(&format!(
         "loaded_runtime_adaptation_sha256\tOBSERVED\t{}\n",
         oa_sha256::to_hex(&report.loaded_adaptation_sha256)
@@ -320,7 +321,7 @@ mod tests {
         let report =
             verify_local_inventory_at(&activation, [0x77; 32], Some(1_795_000_000_123_456_789));
         assert_eq!(report.observed_at_unix_ns, Some(1_795_000_000_123_456_789));
-        assert_eq!(report.expected_adaptation_sha256, expected);
+        assert_eq!(report.expected_adaptation_sha256, Some(expected));
         assert_eq!(report.loaded_adaptation_sha256, [0x77; 32]);
         assert_eq!(report.disk_adaptation_sha256, Some(expected));
         assert_eq!(report.status, LocalInventoryStatus::LoadedRuntimeMismatch);
