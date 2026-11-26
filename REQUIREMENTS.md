@@ -5106,6 +5106,22 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
 - **OA-A7-005** The framed peer delivers an EST followed by a CHG in sequence (Rev G Part II
   §§3.1.2–3.1.3). It asserts NAM transport ordering and parsing only; applying the amendment to
   `oa-flight` remains a separate caller integration requirement.
+- **OA-A7-006** The draft regional adapter accepts an RTI only with an explicit existing full
+  `FlightKey`, exact Field 31 facility/sector mapping, and caller-configured endpoint unit IDs;
+  it never synthesizes GUFI or joins by callsign. It applies RTI/RLA/RTA/LRM receipts to that
+  same full key and refuses a response whose 03(c) reference or peer facilities differ.
+- **OA-A7-007** The adapter keeps NAM semantics distinct in the `oa-flight` operation mapping:
+  RLA is an offer routing/update, target-originated RTA is acceptance, initiator-originated RTA
+  is retract, and target LRM is failure. RTU is not converted to an ownership operation, and
+  missing RTA/RTI timeout is not synthesized by the parser adapter.
+- **OA-A7-008** Framed input reaches the handoff mapper only through a message token produced by
+  the public `oa-nam::session::step` state machine: ATM handoffs require `Action::Deliver`, and
+  RLA/LRM response handling requires `Action::Response` correlated to the outstanding RTI.
+  Duplicate deliveries produce no flight operation. Sequence-gap deliveries remain visible to
+  the application, are mapped according to their message semantics, and increment an explicit
+  ingress gap counter; they are not silently discarded. Wrong-peer, discarded, unmatched-LRM and
+  unmatched-response actions produce no flight operation. The adapter keeps no second
+  message-number cursor and does not replace NAM timeout or acknowledgement behavior.
 
 ## Release replay comparison (oa-track canonical output, oa-replay-diff)
 - **OA-TRK-360** A tracker output row has one canonical byte form of 85 bytes: track address, time,

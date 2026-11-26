@@ -4,6 +4,8 @@
 //! rejects malformed rows whole and never repairs values. Input and row bounds are checked
 //! before parsing or storing data (RULESET C6, C7, E5, E6, E8).
 
+use oa_flight::FlightKey;
+
 /// Maximum bytes in one protocol line, excluding its line ending.
 pub const MAX_EVENT_LINE_BYTES: usize = 768;
 /// Maximum route fixes carried by one normalized route event.
@@ -64,6 +66,12 @@ pub enum FlightOperation {
         plan_id: [u8; 12],
         status: u8,
     },
+    /// Full-key form used when the source identity is NAM flight-plan identity rather than GUFI.
+    SetPlanByKey {
+        key: FlightKey,
+        plan_id: [u8; 12],
+        status: u8,
+    },
     AssignAltitude {
         altitude_ft: i32,
     },
@@ -72,6 +80,10 @@ pub enum FlightOperation {
         altitude_ft: Option<i32>,
     },
     SetOwner {
+        unit: [u8; 8],
+    },
+    SetOwnerByKey {
+        key: FlightKey,
         unit: [u8; 8],
     },
     SetAddress,
@@ -84,15 +96,27 @@ pub enum FlightOperation {
         operation: HandoffOperation,
         unit: [u8; 8],
     },
+    /// Shell-only NAM bridge operation carrying the exact flight-table key resolved by an
+    /// explicit pending-RTI binding. This does not derive GUFI or join by callsign.
+    HandoffByKey {
+        key: FlightKey,
+        operation: HandoffOperation,
+        from_unit: [u8; 8],
+        to_unit: [u8; 8],
+    },
 }
 // A7.2: cold enum, size guard waived; one normalized operation.
 
-/// Ownership-changing operation. Only `Take` may transfer ownership.
+/// Handoff state operation. Only `Take` transfers flight ownership.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HandoffOperation {
+    /// A NAM RLA acknowledges/routs an offer; it does not mean controller acceptance.
+    Update,
     Offer,
     Accept,
     Take,
+    /// An initiating-center RTA retracts an offer. It differs from LRM failure.
+    Retract,
     Fail,
 }
 // A7.2: cold enum, size guard waived; one normalized handoff operation.
@@ -312,12 +336,20 @@ fn parse_flight(parts: &[&str]) -> Result<EventKind, InputError> {
             operation: HandoffOperation::Offer,
             unit: field::<8>(part(parts, 10)?)?,
         },
+        "HO_UPDATE" if parts.len() == 11 => FlightOperation::Handoff {
+            operation: HandoffOperation::Update,
+            unit: field::<8>(part(parts, 10)?)?,
+        },
         "HO_ACCEPT" if parts.len() == 11 => FlightOperation::Handoff {
             operation: HandoffOperation::Accept,
             unit: field::<8>(part(parts, 10)?)?,
         },
         "HO_TAKE" if parts.len() == 11 => FlightOperation::Handoff {
             operation: HandoffOperation::Take,
+            unit: field::<8>(part(parts, 10)?)?,
+        },
+        "HO_RETRACT" if parts.len() == 11 => FlightOperation::Handoff {
+            operation: HandoffOperation::Retract,
             unit: field::<8>(part(parts, 10)?)?,
         },
         "HO_FAIL" if parts.len() == 11 => FlightOperation::Handoff {

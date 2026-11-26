@@ -2335,6 +2335,12 @@ pub fn serialize_recorded_events(events: &[NormalizedEvent]) -> Result<String, A
             }
             EventKind::Flight(op) if event.source == SourceKind::Flight => {
                 match op {
+                    FlightOperation::SetPlanByKey { .. }
+                    | FlightOperation::SetOwnerByKey { .. } => {
+                        // The normalized recording format carries GUFI only. A full key cannot
+                        // be serialized without changing the format, so refuse rather than drop it.
+                        return Err(AdapterError::UnsupportedEvent);
+                    }
                     FlightOperation::SetPlan { plan_id, status } => {
                         write!(out, "\tPLAN\t{}\t{}", ascii_field(&plan_id)?, status)
                     }
@@ -2364,12 +2370,19 @@ pub fn serialize_recorded_events(events: &[NormalizedEvent]) -> Result<String, A
                     ),
                     FlightOperation::Handoff { operation, unit } => {
                         let name = match operation {
+                            HandoffOperation::Update => "HO_UPDATE",
                             HandoffOperation::Offer => "HO_OFFER",
                             HandoffOperation::Accept => "HO_ACCEPT",
                             HandoffOperation::Take => "HO_TAKE",
+                            HandoffOperation::Retract => "HO_RETRACT",
                             HandoffOperation::Fail => "HO_FAIL",
                         };
                         write!(out, "\t{name}\t{}", ascii_trimmed(&unit)?)
+                    }
+                    FlightOperation::HandoffByKey { .. } => {
+                        // The normalized text format has only GUFI identity; serializing a
+                        // full-key NAM event would silently lose its identity, so refuse it.
+                        return Err(AdapterError::UnsupportedEvent);
                     }
                 }
                 .map_err(|_| AdapterError::CountOverflow)?;
