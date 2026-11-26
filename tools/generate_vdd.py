@@ -106,7 +106,12 @@ def _run(root: Path, argv: list[str], *, cap: int = MAX_COMMAND_BYTES) -> bytes:
         for pipe in (process.stdout, process.stderr):
             if pipe is not None and not pipe.closed:
                 pipe.close()
-    code = process.wait(timeout=1)
+    try:
+        code = process.wait(timeout=max(0.001, deadline - time.monotonic()))
+    except subprocess.TimeoutExpired as exc:
+        process.kill()
+        process.wait()
+        raise VddError(f"command exceeded 30-second limit: {argv[0]}") from exc
     if code:
         detail = diagnostics.decode("utf-8", "replace")[:512].replace("\n", " ")
         raise VddError(f"command refused ({argv[0]}, exit {code}): {detail}")
