@@ -19,6 +19,7 @@ HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 HEX40 = re.compile(r"[0-9a-f]{40}\Z")
 MAX_OAG2ADPT_BYTES = 1024
 MAX_CA_PRESET_BYTES = 65_536
+MAX_PVER_CATALOG_BYTES = 16_384
 MAX_SNAPSHOT_BYTES = 512 * 1024 * 1024
 MAX_PORTABILITY_BYTES = 1_048_576
 MAX_BUNDLE_BYTES = 2 * 1024 * 1024 * 1024
@@ -73,18 +74,20 @@ def read_oag2adpt(
     snapshot: bytes,
     *,
     ca_preset: bytes | None = None,
+    pver_catalog: bytes | None = None,
     expected_manifest_sha256: str | None = None,
 ) -> dict:
-    """Read canonical OAG2ADPT v1-v3 bytes and verify the declared components."""
+    """Read canonical OAG2ADPT v1-v4 bytes and bind the declared components."""
     if len(manifest) > MAX_OAG2ADPT_BYTES or len(manifest) < 58:
         raise FormatError("manifest byte length is outside 58..=1024")
     if manifest[:8] != b"OAG2ADPT":
         raise FormatError("bad magic")
     version, reader_min, reader_max = struct.unpack_from("<HHH", manifest, 8)
-    if version not in (1, 2, 3):
+    if version not in (1, 2, 3, 4):
         raise FormatError("unsupported schema")
     release_len, facility_len, change_len, component_count = manifest[14:18]
-    if component_count != (2 if version == 3 else 1):
+    expected_counts = {1: (1,), 2: (1,), 3: (2,), 4: (2, 3)}
+    if component_count not in expected_counts[version]:
         raise FormatError("component count does not match schema")
     snapshot_len = int.from_bytes(manifest[18:26], "little")
     snapshot_digest = manifest[26:58]
@@ -93,6 +96,7 @@ def read_oag2adpt(
     offset = 58
     issue = None
     preset = None
+    catalog = None
     if version >= 2:
         adaptation_version, offset = _integer(manifest, offset, 8)
         previous_digest, offset = _take(manifest, offset, 32)
@@ -101,10 +105,14 @@ def read_oag2adpt(
         approver_len, offset = _integer(manifest, offset, 1)
         reason_len, offset = _integer(manifest, offset, 2)
         issue = (adaptation_version, previous_digest, change_class, issuer_len, approver_len, reason_len)
-    if version == 3:
+    if version == 3 or (version == 4 and component_count == 3):
         preset_len, offset = _integer(manifest, offset, 8)
         preset_digest, offset = _take(manifest, offset, 32)
         preset = (preset_len, preset_digest)
+    if version == 4:
+        catalog_len, offset = _integer(manifest, offset, 8)
+        catalog_digest, offset = _take(manifest, offset, 32)
+        catalog = (catalog_len, catalog_digest)
     lengths = [release_len, facility_len, change_len]
     if version >= 2:
         lengths.extend((issuer_len, approver_len, reason_len))
@@ -132,6 +140,7 @@ def read_oag2adpt(
         raise FormatError("snapshot component binding mismatch")
     if expected_manifest_sha256 is not None and sha256(manifest) != expected_manifest_sha256:
         raise FormatError("separate manifest pin mismatch")
+    issuer_bytes = approver_bytes = reason_bytes = b""
     if issue is not None:
         adaptation_version, previous_digest, change_class, issuer_len, approver_len, reason_len = issue
         issuer = text_fields["issuer_principal_id"]
@@ -162,8 +171,7 @@ def read_oag2adpt(
         text_fields["adaptation_version"] = adaptation_version
         text_fields["previous_manifest_sha256"] = previous_digest.hex()
         text_fields["change_class"] = change_class
-    if version == 3:
-        assert preset is not None
+    if preset is not None:
         preset_len, preset_digest = preset
         if preset_len == 0 or preset_len > MAX_CA_PRESET_BYTES:
             raise FormatError("CA preset length outside limit")
@@ -173,6 +181,16 @@ def read_oag2adpt(
         text_fields["ca_preset_sha256"] = preset_digest.hex()
     elif ca_preset is not None:
         raise FormatError("unexpected CA preset component")
+    if catalog is not None:
+        catalog_len, catalog_digest = catalog
+        if catalog_len == 0 or catalog_len > MAX_PVER_CATALOG_BYTES:
+            raise FormatError("PVER catalog length outside limit")
+        if pver_catalog is None or len(pver_catalog) != catalog_len or bytes.fromhex(sha256(pver_catalog)) != catalog_digest:
+            raise FormatError("PVER catalog component binding mismatch")
+        text_fields["pver_catalog_len"] = catalog_len
+        text_fields["pver_catalog_sha256"] = catalog_digest.hex()
+    elif pver_catalog is not None:
+        raise FormatError("unexpected PVER catalog component")
     release_bytes = text_fields["release"].encode("utf-8")
     facility_bytes = text_fields["facility"].encode("utf-8")
     change_bytes = text_fields["change_ref"].encode("utf-8")
@@ -189,6 +207,9 @@ def read_oag2adpt(
     if preset is not None:
         canonical.extend(struct.pack("<Q", preset[0]))
         canonical.extend(preset[1])
+    if catalog is not None:
+        canonical.extend(struct.pack("<Q", catalog[0]))
+        canonical.extend(catalog[1])
     canonical.extend(release_bytes + facility_bytes + change_bytes)
     if issue is not None:
         canonical.extend(issuer_bytes + approver_bytes + reason_bytes)
@@ -203,6 +224,38 @@ def read_oag2adpt(
         "snapshot_sha256": snapshot_digest.hex(),
         **text_fields,
     }
+
+
+def read_oag2adpt_package(files: dict[str, bytes], *, expected_manifest_sha256: str) -> dict:
+    """Read a synthetic package inventory with exact version-specific component names."""
+    allowed = {"manifest.oag2", "airspace.snapshot", "ca-preset.oaca", "pver-catalog.oapv"}
+    if not isinstance(files, dict) or not set(files) <= allowed or not {"manifest.oag2", "airspace.snapshot"} <= set(files):
+        raise FormatError("package component inventory has missing or unexpected names")
+    if any(not isinstance(value, bytes) for value in files.values()):
+        raise FormatError("package components must be bytes")
+    maximum_package_bytes = MAX_SNAPSHOT_BYTES + MAX_OAG2ADPT_BYTES + MAX_CA_PRESET_BYTES + MAX_PVER_CATALOG_BYTES
+    if sum(map(len, files.values())) > maximum_package_bytes:
+        raise FormatError("package byte limit exceeded")
+    manifest = files["manifest.oag2"]
+    if len(manifest) < 18:
+        raise FormatError("manifest truncated before component inventory can be determined")
+    version = int.from_bytes(manifest[8:10], "little")
+    component_count = manifest[17]
+    expected_names = {"manifest.oag2", "airspace.snapshot"}
+    if version == 3 or (version == 4 and component_count == 3):
+        expected_names.add("ca-preset.oaca")
+    if version == 4:
+        expected_names.add("pver-catalog.oapv")
+    if set(files) != expected_names:
+        raise FormatError("package file inventory does not match manifest version")
+    decoded = read_oag2adpt(
+        manifest,
+        files["airspace.snapshot"],
+        ca_preset=files.get("ca-preset.oaca"),
+        pver_catalog=files.get("pver-catalog.oapv"),
+        expected_manifest_sha256=expected_manifest_sha256,
+    )
+    return decoded
 
 
 def read_tsv(data: bytes, header: str, *, max_bytes: int, max_rows: int) -> list[list[str]]:

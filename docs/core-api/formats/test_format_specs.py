@@ -37,11 +37,33 @@ def oag2adpt(version: int, snapshot: bytes, preset: bytes | None = None) -> byte
     return header + issue_header + preset_header + release + facility + change + tail_text
 
 
+def oag2adpt_v4(snapshot: bytes, catalog: bytes, ca_preset: bytes | None = None) -> bytes:
+    release, facility, change = b"rel-4", b"ZAU", b"PVER-4"
+    issuer, approver, reason = b"issuer-a", b"approver-b", b"synthetic PVER catalog"
+    component_count = 3 if ca_preset is not None else 2
+    header = (
+        b"OAG2ADPT"
+        + struct.pack("<HHH", 4, 1, 1)
+        + bytes((len(release), len(facility), len(change), component_count))
+        + struct.pack("<Q", len(snapshot))
+        + hashlib.sha256(snapshot).digest()
+    )
+    issue = (
+        struct.pack("<Q", 2)
+        + b"p" * 32
+        + bytes((2, len(issuer), len(approver)))
+        + struct.pack("<H", len(reason))
+    )
+    ca = b"" if ca_preset is None else struct.pack("<Q", len(ca_preset)) + hashlib.sha256(ca_preset).digest()
+    pver = struct.pack("<Q", len(catalog)) + hashlib.sha256(catalog).digest()
+    return header + issue + ca + pver + release + facility + change + issuer + approver + reason
+
+
 class FormatSpecTests(unittest.TestCase):
     def test_machine_readable_specs_are_json_and_reference_existing_public_files(self):
         filenames = (
             "iwxxm-2025-2-metar-speci-profile.json",
-            "oag2adpt-v1-v3.json",
+            "oag2adpt-v1-v4.json",
             "oa-regional-j2-formats-v1.json",
         )
         for filename in filenames:
@@ -77,6 +99,67 @@ class FormatSpecTests(unittest.TestCase):
                     self.assertEqual(decoded["change_class"], 2)
                 if version == 3:
                     self.assertEqual(decoded["ca_preset_sha256"], hashlib.sha256(preset).hexdigest())
+
+    def test_oag2adpt_v4_binds_catalog_with_optional_ca_preset(self):
+        snapshot = b"synthetic v4 airspace snapshot"
+        catalog = b"schema,synthetic-pver-v1\nsynthetic-pver-v1,full,T1,410000000,-870000000,1.0,2.0,100.0,1.0\n"
+        preset = b"synthetic v4 CA preset bytes"
+        for ca_preset in (None, preset):
+            with self.subTest(has_ca_preset=ca_preset is not None):
+                manifest = oag2adpt_v4(snapshot, catalog, ca_preset)
+                catalog_offset = 143 if ca_preset is not None else 103
+                component_count = 3 if ca_preset is not None else 2
+                self.assertEqual(manifest[17], component_count)
+                self.assertEqual(struct.unpack_from("<Q", manifest, catalog_offset)[0], len(catalog))
+                decoded = readers.read_oag2adpt(
+                    manifest, snapshot, ca_preset=ca_preset, pver_catalog=catalog,
+                    expected_manifest_sha256=hashlib.sha256(manifest).hexdigest(),
+                )
+                self.assertEqual(decoded["schema_version"], 4)
+                self.assertEqual(decoded["component_count"], component_count)
+                self.assertEqual(decoded["pver_catalog_sha256"], hashlib.sha256(catalog).hexdigest())
+                files = {"manifest.oag2": manifest, "airspace.snapshot": snapshot, "pver-catalog.oapv": catalog}
+                if ca_preset is not None:
+                    files["ca-preset.oaca"] = ca_preset
+                package = readers.read_oag2adpt_package(
+                    files, expected_manifest_sha256=hashlib.sha256(manifest).hexdigest()
+                )
+                self.assertEqual(package["pver_catalog_len"], len(catalog))
+
+    def test_oag2adpt_v4_rejects_missing_tampered_oversize_and_inventory_mismatch(self):
+        snapshot = b"synthetic v4 snapshot"
+        catalog = b"synthetic catalog"
+        manifest = oag2adpt_v4(snapshot, catalog)
+        with self.assertRaises(readers.FormatError):
+            readers.read_oag2adpt(manifest, snapshot)
+        with self.assertRaises(readers.FormatError):
+            readers.read_oag2adpt(manifest, snapshot, pver_catalog=b"tampered catalog")
+        preset = b"synthetic optional CA preset"
+        with self.assertRaises(readers.FormatError):
+            readers.read_oag2adpt(oag2adpt_v4(snapshot, catalog, preset), snapshot,
+                                   ca_preset=b"tampered CA preset", pver_catalog=catalog)
+        oversized = oag2adpt_v4(snapshot, b"x" * (readers.MAX_PVER_CATALOG_BYTES + 1))
+        with self.assertRaises(readers.FormatError):
+            readers.read_oag2adpt(oversized, snapshot)
+        invalid_count = bytearray(manifest)
+        invalid_count[17] = 1
+        with self.assertRaises(readers.FormatError):
+            readers.read_oag2adpt(bytes(invalid_count), snapshot, pver_catalog=catalog)
+        wrong_layout_count = bytearray(manifest)
+        wrong_layout_count[17] = 3
+        with self.assertRaises(readers.FormatError):
+            readers.read_oag2adpt(bytes(wrong_layout_count), snapshot, pver_catalog=catalog)
+        files = {"manifest.oag2": manifest, "airspace.snapshot": snapshot, "pver-catalog.oapv": catalog}
+        pin = hashlib.sha256(manifest).hexdigest()
+        with self.assertRaises(readers.FormatError):
+            readers.read_oag2adpt_package({**files, "unexpected.bin": b"extra"}, expected_manifest_sha256=pin)
+        with self.assertRaises(readers.FormatError):
+            readers.read_oag2adpt_package({"manifest.oag2": manifest, "airspace.snapshot": snapshot}, expected_manifest_sha256=pin)
+        tampered_files = {**files, "pver-catalog.oapv": b"tampered catalog"}
+        with self.assertRaises(readers.FormatError):
+            readers.read_oag2adpt_package(tampered_files, expected_manifest_sha256=pin)
+        with self.assertRaises(readers.FormatError):
+            readers.read_oag2adpt_package(files, expected_manifest_sha256="0" * 64)
 
     def test_oag2adpt_reader_refuses_unbound_noncanonical_and_bad_component_rows(self):
         snapshot = b"synthetic snapshot"
