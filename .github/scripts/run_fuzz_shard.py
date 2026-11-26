@@ -11,7 +11,7 @@ import sys
 import tomllib
 from pathlib import Path
 
-SHARD_COUNT = 4
+SHARD_COUNT = 5
 MAX_TARGETS = 256
 MAX_MANIFEST_BYTES = 64 * 1024
 MAX_TARGET_LIST_BYTES = 16 * 1024
@@ -104,11 +104,19 @@ def cargo_fuzz_listing(payload: bytes, declared_targets: list[str]) -> list[str]
 def targets_for_shard(targets: list[str], shard: int, shard_count: int = SHARD_COUNT) -> list[str]:
     """Assign sorted target names by index modulo shard_count, with no overlap."""
     if shard_count != SHARD_COUNT or not 0 <= shard < SHARD_COUNT:
-        raise FuzzShardError("shard index/count must be one of 0..3 / 4")
+        raise FuzzShardError("shard index/count must be one of 0..4 / 5")
     ordered = sorted(targets)
     if not ordered or len(ordered) > MAX_TARGETS or len(set(ordered)) != len(ordered):
         raise FuzzShardError("target inventory must be nonempty, unique, and bounded")
     return [name for index, name in enumerate(ordered) if index % SHARD_COUNT == shard]
+
+
+def validate_shard_union(targets: list[str]) -> None:
+    """Prove the fixed shard plan covers the validated runtime inventory exactly once."""
+    shards = [targets_for_shard(targets, index) for index in range(SHARD_COUNT)]
+    flattened = [target for group in shards for target in group]
+    if sorted(flattened) != sorted(targets) or len(flattened) != len(set(flattened)):
+        raise FuzzShardError("five-shard partition does not cover every listed target exactly once")
 
 
 
@@ -199,6 +207,7 @@ def main(argv: list[str] | None = None) -> int:
             _bounded_bytes(args.targets_file, MAX_TARGET_LIST_BYTES, "cargo-fuzz target listing"),
             cargo_bin_inventory(args.repo_root / "fuzz" / "Cargo.toml"),
         )
+        validate_shard_union(targets)
         runner_temp = Path(os.environ["RUNNER_TEMP"])
         return run_shard(targets, args.shard, args.repo_root, runner_temp)
     except (FuzzShardError, KeyError, OSError) as exc:

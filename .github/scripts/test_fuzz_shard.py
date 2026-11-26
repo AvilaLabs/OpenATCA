@@ -26,18 +26,20 @@ class FuzzShardTests(unittest.TestCase):
             with self.subTest(payload=payload), self.assertRaises(shard.FuzzShardError):
                 shard.cargo_fuzz_listing(payload, declared)
 
-    def test_four_shards_cover_each_target_exactly_once_and_balance(self):
+    def test_five_shards_cover_all_23_targets_exactly_once_and_balance(self):
         targets = shard.cargo_bin_inventory(REPO / "fuzz" / "Cargo.toml")
-        shards = [shard.targets_for_shard(targets, i) for i in range(4)]
+        self.assertEqual(len(targets), 23)
+        shards = [shard.targets_for_shard(targets, i) for i in range(5)]
         flattened = [target for group in shards for target in group]
         self.assertEqual(sorted(flattened), targets)
         self.assertEqual(len(flattened), len(set(flattened)))
         self.assertLessEqual(max(map(len, shards)) - min(map(len, shards)), 1)
-        self.assertEqual(shards, [shard.targets_for_shard(targets, i) for i in range(4)])
+        self.assertEqual(shards, [shard.targets_for_shard(targets, i) for i in range(5)])
+        shard.validate_shard_union(targets)
 
     def test_shard_index_and_count_are_fixed(self):
         with self.assertRaises(shard.FuzzShardError):
-            shard.targets_for_shard(["x"], 4)
+            shard.targets_for_shard(["x"], 5)
         with self.assertRaises(shard.FuzzShardError):
             shard.targets_for_shard(["x"], 0, 3)
 
@@ -128,22 +130,35 @@ class FuzzShardTests(unittest.TestCase):
             with self.assertRaises(shard.FuzzShardError):
                 shard._bounded_bytes(Path(tmp), 1024, "test directory")
 
-    def test_ci_uses_checked_enumeration_four_shards_and_unique_artifact_names(self):
+    def test_ci_uses_checked_enumeration_five_shards_cache_and_unique_artifacts(self):
         workflow = (REPO / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
         start = workflow.index("  fuzz-smoke:")
         boundary = re.search(r"\n  [a-z][a-z0-9-]*:\n", workflow[start + 1 :])
         end = len(workflow) if boundary is None else start + 1 + boundary.start()
         block = workflow[start:end]
         self.assertIn("fail-fast: false", block)
-        self.assertIn("shard: [0, 1, 2, 3]", block)
+        self.assertIn("shard: [0, 1, 2, 3, 4]", block)
         self.assertIn("set -euo pipefail", block)
         self.assertIn("fuzz list > \"$RUNNER_TEMP/fuzz-targets.txt\"", block)
         self.assertIn('--shard "${{ matrix.shard }}"', block)
         self.assertIn("fuzz-artifacts-shard-${{ matrix.shard }}", block)
+        self.assertIn("actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9", block)
+        self.assertIn("${{ runner.arch }}", block)
+        self.assertIn("${{ matrix.shard }}", block)
+        self.assertIn("${{ runner.os }}", block)
+        self.assertIn("${{ hashFiles('fuzz/Cargo.lock') }}", block)
+        self.assertIn("fuzz-smoke", block)
+        self.assertIn("~/.cargo/registry", block)
+        self.assertIn("~/.cargo/git", block)
+        self.assertIn("fuzz/target", block)
+        self.assertIn("cache_hit=%s", block)
+        self.assertIn("target_seconds=60", block)
+        self.assertIn("Remove stale cached example executables", block)
         runner = (REPO / ".github" / "scripts" / "run_fuzz_shard.py").read_text()
         self.assertIn("MAX_TOTAL_TIME_SECONDS = 60", runner)
         self.assertIn("RSS_LIMIT_MB = 2048", runner)
         self.assertIn('-max_total_time={MAX_TOTAL_TIME_SECONDS}', runner)
+        self.assertIn('validate_shard_union(targets)', runner)
 
 
 if __name__ == "__main__":

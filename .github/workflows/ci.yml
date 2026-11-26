@@ -256,11 +256,31 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3]
+        shard: [0, 1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v4
       - name: Toolchain
         run: rustup toolchain install nightly-2026-08-21 --profile minimal --component rust-src && rustup default nightly-2026-08-21
+      - name: Cache fuzz dependencies and build outputs
+        id: fuzz-cache
+        # actions/cache v6.1.0, pinned to its verified upstream commit.
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            fuzz/target
+          key: ${{ runner.os }}-nightly-2026-08-21-${{ hashFiles('fuzz/Cargo.lock') }}-fuzz-smoke-${{ matrix.shard }}-${{ runner.arch }}
+      - name: Record cache state and shard budget
+        env:
+          FUZZ_CACHE_HIT: ${{ steps.fuzz-cache.outputs.cache-hit }}
+          FUZZ_SHARD: ${{ matrix.shard }}
+        run: |
+          printf 'cache_hit=%s\nshard=%s\ntarget_seconds=60\n' "$FUZZ_CACHE_HIT" "$FUZZ_SHARD" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Remove stale cached example executables
+        run: |
+          rm -rf fuzz/target/debug/examples fuzz/target/release/examples
+          find fuzz/target -mindepth 3 -maxdepth 4 -type d \( -path '*/debug/examples' -o -path '*/release/examples' \) -prune -exec rm -rf {} + 2>/dev/null || true
       - name: Install cargo-fuzz
         run: cargo +nightly-2026-08-21 install --locked cargo-fuzz --version 0.13.2
       - name: Enumerate and verify fuzz targets
