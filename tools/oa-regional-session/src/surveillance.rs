@@ -249,7 +249,7 @@ pub struct ModeDecisionRecord {
     pub reserved: [u8; 2],
     pub result: ModeResult,
 }
-const _: () = assert!(core::mem::size_of::<ModeDecisionRecord>() == 88);
+const _: () = assert!(core::mem::size_of::<ModeDecisionRecord>() == 80);
 
 fn err(e: impl std::fmt::Debug) -> String {
     format!("{e:?}")
@@ -1017,7 +1017,7 @@ pub fn surveillance_finish_with_mode(
                 isr: IsrEvidence::Unknown,
                 controller_initiated_coast: 0,
             });
-            let target_mode = TargetModeState {
+            let mut target_mode = TargetModeState {
                 lat_e7: row.lat_e7,
                 lon_e7: row.lon_e7,
                 // Track altitude is mixed-source evidence, not a validated flight-level field.
