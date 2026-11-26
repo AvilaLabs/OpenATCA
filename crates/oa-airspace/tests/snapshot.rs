@@ -30,9 +30,10 @@ fn old_snapshot(version: u32) -> Vec<u8> {
         .windows(4)
         .position(|tag| tag == b"STRS")
         .expect("STRS table");
-    bytes.remove(table_start - 1); // v5 PFR availability byte
-    if version == FORMAT_VERSION_NOTE {
-        bytes.splice(table_start - 1..table_start - 1, 0u32.to_le_bytes());
+    let availability_at = table_start - 1;
+    bytes.remove(availability_at); // v5 PFR availability byte
+    if version == FORMAT_VERSION_LEGACY {
+        bytes.drain(availability_at - 4..availability_at); // v5 option-tagged cycle note
     }
     bytes[11..15].copy_from_slice(&version.to_le_bytes());
     bytes
@@ -97,6 +98,7 @@ fn an_empty_model_round_trips_and_has_a_fixed_layout() {
     }
 }
 
+// REQ: OA-ASP-006
 #[test]
 fn v3_and_v4_decode_with_preferred_routes_explicitly_unavailable() {
     for version in [FORMAT_VERSION_LEGACY, FORMAT_VERSION_NOTE] {
