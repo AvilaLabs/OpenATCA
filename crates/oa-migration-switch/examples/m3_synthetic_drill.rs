@@ -26,7 +26,7 @@ const DECISION_TO_DELIVERY_NS: i64 = 100_000_000;
 const RECORDED_MODE_STATUS: &str = "NOT_BUILT";
 const QUALIFICATION_STATUS: &str = "INCOMPLETE";
 
-fn drill_policy() -> UnitPolicy {
+pub(crate) fn drill_policy() -> UnitPolicy {
     UnitPolicy {
         policy_version: 1,
         policy_digest: [3; 32],
@@ -70,7 +70,7 @@ fn source_identity(side: Side, ordinal: u64) -> Result<SourceIdentity, Refusal> 
     })
 }
 
-fn snapshot(
+pub(crate) fn snapshot(
     unit: SwapUnitKey,
     policy: UnitPolicy,
     side: Side,
@@ -388,7 +388,7 @@ fn authority(
     Ok(second)
 }
 
-fn window_authorization(
+pub(crate) fn window_authorization(
     selector: &oa_migration_switch::Selector,
     unit: SwapUnitKey,
     policy: UnitPolicy,
@@ -398,7 +398,7 @@ fn window_authorization(
     oa_migration_switch::authorize_window(selector, &m1_result)
 }
 
-fn promotion_intent(
+pub(crate) fn promotion_intent(
     selector: &oa_migration_switch::Selector,
     readiness: &oa_migration_switch::CandidateReadiness,
     authorization: &oa_migration_switch::WindowAuthorization,
@@ -423,7 +423,7 @@ fn promotion_intent(
     )
 }
 
-fn rollback_receipt(
+pub(crate) fn rollback_receipt(
     unit: SwapUnitKey,
     policy: UnitPolicy,
     authority_sequence: u64,
@@ -459,7 +459,7 @@ fn rollback_receipt(
     }
 }
 
-fn drill_state(
+pub(crate) fn drill_state(
     index: u32,
 ) -> Result<(oa_migration_switch::Selector, SwapUnitKey, UnitPolicy, i64), Refusal> {
     let offset = i64::from(index)

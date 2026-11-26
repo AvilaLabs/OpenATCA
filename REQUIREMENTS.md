@@ -7700,6 +7700,15 @@ claims; a match is explicitly unverified.
   source-backed recorded H2/M4 input adapter exists, the harness labels recorded replay
   `NOT_BUILT` and qualification `INCOMPLETE`; synthetic output cannot close H5 or authorize
   readiness.
+- **OA-MIG-305** An ordinary Cargo test starts two bounded local synthetic producer processes
+  and an independent consumer process over a versioned internal test protocol. Selector snapshots
+  are constructed from producer-returned side, epoch-family, source-sequence, and state-version
+  fields; the selected payload bytes are delivered and echoed by the consumer before M2 records
+  delivery. After a candidate producer loss, rollback through the reusable M1 window grant and a
+  fresh M2 intent delivers and acknowledges consumer sequences 1, 2, and 3 within the declared
+  local target. Separate gap and duplicate negative controls are refused and counted. Producer
+  failure and consumer-loss denominators remain distinct; this synthetic process test does not
+  establish a public interface, recorded-data result, network property, or operational readiness.
 
 
 ## Migration safety evidence package (`tools/migration_evidence.py`; H3)
