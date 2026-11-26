@@ -29,11 +29,255 @@ const METAR: &[u8] = br#"<iwxxm:METAR xmlns:iwxxm="http://icao.int/iwxxm/2025-2"
  </iwxxm:MeteorologicalAerodromeObservation></iwxxm:observation>
 </iwxxm:METAR>"#;
 
+const WMO_METAR: &[u8] = include_bytes!("../testdata/official-wmo-v2025-2/metar-A3-1.xml");
+const WMO_SPECI: &[u8] = include_bytes!("../testdata/official-wmo-v2025-2/speci-A3-2.xml");
+const WMO_TAF: &[u8] = include_bytes!("../testdata/official-wmo-v2025-2/taf-A5-1.xml");
+const WMO_TAF_CANCEL: &[u8] = include_bytes!("../testdata/official-wmo-v2025-2/taf-A5-2.xml");
+const WMO_METAR_NIL_COLLECTION: &[u8] =
+    include_bytes!("../testdata/official-wmo-v2025-2/metar-NIL-collect.xml");
+const WMO_METAR_TRANSLATION_FAILED: &[u8] =
+    include_bytes!("../testdata/official-wmo-v2025-2/metar-translation-failed.xml");
+const WMO_TAF_NIL_COLLECTION: &[u8] =
+    include_bytes!("../testdata/official-wmo-v2025-2/taf-NIL-collect.xml");
+const WMO_TAF_TRANSLATION_FAILED: &[u8] =
+    include_bytes!("../testdata/official-wmo-v2025-2/taf-translation-failed.xml");
+
 fn decode_supported(input: &[u8], context: &str) -> DecodeResult {
     match decode_report(input) {
         Ok(result) => result,
         Err(error) => panic!("{context}: decode refused: {error:?}"),
     }
+}
+
+fn required_time(text: &[u8]) -> i64 {
+    match crate::decode::parse_time(text) {
+        Some(value) => value,
+        None => panic!("valid test timestamp expected"),
+    }
+}
+
+fn required_taf(result: &mut crate::Report) -> crate::TafForecast {
+    match result.taf.take() {
+        Some(value) => value,
+        None => panic!("TAF forecast projection expected"),
+    }
+}
+
+// REQ: OA-IWXXM-005
+#[test]
+fn official_wmo_metar_speci_and_taf_values_are_retained() {
+    let metar = decode_supported(WMO_METAR, "WMO 2025-2 METAR A3-1");
+    let crate::NilValueObservation::Observed(obs) = metar.report.observation else {
+        panic!("observation expected")
+    };
+    assert_eq!(
+        obs.prevailing_visibility,
+        Some(NilValue::Measure {
+            measure: crate::Measure {
+                mantissa: 600,
+                scale: 0,
+                unit: QuantityUnit::Meter
+            },
+            operator: None
+        })
+    );
+    assert_eq!(obs.runway_visual_ranges.len(), 1);
+    assert_eq!(
+        obs.runway_visual_ranges[0].runway_designator.as_deref(),
+        Some("12")
+    );
+    assert_eq!(obs.runway_visual_ranges[0].runway_nil_reason_uri, None);
+    assert_eq!(obs.runway_visual_ranges[0].mean_range_operator, None);
+    assert_eq!(obs.present_weather.len(), 2);
+    let metar_xml = core::str::from_utf8(WMO_METAR).unwrap_or("");
+    let runway_start = metar_xml.find("<iwxxm:runway>").unwrap_or(0);
+    let runway_end = metar_xml.find("</iwxxm:runway>").unwrap_or(0) + "</iwxxm:runway>".len();
+    let nil_runway = format!(
+        "{}<iwxxm:runway nilReason=\"http://codes.wmo.int/common/nil/inapplicable\"/>{}",
+        &metar_xml[..runway_start],
+        &metar_xml[runway_end..]
+    );
+    let nil_runway = decode_supported(nil_runway.as_bytes(), "nil RVR runway fixture");
+    let crate::NilValueObservation::Observed(nil_runway_obs) = nil_runway.report.observation else {
+        panic!("observation expected")
+    };
+    assert_eq!(
+        nil_runway_obs.runway_visual_ranges[0].runway_designator,
+        None
+    );
+    assert_eq!(
+        nil_runway_obs.runway_visual_ranges[0]
+            .runway_nil_reason_uri
+            .as_deref(),
+        Some("http://codes.wmo.int/common/nil/inapplicable")
+    );
+    assert_eq!(
+        obs.cloud.as_ref().map(|c| match c {
+            crate::Cloud::Observed { layers, .. } => layers.len(),
+            _ => 0,
+        }),
+        Some(2)
+    );
+    assert_eq!(metar.report.trends.len(), 2);
+    let speci = decode_supported(WMO_SPECI, "WMO 2025-2 SPECI A3-2");
+    let crate::NilValueObservation::Observed(obs) = speci.report.observation else {
+        panic!("observation expected")
+    };
+    assert_eq!(
+        obs.minimum_visibility_direction,
+        Some(NilValue::Measure {
+            measure: crate::Measure {
+                mantissa: 45,
+                scale: 0,
+                unit: QuantityUnit::Degree
+            },
+            operator: None
+        })
+    );
+    assert!(
+        matches!(speci.report.trends.get(1).and_then(|trend| trend.weather.first()), Some(crate::WeatherCode::Nil { reason_uri: Some(reason) }) if reason == "http://codes.wmo.int/common/nil/nothingOfOperationalSignificance")
+    );
+    assert!(
+        matches!(speci.report.trends.get(1).and_then(|trend| trend.cloud.as_ref()), Some(crate::Cloud::Nil { reason_uri: Some(reason) }) if reason == "http://codes.wmo.int/common/nil/nothingOfOperationalSignificance")
+    );
+    let taf = decode_supported(WMO_TAF, "WMO 2025-2 TAF A5-1");
+    assert_eq!(taf.report.kind, ReportKind::Taf);
+    assert_eq!(taf.report.observation_time_ms, None);
+    assert!(matches!(
+        taf.report.observation,
+        crate::NilValueObservation::Missing
+    ));
+    let mut taf_report = taf.report;
+    let forecast = required_taf(&mut taf_report);
+    assert_eq!(
+        forecast.valid_start_ms,
+        required_time(b"2012-08-16T00:00:00Z")
+    );
+    assert_eq!(
+        forecast.valid_end_ms,
+        required_time(b"2012-08-16T18:00:00Z")
+    );
+    assert_eq!(forecast.base.change, crate::ForecastChange::Base);
+    assert_eq!(
+        forecast.base.prevailing_visibility,
+        Some(NilValue::Measure {
+            measure: crate::Measure {
+                mantissa: 9000,
+                scale: 0,
+                unit: QuantityUnit::Meter
+            },
+            operator: None
+        })
+    );
+    assert_eq!(forecast.changes.len(), 3);
+    assert_eq!(forecast.changes[0].change, crate::ForecastChange::Becoming);
+    assert_eq!(
+        forecast.changes[1].change,
+        crate::ForecastChange::TemporaryFluctuations
+    );
+    assert_eq!(forecast.changes[2].change, crate::ForecastChange::From);
+    assert_eq!(
+        forecast.changes[2].valid_start_ms,
+        required_time(b"2012-08-16T12:30:00Z")
+    );
+    let probability = core::str::from_utf8(WMO_TAF)
+        .unwrap_or("")
+        .replace(
+            "changeIndicator=\"BECOMING\"",
+            "changeIndicator=\"PROBABILITY_30\"",
+        )
+        .replace(
+            "changeIndicator=\"TEMPORARY_FLUCTUATIONS\"",
+            "changeIndicator=\"PROBABILITY_40_TEMPORARY_FLUCTUATIONS\"",
+        );
+    let probability = decode_supported(
+        probability.as_bytes(),
+        "synthetic WMO-schema probability groups",
+    );
+    let mut probability_report = probability.report;
+    let groups = required_taf(&mut probability_report).changes;
+    assert_eq!(groups[0].change, crate::ForecastChange::Probability30);
+    assert_eq!(
+        groups[1].change,
+        crate::ForecastChange::Probability40TemporaryFluctuations
+    );
+    let wrong_reference = core::str::from_utf8(WMO_TAF).unwrap_or("").replace(
+        "href=\"#uuid.ed5d465f-51fb-4ecc-834a-2ee26bb1196f\"",
+        "href=\"#unrelated-period\"",
+    );
+    assert!(
+        matches!(decode_report(wrong_reference.as_bytes()), Err(e) if e.failure == DecodeFailure::UnsupportedConstruct && e.context == "taf.forecast.phenomenonTime.reference")
+    );
+    let unsupported_temperature = core::str::from_utf8(WMO_TAF).unwrap_or("").replace(
+        "</iwxxm:MeteorologicalAerodromeForecast>",
+        "<iwxxm:temperature/></iwxxm:MeteorologicalAerodromeForecast>",
+    );
+    assert!(
+        matches!(decode_report(unsupported_temperature.as_bytes()), Err(e) if e.failure == DecodeFailure::UnsupportedConstruct && e.context == "taf.forecast.temperature")
+    );
+    let cancelled = match decode_report(WMO_TAF_CANCEL) {
+        Err(error) => error,
+        Ok(_) => panic!("cancelled TAF is outside the supported non-cancellation profile"),
+    };
+    assert_eq!(cancelled.context, "taf.cancelledReportValidPeriod");
+}
+
+// REQ: OA-IWXXM-005
+#[test]
+fn official_wmo_full_report_set_decodes_or_refuses_by_named_construct() {
+    for (xml, label) in [
+        (WMO_METAR_NIL_COLLECTION, "METAR NIL collection wrapper"),
+        (WMO_TAF_NIL_COLLECTION, "TAF NIL collection wrapper"),
+    ] {
+        let error = match decode_report(xml) {
+            Err(error) => error,
+            Ok(_) => panic!("{label}: collection wrapper must not be treated as one report"),
+        };
+        assert_eq!(error.failure, DecodeFailure::UnsupportedRoot, "{label}");
+        assert_eq!(error.context, "collect.MeteorologicalBulletin", "{label}");
+    }
+
+    for (xml, label) in [
+        (WMO_METAR_TRANSLATION_FAILED, "METAR translation failed"),
+        (WMO_TAF_TRANSLATION_FAILED, "TAF translation failed"),
+    ] {
+        let error = match decode_report(xml) {
+            Err(error) => error,
+            Ok(_) => panic!("{label}: failed translation must not be projected"),
+        };
+        assert_eq!(
+            error.failure,
+            DecodeFailure::UnsupportedConstruct,
+            "{label}"
+        );
+        assert_eq!(error.context, "root.translationFailedTAC", "{label}");
+    }
+}
+
+// REQ: OA-IWXXM-005
+#[test]
+fn retains_rvr_operator_and_refuses_duplicate_rvr_cardinality() {
+    let xml = core::str::from_utf8(WMO_METAR).unwrap_or("");
+    let with_operator = xml.replace(
+        "<iwxxm:meanRVR uom=\"m\">1000</iwxxm:meanRVR>",
+        "<iwxxm:meanRVR uom=\"m\">2000</iwxxm:meanRVR><iwxxm:meanRVROperator>ABOVE</iwxxm:meanRVROperator>",
+    );
+    let report = decode_supported(with_operator.as_bytes(), "RVR operator fixture");
+    let crate::NilValueObservation::Observed(obs) = report.report.observation else {
+        panic!("observation expected")
+    };
+    assert_eq!(
+        obs.runway_visual_ranges[0].mean_range_operator,
+        Some(crate::RelationalOperator::Above)
+    );
+    let mut too_many = xml.to_owned();
+    let extra_rvr = "<iwxxm:rvr><iwxxm:AerodromeRunwayVisualRange><iwxxm:runway nilReason=\"http://codes.wmo.int/common/nil/inapplicable\"/><iwxxm:meanRVR uom=\"m\">50</iwxxm:meanRVR></iwxxm:AerodromeRunwayVisualRange></iwxxm:rvr>";
+    for _ in 0..crate::MAX_RVR_ITEMS {
+        too_many = too_many.replace("</iwxxm:rvr>", &format!("</iwxxm:rvr>{extra_rvr}"));
+    }
+    assert!(
+        matches!(decode_report(too_many.as_bytes()), Err(e) if e.failure == DecodeFailure::Limit)
+    );
 }
 
 // REQ: OA-IWXXM-001
@@ -44,7 +288,7 @@ fn decodes_supported_metar_subset_with_units_status_and_times() {
     assert_eq!(result.report.status, ReportStatus::Normal);
     assert_eq!(result.report.station, "KJFK");
     assert_eq!(result.report.issue_time_ms, 1_795_521_600_000);
-    assert_eq!(result.report.observation_time_ms, 1_795_521_300_000);
+    assert_eq!(result.report.observation_time_ms, Some(1_795_521_300_000));
     assert_eq!(result.report.automated_station, Some(true));
     let crate::NilValueObservation::Observed(observation) = result.report.observation else {
         panic!("observation expected")
@@ -102,11 +346,52 @@ fn refuses_hazard_fields_instead_of_silently_dropping_them() {
     let xml = core::str::from_utf8(METAR).unwrap_or("");
     let hazard = xml.replace(
         "</iwxxm:MeteorologicalAerodromeObservation>",
-        "<iwxxm:presentWeather>http://codes.wmo.int/49-2/4678/RA</iwxxm:presentWeather></iwxxm:MeteorologicalAerodromeObservation>",
+        "<iwxxm:seaCondition/></iwxxm:MeteorologicalAerodromeObservation>",
     );
     let result = decode_report(hazard.as_bytes());
     assert!(
-        matches!(result, Err(e) if e.failure == DecodeFailure::UnsupportedConstruct && e.stats.unsupported_constructs == 1)
+        matches!(result, Err(e) if e.failure == DecodeFailure::UnsupportedConstruct && e.stats.unsupported_constructs == 1 && e.context == "observation.seaCondition")
+    );
+}
+
+// REQ: OA-IWXXM-005
+#[test]
+fn retains_recent_weather_and_all_runways_wind_shear() {
+    let xml = core::str::from_utf8(METAR).unwrap_or("").replace(
+        "xmlns:gml=\"http://www.opengis.net/gml/3.2\"",
+        "xmlns:gml=\"http://www.opengis.net/gml/3.2\" xmlns:xlink=\"http://www.w3.org/1999/xlink\"",
+    ).replace("cloudAndVisibilityOK=\"true\"", "cloudAndVisibilityOK=\"false\"").replace(
+        "</iwxxm:MeteorologicalAerodromeObservation>",
+        "<iwxxm:recentWeather xlink:href=\"http://codes.wmo.int/49-2/AerodromeRecentWeather/TSRA\"/><iwxxm:windShear><iwxxm:AerodromeWindShear allRunways=\"true\"/></iwxxm:windShear></iwxxm:MeteorologicalAerodromeObservation>",
+    );
+    let result = decode_supported(xml.as_bytes(), "recent weather and wind shear fixture");
+    let crate::NilValueObservation::Observed(obs) = result.report.observation else {
+        panic!("observation expected")
+    };
+    assert_eq!(
+        obs.recent_weather,
+        vec![crate::WeatherCode::CodeUri(
+            "http://codes.wmo.int/49-2/AerodromeRecentWeather/TSRA".to_owned()
+        )]
+    );
+    assert_eq!(
+        obs.wind_shear,
+        Some(crate::WindShear {
+            all_runways: true,
+            runway_designators: Vec::new()
+        })
+    );
+}
+
+// REQ: OA-IWXXM-005
+#[test]
+fn refuses_present_but_empty_visibility_instead_of_collapsing_it_to_absent() {
+    let xml = core::str::from_utf8(WMO_METAR).unwrap_or("").replace(
+        "<iwxxm:prevailingVisibility uom=\"m\">600</iwxxm:prevailingVisibility>",
+        "",
+    );
+    assert!(
+        matches!(decode_report(xml.as_bytes()), Err(error) if error.failure == DecodeFailure::MissingRequiredField && error.context == "observation.visibility.prevailingVisibility")
     );
 }
 
@@ -323,9 +608,16 @@ fn enforces_required_temperature_wind_and_cavok_subset() {
         "cloudAndVisibilityOK=\"true\"",
         "cloudAndVisibilityOK=\"false\"",
     );
-    assert!(
-        matches!(decode_report(false_cavok.as_bytes()), Err(e) if e.failure == DecodeFailure::UnsupportedConstruct)
+    let false_cavok_result = decode_supported(
+        false_cavok.as_bytes(),
+        "non-CAVOK report without optional visibility",
     );
+    let crate::NilValueObservation::Observed(false_cavok_observation) =
+        false_cavok_result.report.observation
+    else {
+        panic!("observation expected")
+    };
+    assert!(!false_cavok_observation.cloud_and_visibility_ok);
     let bad_direction = xml.replace(
         ">180</iwxxm:meanWindDirection>",
         ">361</iwxxm:meanWindDirection>",

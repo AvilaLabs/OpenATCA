@@ -1218,9 +1218,9 @@ under RULESET F6 and is verified by its live run, not by the cargo tests.
   issue and observation times, exact supported temperature/QNH quantities, and a required but
   nillable `surfaceWind` property. Within a non-nil wind object, mean speed is required but nillable;
   mean direction is optional, as are variability and gust, with supported units/operators/nil reasons.
-- **OA-IWXXM-002** An unsupported observation construct is refused visibly; non-CAVOK weather,
-  visibility, cloud, runway range, unsupported wind variability extremes, supplementary hazards,
-  trends and extensions are never silently omitted.
+- **OA-IWXXM-002** An unsupported observation construct is refused visibly with a stable element
+  context; unsupported wind variability extremes, supplementary hazards, and extensions are never
+  silently omitted.
 - **OA-IWXXM-003** Inputs exceeding the document/table/work/scalar bounds are refused, and malformed XML,
   timestamp, quantity units and decimal forms do not produce a normalized report. Inline property
   wrappers have exact child cardinality/order; selected element-only parents reject hidden text.
@@ -1232,6 +1232,20 @@ under RULESET F6 and is verified by its live run, not by the cargo tests.
   milliseconds without fractional rounding; offsets, year zero, 24:00, leap-second `:60`, and
   sub-millisecond precision are refused. Only NORMAL, AMENDMENT and CORRECTION statuses are
   accepted. This limited decoder is not an XSD/Schematron validator and does not claim full edition
+  conformance.
+
+- **OA-IWXXM-005** The bounded METAR/SPECI projection retains supported prevailing and minimum
+  visibility, runway visual range, present/recent-weather code URIs, cloud layers, wind-shear
+  runway designators, and trend groups as typed values. The bounded TAF projection retains its
+  valid period, base group, and BECOMING, TEMPORARY_FLUCTUATIONS, FROM, and PROBABILITY_30/40
+  change groups as typed forecast values; the IWXXM FROM group carries the documented TAC FM
+  interval semantics. One base and at most five change groups are accepted. Cancellation reports
+  and unsupported forecast elements refuse with stable element context. Every file in the official
+  WMO IWXXM v2025-2 `IWXXM/examples/` listing is byte-pinned and has a tested outcome: supported
+  METAR/SPECI/TAF values decode, while collection wrappers, translation-failed reports, and the
+  cancellation report refuse with named context. Probability-group and wind-shear examples are
+  schema-derived synthetic fixtures, not separate official examples. See the source manifest for
+  URLs, byte lengths, SHA-256 values, and outcomes. This is a partial profile, not general IWXXM
   conformance.
 
 ### TBFM metering publication (oa-tbfm)

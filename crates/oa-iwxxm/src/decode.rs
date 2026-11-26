@@ -1,10 +1,12 @@
 //! IWXXM 2025-2 METAR/SPECI subset reader. Allocation and XML parsing stay in this shell.
 
 use crate::{
-    Measure, NilValue, NilValueObservation, Observation, PermissibleUsage, QuantityUnit,
-    RelationalOperator, Report, ReportKind, ReportStatus, WeatherCode, MAX_ATTRIBUTES,
-    MAX_DECODE_WORK, MAX_DOCUMENT_BYTES, MAX_ELEMENTS, MAX_NAMESPACE_BINDINGS, MAX_SCALAR_BYTES,
-    MAX_TEXT_NODES,
+    ForecastChange, ForecastGroup, Measure, NilValue, NilValueObservation, Observation,
+    PermissibleUsage, QuantityUnit, RelationalOperator, Report, ReportKind, ReportStatus,
+    RunwayVisualRange, TafForecast, TrendChange, TrendForecast, TrendTimeIndicator, WeatherCode,
+    WindShear, MAX_ATTRIBUTES, MAX_DECODE_WORK, MAX_DOCUMENT_BYTES, MAX_ELEMENTS,
+    MAX_NAMESPACE_BINDINGS, MAX_PRESENT_WEATHER, MAX_RECENT_WEATHER, MAX_RVR_ITEMS,
+    MAX_SCALAR_BYTES, MAX_TEXT_NODES, MAX_TREND_FORECASTS,
 };
 use oa_xml::{
     attr_needs_decode, decode_into, resolve_attr_ns, resolve_elem_ns, span_bytes, Limits, Ns,
@@ -16,6 +18,8 @@ const IWXXM: &[u8] = b"http://icao.int/iwxxm/2025-2";
 const AIXM: &[u8] = b"http://www.aixm.aero/schema/5.1.1";
 const GML: &[u8] = b"http://www.opengis.net/gml/3.2";
 const XSI: &[u8] = b"http://www.w3.org/2001/XMLSchema-instance";
+const XLINK: &[u8] = b"http://www.w3.org/1999/xlink";
+const COLLECT: &[u8] = b"http://def.wmo.int/collect/2014";
 
 /// Non-sensitive outcome counters for a single document.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -109,16 +113,33 @@ pub fn decode_report(input: &[u8]) -> Result<DecodeResult, DecodeError> {
     }
     let root = 0usize;
     no_significant_text(&doc, root, input, &mut stats)?;
+    let root_name = name(&doc, root, input)?;
     if !elem_is(&doc, root, input, IWXXM)? {
+        if root_name == b"MeteorologicalBulletin" && elem_is(&doc, root, input, COLLECT)? {
+            refuse(&mut stats);
+            return Err(DecodeError {
+                failure: DecodeFailure::UnsupportedRoot,
+                stats,
+                context: "collect.MeteorologicalBulletin",
+            });
+        }
         return Err(err(DecodeFailure::UnsupportedNamespace, stats));
     }
     require_gml_id(&doc, root, input, &mut stats)?;
-    let root_name = name(&doc, root, input)?;
     let kind = match root_name {
         b"METAR" => ReportKind::Metar,
         b"SPECI" => ReportKind::Speci,
+        b"TAF" => return decode_taf_report(&doc, root, input, stats),
         _ => return Err(err(DecodeFailure::UnsupportedRoot, stats)),
     };
+    if attr_value(&doc, root, input, b"translationFailedTAC", &mut stats)?.is_some() {
+        refuse(&mut stats);
+        return Err(DecodeError {
+            failure: DecodeFailure::UnsupportedConstruct,
+            stats,
+            context: "root.translationFailedTAC",
+        });
+    }
     in_context(
         check_attributes(
             &doc,
@@ -151,6 +172,7 @@ pub fn decode_report(input: &[u8]) -> Result<DecodeResult, DecodeError> {
     let mut observation_time = None;
     let mut station = None;
     let mut observation_ix = None;
+    let mut trend_ix = Vec::with_capacity(MAX_TREND_FORECASTS);
     let mut next_root_child = 0u8;
     let mut child = first_child(&doc, root);
     while let Some(ix) = child {
@@ -195,6 +217,16 @@ pub fn decode_report(input: &[u8]) -> Result<DecodeResult, DecodeError> {
             }
             set_once(&mut observation_ix, ix, &stats)?;
             next_root_child = 4;
+        } else if elem_is(&doc, ix, input, IWXXM)? && local == b"trendForecast" {
+            if next_root_child != 4 || trend_ix.len() >= MAX_TREND_FORECASTS {
+                refuse(&mut stats);
+                return Err(DecodeError {
+                    failure: DecodeFailure::UnsupportedConstruct,
+                    stats,
+                    context: "trendForecast",
+                });
+            }
+            trend_ix.push(ix);
         } else {
             refuse(&mut stats);
             let context = if elem_is(&doc, ix, input, IWXXM)? {
@@ -223,6 +255,13 @@ pub fn decode_report(input: &[u8]) -> Result<DecodeResult, DecodeError> {
         )?,
         None => NilValueObservation::Missing,
     };
+    let mut trends = Vec::with_capacity(trend_ix.len());
+    for ix in trend_ix {
+        trends.push(in_context(
+            decode_trend(&doc, ix, input, &mut stats),
+            "trendForecast",
+        )?);
+    }
     Ok(DecodeResult {
         report: Report {
             kind,
@@ -230,12 +269,537 @@ pub fn decode_report(input: &[u8]) -> Result<DecodeResult, DecodeError> {
             permissible_usage,
             station,
             issue_time_ms,
-            observation_time_ms,
+            observation_time_ms: Some(observation_time_ms),
             automated_station,
             observation,
+            trends,
+            taf: None,
         },
         stats,
     })
+}
+
+fn decode_taf_report(
+    doc: &oa_xml::Doc<'_>,
+    root: usize,
+    input: &[u8],
+    mut stats: DecodeStats,
+) -> Result<DecodeResult, DecodeError> {
+    if attr_value(doc, root, input, b"translationFailedTAC", &mut stats)?.is_some() {
+        refuse(&mut stats);
+        return Err(DecodeError {
+            failure: DecodeFailure::UnsupportedConstruct,
+            stats,
+            context: "root.translationFailedTAC",
+        });
+    }
+    check_attributes(
+        doc,
+        root,
+        input,
+        &[b"reportStatus", b"permissibleUsage", b"isCancelReport"],
+        &mut stats,
+    )?;
+    match attr_value(doc, root, input, b"isCancelReport", &mut stats)? {
+        Some(b"true") | Some(b"1") => {
+            refuse(&mut stats);
+            return Err(DecodeError {
+                failure: DecodeFailure::UnsupportedConstruct,
+                stats,
+                context: "taf.cancelledReportValidPeriod",
+            });
+        }
+        Some(b"false") | Some(b"0") | None => {}
+        _ => return Err(err(DecodeFailure::InvalidValue, stats)),
+    }
+    let status = match attr_value(doc, root, input, b"reportStatus", &mut stats)? {
+        Some(b"NORMAL") => ReportStatus::Normal,
+        Some(b"AMENDMENT") => ReportStatus::Amendment,
+        Some(b"CORRECTION") => ReportStatus::Correction,
+        _ => return Err(err(DecodeFailure::InvalidValue, stats)),
+    };
+    let permissible = match attr_value(doc, root, input, b"permissibleUsage", &mut stats)? {
+        Some(b"OPERATIONAL") => PermissibleUsage::Operational,
+        Some(b"NON-OPERATIONAL") => PermissibleUsage::NonOperational,
+        _ => return Err(err(DecodeFailure::InvalidValue, stats)),
+    };
+    let mut issue = None;
+    let mut station = None;
+    let mut valid = None;
+    let mut base = None;
+    let mut changes = Vec::with_capacity(crate::MAX_TAF_CHANGE_GROUPS);
+    let mut stage = 0u8;
+    let mut child = first_child(doc, root);
+    while let Some(ix) = child {
+        work(&mut stats)?;
+        if !elem_is(doc, ix, input, IWXXM)? {
+            refuse(&mut stats);
+            return Err(DecodeError {
+                failure: DecodeFailure::UnsupportedConstruct,
+                stats,
+                context: "taf.non-iwxxm-child",
+            });
+        }
+        match name(doc, ix, input)? {
+            b"issueTime" if stage == 0 => {
+                issue = Some(time_reference(doc, ix, input, &mut stats)?);
+                stage = 1;
+            }
+            b"aerodrome" if stage == 1 => {
+                station = Some(aerodrome(doc, ix, input, &mut stats)?);
+                stage = 2;
+            }
+            b"validPeriod" if stage == 2 => {
+                valid = Some(decode_period_reference(doc, ix, input, &mut stats)?);
+                stage = 3;
+            }
+            b"baseForecast" if stage == 3 => {
+                base = Some(ix);
+                stage = 4;
+            }
+            b"changeForecast" if stage >= 4 => {
+                if changes.len() >= crate::MAX_TAF_CHANGE_GROUPS {
+                    refuse(&mut stats);
+                    return Err(DecodeError {
+                        failure: DecodeFailure::Limit,
+                        stats,
+                        context: "taf.changeForecast.cardinality",
+                    });
+                }
+                changes.push(ix);
+            }
+            b"cancelledReportValidPeriod" => {
+                refuse(&mut stats);
+                return Err(DecodeError {
+                    failure: DecodeFailure::UnsupportedConstruct,
+                    stats,
+                    context: "taf.cancelledReportValidPeriod",
+                });
+            }
+            _ => {
+                refuse(&mut stats);
+                let context = match name(doc, ix, input)? {
+                    b"extension" => "taf.extension",
+                    b"baseForecast" => "taf.baseForecast.order",
+                    b"changeForecast" => "taf.changeForecast.order",
+                    _ => "taf.unknown-child",
+                };
+                return Err(DecodeError {
+                    failure: DecodeFailure::UnsupportedConstruct,
+                    stats,
+                    context,
+                });
+            }
+        }
+        child = next_sibling(doc, ix);
+    }
+    let issue_time = issue.ok_or_else(|| err(DecodeFailure::MissingRequiredField, stats))?;
+    let station = station.ok_or_else(|| err(DecodeFailure::MissingRequiredField, stats))?;
+    let valid_period = valid.ok_or_else(|| err(DecodeFailure::MissingRequiredField, stats))?;
+    let base_ix = base.ok_or(DecodeError {
+        failure: DecodeFailure::MissingRequiredField,
+        stats,
+        context: "taf.baseForecast",
+    })?;
+    let base = in_context(
+        decode_forecast_group(
+            doc,
+            base_ix,
+            input,
+            &mut stats,
+            valid_period.clone(),
+            ForecastChange::Base,
+            true,
+        ),
+        "taf.baseForecast",
+    )?;
+    let mut decoded_changes = Vec::with_capacity(changes.len());
+    for ix in changes {
+        decoded_changes.push(in_context(
+            decode_forecast_group(
+                doc,
+                ix,
+                input,
+                &mut stats,
+                valid_period.clone(),
+                ForecastChange::Becoming,
+                false,
+            ),
+            "taf.changeForecast",
+        )?);
+    }
+    Ok(DecodeResult {
+        report: Report {
+            kind: ReportKind::Taf,
+            status,
+            permissible_usage: permissible,
+            station,
+            issue_time_ms: issue_time,
+            observation_time_ms: None,
+            automated_station: None,
+            observation: NilValueObservation::Missing,
+            trends: Vec::new(),
+            taf: Some(TafForecast {
+                valid_start_ms: valid_period.0,
+                valid_end_ms: valid_period.1,
+                base,
+                changes: decoded_changes,
+            }),
+        },
+        stats,
+    })
+}
+
+fn decode_period_reference(
+    doc: &oa_xml::Doc<'_>,
+    wrapper: usize,
+    input: &[u8],
+    stats: &mut DecodeStats,
+) -> Result<(i64, i64, String), DecodeError> {
+    check_attributes(doc, wrapper, input, &[], stats)?;
+    let period = only_child(doc, wrapper, GML, b"TimePeriod", input, stats)?;
+    require_gml_id(doc, period, input, stats)?;
+    check_attributes(doc, period, input, &[], stats)?;
+    let id = gml_id(doc, period, input, stats)?;
+    let (a, b) = exact_children2(
+        doc,
+        period,
+        GML,
+        b"beginPosition",
+        b"endPosition",
+        input,
+        stats,
+    )?;
+    check_attributes(doc, a, input, &[], stats)?;
+    check_attributes(doc, b, input, &[], stats)?;
+    let start = parse_time(&scalar_text(doc, a, input, stats)?)
+        .ok_or_else(|| err(DecodeFailure::InvalidValue, *stats))?;
+    let end = parse_time(&scalar_text(doc, b, input, stats)?)
+        .ok_or_else(|| err(DecodeFailure::InvalidValue, *stats))?;
+    if end <= start {
+        return Err(err(DecodeFailure::InvalidValue, *stats));
+    }
+    Ok((start, end, id))
+}
+
+fn gml_id(
+    doc: &oa_xml::Doc<'_>,
+    elem: usize,
+    input: &[u8],
+    stats: &mut DecodeStats,
+) -> Result<String, DecodeError> {
+    let first = *doc
+        .elem_first_attr
+        .get(elem)
+        .ok_or_else(|| err(DecodeFailure::InvalidValue, *stats))?;
+    let count = *doc
+        .elem_attr_count
+        .get(elem)
+        .ok_or_else(|| err(DecodeFailure::InvalidValue, *stats))? as usize;
+    for i in first.0 as usize..first.0 as usize + count {
+        work(stats)?;
+        let local = span_bytes(
+            input,
+            *doc.attr_name
+                .get(i)
+                .ok_or_else(|| err(DecodeFailure::InvalidValue, *stats))?,
+        )
+        .map_err(|_| err(DecodeFailure::InvalidValue, *stats))?;
+        if local == b"id"
+            && matches!(resolve_attr_ns(doc,oa_xml::ElemIx(elem as u32),oa_xml::AttrIx(i as u32)),Ns::Uri(s)if oa_xml::ns_uri_bytes(doc,s)==Some(GML))
+        {
+            let raw = span_bytes(
+                input,
+                *doc.attr_value
+                    .get(i)
+                    .ok_or_else(|| err(DecodeFailure::InvalidValue, *stats))?,
+            )
+            .map_err(|_| err(DecodeFailure::InvalidValue, *stats))?;
+            if raw.is_empty()
+                || raw.len() > MAX_SCALAR_BYTES
+                || attr_needs_decode(doc, oa_xml::AttrIx(i as u32))
+            {
+                return Err(err(DecodeFailure::InvalidValue, *stats));
+            }
+            return String::from_utf8(raw.to_vec())
+                .map_err(|_| err(DecodeFailure::InvalidValue, *stats));
+        }
+    }
+    Err(err(DecodeFailure::MissingRequiredField, *stats))
+}
+
+fn decode_forecast_group(
+    doc: &oa_xml::Doc<'_>,
+    wrapper: usize,
+    input: &[u8],
+    stats: &mut DecodeStats,
+    valid: (i64, i64, String),
+    default: ForecastChange,
+    base: bool,
+) -> Result<ForecastGroup, DecodeError> {
+    check_attributes(doc, wrapper, input, &[], stats)?;
+    let body = only_child(
+        doc,
+        wrapper,
+        IWXXM,
+        b"MeteorologicalAerodromeForecast",
+        input,
+        stats,
+    )?;
+    require_gml_id(doc, body, input, stats)?;
+    no_significant_text(doc, body, input, stats)?;
+    check_attributes(
+        doc,
+        body,
+        input,
+        &[b"changeIndicator", b"cloudAndVisibilityOK"],
+        stats,
+    )?;
+    let change = if base {
+        if attr_value(doc, body, input, b"changeIndicator", stats)?.is_some() {
+            return Err(err(DecodeFailure::InvalidValue, *stats));
+        }
+        default
+    } else {
+        match attr_value(doc, body, input, b"changeIndicator", stats)? {
+            Some(b"BECOMING") => ForecastChange::Becoming,
+            Some(b"TEMPORARY_FLUCTUATIONS") => ForecastChange::TemporaryFluctuations,
+            Some(b"FROM") => ForecastChange::From,
+            Some(b"PROBABILITY_30") => ForecastChange::Probability30,
+            Some(b"PROBABILITY_30_TEMPORARY_FLUCTUATIONS") => {
+                ForecastChange::Probability30TemporaryFluctuations
+            }
+            Some(b"PROBABILITY_40") => ForecastChange::Probability40,
+            Some(b"PROBABILITY_40_TEMPORARY_FLUCTUATIONS") => {
+                ForecastChange::Probability40TemporaryFluctuations
+            }
+            _ => return Err(err(DecodeFailure::InvalidValue, *stats)),
+        }
+    };
+    let cavok = match attr_value(doc, body, input, b"cloudAndVisibilityOK", stats)? {
+        Some(b"true") | Some(b"1") => true,
+        Some(b"false") | Some(b"0") | None => false,
+        _ => return Err(err(DecodeFailure::InvalidValue, *stats)),
+    };
+    let mut time = None;
+    let mut visibility = None;
+    let mut operator = None;
+    let mut wind = None;
+    let mut weather = Vec::with_capacity(MAX_PRESENT_WEATHER);
+    let mut cloud = None;
+    let mut rank = 0u8;
+    let mut child = first_child(doc, body);
+    while let Some(ix) = child {
+        work(stats)?;
+        if !elem_is(doc, ix, input, IWXXM)? {
+            refuse(stats);
+            return Err(DecodeError {
+                failure: DecodeFailure::UnsupportedConstruct,
+                stats: *stats,
+                context: "taf.forecast.non-iwxxm-child",
+            });
+        }
+        match name(doc, ix, input)? {
+            b"phenomenonTime" if rank == 0 => {
+                time = Some(decode_taf_group_time(doc, ix, input, stats, &valid, base)?);
+                rank = 1;
+            }
+            b"prevailingVisibility" if rank <= 1 => {
+                visibility = Some(measure_value(
+                    doc,
+                    ix,
+                    input,
+                    QuantityUnit::Meter,
+                    b"m",
+                    stats,
+                )?);
+                rank = 2;
+            }
+            b"prevailingVisibilityOperator" if rank <= 2 => {
+                operator = Some(read_operator(doc, ix, input, stats)?);
+                rank = 3;
+            }
+            b"surfaceWind" if rank <= 3 => {
+                wind = Some(decode_forecast_wind(doc, ix, input, stats)?);
+                rank = 4;
+            }
+            b"weather" if rank <= 4 => {
+                if weather.len() >= MAX_PRESENT_WEATHER {
+                    return Err(err(DecodeFailure::Limit, *stats));
+                }
+                weather.push(decode_weather(doc, ix, input, stats)?);
+                rank = 5;
+            }
+            b"cloud" if rank <= 5 && cloud.is_none() => {
+                cloud = Some(decode_forecast_cloud(doc, ix, input, stats)?);
+                rank = 6;
+            }
+            b"temperature" => {
+                refuse(stats);
+                return Err(DecodeError {
+                    failure: DecodeFailure::UnsupportedConstruct,
+                    stats: *stats,
+                    context: "taf.forecast.temperature",
+                });
+            }
+            _ => {
+                refuse(stats);
+                let context = match name(doc, ix, input)? {
+                    b"extension" => "taf.forecast.extension",
+                    b"weather" => "taf.forecast.weather.cardinality",
+                    b"cloud" => "taf.forecast.cloud.duplicate",
+                    _ => "taf.forecast.unknown-child",
+                };
+                return Err(DecodeError {
+                    failure: DecodeFailure::UnsupportedConstruct,
+                    stats: *stats,
+                    context,
+                });
+            }
+        }
+        child = next_sibling(doc, ix);
+    }
+    let (start, end) = time.ok_or(DecodeError {
+        failure: DecodeFailure::MissingRequiredField,
+        stats: *stats,
+        context: "taf.forecast.phenomenonTime",
+    })?;
+    if start < valid.0 || end > valid.1 || end < start {
+        return Err(err(DecodeFailure::InvalidValue, *stats));
+    }
+    if cavok && (visibility.is_some() || !weather.is_empty() || cloud.is_some()) {
+        return Err(err(DecodeFailure::InvalidValue, *stats));
+    }
+    Ok(ForecastGroup {
+        change,
+        valid_start_ms: start,
+        valid_end_ms: end,
+        prevailing_visibility: visibility,
+        prevailing_visibility_operator: operator,
+        wind_direction: wind.as_ref().and_then(|x| x.direction.clone()),
+        wind_speed: wind.as_ref().and_then(|x| x.speed.clone()),
+        wind_gust: wind.as_ref().and_then(|x| x.gust.clone()),
+        variable_wind_direction: wind.and_then(|x| x.variable_direction),
+        weather,
+        cloud,
+    })
+}
+
+fn decode_taf_group_time(
+    doc: &oa_xml::Doc<'_>,
+    wrapper: usize,
+    input: &[u8],
+    stats: &mut DecodeStats,
+    valid: &(i64, i64, String),
+    base: bool,
+) -> Result<(i64, i64), DecodeError> {
+    check_xlink_attributes(doc, wrapper, input, stats)?;
+    if let Some(href) = xlink_href(doc, wrapper, input, stats)? {
+        if !base || href.strip_prefix('#') != Some(valid.2.as_str()) {
+            refuse(stats);
+            return Err(DecodeError {
+                failure: DecodeFailure::UnsupportedConstruct,
+                stats: *stats,
+                context: "taf.forecast.phenomenonTime.reference",
+            });
+        }
+        return Ok((valid.0, valid.1));
+    }
+    if base {
+        return Err(DecodeError {
+            failure: DecodeFailure::MissingRequiredField,
+            stats: *stats,
+            context: "taf.forecast.phenomenonTime.reference",
+        });
+    }
+    let (start, end, _) = decode_period_reference(doc, wrapper, input, stats)?;
+    Ok((start, end))
+}
+
+fn check_xlink_attributes(
+    doc: &oa_xml::Doc<'_>,
+    elem: usize,
+    input: &[u8],
+    stats: &mut DecodeStats,
+) -> Result<(), DecodeError> {
+    let first = *doc
+        .elem_first_attr
+        .get(elem)
+        .ok_or_else(|| err(DecodeFailure::InvalidValue, *stats))?;
+    let count = *doc
+        .elem_attr_count
+        .get(elem)
+        .ok_or_else(|| err(DecodeFailure::InvalidValue, *stats))? as usize;
+    for i in first.0 as usize..first.0 as usize + count {
+        work(stats)?;
+        let prefix = span_bytes(
+            input,
+            *doc.attr_prefix
+                .get(i)
+                .ok_or_else(|| err(DecodeFailure::InvalidValue, *stats))?,
+        )
+        .map_err(|_| err(DecodeFailure::InvalidValue, *stats))?;
+        let local = span_bytes(
+            input,
+            *doc.attr_name
+                .get(i)
+                .ok_or_else(|| err(DecodeFailure::InvalidValue, *stats))?,
+        )
+        .map_err(|_| err(DecodeFailure::InvalidValue, *stats))?;
+        if prefix == b"xmlns" || prefix.is_empty() && local == b"xmlns" {
+            continue;
+        }
+        if !(local == b"href"
+            && matches!(resolve_attr_ns(doc,oa_xml::ElemIx(elem as u32),oa_xml::AttrIx(i as u32)),Ns::Uri(s)if oa_xml::ns_uri_bytes(doc,s)==Some(XLINK)))
+        {
+            refuse(stats);
+            return Err(err(DecodeFailure::UnsupportedConstruct, *stats));
+        }
+    }
+    Ok(())
+}
+
+fn decode_forecast_wind(
+    doc: &oa_xml::Doc<'_>,
+    wrapper: usize,
+    input: &[u8],
+    stats: &mut DecodeStats,
+) -> Result<DecodedWind, DecodeError> {
+    check_attributes(doc, wrapper, input, &[], stats)?;
+    let body = only_child(
+        doc,
+        wrapper,
+        IWXXM,
+        b"AerodromeSurfaceWindForecast",
+        input,
+        stats,
+    )?;
+    decode_surface_wind_body(doc, body, input, stats, b"AerodromeSurfaceWindForecast")
+}
+
+fn decode_forecast_cloud(
+    doc: &oa_xml::Doc<'_>,
+    wrapper: usize,
+    input: &[u8],
+    stats: &mut DecodeStats,
+) -> Result<crate::Cloud, DecodeError> {
+    check_attributes(doc, wrapper, input, &[b"nilReason"], stats)?;
+    if let Some(reason) = attr_value(doc, wrapper, input, b"nilReason", stats)? {
+        if reason.is_empty()
+            || reason.len() > MAX_SCALAR_BYTES
+            || first_child(doc, wrapper).is_some()
+        {
+            return Err(err(DecodeFailure::InvalidValue, *stats));
+        }
+        return Ok(crate::Cloud::Nil {
+            reason_uri: Some(
+                String::from_utf8(reason.to_vec())
+                    .map_err(|_| err(DecodeFailure::InvalidValue, *stats))?,
+            ),
+        });
+    }
+    let body = only_child(doc, wrapper, IWXXM, b"AerodromeCloudForecast", input, stats)?;
+    decode_cloud_body(doc, body, input, stats)
 }
 
 fn refuse(stats: &mut DecodeStats) {
@@ -538,12 +1102,19 @@ fn aerodrome(
     )?;
     require_gml_id(doc, slice, input, stats)?;
     check_attributes(doc, slice, input, &[], stats)?;
-    validate_aixm_slice_time(doc, slice, input, stats)?;
     let interpretation = unique_child(doc, slice, AIXM, b"interpretation", input, stats)?;
     check_attributes(doc, interpretation, input, &[], stats)?;
-    if scalar_text(doc, interpretation, input, stats)?.as_slice() != b"BASELINE" {
-        refuse(stats);
-        return Err(err(DecodeFailure::UnsupportedConstruct, *stats));
+    match scalar_text(doc, interpretation, input, stats)?.as_slice() {
+        b"BASELINE" => validate_aixm_slice_time(doc, slice, input, stats)?,
+        b"SNAPSHOT" => validate_aixm_snapshot_time(doc, slice, input, stats)?,
+        _ => {
+            refuse(stats);
+            return Err(DecodeError {
+                failure: DecodeFailure::UnsupportedConstruct,
+                stats: *stats,
+                context: "aixm-interpretation",
+            });
+        }
     }
     let designator = unique_child(doc, slice, AIXM, b"designator", input, stats)?;
     check_attributes(doc, designator, input, &[], stats)?;
@@ -552,6 +1123,25 @@ fn aerodrome(
         return Err(err(DecodeFailure::InvalidValue, *stats));
     }
     String::from_utf8(raw).map_err(|_| err(DecodeFailure::InvalidValue, *stats))
+}
+
+fn validate_aixm_snapshot_time(
+    doc: &oa_xml::Doc<'_>,
+    slice: usize,
+    input: &[u8],
+    stats: &mut DecodeStats,
+) -> Result<(), DecodeError> {
+    let valid = unique_child(doc, slice, GML, b"validTime", input, stats)?;
+    check_attributes(doc, valid, input, &[], stats)?;
+    if first_child(doc, valid).is_some() {
+        refuse(stats);
+        return Err(DecodeError {
+            failure: DecodeFailure::UnsupportedConstruct,
+            stats: *stats,
+            context: "snapshot-validTime",
+        });
+    }
+    no_significant_text(doc, valid, input, stats)
 }
 
 fn validate_aixm_slice_time(
@@ -865,6 +1455,13 @@ fn decode_observation(
     let mut dewpoint_temperature = None;
     let mut qnh = None;
     let mut surface_wind = None;
+    let mut visibility = None;
+    let mut rvr = Vec::with_capacity(MAX_RVR_ITEMS);
+    let mut present_weather = Vec::with_capacity(MAX_PRESENT_WEATHER);
+    let mut cloud = None;
+    let mut recent_weather = Vec::with_capacity(MAX_RECENT_WEATHER);
+    let mut wind_shear = None;
+    let mut wind_shear_nil_reason_uri = None;
     let mut next_field = 0u8;
     let mut child = first_child(doc, ix);
     while let Some(field) = child {
@@ -911,9 +1508,71 @@ fn decode_observation(
                 surface_wind = Some(decode_surface_wind(doc, field, input, stats)?);
                 next_field = 4;
             }
+            b"visibility" if (4..=5).contains(&next_field) => {
+                if visibility.is_some() {
+                    return Err(err(DecodeFailure::InvalidValue, *stats));
+                }
+                visibility = Some(decode_visibility(doc, field, input, stats)?);
+                next_field = 5;
+            }
+            b"rvr" if (4..=6).contains(&next_field) => {
+                if rvr.len() >= MAX_RVR_ITEMS {
+                    refuse(stats);
+                    return Err(err(DecodeFailure::Limit, *stats));
+                }
+                rvr.push(decode_rvr(doc, field, input, stats)?);
+                next_field = 6;
+            }
+            b"presentWeather" if (4..=7).contains(&next_field) => {
+                if present_weather.len() >= MAX_PRESENT_WEATHER {
+                    refuse(stats);
+                    return Err(err(DecodeFailure::Limit, *stats));
+                }
+                present_weather.push(decode_weather(doc, field, input, stats)?);
+                next_field = 7;
+            }
+            b"cloud" if (4..=8).contains(&next_field) => {
+                if cloud.is_some() {
+                    return Err(err(DecodeFailure::InvalidValue, *stats));
+                }
+                cloud = Some(decode_cloud(doc, field, input, stats)?);
+                next_field = 8;
+            }
+            b"recentWeather" if (4..=9).contains(&next_field) => {
+                if recent_weather.len() >= MAX_RECENT_WEATHER {
+                    refuse(stats);
+                    return Err(err(DecodeFailure::Limit, *stats));
+                }
+                recent_weather.push(decode_weather(doc, field, input, stats)?);
+                next_field = 9;
+            }
+            b"windShear" if next_field <= 9 => {
+                if wind_shear.is_some() {
+                    return Err(err(DecodeFailure::InvalidValue, *stats));
+                }
+                let (value, nil_reason) = decode_wind_shear(doc, field, input, stats)?;
+                wind_shear = value;
+                wind_shear_nil_reason_uri = nil_reason;
+                next_field = 10;
+            }
             _ => {
                 refuse(stats);
-                return Err(err(DecodeFailure::UnsupportedConstruct, *stats));
+                let context = match name(doc, field, input)? {
+                    b"seaCondition" => "observation.seaCondition",
+                    b"recentWeather" => "observation.recentWeather",
+                    b"windShear" => "observation.windShear",
+                    b"extension" => "observation.extension",
+                    b"visibility" => "observation.visibility",
+                    b"rvr" => "observation.rvr",
+                    b"presentWeather" => "observation.presentWeather",
+                    b"cloud" => "observation.cloud",
+                    _ => "observation.unknown-child",
+                };
+                return Err(DecodeError {
+                    failure: DecodeFailure::UnsupportedConstruct,
+                    stats: *stats,
+                    context,
+                });
             }
         }
         child = next_sibling(doc, field);
@@ -925,9 +1584,16 @@ fn decode_observation(
     {
         return Err(err(DecodeFailure::MissingRequiredField, *stats));
     }
-    if !cavok {
-        refuse(stats);
-        return Err(err(DecodeFailure::UnsupportedConstruct, *stats));
+    if cavok
+        && (visibility.is_some()
+            || !rvr.is_empty()
+            || !present_weather.is_empty()
+            || cloud.is_some()
+            || !recent_weather.is_empty()
+            || wind_shear.is_some()
+            || wind_shear_nil_reason_uri.is_some())
+    {
+        return Err(err(DecodeFailure::InvalidValue, *stats));
     }
     let wind = surface_wind.ok_or_else(|| err(DecodeFailure::MissingRequiredField, *stats))?;
     Ok(NilValueObservation::Observed(Observation {
@@ -937,16 +1603,811 @@ fn decode_observation(
         wind_speed: wind.speed,
         wind_gust: wind.gust,
         variable_wind_direction: wind.variable_direction,
-        prevailing_visibility: None,
-        prevailing_visibility_operator: None,
-        minimum_visibility: None,
-        minimum_visibility_direction: None,
+        prevailing_visibility: visibility.as_ref().and_then(|v| v.0.clone()),
+        prevailing_visibility_operator: visibility.as_ref().and_then(|v| v.1),
+        minimum_visibility: visibility.as_ref().and_then(|v| v.2.clone()),
+        minimum_visibility_direction: visibility.and_then(|v| v.3),
         air_temperature,
         dewpoint_temperature,
         qnh,
-        present_weather: Vec::<WeatherCode>::new(),
-        cloud: None,
+        present_weather,
+        recent_weather,
+        runway_visual_ranges: rvr,
+        wind_shear,
+        wind_shear_nil_reason_uri,
+        cloud,
     }))
+}
+
+type VisibilityFields = (
+    Option<NilValue>,
+    Option<RelationalOperator>,
+    Option<NilValue>,
+    Option<NilValue>,
+);
+
+fn decode_visibility(
+    doc: &oa_xml::Doc<'_>,
+    wrapper: usize,
+    input: &[u8],
+    stats: &mut DecodeStats,
+) -> Result<VisibilityFields, DecodeError> {
+    check_attributes(doc, wrapper, input, &[b"nilReason"], stats)?;
+    if let Some(reason) = attr_value(doc, wrapper, input, b"nilReason", stats)? {
+        if first_child(doc, wrapper).is_some()
+            || reason.is_empty()
+            || reason.len() > MAX_SCALAR_BYTES
+        {
+            return Err(err(DecodeFailure::InvalidValue, *stats));
+        }
+        no_significant_text(doc, wrapper, input, stats)?;
+        return Ok((
+            Some(NilValue::Nil {
+                reason_uri: Some(
+                    String::from_utf8(reason.to_vec())
+                        .map_err(|_| err(DecodeFailure::InvalidValue, *stats))?,
+                ),
+            }),
+            None,
+            None,
+            None,
+        ));
+    }
+    let value = only_child(
+        doc,
+        wrapper,
+        IWXXM,
+        b"AerodromeHorizontalVisibility",
+        input,
+        stats,
+    )?;
+    check_attributes(doc, value, input, &[], stats)?;
+    no_significant_text(doc, value, input, stats)?;
+    let mut previous = 0u8;
+    let mut prevailing = None;
+    let mut operator = None;
+    let mut minimum = None;
+    let mut direction = None;
+    let mut child = first_child(doc, value);
+    while let Some(ix) = child {
+        work(stats)?;
+        if !elem_is(doc, ix, input, IWXXM)? {
+            refuse(stats);
+            return Err(DecodeError {
+                failure: DecodeFailure::UnsupportedConstruct,
+                stats: *stats,
+                context: "visibility-child",
+            });
+        }
+        match name(doc, ix, input)? {
+            b"prevailingVisibility" if previous == 0 => {
+                prevailing = Some(measure_value(
+                    doc,
+                    ix,
+                    input,
+                    QuantityUnit::Meter,
+                    b"m",
+                    stats,
+                )?);
+                previous = 1;
+            }
+            b"prevailingVisibilityOperator" if previous == 1 => {
+                if matches!(prevailing.as_ref(), Some(NilValue::Nil { .. })) {
+                    return Err(err(DecodeFailure::InvalidValue, *stats));
+                }
+                operator = Some(read_operator(doc, ix, input, stats)?);
+                previous = 2;
+            }
+            b"minimumVisibility" if previous <= 2 => {
+                minimum = Some(measure_value(
+                    doc,
+                    ix,
+                    input,
+                    QuantityUnit::Meter,
+                    b"m",
+                    stats,
+                )?);
+                previous = 3;
+            }
+            b"minimumVisibilityDirection" if previous <= 3 => {
+                direction = Some(measure_value(
+                    doc,
+                    ix,
+                    input,
+                    QuantityUnit::Degree,
+                    b"deg",
+                    stats,
+                )?);
+                previous = 4;
+            }
+            _ => {
+                refuse(stats);
+                return Err(DecodeError {
+                    failure: DecodeFailure::UnsupportedConstruct,
+                    stats: *stats,
+                    context: "visibility-child",
+                });
+            }
+        }
+        child = next_sibling(doc, ix);
+    }
+    if prevailing.is_none() {
+        return Err(DecodeError {
+            failure: DecodeFailure::MissingRequiredField,
+            stats: *stats,
+            context: "observation.visibility.prevailingVisibility",
+        });
+    }
+    Ok((prevailing, operator, minimum, direction))
+}
+
+fn decode_weather(
+    doc: &oa_xml::Doc<'_>,
+    elem: usize,
+    input: &[u8],
+    stats: &mut DecodeStats,
+) -> Result<WeatherCode, DecodeError> {
+    check_code_attributes(doc, elem, input, stats)?;
+    if let Some(reason) = attr_value(doc, elem, input, b"nilReason", stats)? {
+        if reason.is_empty()
+            || reason.len() > MAX_SCALAR_BYTES
+            || first_child(doc, elem).is_some()
+            || xlink_href(doc, elem, input, stats)?.is_some()
+        {
+            return Err(err(DecodeFailure::InvalidValue, *stats));
+        }
+        no_significant_text(doc, elem, input, stats)?;
+        return Ok(WeatherCode::Nil {
+            reason_uri: Some(
+                String::from_utf8(reason.to_vec())
+                    .map_err(|_| err(DecodeFailure::InvalidValue, *stats))?,
+            ),
+        });
+    }
+    let href = xlink_href(doc, elem, input, stats)?
+        .ok_or_else(|| err(DecodeFailure::MissingRequiredField, *stats))?;
+    if first_child(doc, elem).is_some() {
+        return Err(err(DecodeFailure::InvalidValue, *stats));
+    }
+    no_significant_text(doc, elem, input, stats)?;
+    Ok(WeatherCode::CodeUri(href))
+}
+
+fn check_code_attributes(
+    doc: &oa_xml::Doc<'_>,
+    elem: usize,
+    input: &[u8],
+    stats: &mut DecodeStats,
+) -> Result<(), DecodeError> {
+    let first = *doc
+        .elem_first_attr
+        .get(elem)
+        .ok_or_else(|| err(DecodeFailure::InvalidValue, *stats))?;
+    let count = *doc
+        .elem_attr_count
+        .get(elem)
+        .ok_or_else(|| err(DecodeFailure::InvalidValue, *stats))? as usize;
+    for i in first.0 as usize..first.0 as usize + count {
+        work(stats)?;
+        let prefix = span_bytes(
+            input,
+            *doc.attr_prefix
+                .get(i)
+                .ok_or_else(|| err(DecodeFailure::InvalidValue, *stats))?,
+        )
+        .map_err(|_| err(DecodeFailure::InvalidValue, *stats))?;
+        let local = span_bytes(
+            input,
+            *doc.attr_name
+                .get(i)
+                .ok_or_else(|| err(DecodeFailure::InvalidValue, *stats))?,
+        )
+        .map_err(|_| err(DecodeFailure::InvalidValue, *stats))?;
+        if prefix == b"xmlns" || prefix.is_empty() && local == b"xmlns" {
+            continue;
+        }
+        let ns = resolve_attr_ns(doc, oa_xml::ElemIx(elem as u32), oa_xml::AttrIx(i as u32));
+        let accepted = matches!(ns, Ns::None) && local == b"nilReason"
+            || matches!(ns, Ns::Uri(s) if oa_xml::ns_uri_bytes(doc, s) == Some(XLINK) && local == b"href");
+        if !accepted {
+            refuse(stats);
+            return Err(err(DecodeFailure::UnsupportedConstruct, *stats));
+        }
+        if attr_needs_decode(doc, oa_xml::AttrIx(i as u32)) {
+            return Err(err(DecodeFailure::InvalidValue, *stats));
+        }
+    }
+    Ok(())
+}
+
+fn xlink_href(
+    doc: &oa_xml::Doc<'_>,
+    elem: usize,
+    input: &[u8],
+    stats: &mut DecodeStats,
+) -> Result<Option<String>, DecodeError> {
+    let first = *doc
+        .elem_first_attr
+        .get(elem)
+        .ok_or_else(|| err(DecodeFailure::InvalidValue, *stats))?;
+    let count = *doc
+        .elem_attr_count
+        .get(elem)
+        .ok_or_else(|| err(DecodeFailure::InvalidValue, *stats))? as usize;
+    let mut href = None;
+    for i in first.0 as usize..first.0 as usize + count {
+        work(stats)?;
+        let local = span_bytes(
+            input,
+            *doc.attr_name
+                .get(i)
+                .ok_or_else(|| err(DecodeFailure::InvalidValue, *stats))?,
+        )
+        .map_err(|_| err(DecodeFailure::InvalidValue, *stats))?;
+        if local == b"href"
+            && matches!(resolve_attr_ns(doc, oa_xml::ElemIx(elem as u32), oa_xml::AttrIx(i as u32)), Ns::Uri(s) if oa_xml::ns_uri_bytes(doc, s) == Some(XLINK))
+        {
+            if href.is_some() || attr_needs_decode(doc, oa_xml::AttrIx(i as u32)) {
+                return Err(err(DecodeFailure::InvalidValue, *stats));
+            }
+            let span = *doc
+                .attr_value
+                .get(i)
+                .ok_or_else(|| err(DecodeFailure::InvalidValue, *stats))?;
+            let raw =
+                span_bytes(input, span).map_err(|_| err(DecodeFailure::InvalidValue, *stats))?;
+            if raw.is_empty() || raw.len() > MAX_SCALAR_BYTES {
+                return Err(err(DecodeFailure::Limit, *stats));
+            }
+            href = Some(
+                String::from_utf8(raw.to_vec())
+                    .map_err(|_| err(DecodeFailure::InvalidValue, *stats))?,
+            );
+        }
+    }
+    Ok(href)
+}
+
+fn decode_cloud(
+    doc: &oa_xml::Doc<'_>,
+    wrapper: usize,
+    input: &[u8],
+    stats: &mut DecodeStats,
+) -> Result<crate::Cloud, DecodeError> {
+    check_attributes(doc, wrapper, input, &[b"nilReason"], stats)?;
+    if let Some(reason) = attr_value(doc, wrapper, input, b"nilReason", stats)? {
+        if first_child(doc, wrapper).is_some()
+            || reason.is_empty()
+            || reason.len() > MAX_SCALAR_BYTES
+        {
+            return Err(err(DecodeFailure::InvalidValue, *stats));
+        }
+        no_significant_text(doc, wrapper, input, stats)?;
+        return Ok(crate::Cloud::Nil {
+            reason_uri: Some(
+                String::from_utf8(reason.to_vec())
+                    .map_err(|_| err(DecodeFailure::InvalidValue, *stats))?,
+            ),
+        });
+    }
+    let body = only_child(doc, wrapper, IWXXM, b"AerodromeCloud", input, stats)?;
+    decode_cloud_body(doc, body, input, stats)
+}
+
+fn decode_cloud_body(
+    doc: &oa_xml::Doc<'_>,
+    body: usize,
+    input: &[u8],
+    stats: &mut DecodeStats,
+) -> Result<crate::Cloud, DecodeError> {
+    check_attributes(doc, body, input, &[], stats)?;
+    no_significant_text(doc, body, input, stats)?;
+    let mut layers = Vec::with_capacity(crate::MAX_CLOUD_LAYERS);
+    let mut vertical_visibility = None;
+    let mut child = first_child(doc, body);
+    while let Some(ix) = child {
+        work(stats)?;
+        if !elem_is(doc, ix, input, IWXXM)? {
+            refuse(stats);
+            return Err(DecodeError {
+                failure: DecodeFailure::UnsupportedConstruct,
+                stats: *stats,
+                context: "cloud-child",
+            });
+        }
+        match name(doc, ix, input)? {
+            b"layer" if layers.len() < crate::MAX_CLOUD_LAYERS => {
+                let layer = only_child(doc, ix, IWXXM, b"CloudLayer", input, stats)?;
+                check_attributes(doc, layer, input, &[], stats)?;
+                no_significant_text(doc, layer, input, stats)?;
+                let mut amount = None;
+                let mut base = None;
+                let mut cloud_type_uri = None;
+                let mut cloud_type_nil_reason_uri = None;
+                let mut field = first_child(doc, layer);
+                let mut rank = 0;
+                while let Some(item) = field {
+                    if !elem_is(doc, item, input, IWXXM)? {
+                        refuse(stats);
+                        return Err(DecodeError {
+                            failure: DecodeFailure::UnsupportedConstruct,
+                            stats: *stats,
+                            context: "cloud-layer-child",
+                        });
+                    }
+                    match name(doc, item, input)? {
+                        b"amount" if rank == 0 => {
+                            check_code_attributes(doc, item, input, stats)?;
+                            amount = Some(match decode_code_uri(doc, item, input, stats)? {
+                                Some(uri) => crate::CloudAmount::CodeUri(uri),
+                                None => crate::CloudAmount::Nil {
+                                    reason_uri: attr_value(doc, item, input, b"nilReason", stats)?
+                                        .map(|v| {
+                                            String::from_utf8(v.to_vec()).map_err(|_| {
+                                                err(DecodeFailure::InvalidValue, *stats)
+                                            })
+                                        })
+                                        .transpose()?,
+                                },
+                            });
+                            rank = 1;
+                        }
+                        b"base" if rank <= 1 => {
+                            base = Some(measure_value_units(
+                                doc,
+                                item,
+                                input,
+                                &[(b"[ft_i]", QuantityUnit::Foot), (b"m", QuantityUnit::Meter)],
+                                stats,
+                            )?);
+                            rank = 2;
+                        }
+                        b"cloudType" if rank <= 2 => {
+                            check_code_attributes(doc, item, input, stats)?;
+                            cloud_type_uri = decode_code_uri(doc, item, input, stats)?;
+                            cloud_type_nil_reason_uri =
+                                attr_value(doc, item, input, b"nilReason", stats)?
+                                    .map(|value| {
+                                        String::from_utf8(value.to_vec())
+                                            .map_err(|_| err(DecodeFailure::InvalidValue, *stats))
+                                    })
+                                    .transpose()?;
+                            rank = 3;
+                        }
+                        _ => {
+                            refuse(stats);
+                            return Err(DecodeError {
+                                failure: DecodeFailure::UnsupportedConstruct,
+                                stats: *stats,
+                                context: "cloud-layer-child",
+                            });
+                        }
+                    }
+                    field = next_sibling(doc, item);
+                }
+                layers.push(crate::CloudLayer {
+                    amount: amount
+                        .ok_or_else(|| err(DecodeFailure::MissingRequiredField, *stats))?,
+                    base: base.ok_or_else(|| err(DecodeFailure::MissingRequiredField, *stats))?,
+                    cloud_type_uri,
+                    cloud_type_nil_reason_uri,
+                });
+            }
+            b"verticalVisibility" if vertical_visibility.is_none() && layers.is_empty() => {
+                vertical_visibility = Some(measure_value_units(
+                    doc,
+                    ix,
+                    input,
+                    &[(b"[ft_i]", QuantityUnit::Foot), (b"m", QuantityUnit::Meter)],
+                    stats,
+                )?);
+            }
+            _ => {
+                refuse(stats);
+                return Err(DecodeError {
+                    failure: DecodeFailure::UnsupportedConstruct,
+                    stats: *stats,
+                    context: "cloud-child",
+                });
+            }
+        }
+        child = next_sibling(doc, ix);
+    }
+    Ok(crate::Cloud::Observed {
+        vertical_visibility,
+        layers,
+    })
+}
+
+fn decode_code_uri(
+    doc: &oa_xml::Doc<'_>,
+    elem: usize,
+    input: &[u8],
+    stats: &mut DecodeStats,
+) -> Result<Option<String>, DecodeError> {
+    if let Some(reason) = attr_value(doc, elem, input, b"nilReason", stats)? {
+        if reason.is_empty()
+            || reason.len() > MAX_SCALAR_BYTES
+            || xlink_href(doc, elem, input, stats)?.is_some()
+            || first_child(doc, elem).is_some()
+        {
+            return Err(err(DecodeFailure::InvalidValue, *stats));
+        }
+        no_significant_text(doc, elem, input, stats)?;
+        return Ok(None);
+    }
+    if first_child(doc, elem).is_some() {
+        return Err(err(DecodeFailure::InvalidValue, *stats));
+    }
+    no_significant_text(doc, elem, input, stats)?;
+    xlink_href(doc, elem, input, stats)?
+        .map(Some)
+        .ok_or_else(|| err(DecodeFailure::MissingRequiredField, *stats))
+}
+
+fn decode_rvr(
+    doc: &oa_xml::Doc<'_>,
+    wrapper: usize,
+    input: &[u8],
+    stats: &mut DecodeStats,
+) -> Result<RunwayVisualRange, DecodeError> {
+    check_attributes(doc, wrapper, input, &[], stats)?;
+    let body = only_child(
+        doc,
+        wrapper,
+        IWXXM,
+        b"AerodromeRunwayVisualRange",
+        input,
+        stats,
+    )?;
+    check_attributes(doc, body, input, &[b"pastTendency"], stats)?;
+    no_significant_text(doc, body, input, stats)?;
+    let tendency = attr_value(doc, body, input, b"pastTendency", stats)?
+        .map(|v| match v {
+            b"UPWARD" | b"DOWNWARD" | b"NO_CHANGE" | b"MISSING_VALUE" => {
+                String::from_utf8(v.to_vec()).map_err(|_| err(DecodeFailure::InvalidValue, *stats))
+            }
+            _ => Err(err(DecodeFailure::InvalidValue, *stats)),
+        })
+        .transpose()?;
+    let mut runway = None;
+    let mut mean = None;
+    let mut mean_operator = None;
+    let mut rank = 0u8;
+    let mut field = first_child(doc, body);
+    while let Some(ix) = field {
+        match name(doc, ix, input)? {
+            b"runway" if runway.is_none() && rank == 0 => {
+                runway = Some(decode_runway(doc, ix, input, stats)?);
+                rank = 1;
+            }
+            b"meanRVR" if mean.is_none() && rank <= 1 => {
+                mean = Some(measure_value(
+                    doc,
+                    ix,
+                    input,
+                    QuantityUnit::Meter,
+                    b"m",
+                    stats,
+                )?);
+                rank = 2;
+            }
+            b"meanRVROperator" if mean.is_some() && mean_operator.is_none() && rank <= 2 => {
+                mean_operator = Some(read_operator(doc, ix, input, stats)?);
+                rank = 3;
+            }
+            _ => {
+                refuse(stats);
+                return Err(DecodeError {
+                    failure: DecodeFailure::UnsupportedConstruct,
+                    stats: *stats,
+                    context: "rvr-child",
+                });
+            }
+        }
+        field = next_sibling(doc, ix);
+    }
+    let mean_range = mean.ok_or_else(|| err(DecodeFailure::MissingRequiredField, *stats))?;
+    if mean_operator.is_some() && matches!(mean_range, NilValue::Nil { .. }) {
+        return Err(err(DecodeFailure::InvalidValue, *stats));
+    }
+    let (runway_designator, runway_nil_reason_uri) =
+        runway.ok_or_else(|| err(DecodeFailure::MissingRequiredField, *stats))?;
+    Ok(RunwayVisualRange {
+        runway_designator,
+        runway_nil_reason_uri,
+        mean_range,
+        mean_range_operator: mean_operator,
+        past_tendency: tendency,
+    })
+}
+
+fn decode_runway(
+    doc: &oa_xml::Doc<'_>,
+    wrapper: usize,
+    input: &[u8],
+    stats: &mut DecodeStats,
+) -> Result<(Option<String>, Option<String>), DecodeError> {
+    check_attributes(doc, wrapper, input, &[b"nilReason"], stats)?;
+    if let Some(reason) = attr_value(doc, wrapper, input, b"nilReason", stats)? {
+        if reason.is_empty()
+            || reason.len() > MAX_SCALAR_BYTES
+            || first_child(doc, wrapper).is_some()
+        {
+            return Err(err(DecodeFailure::InvalidValue, *stats));
+        }
+        no_significant_text(doc, wrapper, input, stats)?;
+        return Ok((
+            None,
+            Some(
+                String::from_utf8(reason.to_vec())
+                    .map_err(|_| err(DecodeFailure::InvalidValue, *stats))?,
+            ),
+        ));
+    }
+    let feature = only_child(doc, wrapper, AIXM, b"RunwayDirection", input, stats)?;
+    let slice = only_child(
+        doc,
+        unique_child(doc, feature, AIXM, b"timeSlice", input, stats)?,
+        AIXM,
+        b"RunwayDirectionTimeSlice",
+        input,
+        stats,
+    )?;
+    let valid = unique_child(doc, slice, GML, b"validTime", input, stats)?;
+    no_significant_text(doc, valid, input, stats)?;
+    if first_child(doc, valid).is_some() {
+        refuse(stats);
+        return Err(DecodeError {
+            failure: DecodeFailure::UnsupportedConstruct,
+            stats: *stats,
+            context: "runway-validTime",
+        });
+    }
+    let interpretation = unique_child(doc, slice, AIXM, b"interpretation", input, stats)?;
+    if scalar_text(doc, interpretation, input, stats)?.as_slice() != b"SNAPSHOT" {
+        return Err(err(DecodeFailure::UnsupportedConstruct, *stats));
+    }
+    let d = unique_child(doc, slice, AIXM, b"designator", input, stats)?;
+    let raw = scalar_text(doc, d, input, stats)?;
+    if raw.len() > MAX_SCALAR_BYTES {
+        return Err(err(DecodeFailure::Limit, *stats));
+    }
+    Ok((
+        Some(String::from_utf8(raw).map_err(|_| err(DecodeFailure::InvalidValue, *stats))?),
+        None,
+    ))
+}
+
+fn decode_wind_shear(
+    doc: &oa_xml::Doc<'_>,
+    wrapper: usize,
+    input: &[u8],
+    stats: &mut DecodeStats,
+) -> Result<(Option<WindShear>, Option<String>), DecodeError> {
+    check_attributes(doc, wrapper, input, &[b"nilReason"], stats)?;
+    if let Some(reason) = attr_value(doc, wrapper, input, b"nilReason", stats)? {
+        if reason.is_empty()
+            || reason.len() > MAX_SCALAR_BYTES
+            || first_child(doc, wrapper).is_some()
+        {
+            return Err(err(DecodeFailure::InvalidValue, *stats));
+        }
+        no_significant_text(doc, wrapper, input, stats)?;
+        return Ok((
+            None,
+            Some(
+                String::from_utf8(reason.to_vec())
+                    .map_err(|_| err(DecodeFailure::InvalidValue, *stats))?,
+            ),
+        ));
+    }
+    let body = only_child(doc, wrapper, IWXXM, b"AerodromeWindShear", input, stats)?;
+    check_attributes(doc, body, input, &[b"allRunways"], stats)?;
+    no_significant_text(doc, body, input, stats)?;
+    let all = match attr_value(doc, body, input, b"allRunways", stats)? {
+        Some(b"true") | Some(b"1") => true,
+        Some(b"false") | Some(b"0") | None => false,
+        _ => return Err(err(DecodeFailure::InvalidValue, *stats)),
+    };
+    let mut runways = Vec::with_capacity(4);
+    let mut child = first_child(doc, body);
+    while let Some(ix) = child {
+        if name(doc, ix, input)? != b"runway"
+            || !elem_is(doc, ix, input, IWXXM)?
+            || runways.len() >= 4
+        {
+            refuse(stats);
+            return Err(DecodeError {
+                failure: DecodeFailure::UnsupportedConstruct,
+                stats: *stats,
+                context: "windShear-runway",
+            });
+        }
+        let (designation, nil_reason) = decode_runway(doc, ix, input, stats)?;
+        if nil_reason.is_some() {
+            refuse(stats);
+            return Err(DecodeError {
+                failure: DecodeFailure::UnsupportedConstruct,
+                stats: *stats,
+                context: "windShear.runway.nil",
+            });
+        }
+        if let Some(s) = designation {
+            runways.push(s);
+        }
+        child = next_sibling(doc, ix);
+    }
+    if !all && runways.is_empty() {
+        return Err(err(DecodeFailure::MissingRequiredField, *stats));
+    }
+    Ok((
+        Some(WindShear {
+            all_runways: all,
+            runway_designators: runways,
+        }),
+        None,
+    ))
+}
+
+fn decode_trend(
+    doc: &oa_xml::Doc<'_>,
+    wrapper: usize,
+    input: &[u8],
+    stats: &mut DecodeStats,
+) -> Result<TrendForecast, DecodeError> {
+    check_attributes(doc, wrapper, input, &[], stats)?;
+    let body = only_child(
+        doc,
+        wrapper,
+        IWXXM,
+        b"MeteorologicalAerodromeTrendForecast",
+        input,
+        stats,
+    )?;
+    require_gml_id(doc, body, input, stats)?;
+    check_attributes(
+        doc,
+        body,
+        input,
+        &[b"changeIndicator", b"cloudAndVisibilityOK"],
+        stats,
+    )?;
+    no_significant_text(doc, body, input, stats)?;
+    let change = match attr_value(doc, body, input, b"changeIndicator", stats)? {
+        Some(b"BECOMING") => TrendChange::Becoming,
+        Some(b"TEMPORARY_FLUCTUATIONS") => TrendChange::TemporaryFluctuations,
+        Some(b"FROM") => TrendChange::From,
+        _ => return Err(err(DecodeFailure::InvalidValue, *stats)),
+    };
+    let mut time = None;
+    let mut indicator = None;
+    let mut visibility = None;
+    let mut operator = None;
+    let mut weather = Vec::with_capacity(MAX_PRESENT_WEATHER);
+    let mut cloud = None;
+    let mut child = first_child(doc, body);
+    let mut stage = 0;
+    while let Some(ix) = child {
+        if !elem_is(doc, ix, input, IWXXM)? {
+            refuse(stats);
+            return Err(DecodeError {
+                failure: DecodeFailure::UnsupportedConstruct,
+                stats: *stats,
+                context: "trend-child",
+            });
+        }
+        match name(doc, ix, input)? {
+            b"phenomenonTime" if stage == 0 => {
+                time = Some(time_period_or_instant(doc, ix, input, stats)?);
+                stage = 1;
+            }
+            b"timeIndicator" if stage <= 1 => {
+                indicator = Some(match scalar_text(doc, ix, input, stats)?.as_slice() {
+                    b"AT" => TrendTimeIndicator::At,
+                    b"UNTIL" => TrendTimeIndicator::Until,
+                    _ => return Err(err(DecodeFailure::InvalidValue, *stats)),
+                });
+                stage = 2;
+            }
+            b"prevailingVisibility" if stage <= 2 => {
+                visibility = Some(measure_value(
+                    doc,
+                    ix,
+                    input,
+                    QuantityUnit::Meter,
+                    b"m",
+                    stats,
+                )?);
+                stage = 3;
+            }
+            b"prevailingVisibilityOperator" if stage <= 3 => {
+                operator = Some(read_operator(doc, ix, input, stats)?);
+                stage = 4;
+            }
+            b"weather" if stage <= 4 => {
+                if weather.len() >= MAX_PRESENT_WEATHER {
+                    return Err(err(DecodeFailure::Limit, *stats));
+                }
+                weather.push(decode_weather(doc, ix, input, stats)?);
+                stage = 5;
+            }
+            b"cloud" if stage <= 5 && cloud.is_none() => {
+                cloud = Some(decode_cloud(doc, ix, input, stats)?);
+                stage = 6;
+            }
+            _ => {
+                refuse(stats);
+                return Err(DecodeError {
+                    failure: DecodeFailure::UnsupportedConstruct,
+                    stats: *stats,
+                    context: "trend-child",
+                });
+            }
+        }
+        child = next_sibling(doc, ix);
+    }
+    let (start, end) = time.ok_or_else(|| err(DecodeFailure::MissingRequiredField, *stats))?;
+    Ok(TrendForecast {
+        change,
+        time_start_ms: start,
+        time_end_ms: end,
+        time_indicator: indicator,
+        prevailing_visibility: visibility,
+        prevailing_visibility_operator: operator,
+        weather,
+        cloud,
+    })
+}
+
+fn time_period_or_instant(
+    doc: &oa_xml::Doc<'_>,
+    wrapper: usize,
+    input: &[u8],
+    stats: &mut DecodeStats,
+) -> Result<(i64, Option<i64>), DecodeError> {
+    check_attributes(doc, wrapper, input, &[], stats)?;
+    let Some(node) = first_child(doc, wrapper) else {
+        return Err(err(DecodeFailure::MissingRequiredField, *stats));
+    };
+    if next_sibling(doc, node).is_some() {
+        return Err(err(DecodeFailure::InvalidValue, *stats));
+    }
+    if elem_is(doc, node, input, GML)? && name(doc, node, input)? == b"TimeInstant" {
+        require_gml_id(doc, node, input, stats)?;
+        let p = unique_child(doc, node, GML, b"timePosition", input, stats)?;
+        return Ok((
+            parse_time(&scalar_text(doc, p, input, stats)?)
+                .ok_or_else(|| err(DecodeFailure::InvalidValue, *stats))?,
+            None,
+        ));
+    }
+    if elem_is(doc, node, input, GML)? && name(doc, node, input)? == b"TimePeriod" {
+        require_gml_id(doc, node, input, stats)?;
+        let (a, b) = exact_children2(
+            doc,
+            node,
+            GML,
+            b"beginPosition",
+            b"endPosition",
+            input,
+            stats,
+        )?;
+        let start = parse_time(&scalar_text(doc, a, input, stats)?)
+            .ok_or_else(|| err(DecodeFailure::InvalidValue, *stats))?;
+        let end = parse_time(&scalar_text(doc, b, input, stats)?)
+            .ok_or_else(|| err(DecodeFailure::InvalidValue, *stats))?;
+        if end < start {
+            return Err(err(DecodeFailure::InvalidValue, *stats));
+        }
+        return Ok((start, Some(end)));
+    }
+    refuse(stats);
+    Err(DecodeError {
+        failure: DecodeFailure::UnsupportedConstruct,
+        stats: *stats,
+        context: "phenomenonTime",
+    })
 }
 
 struct DecodedWind {
@@ -983,7 +2444,19 @@ fn decode_surface_wind(
         });
     }
     let ix = only_child(doc, wrapper, IWXXM, b"AerodromeSurfaceWind", input, stats)?;
-    require_gml_id(doc, ix, input, stats)?;
+    decode_surface_wind_body(doc, ix, input, stats, b"AerodromeSurfaceWind")
+}
+
+fn decode_surface_wind_body(
+    doc: &oa_xml::Doc<'_>,
+    ix: usize,
+    input: &[u8],
+    stats: &mut DecodeStats,
+    body_name: &[u8],
+) -> Result<DecodedWind, DecodeError> {
+    if !elem_is(doc, ix, input, IWXXM)? || name(doc, ix, input)? != body_name {
+        return Err(err(DecodeFailure::UnsupportedConstruct, *stats));
+    }
     no_significant_text(doc, ix, input, stats)?;
     check_attributes(doc, ix, input, &[b"variableWindDirection"], stats)?;
     let variable_direction = match attr_value(doc, ix, input, b"variableWindDirection", stats)? {
@@ -1171,6 +2644,12 @@ fn measure_value_units(
             return Err(err(DecodeFailure::InvalidValue, *stats));
         }
         QuantityUnit::Hectopascal if value.0 <= 0 => {
+            return Err(err(DecodeFailure::InvalidValue, *stats));
+        }
+        QuantityUnit::Degree if scaled < 0 || scaled > 360 * decimal_scale => {
+            return Err(err(DecodeFailure::InvalidValue, *stats));
+        }
+        QuantityUnit::Meter | QuantityUnit::Foot if scaled < 0 => {
             return Err(err(DecodeFailure::InvalidValue, *stats));
         }
         _ => {}
