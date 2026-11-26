@@ -41,6 +41,48 @@ class P010SyntheticGateTests(unittest.TestCase):
         path.write_bytes(data)
         return path
 
+    def cross_capture_summary(self, manifest_sha: str, scale: float = 1.0) -> dict:
+        profiles = [
+            {"name": "candidate-raw", "tracker_role": "candidate", "timing_profile": "fixed-10-30-120-v1", "publication_grid": None},
+            {"name": "replication-raw", "tracker_role": "replication", "timing_profile": "legacy-day-intervals", "publication_grid": None},
+        ]
+        public_output = {
+            "name": "fixed", "timing_profile": "fixed-10-30-120-v1", "rows": 10, "seconds": 2,
+            "digest": {"bytes": 1, "sha256": "1" * 64},
+            "canonical_rows": {"bytes": 2, "sha256": "2" * 64},
+            "profile_summary_sha256": "3" * 64,
+        }
+        claim = lambda metric, better, diff, lo, hi: (
+            f"CLAIM metric={metric} better={better} diff={diff * scale} lo={lo * scale} hi={hi * scale} "
+            f"verdict=none floor=0 oa3=1 pt3=1"
+        )
+        arms = [
+            {"name": "candidate-raw", "tracker_role": "candidate", "timing_profile": "fixed-10-30-120-v1", "publication_grid": None, "accounting": {}, "claims": [
+                claim("M1_median", "lower", 0.2, -0.2, 0.4),
+                claim("M5_speed_median", "lower", 0.02, -0.02, 0.04),
+                claim("M4t_300", "higher", 0.003, -0.003, 0.006),
+            ]},
+            {"name": "replication-raw", "tracker_role": "replication", "timing_profile": "legacy-day-intervals", "publication_grid": None, "accounting": {}, "claims": [
+                claim("M1_median", "lower", 0.1, -0.2, 0.3),
+                claim("M5_speed_median", "lower", 0.01, -0.02, 0.03),
+                claim("M4t_300", "higher", 0.002, -0.003, 0.005),
+            ]},
+        ]
+        return {
+            "schema": p010.AGGREGATE_SCHEMA, "day": p010.DAY, "measurement_status": "complete",
+            "qualification": "not-assessed; frozen-coverage-and-input-health-policy-required",
+            "window": {"warmup_from": p010.WARMUP_FROM, "score_from": p010.SCORE_FROM, "score_to": p010.SCORE_TO, "interval": "half-open"},
+            "arms": arms, "cohort_comparability": [], "availability_interpretation": "synthetic", "interpretation": "synthetic",
+            "bindings": {
+                "driver_sha256": p010._sha(SCRIPT.read_bytes()), "manifest_sha256": manifest_sha,
+                "candidate_commit": "c" * 40, "replication_commit": p010.REPLICATION_TRACKER_COMMIT,
+                "replication_scorer_commit": "a" * 40, "replication_scorer_patch_sha256": "b" * 64,
+                "build_binary_sha256": {role: "e" * 64 for role in p010.BUILD_ROLES},
+                "public_archive_inventory_sha256": "7" * 64, "public_clip_sha256": "4" * 64, "public_oa_outputs": [public_output], "compare_profiles": profiles,
+                "health_eligibility": "unknown-not-assessed", "disclosure_eligibility": "unknown-not-assessed",
+            },
+        }
+
     def manifest(self) -> dict:
         tag = "2026-11-30"
         url = f"https://github.com/adsblol/globe_history_2026/releases/tag/{tag}"
@@ -128,6 +170,24 @@ class P010SyntheticGateTests(unittest.TestCase):
     def test_duplicate_json_keys_and_day_window_are_rejected(self) -> None:
         with self.assertRaises(ValueError):
             p010._object_no_duplicates([("day", "2026-11-30"), ("day", "2026-12-01")])
+
+    def test_cross_capture_comparison_is_aggregate_only_and_not_a_qualification(self) -> None:
+        project = self.cross_capture_summary("5" * 64)
+        outsider = self.cross_capture_summary("6" * 64, scale=1.1)
+        result = p010._compare_capture_summaries(project, outsider, "candidate-raw")
+        self.assertEqual(result["status"], "COMPARISON_COMPLETE")
+        self.assertEqual(result["metrics"]["M1_median"]["outsider_minus_project"], 0.020000000000000018)
+        self.assertEqual(result["metrics"]["M1_median"]["proposed_bound"], 0.25)
+        self.assertEqual(result["prediction_hit_miss"], "not-assessed-separately")
+        self.assertEqual(result["capture_close_match"], "not-assessed-pending-approved-statistic-health-and-disclosure-policy")
+        self.assertNotIn("private_cohorts", result)
+
+    def test_cross_capture_comparison_refuses_shared_source_mismatch(self) -> None:
+        project = self.cross_capture_summary("5" * 64)
+        outsider = self.cross_capture_summary("6" * 64)
+        outsider["bindings"]["candidate_commit"] = "d" * 40
+        with self.assertRaises(p010.Refused):
+            p010._compare_capture_summaries(project, outsider, "candidate-raw")
         self.assertEqual(p010._utc("2026-11-30T05:00:00Z", "warmup"), 1_796_014_800)
         with self.assertRaises(p010.Refused):
             p010._utc("2026-11-30T05:00:00.001Z", "warmup")

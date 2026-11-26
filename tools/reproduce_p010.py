@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the frozen P-010 public ADS-B arm or its private raw-SFDPS comparison.
+"""Run the P-010 public ADS-B arm, local raw-SFDPS comparison, or aggregate capture comparison.
 
 This is a narrow, offline coordinator. It accepts no shell fragments, downloads nothing, never
 opens an environment file, and preserves failed runs as INCOMPLETE. The exact manifest schema and
@@ -38,7 +38,8 @@ GUARD_SPEC.loader.exec_module(sealed_guard)
 SCHEMA = "openatca-p010-manifest-v3"
 REPORT_SCHEMA = "openatca-p010-run-report-v2"
 PUBLIC_SCHEMA = "openatca-p010-public-summary-v1"
-AGGREGATE_SCHEMA = "openatca-p010-aggregate-v2"
+AGGREGATE_SCHEMA = "openatca-p010-aggregate-v3"
+CROSS_CAPTURE_SCHEMA = "openatca-p010-cross-capture-comparison-v1"
 DAY = "2026-11-30"
 ARCHIVE_FROM = "2026-11-30T00:00:00Z"
 ARCHIVE_TO = "2026-12-01T00:00:00Z"
@@ -1631,7 +1632,7 @@ def _public_run(args: argparse.Namespace) -> dict[str, Any]:
         raise
 
 
-def _verify_public_run(public_dir: Path, doc: dict[str, Any], manifest_sha: str) -> tuple[Path, str]:
+def _verify_public_run(public_dir: Path, doc: dict[str, Any], manifest_sha: str) -> tuple[Path, str, dict[str, Any]]:
     _guard().check(public_dir)
     report_path = public_dir / "run-report.json"
     raw = _read_guarded(report_path, 256 * 1024)
@@ -1686,7 +1687,7 @@ def _verify_public_run(public_dir: Path, doc: dict[str, Any], manifest_sha: str)
         values = _kv_text(metadata, "public-window.txt")
         if values.get("profile") != arm_config["timing_profile"] or values.get("input") != "full_public_clip_loaded_and_split_once" or values.get("canonical_rows") != str(rows) or values.get("canonical_seconds") != str(seconds):
             raise Refused("public run output accounting does not reconcile")
-    return clip_path.resolve(strict=True), sha
+    return clip_path.resolve(strict=True), sha, summary
 
 
 def _compare_run(args: argparse.Namespace) -> dict[str, Any]:
@@ -1699,7 +1700,7 @@ def _compare_run(args: argparse.Namespace) -> dict[str, Any]:
     sfdps = Path(args.sfdps_dir)
     sfdps_files, sfdps_bytes = _measure_dir(sfdps, LIMITS["max_sfdps_files"], LIMITS["max_sfdps_bytes"])
     public_dir = Path(args.public_run_dir)
-    clip_path, clip_sha = _verify_public_run(public_dir, doc, manifest_sha)
+    clip_path, clip_sha, public_summary = _verify_public_run(public_dir, doc, manifest_sha)
     out = _prepare_out(args)
     report: dict[str, Any] = {"schema": REPORT_SCHEMA, "mode": "private-compare", "status": "INCOMPLETE", "qualification": "not-assessed; frozen-coverage-and-input-health-policy-required", "manifest_sha256": manifest_sha, "candidate_tracker_commit": doc["candidate"]["commit"], "replication_tracker_commit": doc["replication"]["commit"], "replication_scorer_commit": doc["replication_scorer"]["commit"], "replication_scorer_patch": {"base_commit": doc["replication_scorer_relation"]["base_commit"], "scorer_commit": doc["replication_scorer_relation"]["scorer_commit"], "changed_paths": doc["replication_scorer_relation"]["changed_paths"], "delta_sha256_private": doc["replication_scorer_relation"]["delta_sha256"], "review_sha256_private": doc["replication_scorer_relation"]["review_sha256"]}, "public_clip_sha256": clip_sha, "sfdps_files": sfdps_files, "sfdps_bytes": sfdps_bytes, "arms": [], "cohort_reconciliation": [], "failure": None}
     _write_report(out, report)
@@ -1761,6 +1762,27 @@ def _compare_run(args: argparse.Namespace) -> dict[str, Any]:
             "qualification": "not-assessed; frozen-coverage-and-input-health-policy-required",
             "window": {"warmup_from": WARMUP_FROM, "score_from": SCORE_FROM, "score_to": SCORE_TO, "interval": "half-open"},
             "arms": [{"name": arm["name"], "tracker_role": arm["tracker_role"], "timing_profile": arm["timing_profile"], "publication_grid": arm["publication_grid"], "accounting": arm["accounting"], "claims": arm["aggregate"]} for arm in report["arms"]],
+            "bindings": {
+                "driver_sha256": doc["driver_sha256"],
+                "manifest_sha256": manifest_sha,
+                "candidate_commit": doc["candidate"]["commit"],
+                "replication_commit": doc["replication"]["commit"],
+                "replication_scorer_commit": doc["replication_scorer"]["commit"],
+                "replication_scorer_patch_sha256": doc["replication_scorer_relation"]["delta_sha256"],
+                "build_binary_sha256": {role: doc["builds"][role]["binary_sha256"] for role in BUILD_ROLES},
+                "public_archive_inventory_sha256": doc["release"]["inventory_sha256"],
+                "public_clip_sha256": clip_sha,
+                "public_oa_outputs": [
+                    {key: arm[key] for key in ("name", "timing_profile", "rows", "seconds", "digest", "canonical_rows", "profile_summary_sha256")}
+                    for arm in public_summary["oa_arms"]
+                ],
+                "compare_profiles": [
+                    {key: arm[key] for key in ("name", "tracker_role", "timing_profile", "publication_grid")}
+                    for arm in report["arms"]
+                ],
+                "health_eligibility": "unknown-not-assessed",
+                "disclosure_eligibility": "unknown-not-assessed",
+            },
             "cohort_comparability": [{"publication_grid": item["publication_grid"], "public_eligibility_identity_equal": item["public_eligibility_identity_equal"], "eram_availability_identity_equal": item["eram_availability_identity_equal"], "common_available_intersection_computed": item["common_available_intersection_computed"]} for item in report["cohort_reconciliation"]],
             "availability_interpretation": "candidate-and-C-ERAM-available-cohorts-have-identical-private-identities" if all(item["eram_availability_identity_equal"] for item in report["cohort_reconciliation"]) else "availability-cohorts-differ; private identities retained; no common available intersection computed, so do not interpret as a common-availability matched subset",
             "interpretation": "authorized-aggregate-only; local-P010-comparison; not-P006-holdout; no-causal-or-safety-claim",
@@ -1780,6 +1802,199 @@ def _compare_run(args: argparse.Namespace) -> dict[str, Any]:
         raise
 
 
+def _read_cross_capture_summary(path: Path) -> dict[str, Any]:
+    raw = _read_guarded(path, 512 * 1024)
+    try:
+        summary = json.loads(raw.decode("utf-8", "strict"), object_pairs_hook=_object_no_duplicates, parse_constant=_reject_constant)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError) as exc:
+        raise Refused(f"cross-capture input is not strict bounded UTF-8 JSON: {exc}") from exc
+    expected = {"schema", "day", "measurement_status", "qualification", "window", "arms", "bindings", "cohort_comparability", "availability_interpretation", "interpretation"}
+    if not isinstance(summary, dict) or set(summary) != expected:
+        raise Refused("cross-capture input has an unexpected aggregate-summary field set")
+    if summary["schema"] != AGGREGATE_SCHEMA or summary["day"] != DAY or summary["measurement_status"] != "complete":
+        raise Refused("cross-capture input is not a complete summary from this P-010 schema and day")
+    if summary["qualification"] != "not-assessed; frozen-coverage-and-input-health-policy-required":
+        raise Refused("cross-capture input has an unexpected qualification state")
+    if summary["window"] != {"warmup_from": WARMUP_FROM, "score_from": SCORE_FROM, "score_to": SCORE_TO, "interval": "half-open"}:
+        raise Refused("cross-capture window binding does not match the fixed P-010 window")
+    bind = summary["bindings"]
+    bind_keys = {"driver_sha256", "manifest_sha256", "candidate_commit", "replication_commit", "replication_scorer_commit", "replication_scorer_patch_sha256", "build_binary_sha256", "public_archive_inventory_sha256", "public_clip_sha256", "public_oa_outputs", "compare_profiles", "health_eligibility", "disclosure_eligibility"}
+    if not isinstance(bind, dict) or set(bind) != bind_keys:
+        raise Refused("cross-capture input has an unexpected source/run binding field set")
+    if bind["driver_sha256"] != _sha(SCRIPT_PATH.read_bytes()):
+        raise Refused("cross-capture driver source differs from this comparator")
+    for key in ("driver_sha256", "manifest_sha256", "replication_scorer_patch_sha256", "public_archive_inventory_sha256", "public_clip_sha256"):
+        if not isinstance(bind[key], str) or not HEX64.fullmatch(bind[key]):
+            raise Refused(f"cross-capture binding {key} is not a lowercase SHA-256")
+    for key in ("candidate_commit", "replication_commit", "replication_scorer_commit"):
+        if not isinstance(bind[key], str) or not HEX40.fullmatch(bind[key]):
+            raise Refused(f"cross-capture binding {key} is not a lowercase commit ID")
+    if not isinstance(bind["build_binary_sha256"], dict) or set(bind["build_binary_sha256"]) != set(BUILD_ROLES):
+        raise Refused("cross-capture build bindings do not contain the exact P-010 build roles")
+    if any(not isinstance(value, str) or not HEX64.fullmatch(value) for value in bind["build_binary_sha256"].values()):
+        raise Refused("cross-capture build binding has a malformed binary hash")
+    if bind["health_eligibility"] != "unknown-not-assessed" or bind["disclosure_eligibility"] != "unknown-not-assessed":
+        raise Refused("cross-capture input must retain unresolved health and disclosure eligibility")
+    if not isinstance(bind["public_oa_outputs"], list) or not 1 <= len(bind["public_oa_outputs"]) <= 2:
+        raise Refused("cross-capture input lacks public tracker output bindings")
+    public_output_keys = {"name", "timing_profile", "rows", "seconds", "digest", "canonical_rows", "profile_summary_sha256"}
+    for output in bind["public_oa_outputs"]:
+        if not isinstance(output, dict) or set(output) != public_output_keys:
+            raise Refused("cross-capture public tracker output has an unexpected field set")
+        if not isinstance(output["name"], str) or output["timing_profile"] not in TIMING_PROFILES:
+            raise Refused("cross-capture public tracker output has an invalid name/profile")
+        for key in ("rows", "seconds"):
+            if not isinstance(output[key], int) or isinstance(output[key], bool) or output[key] < 0:
+                raise Refused("cross-capture public tracker output count is invalid")
+        for key in ("digest", "canonical_rows"):
+            item = output[key]
+            if not isinstance(item, dict) or set(item) != {"bytes", "sha256"} or not isinstance(item["bytes"], int) or isinstance(item["bytes"], bool) or item["bytes"] < 0 or not isinstance(item["sha256"], str) or not HEX64.fullmatch(item["sha256"]):
+                raise Refused("cross-capture public tracker output hash binding is invalid")
+        if not isinstance(output["profile_summary_sha256"], str) or not HEX64.fullmatch(output["profile_summary_sha256"]):
+            raise Refused("cross-capture public profile metadata hash is invalid")
+    if not isinstance(bind["compare_profiles"], list) or not 2 <= len(bind["compare_profiles"]) <= 4:
+        raise Refused("cross-capture input lacks compare-arm profiles")
+    profile_keys = {"name", "tracker_role", "timing_profile", "publication_grid"}
+    for profile in bind["compare_profiles"]:
+        if not isinstance(profile, dict) or set(profile) != profile_keys or profile["tracker_role"] not in {"candidate", "replication"} or profile["timing_profile"] not in TIMING_PROFILES or profile["publication_grid"] not in GRID_PROFILES:
+            raise Refused("cross-capture compare-arm profile binding is invalid")
+    if not isinstance(summary["arms"], list) or not 2 <= len(summary["arms"]) <= 4:
+        raise Refused("cross-capture input has no aggregate metric arms")
+    arm_keys = {"name", "tracker_role", "timing_profile", "publication_grid", "accounting", "claims"}
+    accounting_keys = {"qualification", "address_minute_opportunities", "no_active_leg_address_minutes", "eligible_address_minutes", "ambiguous_address_minute_candidates", "unusable_truth_address_minutes", "no_truth_address_minutes", "paired_position_time_rows", "available_address_minutes", "availability_denominator", "availability_percent", "tracker_measurements_before_window_filter", "tracker_measurements_after_warmup_filter", "adsb_bad_frames", "adsb_dropped_records", "adsb_sealed_drops", "sfdps_sealed_drops"}
+    expected_profiles: list[dict[str, Any]] = []
+    seen_arms: set[str] = set()
+    for arm in summary["arms"]:
+        if not isinstance(arm, dict) or set(arm) != arm_keys or arm["tracker_role"] not in {"candidate", "replication"} or arm["timing_profile"] not in TIMING_PROFILES or arm["publication_grid"] not in GRID_PROFILES:
+            raise Refused("cross-capture aggregate arm has an invalid schema or profile")
+        if not isinstance(arm["name"], str) or not ARM_NAME.fullmatch(arm["name"]) or arm["name"] in seen_arms:
+            raise Refused("cross-capture aggregate arm names are invalid or duplicated")
+        seen_arms.add(arm["name"])
+        expected_profiles.append({key: arm[key] for key in ("name", "tracker_role", "timing_profile", "publication_grid")})
+        accounting = arm["accounting"]
+        if not isinstance(accounting, dict) or set(accounting) != accounting_keys or accounting["qualification"] != summary["qualification"]:
+            raise Refused("cross-capture arm accounting has an unexpected aggregate-only schema")
+        for key, value in accounting.items():
+            if key == "qualification":
+                continue
+            if key == "availability_percent":
+                try:
+                    percent = float(value)
+                except (TypeError, ValueError) as exc:
+                    raise Refused("cross-capture arm availability percentage is invalid") from exc
+                if not math.isfinite(percent) or not 0.0 <= percent <= 100.0:
+                    raise Refused("cross-capture arm availability percentage is outside [0,100]")
+            elif not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise Refused("cross-capture arm accounting contains a non-count or negative value")
+        if not isinstance(arm["claims"], list) or len(arm["claims"]) != 3 or any(not isinstance(line, str) for line in arm["claims"]):
+            raise Refused("cross-capture aggregate arm claims are malformed")
+        normalized = _approved_aggregate("\n".join(arm["claims"]))
+        if normalized != arm["claims"]:
+            raise Refused("cross-capture claims are not canonical approved aggregate lines")
+    if bind["compare_profiles"] != expected_profiles:
+        raise Refused("cross-capture compare-profile binding differs from aggregate arm metadata")
+    cohort_keys = {"publication_grid", "public_eligibility_identity_equal", "eram_availability_identity_equal", "common_available_intersection_computed"}
+    if not isinstance(summary["cohort_comparability"], list) or len(summary["cohort_comparability"]) > 2:
+        raise Refused("cross-capture cohort status is malformed")
+    for item in summary["cohort_comparability"]:
+        if not isinstance(item, dict) or set(item) != cohort_keys or item["publication_grid"] not in {"raw", "sfdps-v1"} or any(not isinstance(item[key], bool) for key in cohort_keys - {"publication_grid"}):
+            raise Refused("cross-capture cohort status contains a non-aggregate or malformed value")
+    return summary
+
+
+def _claim_values(lines: list[str]) -> dict[str, dict[str, float]]:
+    values: dict[str, dict[str, float]] = {}
+    for line in lines:
+        fields = line.split()
+        parsed = {token.split("=", 1)[0]: token.split("=", 1)[1] for token in fields[1:]}
+        metric = parsed["metric"]
+        vals = {key: float(parsed[key]) for key in ("diff", "lo", "hi")}
+        if not all(math.isfinite(value) for value in vals.values()) or vals["lo"] > vals["hi"]:
+            raise Refused(f"cross-capture metric {metric} has non-finite or reversed interval data")
+        values[metric] = vals
+    return values
+
+
+def _sign(value: float) -> int:
+    return 1 if value > 0.0 else -1 if value < 0.0 else 0
+
+
+def _compare_capture_summaries(project: dict[str, Any], outsider: dict[str, Any], arm_name: str) -> dict[str, Any]:
+    # Do not treat per-run provenance, equal counts, or participant-held cohort hashes as
+    # cross-participant matched-cohort evidence. No approved private attestation is an input here.
+    pb, ob = project["bindings"], outsider["bindings"]
+    shared = ("driver_sha256", "candidate_commit", "replication_commit", "replication_scorer_commit", "replication_scorer_patch_sha256", "build_binary_sha256", "public_archive_inventory_sha256", "public_clip_sha256", "public_oa_outputs", "compare_profiles", "health_eligibility", "disclosure_eligibility")
+    mismatched = [key for key in shared if pb[key] != ob[key]]
+    if mismatched:
+        raise Refused("participant summaries differ in shared source/public-run/window/profile/health bindings: " + ", ".join(mismatched))
+    selected: list[dict[str, Any]] = []
+    for label, summary in (("project", project), ("outsider", outsider)):
+        matches = [arm for arm in summary["arms"] if arm["name"] == arm_name]
+        if len(matches) != 1:
+            raise Refused(f"{label} summary must contain exactly one selected arm {arm_name!r}")
+        item = matches[0]
+        if item["tracker_role"] != "candidate" or item["timing_profile"] != "fixed-10-30-120-v1":
+            raise Refused("selected comparison arm must bind the fixed candidate tracker profile")
+        selected.append(item)
+    left, right = selected
+    if (left["timing_profile"], left["publication_grid"]) != (right["timing_profile"], right["publication_grid"]):
+        raise Refused("selected participant arm profiles differ")
+    left_values, right_values = _claim_values(left["claims"]), _claim_values(right["claims"])
+    expected = {"M1_median": (0.25, 0.05), "M5_speed_median": (0.03, 0.05), "M4t_300": (0.005, 0.0)}
+    if set(left_values) != set(expected) or set(right_values) != set(expected):
+        raise Refused("selected participant arms do not carry the exact three primary metrics")
+    metrics: dict[str, Any] = {}
+    for metric, (absolute_floor, relative_fraction) in expected.items():
+        p, o = left_values[metric], right_values[metric]
+        delta = o["diff"] - p["diff"]
+        bound = max(absolute_floor, relative_fraction * abs(p["diff"]))
+        project_excludes_zero = p["lo"] > 0.0 or p["hi"] < 0.0
+        outsider_excludes_zero = o["lo"] > 0.0 or o["hi"] < 0.0
+        project_ci_sign = _sign(p["lo"]) if project_excludes_zero and p["lo"] > 0.0 else _sign(p["hi"]) if project_excludes_zero else 0
+        outsider_ci_sign = _sign(o["lo"]) if outsider_excludes_zero and o["lo"] > 0.0 else _sign(o["hi"]) if outsider_excludes_zero else 0
+        sign_same = _sign(p["diff"]) == _sign(o["diff"])
+        excludes_zero_same = project_excludes_zero == outsider_excludes_zero
+        ci_direction_same = not project_excludes_zero or not outsider_excludes_zero or project_ci_sign == outsider_ci_sign
+        metrics[metric] = {
+            "project_delta": p["diff"], "outsider_delta": o["diff"], "outsider_minus_project": delta,
+            "proposed_bound": bound, "within_proposed_bound": abs(delta) <= bound,
+            "project_interval": [p["lo"], p["hi"]], "outsider_interval": [o["lo"], o["hi"]],
+            "point_sign_same": sign_same, "interval_excludes_zero_same": excludes_zero_same,
+            "interval_direction_same_when_excluding_zero": ci_direction_same,
+            "descriptive_alignment": sign_same and excludes_zero_same and ci_direction_same,
+            "statistical_verdict": "not-assessed; exact statistic and relative-scale anchor await approval",
+        }
+    numeric_bounds_all = all(item["within_proposed_bound"] for item in metrics.values())
+    descriptive_alignment_all = all(item["descriptive_alignment"] for item in metrics.values())
+    return {
+        "schema": CROSS_CAPTURE_SCHEMA, "day": DAY, "status": "COMPARISON_COMPLETE",
+        "selected_arm": {"name": arm_name, "tracker_role": "candidate", "timing_profile": "fixed-10-30-120-v1", "publication_grid": left["publication_grid"]},
+        "shared_bindings_match": True,
+        "numeric_bounds": "within-proposed-bounds" if numeric_bounds_all else "outside-proposed-bounds",
+        "descriptive_alignment": "aligned" if descriptive_alignment_all else "not-aligned",
+        "metrics": metrics,
+        "prediction_hit_miss": "not-assessed-separately",
+        "matched_cohort_checked": "not-assessed",
+        "health_eligibility": "unknown-not-assessed",
+        "disclosure_eligibility": "unknown-not-assessed",
+        "private_cohort_bindings_disclosed": False,
+        "capture_close_match": "not-assessed-pending-approved-statistic-health-and-disclosure-policy",
+        "qualification": "not-assessed",
+        "interpretation": "aggregate-only; identity-level cohorts remain private; numerical bounds and descriptive alignment do not constitute a registered verdict",
+    }
+
+
+def _compare_captures(args: argparse.Namespace) -> dict[str, Any]:
+    project = _read_cross_capture_summary(Path(args.project_summary))
+    outsider = _read_cross_capture_summary(Path(args.outsider_summary))
+    result = _compare_capture_summaries(project, outsider, args.arm)
+    out = Path(args.out)
+    _new_private_dir(out)
+    out = out.resolve(strict=True)
+    _atomic_json(out / "cross-capture-summary.json", result)
+    return {"status": result["status"], "summary": str(out / "cross-capture-summary.json"), "capture_close_match": result["capture_close_match"]}
+
+
 def _parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__)
     sub = p.add_subparsers(dest="mode", required=True)
@@ -1791,13 +2006,26 @@ def _parser() -> argparse.ArgumentParser:
         if mode == "compare":
             q.add_argument("--public-run-dir", required=True)
             q.add_argument("--sfdps-dir", required=True)
+    q = sub.add_parser("compare-captures")
+    q.add_argument("--project-summary", required=True)
+    q.add_argument("--outsider-summary", required=True)
+    q.add_argument("--arm", required=True)
+    q.add_argument("--out", required=True)
     return p
 
 
 def main(argv: list[str] | None = None) -> int:
     try:
         args = _parser().parse_args(argv)
-        result = _public_run(args) if args.mode == "public" else _compare_run(args)
+    except SystemExit as exc:
+        return exc.code if isinstance(exc.code, int) else 1
+    try:
+        if args.mode == "public":
+            result = _public_run(args)
+        elif args.mode == "compare":
+            result = _compare_run(args)
+        else:
+            result = _compare_captures(args)
         print(json.dumps(result, ensure_ascii=True, sort_keys=True, separators=(",", ":")))
         return 0
     except Refused as exc:
