@@ -1045,7 +1045,7 @@ fn execute(
         )?;
         let flight_outcome = flight::flight_apply_event(&mut runtime.flights, event)
             .map_err(|error| format!("accepted flight commit invariant: {error:?}"))?;
-        commit_flight_key(runtime, pending_flight_key, flight_outcome)?;
+        commit_flight_key(runtime, pending_flight_key, flight_outcome);
         flight_operations.push(flight_outcome);
         route::route_commit_stage(&mut runtime.routes, route_stage);
         surveillance::surveillance_event(&mut runtime.surveillance, event)

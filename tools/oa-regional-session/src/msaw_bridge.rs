@@ -634,11 +634,11 @@ mod tests {
         let outage = crate::runtime::regional_step(
             &mut runtime,
             &crate::ReceiptBatch {
-                receipt_ns: 3 * SECOND,
+                receipt_ns: 3_000_000_000,
                 source_clock_regressions: 0,
                 events: vec![crate::NormalizedEvent {
-                    receipt_ns: 3 * SECOND,
-                    source_ns: 3 * SECOND,
+                    receipt_ns: 3_000_000_000,
+                    source_ns: 3_000_000_000,
                     sequence: 3,
                     source: crate::SourceKind::Surveillance,
                     identity: crate::Identity {
