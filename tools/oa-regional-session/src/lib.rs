@@ -17,6 +17,7 @@ pub mod migration_snapshot;
 pub mod msaw_bridge;
 pub mod nam_flight;
 pub mod nam_handoff;
+pub mod nam_pointout;
 pub mod operator;
 pub mod performance;
 pub mod recordings;

@@ -7,6 +7,9 @@ use crate::flight::{
     FlightViewStatus, SharedFlightView, MAX_DRIVER_FLIGHTS, MAX_DRIVER_LOG_ENTRIES,
 };
 use crate::nam_flight::{self, NamFlightContext, NamFlightResult, NamFlightRuntime};
+use crate::nam_pointout::{
+    self, NamPointOutRuntime, PointOutContext, PointOutMode, PointOutResult, PointOutView,
+};
 use crate::route::{self, RouteStore};
 use crate::session::{summarize_input_batch, FrameEvidence, ReceiptBatch, MAX_EVENTS_PER_RECEIPT};
 use crate::surveillance::{self, Surveillance, SurveillanceConfig, SurveillanceFrame};
@@ -33,6 +36,7 @@ pub struct RegionalRuntime {
     surveillance: Surveillance,
     routes: RouteStore,
     nam_flights: NamFlightRuntime,
+    nam_pointouts: NamPointOutRuntime,
     centre: [u8; 4],
     frame_sequence: u64,
     failed: bool,
@@ -124,6 +128,8 @@ pub struct RegionalFrame {
     pub surveillance: SurveillanceFrame,
     pub flight_operations: Vec<FlightApplyOutcome>,
     pub flights: Vec<FlightEvidence>,
+    /// Current admitted NAM point-outs. These remain coordination state, never flight ownership.
+    pub point_outs: Vec<PointOutView>,
     pub flight_report: FlightDriverReport,
     pub refused_legacy_route_events: u64,
     pub controller_views: Vec<oa_display::interaction::TargetView>,
@@ -444,6 +450,37 @@ pub fn regional_receive_nam_flight(
     )
 }
 
+/// Admit an encoded NAM point-out through the peer session and update the same runtime state
+/// returned on normal `RegionalFrame`s. Flight binding is an explicit full-key/address context;
+/// absent binding stays unbound. Point-out state never changes flight ownership.
+pub fn regional_receive_nam_pointout(
+    runtime: &mut RegionalRuntime,
+    ingress: &mut crate::nam_handoff::NamSessionIngress,
+    framed_bytes: &[u8],
+    now_ms: u64,
+    context: PointOutContext,
+) -> Result<PointOutResult, nam_pointout::PointOutError> {
+    nam_pointout::nam_pointout_receive(
+        &mut runtime.nam_pointouts,
+        &mut runtime.flights,
+        ingress,
+        framed_bytes,
+        now_ms,
+        runtime.centre,
+        context,
+        &runtime.observed,
+    )
+}
+
+/// Set the peer adaptation mode before any point-out is admitted. Basic mode retains manual
+/// coordination; Enhanced mode exposes decisions, without assigning a facility behavior policy.
+pub fn regional_set_nam_pointout_mode(
+    runtime: &mut RegionalRuntime,
+    mode: PointOutMode,
+) -> Result<(), nam_pointout::PointOutError> {
+    nam_pointout::nam_pointout_set_mode(&mut runtime.nam_pointouts, mode)
+}
+
 fn regional_new_with_profile_and_namespace(
     model: Model,
     snapshot_sha256: [u8; 32],
@@ -471,6 +508,9 @@ fn regional_new_with_profile_and_namespace(
     }
     let nam_flights = nam_flight::nam_flight_runtime_new(profile.max_flights)
         .ok_or("NAM flight-plan runtime capacity is invalid")?;
+    let nam_pointouts =
+        nam_pointout::nam_pointout_runtime_new(nam_pointout::MAX_POINT_OUTS, PointOutMode::Basic)
+            .ok_or("NAM point-out runtime capacity is invalid")?;
     Ok(RegionalRuntime {
         surveillance: surveillance::surveillance_new_with_profile(
             model.clone(),
@@ -489,6 +529,7 @@ fn regional_new_with_profile_and_namespace(
         .map_err(|e| format!("flight startup: {e:?}"))?,
         routes: route::route_store_new(snapshot_sha256),
         nam_flights,
+        nam_pointouts,
         centre,
         frame_sequence: 0,
         failed: false,
@@ -790,6 +831,9 @@ fn execute(
         surveillance,
         flight_operations,
         flights,
+        point_outs: nam_pointout::nam_pointout_views(&runtime.nam_pointouts)
+            .copied()
+            .collect(),
         flight_report: flight::flight_driver_report(&runtime.flights),
         refused_legacy_route_events: runtime.routes.rejected_legacy_routes,
         controller_views: runtime.views.clone(),

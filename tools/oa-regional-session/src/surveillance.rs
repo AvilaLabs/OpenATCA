@@ -94,6 +94,12 @@ pub struct ObservedTrack {
     pub state_ns: i64,
     pub newest_source_ns: i64,
     pub address: u32,
+    /// Last source-observed Mode 3/A code for this address, or the tracker sentinel.
+    pub ident: u16,
+    /// Applicability time of `ident`; `i64::MIN` when unavailable.
+    pub ident_ns: i64,
+    /// Nonzero when same-time sources disagreed and the identity was cleared.
+    pub ident_conflict: u8,
     pub lat_e7: i32,
     pub lon_e7: i32,
     pub altitude_ft: i32,
@@ -102,7 +108,7 @@ pub struct ObservedTrack {
     pub north_mmps: i32,
     pub r95_mm: u32,
 }
-const _: () = assert!(core::mem::size_of::<ObservedTrack>() == 48);
+const _: () = assert!(core::mem::size_of::<ObservedTrack>() == 64);
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SurveillanceConfig {
@@ -642,6 +648,9 @@ fn offline_projection_digest(
         hash.update(&track.newest_source_ns.to_le_bytes())
             .map_err(err)?;
         hash.update(&track.address.to_le_bytes()).map_err(err)?;
+        hash.update(&track.ident.to_le_bytes()).map_err(err)?;
+        hash.update(&track.ident_ns.to_le_bytes()).map_err(err)?;
+        hash.update(&[track.ident_conflict]).map_err(err)?;
         hash.update(&track.lat_e7.to_le_bytes()).map_err(err)?;
         hash.update(&track.lon_e7.to_le_bytes()).map_err(err)?;
         hash.update(&track.altitude_ft.to_le_bytes()).map_err(err)?;
@@ -728,6 +737,9 @@ pub fn surveillance_finish(
             state_ns: time_ns,
             newest_source_ns: source_ns,
             address,
+            ident: row.ident,
+            ident_ns: row.ident_ns,
+            ident_conflict: row.ident_conflict,
             lat_e7: row.lat_e7,
             lon_e7: row.lon_e7,
             altitude_ft: altitude,

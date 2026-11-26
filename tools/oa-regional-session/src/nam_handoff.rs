@@ -143,14 +143,29 @@ pub fn nam_session_ingress_receive(
             .checked_add(1)
             .ok_or(NamHandoffError::SequenceGapCountOverflow)?;
     }
-    let admission = match actions.as_slice() {
-        [session::Action::Deliver { header, seq }] if *header == message.header => {
-            Some(NamAdmission::Deliver(*seq))
-        }
-        [session::Action::Response {
-            header,
-            answers: Kind::Rti,
-        }] if *header == message.header && matches!(message.header.kind, Kind::Rla | Kind::Lrm) => {
+    // Rev G messages such as POA/POJ produce a logical-response action and an application
+    // delivery together. Preserve the response in `actions` while admitting only one exact
+    // delivery; a generated LAM is a computer acknowledgement, never controller approval.
+    let deliveries: Vec<_> = actions
+        .as_slice()
+        .iter()
+        .filter_map(|action| match action {
+            session::Action::Deliver { header, seq } => Some((*header, *seq)),
+            _ => None,
+        })
+        .collect();
+    let admission = match deliveries.as_slice() {
+        [(header, seq)] if *header == message.header => Some(NamAdmission::Deliver(*seq)),
+        [] if actions.as_slice().iter().any(|action| {
+            matches!(
+                action,
+                session::Action::Response {
+                    header,
+                    answers: Kind::Rti
+                } if *header == message.header
+            )
+        }) && matches!(message.header.kind, Kind::Rla | Kind::Lrm) =>
+        {
             Some(NamAdmission::CorrelatedRtiResponse)
         }
         _ => None,
