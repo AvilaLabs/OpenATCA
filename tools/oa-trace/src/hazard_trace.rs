@@ -1178,6 +1178,29 @@ mod tests {
         assert!(errors
             .iter()
             .any(|error| error.contains("is not a linked test")));
+
+        // Keep every other field valid so removing the assessment-to-hazard consistency guard
+        // makes this same test fail.
+        let mismatched_hazard =
+            fixture().replace("\"hazard_id\":\"HZ-SYN-1\"", "\"hazard_id\":\"HZ-OTHER-1\"");
+        root.write_log(&mismatched_hazard);
+        let errors = check(&root.0);
+        assert!(errors
+            .iter()
+            .any(|error| { error.contains("assessment for OA-AAA-001 names a different hazard") }));
+
+        // Keep the log and hazard links internally coherent, but make its safety requirement
+        // absent from the active register so removing the active-requirement guard is detected.
+        fs::write(
+            root.0.join("REQUIREMENTS.md"),
+            "- **OA-BBB-001** unrelated active requirement\n",
+        )
+        .unwrap();
+        root.write_log(&fixture());
+        let errors = check(&root.0);
+        assert!(errors.iter().any(|error| {
+            error.contains("safety assessment OA-AAA-001 is not an active requirement")
+        }));
     }
 
     // REQ: OA-MIG-602
