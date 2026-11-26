@@ -4,7 +4,8 @@
 //! state. This module does not guess a reliability threshold or select a mode from sensor
 //! availability. It implements only the published JO 7110.65BB 5-5-4 minima and the
 //! corresponding JO 7210.3EE 3-6-7 multi-sensor restriction. Output is a policy result for the
-//! caller to apply; this module is not yet wired into `oa-ca` or the display renderer.
+//! caller to apply; the regional session may display the selected mode, but this module does not
+//! set the conflict-alert engine's volume or claim to implement facility-specific adaptation.
 //!
 //! A coasted target is always marked ineligible for separation. A controller-initiated coast
 //! also requires the caller to identify a flight-plan-aided track (FLAT); missing that evidence
@@ -41,6 +42,25 @@ pub enum TargetSource {
     Unknown = 4,
 }
 
+/// Reliability evidence supplied by the selected sensor adapter. Unknown never enables 3 NM.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ReliabilityEvidence {
+    Unknown = 0,
+    Reliable = 1,
+    Unreliable = 2,
+}
+
+/// ISR evidence from the selected automation mode. Unknown remains distinct from an affirmed
+/// no-ISR state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum IsrEvidence {
+    Unknown = 0,
+    Clear = 1,
+    Required = 2,
+}
+
 /// Fixed adaptation supplied by the facility configuration. Coordinates are degrees * 1e7.
 /// A7.2: cold configuration; exact size guarded because it crosses the core boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,13 +87,30 @@ pub struct TargetModeState {
     pub lon_e7: i32,
     pub flight_level_hundreds: i16,
     pub source: TargetSource,
-    pub reliable: u8,
-    pub isr: u8,
+    pub reliability: ReliabilityEvidence,
+    pub isr: IsrEvidence,
     pub coasting: u8,
     pub controller_initiated_coast: u8,
     pub flight_plan_aided: u8,
 }
 const _: () = assert!(core::mem::size_of::<TargetModeState>() == 16);
+
+/// Caller-asserted target evidence for one regional receipt epoch. `state_ns` must equal that
+/// receipt's time. This row does not authenticate its claims; absence is represented by the
+/// explicit `Unknown` enum values and missing-flight-level sentinel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
+pub struct TargetModeEvidence {
+    pub address: u32,
+    pub state_ns: i64,
+    pub flight_level_hundreds: i16,
+    pub source: TargetSource,
+    pub reliability: ReliabilityEvidence,
+    pub isr: IsrEvidence,
+    pub controller_initiated_coast: u8,
+    pub flight_plan_aided: u8,
+}
+const _: () = assert!(core::mem::size_of::<TargetModeEvidence>() == 24);
 
 /// Explicit failure; a missing prerequisite is not converted to a permissive mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,7 +120,6 @@ pub enum ModeRefusal {
     BadPosition = 2,
     MissingPreferredRadar = 3,
     MissingFlightLevel = 4,
-    UnreliableTarget = 5,
     UnsupportedSingleSensorSource = 6,
     ControllerCoastRequiresFlat = 7,
 }
@@ -95,13 +131,18 @@ pub enum ModeRefusal {
 #[repr(C)]
 pub struct ModeResult {
     pub minimum_nm: u8,
+    /// Candidate indicates that the rule set calls for a 3 NM target symbol. Platform-specific
+    /// selection is exposed separately; JO 7110.65BB does not define ERAM symbol geometry.
     pub three_nm_symbol: u8,
     pub separation_eligible: u8,
     pub flat_aided: u8,
+    /// `1` when the selected terminal FUSION mode uses the solid-circle symbol per N JO 7110.676.
+    pub fusion_solid_circle: u8,
+    pub reserved: [u8; 2],
     /// Metres; `u32::MAX` when no preferred-radar distance was required/available.
     pub preferred_radar_distance_m: u32,
 }
-const _: () = assert!(core::mem::size_of::<ModeResult>() == 8);
+const _: () = assert!(core::mem::size_of::<ModeResult>() == 12);
 
 /// Select the published horizontal minimum for one target.
 ///
@@ -118,8 +159,6 @@ pub fn surveillance_mode_result(
         || adaptation.track_based_display > 1
         || adaptation.area_3nm_adapted > 1
         || adaptation.map_3nm_visible > 1
-        || target.reliable > 1
-        || target.isr > 1
         || target.coasting > 1
         || target.controller_initiated_coast > 1
         || target.flight_plan_aided > 1
@@ -181,7 +220,9 @@ pub fn surveillance_mode_result(
             }
         }
         SurveillanceMode::TerminalFusion => {
-            if target.isr == 1 || target.reliable != 1 {
+            if target.isr != IsrEvidence::Clear
+                || target.reliability != ReliabilityEvidence::Reliable
+            {
                 5
             } else {
                 3
@@ -204,7 +245,7 @@ pub fn surveillance_mode_result(
             let allows_3nm = fl <= 230
                 && adaptation.area_3nm_adapted == 1
                 && adaptation.map_3nm_visible == 1
-                && target.reliable == 1
+                && target.reliability == ReliabilityEvidence::Reliable
                 && source_can_support_3nm
                 && (adaptation.track_based_display == 1 || in_preferred_range);
             if allows_3nm {
@@ -224,6 +265,8 @@ pub fn surveillance_mode_result(
         three_nm_symbol: u8::from(minimum_nm == 3),
         separation_eligible: u8::from(separation_eligible),
         flat_aided,
+        fusion_solid_circle: u8::from(adaptation.mode == SurveillanceMode::TerminalFusion),
+        reserved: [0; 2],
         preferred_radar_distance_m: distance_m,
     })
 }
@@ -254,8 +297,8 @@ mod tests {
             lon_e7: 0,
             flight_level_hundreds: 100,
             source: TargetSource::Radar,
-            reliable: 1,
-            isr: 0,
+            reliability: ReliabilityEvidence::Reliable,
+            isr: IsrEvidence::Clear,
             coasting: 0,
             controller_initiated_coast: 0,
             flight_plan_aided: 0,
@@ -265,10 +308,23 @@ mod tests {
     #[test]
     fn fusion_isr_falls_back_to_five_and_requests_no_three_nm_symbol() {
         let mut t = target();
-        t.isr = 1;
+        t.isr = IsrEvidence::Required;
         let r = surveillance_mode_result(adaptation(SurveillanceMode::TerminalFusion), t).unwrap();
         assert_eq!(r.minimum_nm, 5);
         assert_eq!(r.three_nm_symbol, 0);
+        assert_eq!(r.fusion_solid_circle, 1);
+    }
+
+    #[test]
+    fn unknown_fusion_health_is_not_treated_as_clear_or_reliable() {
+        let mut t = target();
+        t.reliability = ReliabilityEvidence::Unknown;
+        let r = surveillance_mode_result(adaptation(SurveillanceMode::TerminalFusion), t).unwrap();
+        assert_eq!(r.minimum_nm, 5);
+        t.reliability = ReliabilityEvidence::Reliable;
+        t.isr = IsrEvidence::Unknown;
+        let r = surveillance_mode_result(adaptation(SurveillanceMode::TerminalFusion), t).unwrap();
+        assert_eq!(r.minimum_nm, 5);
     }
 
     #[test]

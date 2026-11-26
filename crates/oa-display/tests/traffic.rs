@@ -181,6 +181,44 @@ fn a_coasting_target_has_an_x_through_the_square_instead_of_the_dot() {
     assert_eq!(st.coasting, 1);
 }
 
+// REQ: OA-DSP-084
+#[test]
+fn fusion_uses_the_solid_circle_and_isr_is_explicit_in_the_data_block() {
+    let mut t = plain(ORD.0, ORD.1);
+    t.flags = T_FUSION | T_ISR;
+    let (l, _) = draw(&[t], &DEFAULT_STYLE);
+    assert_eq!(l.rects.x0.len(), 7);
+    assert!(l.rects.colour.iter().all(|&c| c == pal::TARGET));
+    assert!(l.rects.layer.iter().all(|&layer| layer == LAYER_SYMBOL));
+    assert!(lines_of(&l).is_empty());
+    assert_eq!(texts_of(&l).last().unwrap().0, "ISR");
+    assert_eq!(tags(T_COAST | T_ISR, false, false), "CST ISR");
+}
+
+// REQ: OA-DSP-084
+#[test]
+fn mode_overlay_matches_sorted_visible_addresses_and_refuses_ambiguous_inputs() {
+    let mut first = plain(ORD.0, ORD.1);
+    first.addr = 0x10;
+    let mut second = plain(ORD.0, ORD.1 + 100);
+    second.addr = 0x20;
+    let mut set = targets_new(2).unwrap();
+    targets_push(&mut set, &first).unwrap();
+    targets_push(&mut set, &second).unwrap();
+
+    assert_eq!(
+        targets_apply_mode_flags(
+            &mut set,
+            &[(0x10, T_FUSION), (0x20, T_ISR), (0x30, T_FUSION)],
+        )
+        .unwrap(),
+        2
+    );
+    assert_eq!(targets_columns(&set).flags, &[T_FUSION, T_ISR]);
+    assert!(targets_apply_mode_flags(&mut set, &[(0x20, T_FUSION), (0x10, T_ISR)]).is_err());
+    assert!(targets_apply_mode_flags(&mut set, &[(0x10, T_COAST)]).is_err());
+}
+
 // REQ: OA-DSP-039
 #[test]
 fn an_uncertain_target_is_a_diamond_with_its_r95_circle_at_true_scale() {
