@@ -64,8 +64,20 @@ fn key(r: &Row<'_>) -> Result<Key, crate::row::Fail> {
         r.req("ORIGIN_ID")?,
         r.req("DSTN_ID")?,
         r.req("PFR_TYPE_CODE")?,
-        r.req_u32("ROUTE_NO")?,
+        route_no(r)?,
     ))
+}
+
+fn route_no(r: &Row<'_>) -> Result<u32, crate::row::Fail> {
+    let value = r.req_u32("ROUTE_NO")?;
+    if (1..=99).contains(&value) {
+        Ok(value)
+    } else {
+        Err(r.problem(
+            "ROUTE_NO",
+            RowErrorKind::UnknownValue(format!("{value} (expected 1..=99)")),
+        ))
+    }
 }
 
 /// Parses the `PFR_BASE.csv` records.
@@ -80,7 +92,7 @@ pub fn parse_bases<R: BufRead>(
             origin: r.req("ORIGIN_ID")?,
             destination: r.req("DSTN_ID")?,
             route_type: r.req("PFR_TYPE_CODE")?,
-            route_no: r.req_u32("ROUTE_NO")?,
+            route_no: route_no(r)?,
             area_description: r.opt("SPECIAL_AREA_DESCRIP")?,
             altitude_description: r.opt("ALT_DESCRIP")?,
             aircraft_description: r.opt("AIRCRAFT")?,
@@ -315,5 +327,27 @@ mod tests {
         .unwrap();
         assert_eq!(parsed.records[0].segments.len(), 1);
         assert_eq!(parsed.rejected.len(), 3);
+    }
+
+    #[test]
+    fn route_number_enforces_the_published_one_through_ninety_nine_domain() {
+        let base = |number: u32| {
+            format!(
+                "EFF_DATE,ORIGIN_ID,DSTN_ID,PFR_TYPE_CODE,ROUTE_NO,SPECIAL_AREA_DESCRIP,ALT_DESCRIP,AIRCRAFT,HOURS,ROUTE_DIR_DESCRIP,ROUTE_STRING\n2026/10/29,ORD,JFK,H,{number},,,,,,ORD J60 JFK\n"
+            )
+        };
+        for number in [1, 99] {
+            let csv = base(number);
+            let parsed = parse_bases("PFR_BASE.csv", csv.as_bytes()).unwrap();
+            assert_eq!(parsed.records.len(), 1);
+            assert!(parsed.rejected.is_empty());
+        }
+        for number in [0, 100] {
+            let csv = base(number);
+            let parsed = parse_bases("PFR_BASE.csv", csv.as_bytes()).unwrap();
+            assert!(parsed.records.is_empty());
+            assert_eq!(parsed.rejected.len(), 1);
+            assert_eq!(parsed.rejected[0].column, "ROUTE_NO");
+        }
     }
 }

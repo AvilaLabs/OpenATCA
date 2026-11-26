@@ -1004,7 +1004,9 @@ fn gather_candidates(src: &Sources, ell: &Ellipsoid, info: &mut BuildInfo) -> (R
         cand.region = Some(c.icao_region.clone());
         cand.name = Some(c.name.clone());
         cand.elev = c.elevation_ft;
-        cand.alt_ident = c.iata.clone().filter(|t| *t != c.ident);
+        // IATA is not a NASR facility-location identifier. Keep it out of alt_ident,
+        // whose airport fallback is used for FAA PFR origin/destination joins.
+        cand.alt_ident = None;
         airport_cand(
             &mut reg,
             &mut maps,

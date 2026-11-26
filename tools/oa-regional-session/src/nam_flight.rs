@@ -537,6 +537,7 @@ fn assess_preferred_route(
     }
     let table = &model.preferred_routes;
     let mut conversion_unavailable = false;
+    let mut altitude_indeterminate = false;
     let mut selected: Option<(usize, bool)> = None;
     for row in range {
         let Some(route_text_ix) = table.route_string.get(row).copied() else {
@@ -560,8 +561,20 @@ fn assess_preferred_route(
             return model_pfr_assessment(model, S::Unavailable, None);
         };
         let (altitude_type_matches, type_needs_coordination) = match route_type {
-            "L" | "LSD" => (level_ft.is_some_and(|level| level < 18_000), false),
-            "H" | "HSD" => (level_ft.is_some_and(|level| level >= 18_000), false),
+            "L" | "LSD" | "SLD" => match level_ft {
+                Some(level) => (level < 18_000, route_type == "SLD"),
+                None => {
+                    altitude_indeterminate = true;
+                    (true, true)
+                }
+            },
+            "H" | "HSD" | "SHD" => match level_ft {
+                Some(level) => (level >= 18_000, route_type == "SHD"),
+                None => {
+                    altitude_indeterminate = true;
+                    (true, true)
+                }
+            },
             // The source identifies these preferred-route families, but this adapter does not
             // infer their operating envelope from the code or free-text descriptions.
             _ => (true, true),
@@ -624,6 +637,8 @@ fn assess_preferred_route(
         model,
         if conversion_unavailable {
             S::Unavailable
+        } else if altitude_indeterminate {
+            S::CoordinationRequired
         } else {
             S::RouteNotPreferred
         },
@@ -1204,6 +1219,33 @@ mod tests {
         );
         assert_eq!(
             assess_preferred_route(&model, b"KAAA", b"KBBB", &filed, Some(10_000), &[]).status,
+            PreferredRouteStatus::RouteNotPreferred
+        );
+        assert_eq!(
+            assess_preferred_route(&model, b"KAAA", b"KBBB", &filed, None, &[]).status,
+            PreferredRouteStatus::CoordinationRequired
+        );
+
+        let mut special_low = model_fixture();
+        preferred_route(
+            &mut special_low,
+            "KAAA",
+            "KBBB",
+            "SLD",
+            "FIXA FIXB",
+            None,
+            None,
+        );
+        let filed = resolve_icao_item15(&special_low, &elements, Some(10_000), "KAAA", "KBBB", &[])
+            .expect("accepted route geometry");
+        assert_eq!(
+            assess_preferred_route(&special_low, b"KAAA", b"KBBB", &filed, Some(10_000), &[])
+                .status,
+            PreferredRouteStatus::CoordinationRequired
+        );
+        assert_eq!(
+            assess_preferred_route(&special_low, b"KAAA", b"KBBB", &filed, Some(35_000), &[])
+                .status,
             PreferredRouteStatus::RouteNotPreferred
         );
 
