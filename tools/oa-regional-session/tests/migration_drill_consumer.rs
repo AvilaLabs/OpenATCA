@@ -228,6 +228,7 @@ fn worker_data_frame(sequence: u64, payload: &[u8]) -> Vec<u8> {
 }
 
 #[test]
+// REQ: OA-MIG-414
 fn worker_refuses_a_hash_valid_normalized_row_with_a_sealed_timestamp() {
     let mut consumer = Consumer::new();
     let sealed_row = normalized_position_row(1_795_132_800_000_000_000, 1);
