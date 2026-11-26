@@ -10,6 +10,8 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
+oa-sealed = { path = "../../crates/oa-sealed" }
+oa-sha256 = { path = "../../crates/oa-sha256" }
 
 [package.metadata.openatca]
 class = "shell"
