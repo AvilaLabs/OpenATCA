@@ -589,6 +589,8 @@ pub fn ack_alarm(
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
+
     use super::*;
     const EMPTY_ALARM: Alarm = Alarm {
         instance_id: 0,
