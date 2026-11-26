@@ -4,6 +4,7 @@
 
 pub mod airac;
 pub mod build_info;
+pub mod conflict_probe;
 pub mod diff;
 pub mod geom;
 pub mod model;

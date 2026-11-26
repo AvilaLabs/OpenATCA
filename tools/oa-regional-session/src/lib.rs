@@ -4,6 +4,7 @@
 
 pub mod cli;
 pub mod commands;
+pub mod conflict_probe;
 pub mod flight;
 pub mod input;
 pub mod migration_amendment;

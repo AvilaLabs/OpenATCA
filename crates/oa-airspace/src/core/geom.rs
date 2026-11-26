@@ -353,6 +353,12 @@ pub struct Area {
     pub bbox: Option<Bbox>,
 }
 
+/// Number of polygon boundary edges retained by this area. Callers that need a strict work bound
+/// can reject oversized geometry before invoking point containment.
+pub fn area_edge_count(area: &Area) -> usize {
+    area.edges.len()
+}
+
 /// Builds the area from rings of vertices. Each ring must be a valid geodesic polygon for
 /// `oa-geo`; the error says which limit it broke.
 pub fn build_area(rings: Vec<Vec<LatLon>>, buffer_m: f64) -> Result<Area, GeoError> {
@@ -415,6 +421,42 @@ pub fn build_area(rings: Vec<Vec<LatLon>>, buffer_m: f64) -> Result<Area, GeoErr
     })
 }
 
+/// Build a bounded geometry from the model's E7 coordinate representation. This cold adapter
+/// rejects over-capacity requests before allocating or converting any vertices.
+pub fn build_area_e7(rings_e7: &[&[(i32, i32)]], buffer_m: f64) -> Result<Area, GeoError> {
+    const MAX_RINGS: usize = 32;
+    const MAX_EDGES: usize = 4_096;
+    if rings_e7.len() > MAX_RINGS {
+        return Err(GeoError::BadParameter("too many area rings"));
+    }
+    let mut total = 0usize;
+    for ring in rings_e7 {
+        if ring.len() < 3 {
+            return Err(GeoError::BadParameter(
+                "area ring has fewer than three vertices",
+            ));
+        }
+        total = total
+            .checked_add(ring.len())
+            .ok_or(GeoError::BadParameter("area vertex count overflow"))?;
+        if total > MAX_EDGES {
+            return Err(GeoError::BadParameter("too many area edges"));
+        }
+    }
+    let mut rings = Vec::with_capacity(rings_e7.len());
+    for ring in rings_e7 {
+        let mut converted = Vec::with_capacity(ring.len());
+        for (lat_e7, lon_e7) in ring.iter().copied() {
+            converted.push(LatLon::new(
+                f64::from(lat_e7) * DEG_PER_E7,
+                f64::from(lon_e7) * DEG_PER_E7,
+            )?);
+        }
+        rings.push(converted);
+    }
+    build_area(rings, buffer_m)
+}
+
 fn in_bbox(area: &Area, p: LatLon) -> bool {
     match area.bbox {
         Some(b) => {
@@ -429,6 +471,80 @@ fn in_bbox(area: &Area, p: LatLon) -> bool {
 /// True when `p` is inside any of the area's polygons (no buffer).
 pub fn area_inside(area: &Area, p: LatLon) -> bool {
     in_bbox(area, p) && area.polys.iter().any(|poly| poly.contains(p))
+}
+
+/// E7-coordinate facade for bounded callers that already enforce a vertex/edge budget.
+pub fn area_inside_e7(area: &Area, lat_e7: i32, lon_e7: i32) -> Result<bool, GeoError> {
+    let lat = f64::from(lat_e7) * DEG_PER_E7;
+    let lon = f64::from(lon_e7) * DEG_PER_E7;
+    let point = LatLon::new(lat, lon)?;
+    Ok(area_inside(area, point))
+}
+
+/// Great-circle interpolation between two shared-trajectory knots. `fraction` is inclusive
+/// `[0, 1]`; outputs use the airspace model's E7 quantization with specified IEEE rounding.
+pub fn interpolate_e7(
+    a_lat_e7: i32,
+    a_lon_e7: i32,
+    b_lat_e7: i32,
+    b_lon_e7: i32,
+    fraction: f64,
+) -> Result<(i32, i32), GeoError> {
+    if !fraction.is_finite() || !(0.0..=1.0).contains(&fraction) {
+        return Err(GeoError::BadParameter("interpolation fraction"));
+    }
+    let a = LatLon::new(
+        f64::from(a_lat_e7) * DEG_PER_E7,
+        f64::from(a_lon_e7) * DEG_PER_E7,
+    )?;
+    let b = LatLon::new(
+        f64::from(b_lat_e7) * DEG_PER_E7,
+        f64::from(b_lon_e7) * DEG_PER_E7,
+    )?;
+    let ell = wgs84();
+    let inverse = ell.inverse(a, b)?;
+    let position = ell
+        .direct(a, inverse.azimuth1_deg, inverse.distance_m * fraction)?
+        .position;
+    let lat = oa_ieee::round(position.lat() / DEG_PER_E7);
+    let lon = oa_ieee::round(position.lon() / DEG_PER_E7);
+    if !lat.is_finite()
+        || !lon.is_finite()
+        || lat < f64::from(i32::MIN)
+        || lat > f64::from(i32::MAX)
+        || lon < f64::from(i32::MIN)
+        || lon > f64::from(i32::MAX)
+    {
+        return Err(GeoError::BadParameter("interpolated E7 overflow"));
+    }
+    Ok((lat as i32, lon as i32))
+}
+
+/// Exact ellipsoidal distance between two E7 positions.
+pub fn distance_e7(
+    a_lat_e7: i32,
+    a_lon_e7: i32,
+    b_lat_e7: i32,
+    b_lon_e7: i32,
+) -> Result<f64, GeoError> {
+    let a = LatLon::new(
+        f64::from(a_lat_e7) * DEG_PER_E7,
+        f64::from(a_lon_e7) * DEG_PER_E7,
+    )?;
+    let b = LatLon::new(
+        f64::from(b_lat_e7) * DEG_PER_E7,
+        f64::from(b_lon_e7) * DEG_PER_E7,
+    )?;
+    Ok(wgs84().inverse(a, b)?.distance_m)
+}
+
+/// Exact distance from an E7 position to the nearest area boundary edge.
+pub fn area_edge_distance_e7(area: &Area, lat_e7: i32, lon_e7: i32) -> Result<f64, GeoError> {
+    let point = LatLon::new(
+        f64::from(lat_e7) * DEG_PER_E7,
+        f64::from(lon_e7) * DEG_PER_E7,
+    )?;
+    area_edge_distance_m(area, point)
 }
 
 /// Geodesic distance from `p` to the nearest edge of any polygon, metres (exact).

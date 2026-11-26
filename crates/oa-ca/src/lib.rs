@@ -53,6 +53,7 @@ extern crate alloc;
 mod cycle;
 mod grid;
 mod preset;
+pub mod probe;
 pub mod solve;
 mod state;
 mod types;

@@ -20,6 +20,12 @@ pub const HORIZON_10_MIN_MS: i64 = 600_000;
 pub const HORIZON_20_MIN_MS: i64 = 1_200_000;
 pub const HORIZON_MS: [i64; HORIZON_COUNT] =
     [HORIZON_5_MIN_MS, HORIZON_10_MIN_MS, HORIZON_20_MIN_MS];
+pub const PROFILE_UNIFORM_STEP_MS: i64 = 30_000;
+pub const PROFILE_UNIFORM_SAMPLES: usize = 41;
+/// Maximum one-flight profile: 41 uniform samples plus every possible active route vertex.
+pub const MAX_PROFILE_SAMPLES: usize = PROFILE_UNIFORM_SAMPLES + MAX_ROUTE_POINTS;
+/// Pair probe union: uniform samples plus route vertices from both flights.
+pub const MAX_PAIR_PROFILE_SAMPLES: usize = PROFILE_UNIFORM_SAMPLES + 2 * MAX_ROUTE_POINTS;
 /// Fixed ID-byte comparisons made by route identity validation and exact ETA matching.
 pub const FIX_IDENTITY_BYTE_WORK: usize = 12 + 4 + 12;
 pub const FLIGHT_KEY_IDENTITY_BYTE_WORK: usize = 16 + 4 + 4 + 12;
@@ -49,6 +55,28 @@ pub const MAX_FORECAST_WORK: usize = MAX_ROUTE_POINTS
     + 3 * FLIGHT_KEY_IDENTITY_BYTE_WORK
     + 2 * ROUTE_BINDING_HASH_BYTE_WORK
     + OWNER_UNIT_ID_BYTE_WORK;
+pub const MAX_PAIR_SAMPLE_WORK: usize = MAX_ROUTE_POINTS
+    * (MAX_PAIR_PROFILE_SAMPLES
+        + 3
+        + 3 * FIX_IDENTITY_BYTE_WORK
+        + ROUTE_POINT_RESERVED_BYTE_WORK
+        + ROUTE_CONSTRAINT_CHANNEL_WORK)
+    + ROUTE_PROVENANCE_RESERVED_BYTE_WORK
+    + CURSOR_RESERVED_BYTE_WORK
+    + OWNER_RESERVED_BYTE_WORK
+    + CLEARANCE_RESERVED_BYTE_WORK
+    + 2 * FIX_IDENTITY_BYTE_WORK
+    + 3 * FLIGHT_KEY_IDENTITY_BYTE_WORK
+    + 2 * ROUTE_BINDING_HASH_BYTE_WORK
+    + OWNER_UNIT_ID_BYTE_WORK;
+/// Pair-level upper bound: two profile validations/builds, two evaluations on the merged
+/// timeline, and bounded profile merge work. The individual sample evaluator uses
+/// `MAX_PAIR_SAMPLE_WORK`; this aggregate documents the whole adapter operation.
+pub const MAX_PAIR_FORECAST_WORK: usize = 2
+    * (MAX_FORECAST_WORK + MAX_ROUTE_POINTS + MAX_PROFILE_SAMPLES * MAX_PROFILE_SAMPLES)
+    + 2 * MAX_PAIR_SAMPLE_WORK
+    + MAX_PAIR_PROFILE_SAMPLES
+    + 2 * MAX_PROFILE_SAMPLES;
 /// Pair comparisons needed to detect same-source payload conflicts at evidence capacity.
 pub const MAX_EVIDENCE_COMPARISONS: usize = MAX_REVISION_EVIDENCE * (MAX_REVISION_EVIDENCE - 1) / 2;
 /// Each evidence row's fixed identity/revision bytes and each pairwise same-source comparison.
@@ -66,6 +94,16 @@ pub const NO_SPEED_MMPS: u32 = u32::MAX;
 pub const NO_VERTICAL_RATE_FPM: i32 = i32::MIN;
 pub const NO_POSITION_E7: i32 = i32::MIN;
 pub const MAX_VERTICAL_WORK: usize = MAX_FORECAST_WORK + MAX_ROUTE_POINTS * 12 + 512;
+
+fn route_leg_length_m(origin: Place, point: &RoutePoint) -> f64 {
+    great_circle_m(
+        origin,
+        Place {
+            lat_deg: f64::from(point.lat_e7) / 10_000_000.0,
+            lon_deg: f64::from(point.lon_e7) / 10_000_000.0,
+        },
+    )
+}
 
 /// Full stable flight identity. GUFI and SFDPS plan identity stay lossless across the boundary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -418,6 +456,8 @@ pub enum Refusal {
     VerticalWorkLimit = 37,
     PerformanceUnavailableAtCutoff = 38,
     PerformanceIdentityMismatch = 39,
+    InvalidSampleHorizon = 40,
+    SampleCapacity = 41,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -698,10 +738,34 @@ fn output_route_refusal(
     output
 }
 
-/// Produce the shared bounded baseline forecast. Route scans are capped at 256 points and the
-/// declared work budget is checked before conversion/walking. Route-end predictions are explicitly
-/// refused when the horizon extends beyond the last published point.
-pub fn issue_trajectory(input: &TrajectoryIssueInput<'_>) -> TrajectoryIssueOutput {
+/// Evaluate one shared issue-time route walk at caller-selected, increasing duration horizons.
+/// Outputs keep absolute `predicted_time_ms`; offsets are durations from `CurrentTrack::state_ms`.
+/// Route scans and sample work are bounded before the forecast loop.
+fn issue_trajectory_with_horizons(
+    input: &TrajectoryIssueInput<'_>,
+    horizon_offsets_ms: &[i64],
+    horizon_outputs: &mut [HorizonOutput],
+    horizons_valid: &mut bool,
+) -> TrajectoryIssueOutput {
+    *horizons_valid = false;
+    if horizon_offsets_ms.is_empty()
+        || horizon_offsets_ms.len() != horizon_outputs.len()
+        || horizon_offsets_ms.len() > MAX_PAIR_PROFILE_SAMPLES
+        || horizon_offsets_ms
+            .iter()
+            .any(|offset| *offset < 0 || *offset > HORIZON_20_MIN_MS)
+        || horizon_offsets_ms
+            .windows(2)
+            .any(|pair| match (pair.first(), pair.get(1)) {
+                (Some(a), Some(b)) => a >= b,
+                _ => true,
+            })
+    {
+        return output_unavailable(input, Refusal::InvalidSampleHorizon);
+    }
+    for (offset, output) in horizon_offsets_ms.iter().zip(horizon_outputs.iter_mut()) {
+        *output = unavailable_horizon(*offset, Refusal::None);
+    }
     if input.points.len() > MAX_ROUTE_POINTS {
         return output_unavailable(input, Refusal::RouteTooLong);
     }
@@ -709,7 +773,7 @@ pub fn issue_trajectory(input: &TrajectoryIssueInput<'_>) -> TrajectoryIssueOutp
         .points
         .len()
         .saturating_mul(
-            HORIZON_COUNT
+            horizon_offsets_ms.len()
                 + 3
                 + 3 * FIX_IDENTITY_BYTE_WORK
                 + ROUTE_POINT_RESERVED_BYTE_WORK
@@ -725,7 +789,12 @@ pub fn issue_trajectory(input: &TrajectoryIssueInput<'_>) -> TrajectoryIssueOutp
                 + OWNER_RESERVED_BYTE_WORK
                 + CLEARANCE_RESERVED_BYTE_WORK,
         );
-    if planned_work > MAX_FORECAST_WORK {
+    let work_limit = if horizon_offsets_ms.len() == HORIZON_COUNT {
+        MAX_FORECAST_WORK
+    } else {
+        MAX_PAIR_SAMPLE_WORK
+    };
+    if planned_work > work_limit {
         return output_unavailable(input, Refusal::WorkLimit);
     }
     if input.route.source_ms > input.route.available_ms {
@@ -825,10 +894,10 @@ pub fn issue_trajectory(input: &TrajectoryIssueInput<'_>) -> TrajectoryIssueOutp
     let first = match active_point {
         Some(point) if matches == 1 => point,
         Some(_) => {
-            return output_route_refusal(input, Refusal::AmbiguousActiveLeg, input.points.len(), 0)
+            return output_route_refusal(input, Refusal::AmbiguousActiveLeg, input.points.len(), 0);
         }
         None => {
-            return output_route_refusal(input, Refusal::ActiveLegUnknown, input.points.len(), 0)
+            return output_route_refusal(input, Refusal::ActiveLegUnknown, input.points.len(), 0);
         }
     };
     if input.track.groundspeed_mmps == 0 || input.track.groundspeed_mmps == NO_SPEED_MMPS {
@@ -1030,7 +1099,9 @@ pub fn issue_trajectory(input: &TrajectoryIssueInput<'_>) -> TrajectoryIssueOutp
         output.model_flags |= MODEL_ALTITUDE_UNAVAILABLE;
     }
 
-    for (horizon_ms_ref, horizon_output) in HORIZON_MS.iter().zip(output.horizons.iter_mut()) {
+    for (horizon_ms_ref, horizon_output) in
+        horizon_offsets_ms.iter().zip(horizon_outputs.iter_mut())
+    {
         let horizon_ms = *horizon_ms_ref;
         let mut distance_m = speed_mps * (horizon_ms as f64 / 1000.0);
         let mut origin = start;
@@ -1057,13 +1128,7 @@ pub fn issue_trajectory(input: &TrajectoryIssueInput<'_>) -> TrajectoryIssueOutp
             let leg_m = if first_leg {
                 remaining_m
             } else {
-                great_circle_m(
-                    origin,
-                    Place {
-                        lat_deg: point.lat_e7 as f64 / 10_000_000.0,
-                        lon_deg: point.lon_e7 as f64 / 10_000_000.0,
-                    },
-                )
+                route_leg_length_m(origin, point)
             };
             let is_last = route_iter.peek().is_none();
             if distance_m <= leg_m || is_last {
@@ -1255,6 +1320,7 @@ pub fn issue_trajectory(input: &TrajectoryIssueInput<'_>) -> TrajectoryIssueOutp
         }
     }
 
+    *horizons_valid = true;
     if input.eta_target.present {
         if !fix_identity_ok(input.eta_target.fix) {
             output.eta = EtaOutput {
@@ -1325,6 +1391,154 @@ pub fn issue_trajectory(input: &TrajectoryIssueInput<'_>) -> TrajectoryIssueOutp
         };
     }
     output
+}
+
+/// Produce the established three-horizon output using the same route-walk implementation as the
+/// bounded sampler. The fixed public output and its 5/10/20-minute values are unchanged.
+pub fn issue_trajectory(input: &TrajectoryIssueInput<'_>) -> TrajectoryIssueOutput {
+    let mut samples = [unavailable_horizon(HORIZON_5_MIN_MS, Refusal::None); HORIZON_COUNT];
+    let mut horizons_valid = false;
+    let mut output =
+        issue_trajectory_with_horizons(input, &HORIZON_MS, &mut samples, &mut horizons_valid);
+    if horizons_valid {
+        output.horizons = samples;
+    }
+    output
+}
+
+/// Evaluate arbitrary sorted duration horizons with the same route walk as `issue_trajectory`.
+/// `horizon_offsets_ms` are durations from the state epoch; `predicted_time_ms` in each output is
+/// absolute. The maximum pair-union capacity is 553 samples (41 regular samples plus 256 route
+/// vertices from each of two flights). Both slices are caller-owned and must have equal length.
+pub fn issue_trajectory_samples(
+    input: &TrajectoryIssueInput<'_>,
+    horizon_offsets_ms: &[i64],
+    horizon_outputs: &mut [HorizonOutput],
+) -> TrajectoryIssueOutput {
+    let mut horizons_valid = false;
+    issue_trajectory_with_horizons(
+        input,
+        horizon_offsets_ms,
+        horizon_outputs,
+        &mut horizons_valid,
+    )
+}
+
+/// Produce the 30-second profile grid plus every filed route vertex reached within 20 minutes.
+/// Offsets are sorted, deduplicated and caller-owned. The return count identifies valid entries;
+/// a refusal returns zero. This is a time-grid planner only; `issue_trajectory_samples` evaluates
+/// every returned offset through the shared route walker.
+pub fn trajectory_profile_offsets(
+    input: &TrajectoryIssueInput<'_>,
+    offsets_ms: &mut [i64],
+) -> (TrajectoryIssueOutput, usize) {
+    if offsets_ms.len() < MAX_PROFILE_SAMPLES {
+        return (output_unavailable(input, Refusal::SampleCapacity), 0);
+    }
+    let mut baseline_samples =
+        [unavailable_horizon(HORIZON_5_MIN_MS, Refusal::None); HORIZON_COUNT];
+    let mut baseline_valid = false;
+    let mut baseline = issue_trajectory_with_horizons(
+        input,
+        &HORIZON_MS,
+        &mut baseline_samples,
+        &mut baseline_valid,
+    );
+    if !baseline_valid {
+        return (baseline, 0);
+    }
+    baseline.horizons = baseline_samples;
+    let mut count = 0usize;
+    for index in 0..PROFILE_UNIFORM_SAMPLES {
+        let Ok(index_ms) = i64::try_from(index) else {
+            return (output_unavailable(input, Refusal::InvalidSampleHorizon), 0);
+        };
+        let Some(offset) = index_ms.checked_mul(PROFILE_UNIFORM_STEP_MS) else {
+            return (output_unavailable(input, Refusal::InvalidSampleHorizon), 0);
+        };
+        let Some(slot) = offsets_ms.get_mut(count) else {
+            return (output_unavailable(input, Refusal::SampleCapacity), 0);
+        };
+        *slot = offset;
+        count += 1;
+    }
+    let Some(cursor) = input.route_cursor else {
+        return (output_unavailable(input, Refusal::ActiveLegUnknown), 0);
+    };
+    let mut active_index = None;
+    for (index, point) in input.points.iter().enumerate() {
+        if same_fix(point.fix, cursor.next_fix) {
+            active_index = Some(index);
+            break;
+        }
+    }
+    let Some(active_index) = active_index else {
+        return (output_unavailable(input, Refusal::ActiveLegUnknown), 0);
+    };
+    let start = Place {
+        lat_deg: f64::from(input.track.lat_e7) / 10_000_000.0,
+        lon_deg: f64::from(input.track.lon_e7) / 10_000_000.0,
+    };
+    let speed_mps = f64::from(input.track.groundspeed_mmps) / 1_000.0;
+    let mut origin = start;
+    let mut cumulative_m = 0.0;
+    for point in input.points.iter().skip(active_index) {
+        let leg_m = route_leg_length_m(origin, point);
+        cumulative_m += leg_m;
+        let elapsed_ms = oa_ieee::round(cumulative_m / speed_mps * 1_000.0);
+        if !cumulative_m.is_finite() || !elapsed_ms.is_finite() {
+            return (output_unavailable(input, Refusal::TimeOverflow), 0);
+        }
+        if elapsed_ms > HORIZON_20_MIN_MS as f64 {
+            break;
+        }
+        if elapsed_ms < 0.0 || elapsed_ms > i64::MAX as f64 {
+            return (output_unavailable(input, Refusal::TimeOverflow), 0);
+        }
+        let Some(slot) = offsets_ms.get_mut(count) else {
+            return (output_unavailable(input, Refusal::SampleCapacity), 0);
+        };
+        *slot = elapsed_ms as i64;
+        count += 1;
+        origin = Place {
+            lat_deg: f64::from(point.lat_e7) / 10_000_000.0,
+            lon_deg: f64::from(point.lon_e7) / 10_000_000.0,
+        };
+    }
+    // Bounded insertion sort: count <= 41 + MAX_ROUTE_POINTS; included in MAX_PAIR_FORECAST_WORK.
+    for index in 1..count {
+        let Some(value) = offsets_ms.get(index).copied() else {
+            return (output_unavailable(input, Refusal::InvalidSampleHorizon), 0);
+        };
+        let mut cursor = index;
+        while cursor > 0 {
+            let (Some(&prior), Some(_)) = (offsets_ms.get(cursor - 1), offsets_ms.get(cursor))
+            else {
+                return (output_unavailable(input, Refusal::InvalidSampleHorizon), 0);
+            };
+            if prior <= value {
+                break;
+            }
+            offsets_ms.swap(cursor, cursor - 1);
+            cursor -= 1;
+        }
+    }
+    let mut unique = 0usize;
+    let mut previous = None;
+    for index in 0..count {
+        let Some(value) = offsets_ms.get(index).copied() else {
+            return (output_unavailable(input, Refusal::InvalidSampleHorizon), 0);
+        };
+        if previous != Some(value) {
+            let Some(slot) = offsets_ms.get_mut(unique) else {
+                return (output_unavailable(input, Refusal::SampleCapacity), 0);
+            };
+            *slot = value;
+            unique += 1;
+            previous = Some(value);
+        }
+    }
+    (baseline, unique)
 }
 
 /// Route revision candidate. The route payload hash binds the complete converted payload; no
@@ -1886,7 +2100,7 @@ pub fn issue_vertical_profile(
                     performance,
                     ClearanceAssumption::Unsupported,
                     Refusal::UnsupportedClearanceForm,
-                )
+                );
             }
         }
     }

@@ -1237,3 +1237,93 @@ fn route_revision_selection_preserves_full_flight_identity_and_detects_conflict(
         EvidenceRefusal::SameSourceConflict
     );
 }
+
+// REQ: OA-ENC-023
+#[test]
+fn sampled_shared_route_preserves_fixed_horizons_and_includes_route_turns() {
+    let mut second_fix = ident();
+    second_fix.ident.bytes = *b"DEF\0\0\0\0\0\0\0\0\0";
+    let points = [
+        route_point(0, 1_000_000, ident()),
+        route_point(10_000_000, 1_000_000, second_fix),
+    ];
+    let request = input(&points);
+    let fixed = issue_trajectory(&request);
+
+    let mut offsets = [0_i64; MAX_PROFILE_SAMPLES];
+    let (profile, count) = trajectory_profile_offsets(&request, &mut offsets);
+    assert_eq!(profile.eta.refusal, Refusal::None);
+    assert!(count > PROFILE_UNIFORM_SAMPLES);
+    let first = HorizonOutput {
+        horizon_ms: 0,
+        predicted_time_ms: 0,
+        lat_e7: 0,
+        lon_e7: 0,
+        altitude_ft: 0,
+        groundspeed_mmps: 0,
+        flags: 0,
+        available: Availability::Unavailable,
+        refusal: Refusal::None,
+        reserved: [0; 2],
+    };
+    let mut samples = [first; MAX_PROFILE_SAMPLES];
+    let sampled = issue_trajectory_samples(
+        &request,
+        offsets.get(..count).unwrap(),
+        samples.get_mut(..count).unwrap(),
+    );
+    assert_eq!(sampled.eta.refusal, Refusal::None);
+    for (index, expected) in fixed.horizons.iter().enumerate() {
+        let actual = samples
+            .iter()
+            .take(count)
+            .find(|sample| sample.horizon_ms == expected.horizon_ms)
+            .unwrap();
+        assert_eq!(actual, expected, "fixed horizon slot {index}");
+    }
+    let corner = samples.iter().take(count).find(|sample| {
+        (sample.horizon_ms - 111_000).abs() <= 500
+            && sample.lat_e7 == 0
+            && (sample.lon_e7 - 1_000_000).abs() <= 100
+    });
+    assert!(
+        corner.is_some(),
+        "profile includes the reached route vertex"
+    );
+    let after_turn = samples
+        .iter()
+        .take(count)
+        .find(|sample| sample.horizon_ms == 150_000)
+        .unwrap();
+    let coarse_chord_lon = fixed.horizons[0].lon_e7 / 2;
+    assert!((after_turn.lon_e7 - coarse_chord_lon).abs() > 200_000);
+}
+
+// REQ: OA-ENC-023
+#[test]
+fn sampled_route_profile_and_horizon_capacity_refuse_without_truncation() {
+    let points = [route_point(0, 1_000_000, ident())];
+    let request = input(&points);
+    let mut short_profile = [0_i64; MAX_PROFILE_SAMPLES - 1];
+    let (profile, count) = trajectory_profile_offsets(&request, &mut short_profile);
+    assert_eq!(profile.eta.refusal, Refusal::SampleCapacity);
+    assert_eq!(count, 0);
+
+    let offsets = [HORIZON_5_MIN_MS, 0];
+    let sentinel = HorizonOutput {
+        horizon_ms: 17,
+        predicted_time_ms: 19,
+        lat_e7: 23,
+        lon_e7: 29,
+        altitude_ft: 31,
+        groundspeed_mmps: 37,
+        flags: 41,
+        available: Availability::Degraded,
+        refusal: Refusal::UnsupportedGeometry,
+        reserved: [43; 2],
+    };
+    let mut outputs = [sentinel; 2];
+    let result = issue_trajectory_samples(&request, &offsets, &mut outputs);
+    assert_eq!(result.eta.refusal, Refusal::InvalidSampleHorizon);
+    assert_eq!(outputs, [sentinel; 2]);
+}
