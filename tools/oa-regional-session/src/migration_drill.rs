@@ -1933,7 +1933,9 @@ fn parse_display_target(value: &str) -> Result<Option<AppliedDisplayTarget>, Str
         let (lat, lon) = row
             .split_once(':')
             .ok_or("regional display trail pair is malformed")?;
-        trail[index] = (
+        *trail
+            .get_mut(index)
+            .ok_or("regional display trail index exceeds capacity")? = (
             lat.parse()
                 .map_err(|_| "regional display trail latitude is invalid")?,
             lon.parse()
@@ -4115,10 +4117,6 @@ pub fn run_recorded_stream(
                         &candidate_snapshot.display_targets,
                         Output::Candidate,
                     )?;
-                    applied_display_blocks = Some(
-                        u64::try_from(candidate_snapshot.display_targets.len())
-                            .map_err(|_| "candidate display block count overflow")?,
-                    );
                     worker_generation = generation;
                     let candidate_ack_ns = snapshot_now_ns
                         .checked_add(

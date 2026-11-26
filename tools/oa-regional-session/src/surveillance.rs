@@ -704,8 +704,8 @@ fn display_target_rows(
             .get(start..end)
             .ok_or("display longitude trail missing")?;
         let mut trail = [(0, 0); MAX_TRAIL];
-        for offset in 0..MAX_TRAIL {
-            trail[offset] = (
+        for (offset, point) in trail.iter_mut().enumerate() {
+            *point = (
                 *lat_trail
                     .get(offset)
                     .ok_or("display latitude trail row missing")?,
