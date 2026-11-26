@@ -7,6 +7,7 @@
 //!         [--retain-days <n> --peak-bytes-per-hour <n> --peak-rate-source <measurement-path>]
 //!         [--duration <s>] [--summary-every <s>]
 //! oa-feed replay <file.oaf | file.oaf.gz>...
+//! oa-feed measure-rate <raw-file.oaf>...
 //! oa-feed recordings --feed <name> --from <unix-seconds> --to <unix-seconds> <dir>
 //! ```
 //!
@@ -17,6 +18,9 @@
 //! segment receives a closed-retention receipt only after both sync stages succeed. Sizes
 //! (`--max-bytes`, `--rotate-bytes`) count the
 //! bytes written. Replay tells the formats apart by the file's first bytes, not its name.
+//! `measure-rate` is a stricter raw `.oaf`-only aggregate measurement: it refuses compressed,
+//! damaged, sealed-window, or unframed input. Its hourly frame-byte sample does not prove capture
+//! continuity or a future maximum; the report discloses partial edge hours.
 
 use std::path::PathBuf;
 
@@ -84,6 +88,8 @@ pub enum Command {
     Live(Live),
     /// Replay recorded files.
     Replay(Vec<PathBuf>),
+    /// Print payload-free observed UTC-hour frame-byte aggregates for bounded OAF inputs.
+    MeasureRate(Vec<PathBuf>),
     /// List segments whose known or possible interval overlaps a half-open UTC range.
     ListRecordings {
         dir: PathBuf,
@@ -99,7 +105,7 @@ pub enum Command {
 pub const USAGE: &str =
     "usage:\n  oa-feed (--env <file> [--jar <jar>] [--java <java>] | --stdin) [--feed <name>] \
 [--record <dir> | --record-raw <dir>] [--sync-closed-segments] [--max-bytes <n>] [--rotate-bytes <n>] [--duration <s>] \
-[--summary-every <s>] [--retain-days <n> --peak-bytes-per-hour <n> --peak-rate-source <measurement-path>]\n  oa-feed replay <file.oaf | file.oaf.gz>...\n  oa-feed recordings --feed <name> --from <unix-seconds> --to <unix-seconds> <dir>";
+[--summary-every <s>] [--retain-days <n> --peak-bytes-per-hour <n> --peak-rate-source <measurement-path>]\n  oa-feed replay <file.oaf | file.oaf.gz>...\n  oa-feed measure-rate <raw-file.oaf>...\n  oa-feed recordings --feed <name> --from <unix-seconds> --to <unix-seconds> <dir>";
 
 /// Parses arguments (without the program name).
 pub fn parse(args: &[String]) -> Result<Command, String> {
@@ -126,6 +132,16 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             return Err("replay needs at least one file".into());
         }
         return Ok(Command::Replay(files));
+    }
+    if args.first().map(String::as_str) == Some("measure-rate") {
+        let files: Vec<PathBuf> = args.iter().skip(1).map(PathBuf::from).collect();
+        if files.is_empty() {
+            return Err("measure-rate needs at least one file".into());
+        }
+        if files.len() > 256 {
+            return Err("measure-rate accepts at most 256 files".into());
+        }
+        return Ok(Command::MeasureRate(files));
     }
     if args.first().map(String::as_str) == Some("recordings") {
         return parse_recordings_query(args);

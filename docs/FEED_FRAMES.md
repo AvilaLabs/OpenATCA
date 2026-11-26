@@ -83,6 +83,22 @@ so the hours of a suspend are a step.
 * The reader works in a caller-supplied buffer of at least one maximum frame; it allocates
   nothing after start. Input of any chunking gives the same frames.
 
+## Measured hourly frame-byte sample
+
+`oa-feed measure-rate <raw-file.oaf>...` reads up to 256 guarded regular raw OAF files through the
+same frame parser and sealed-window gate used by replay. Per-file input is capped at 4 GiB and
+aggregate input at 16 GiB. It refuses compressed input, frame damage/truncation, unframed bytes,
+and any sealed-window drop so that valid raw frame sizes account for the complete input file
+bytes. The command retains only bounded per-UTC-hour byte totals and prints aggregate counts,
+first/last receive timestamps, possible partial edge-hour count, and the maximum observed hourly
+frame-byte total; it prints no payload or message identifiers.
+
+This is a measurement of the supplied sample, not proof that capture was continuous between
+frames or a guarantee of a future peak. The first and last hour buckets may be partial, and the
+report labels capture continuity as unverified. Use the reported value and exact measurement
+artifact as operator-supplied input to measured retention sizing; the sizing calculation does not
+infer a rate or convert this sample into a future maximum.
+
 ## Recording startup
 
 Before opening a recording, `oa-feed` counts existing `.oaf` and `.oaf.gz` bytes while inspecting

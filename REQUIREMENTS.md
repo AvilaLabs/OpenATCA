@@ -1072,6 +1072,12 @@ under RULESET F6 and is verified by its live run, not by the cargo tests.
   source, arithmetic overflow, and conflicting explicit cap; its summary reports the exact configured retention,
   supplied rate, derived cap and source. On Linux, combining retention with `--sync-closed-segments` preserves
   file-then-directory sync ordering; a closed receipt is created only after both sync stages succeed.
+- **OA-FEED-196** `oa-feed measure-rate` accepts at most 256 guarded regular raw-OAF files, with per-file and
+  aggregate byte caps, and uses the production frame reader/sealed-window gate to aggregate only validated frame
+  byte counts by receive-time UTC hour. It refuses gzip, damaged/truncated/unframed input and sealed-window drops,
+  emits aggregate counts and first/last frame times without payloads or IDs, and discloses that edge buckets may be
+  partial and capture continuity is unverified. Its observed sample peak is operator-supplied measurement input;
+  it does not establish a future traffic maximum or continuous hourly coverage.
 - **OA-DEF-001** Compresses to a raw RFC 1951 DEFLATE stream that the oa-zip inflater decodes to
   exactly the input, at levels 1 to 9 (others are clamped), for empty input, one byte, all-same
   bytes, random bytes and data at 32 KiB, 64 KiB and buffer-slide boundaries (each +-1).

@@ -22,7 +22,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use oa_feed::cli::{self, Command, Live, Source};
 use oa_feed::health::{observe_error, observe_frame, observe_skipped, FeedHealth};
 use oa_feed::record::{format_recording, utc_iso, Format, Outcome, Recorder};
-use oa_feed::replay::{replay_files_counted, GzNoteKind};
+use oa_feed::replay::{
+    replay_files_counted, replay_files_counted_with_rate, GzNoteKind, HourlyRateMeter,
+};
 use oa_feed::{
     encode_frame_mono, format_summary, frame_work_refusal_retryable, FrameReader, FrameWorkBudget,
     FrameWorkRefusal, MAX_FRAME_LEN,
@@ -132,6 +134,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Ok(Command::Replay(files)) => replay(&files),
+        Ok(Command::MeasureRate(files)) => measure_rate(&files),
         Ok(Command::ListRecordings {
             dir,
             feed,
@@ -171,6 +174,41 @@ fn main() -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+fn measure_rate(files: &[PathBuf]) -> ExitCode {
+    let mut sealed = 0u64;
+    let mut meter = HourlyRateMeter::default();
+    let report = match replay_files_counted_with_rate(files, &mut sealed, &mut meter) {
+        Ok(report) => report,
+        Err(_) => {
+            eprintln!("oa-feed: rate measurement refused");
+            return ExitCode::FAILURE;
+        }
+    };
+    let rate = meter.finish();
+    // A rate report is only usable when every input was parsed without damage and no sealed
+    // frame was removed. Do not expose frame error details, file paths, payload, or IDs.
+    if !report.errors.is_empty()
+        || !report.gzip.is_empty()
+        || report.sealed_window_dropped != 0
+        || rate.frames == 0
+    {
+        eprintln!("oa-feed: rate measurement incomplete (input damage or sealed-window drops)");
+        return ExitCode::FAILURE;
+    }
+    println!(
+        "rate_measurement unit=decoded_oaf_frame_bytes_per_utc_hour input_files={} input_file_bytes={} frames={} observed_hours={} first_recv_unix_ns={} last_recv_unix_ns={} edge_hours_may_be_partial={} max_observed_hour_frame_bytes={} capture_continuity=unverified",
+        report.files,
+        rate.input_file_bytes,
+        rate.frames,
+        rate.observed_hours,
+        rate.first_recv_unix_ns.map_or_else(|| "none".to_owned(), |v| v.to_string()),
+        rate.last_recv_unix_ns.map_or_else(|| "none".to_owned(), |v| v.to_string()),
+        rate.edge_hours_may_be_partial,
+        rate.max_observed_hour_frame_bytes,
+    );
+    ExitCode::SUCCESS
 }
 
 fn now_ns() -> i64 {
