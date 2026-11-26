@@ -144,8 +144,7 @@ pub struct QuarantineQueue {
     heads: [u16; INPUT_SOURCE_COUNT],
     lengths: [u16; INPUT_SOURCE_COUNT],
     stats: [SourceStats; INPUT_SOURCE_COUNT],
-    last_release_audit_sequence: u64,
-    last_release_audit_digest: [u8; 32],
+    release_audit_checkpoint: oa_audit_core::Checkpoint,
 }
 
 // A7.1: each event is 32 bytes and the 384 slots are 12 KiB. Long-lived u64 counters are sized
@@ -212,13 +211,18 @@ fn empty_event() -> QuarantineEvent {
 
 /// Initialize an empty fixed-capacity queue subsystem.
 pub fn queue_new() -> QuarantineQueue {
+    queue_new_with_audit_checkpoint(oa_audit_core::genesis())
+}
+
+/// Initialize an empty queue with the trusted checkpoint for its dedicated audit chain.
+/// The shell still verifies this checkpoint against the log before an append.
+pub fn queue_new_with_audit_checkpoint(checkpoint: oa_audit_core::Checkpoint) -> QuarantineQueue {
     QuarantineQueue {
         events: [empty_event(); MAX_PENDING_EVENTS],
         heads: [0; INPUT_SOURCE_COUNT],
         lengths: [0; INPUT_SOURCE_COUNT],
         stats: [EMPTY_STATS; INPUT_SOURCE_COUNT],
-        last_release_audit_sequence: 0,
-        last_release_audit_digest: [0; 32],
+        release_audit_checkpoint: checkpoint,
     }
 }
 
@@ -372,7 +376,8 @@ pub fn queue_acknowledge(
     let event = *checked_ref(&queue.events, index)?;
     let (expected_target, expected_target_len) = release_audit_target(event);
     let next_audit_sequence = queue
-        .last_release_audit_sequence
+        .release_audit_checkpoint
+        .count
         .checked_add(1)
         .ok_or(QuarantineError::CounterOverflow)?;
     if oa_audit_core::validate_event(&receipt.event).is_err()
@@ -382,7 +387,7 @@ pub fn queue_acknowledge(
             oa_audit_core::Role::Operate | oa_audit_core::Role::Configure
         )
         || receipt.sequence() != next_audit_sequence
-        || receipt.previous() != queue.last_release_audit_digest
+        || receipt.previous() != queue.release_audit_checkpoint.tail
         || receipt.target()
             != expected_target
                 .get(..usize::from(expected_target_len))
@@ -405,8 +410,10 @@ pub fn queue_acknowledge(
     *stored_head = next_head;
     *stored_length = next_length;
     *stored_stats = next_stats;
-    queue.last_release_audit_sequence = receipt.sequence();
-    queue.last_release_audit_digest = receipt.digest();
+    queue.release_audit_checkpoint = oa_audit_core::Checkpoint {
+        count: receipt.sequence(),
+        tail: receipt.digest(),
+    };
     Ok(event)
 }
 

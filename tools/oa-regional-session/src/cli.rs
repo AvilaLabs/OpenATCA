@@ -3,7 +3,9 @@
 //! recomputes state and does not claim a live or distributed process checkpoint.
 
 use crate::runtime::{
-    regional_new, regional_new_with_profile, regional_pixels, regional_step, RegionalRunProfile,
+    regional_acknowledge_quarantine_before_commit, regional_new, regional_new_with_profile,
+    regional_new_with_profile_and_quarantine_audit_checkpoint, regional_pixels,
+    regional_quarantine_stats, regional_step, QuarantineMaintenanceRequest, RegionalRunProfile,
     DEFAULT_REGIONAL_RUN_PROFILE,
 };
 use crate::surveillance::{SurveillanceConfig, FRAME_HEIGHT, FRAME_WIDTH, MAX_FRAMES};
@@ -27,6 +29,19 @@ pub enum MsawSource {
     Disabled,
     Synthetic,
     Manifest(PathBuf),
+}
+
+/// Explicit caller-supplied inputs for one in-process manual quarantine handoff.
+#[derive(Clone, Debug)]
+pub struct QuarantineReleaseOptions {
+    pub source: oa_quarantine::InputSource,
+    pub identity: oa_quarantine::InputIdentity,
+    pub manual_handoff_ref: String,
+    pub audit_log: PathBuf,
+    pub audit_checkpoint: oa_audit_core::Checkpoint,
+    pub principal: u64,
+    pub role: oa_audit_core::Role,
+    pub time_ns: u64,
 }
 
 /// Persisted CLI profile selection. The absent/default option remains the historical 32-track
@@ -188,6 +203,28 @@ pub fn run_session_with_profile_options(
     performance: Option<&Path>,
     selected_profile: RegionalCliProfile,
 ) -> Result<(), String> {
+    run_session_with_profile_options_and_quarantine_release(
+        bytes,
+        output,
+        source,
+        safety,
+        performance,
+        selected_profile,
+        None,
+    )
+}
+
+/// Run a bounded replay and optionally append before acknowledging one explicitly selected
+/// pending queue front as a caller-claimed manual-responsibility handoff.
+pub fn run_session_with_profile_options_and_quarantine_release(
+    bytes: &[u8],
+    output: &Path,
+    source: &ModelSource,
+    safety: &MsawSource,
+    performance: Option<&Path>,
+    selected_profile: RegionalCliProfile,
+    quarantine_release: Option<&QuarantineReleaseOptions>,
+) -> Result<(), String> {
     if bytes.len() > 16 * 1024 * 1024 {
         return Err("normalized input exceeds byte limit".into());
     }
@@ -209,10 +246,19 @@ pub fn run_session_with_profile_options(
         range_nm: 180.0,
     };
     let profile = regional_cli_runtime_profile(selected_profile);
-    let mut runtime = if selected_profile == RegionalCliProfile::Default {
-        regional_new(model, snapshot_sha, *b"ZAU1", cfg)?
-    } else {
-        regional_new_with_profile(model, snapshot_sha, *b"ZAU1", cfg, profile)?
+    let mut runtime = match quarantine_release {
+        Some(request) => regional_new_with_profile_and_quarantine_audit_checkpoint(
+            model,
+            snapshot_sha,
+            *b"ZAU1",
+            cfg,
+            profile,
+            request.audit_checkpoint,
+        )?,
+        None if selected_profile == RegionalCliProfile::Default => {
+            regional_new(model, snapshot_sha, *b"ZAU1", cfg)?
+        }
+        None => regional_new_with_profile(model, snapshot_sha, *b"ZAU1", cfg, profile)?,
     };
     let text = std::str::from_utf8(bytes).map_err(|_| "input not UTF-8")?;
     if text.lines().next() != Some("OA-RS\t1") {
@@ -352,6 +398,45 @@ pub fn run_session_with_profile_options(
             name,
             oa_sha256::to_hex(&oa_sha256::sha256(evidence.as_bytes())),
             oa_sha256::to_hex(&oa_sha256::sha256(&ppm))
+        ));
+    }
+    if let Some(request) = quarantine_release {
+        let receipt = regional_acknowledge_quarantine_before_commit(
+            &mut runtime,
+            QuarantineMaintenanceRequest {
+                source: request.source,
+                expected_identity: request.identity,
+                audit_log: &request.audit_log,
+                expected_checkpoint: request.audit_checkpoint,
+                principal: request.principal,
+                role: request.role,
+                time_ns: request.time_ns,
+                manual_handoff_ref: &request.manual_handoff_ref,
+            },
+        )?;
+        let stats = regional_quarantine_stats(&runtime)?;
+        let report = format!(
+            "OA_REGIONAL_QUARANTINE_MAINTENANCE\t1\nsource\t{:?}\nsource_instance\t{}\nitem_id\t{}\nreasons\t{}\nclock_domain_id\t{}\ncompleted_at_ns\t{}\nmanual_handoff_ref\t{}\naudit_count\t{}\naudit_tail\t{}\nsource_stats\t{stats:?}\n",
+            receipt.event.identity.source,
+            receipt.event.identity.source_instance,
+            receipt.event.identity.item_id,
+            receipt.event.reasons.0,
+            receipt.event.clock_domain_id,
+            receipt.event.completed_at_ns,
+            request.manual_handoff_ref,
+            receipt.audit_checkpoint.count,
+            oa_sha256::to_hex(&receipt.audit_checkpoint.tail),
+        );
+        if report.len() > 4096 {
+            return Err("quarantine maintenance report exceeds its fixed bound".into());
+        }
+        write_new(
+            &output.join("quarantine-maintenance.tsv"),
+            report.as_bytes(),
+        )?;
+        manifest.push_str(&format!(
+            "quarantine_maintenance\tquarantine-maintenance.tsv\t{}\n",
+            oa_sha256::to_hex(&oa_sha256::sha256(report.as_bytes()))
         ));
     }
     write_new(&output.join("manifest.tsv"), manifest.as_bytes())?;

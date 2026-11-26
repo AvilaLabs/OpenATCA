@@ -15,10 +15,12 @@ use oa_legacy_traj::core::trajectory::{
     PerformanceEnvelope, TrajectoryIssueOutput, VerticalProfileOutput,
 };
 use oa_quarantine::{
-    route_input, source_stats, Disposition, InputIdentity, InputOutcome, InputSource,
-    QuarantineQueue, ReasonFlags, SourceStats, REASON_INPUT_INVALID, REASON_RESOURCE_LIMIT,
-    REASON_SURVEILLANCE_INVALID,
+    queue_acknowledge, queue_front, route_input, source_stats, Disposition, InputIdentity,
+    InputOutcome, InputSource, QuarantineEvent, QuarantineQueue, ReasonFlags, SourceStats,
+    REASON_INPUT_INVALID, REASON_RESOURCE_LIMIT, REASON_SURVEILLANCE_INVALID,
 };
+use std::fmt::Write as _;
+use std::path::Path;
 use std::time::Instant;
 
 const DEFAULT_SESSION_NAMESPACE: u16 = 1;
@@ -407,6 +409,124 @@ pub fn regional_new_with_profile(
     )
 }
 
+/// Construct a regional replay with the caller's trusted durable quarantine-audit checkpoint.
+/// The shell append verifies this value against the actual audit file before any release mutation.
+pub fn regional_new_with_profile_and_quarantine_audit_checkpoint(
+    model: Model,
+    snapshot_sha256: [u8; 32],
+    centre: [u8; 4],
+    cfg: SurveillanceConfig,
+    profile: RegionalRunProfile,
+    checkpoint: oa_audit_core::Checkpoint,
+) -> Result<RegionalRuntime, String> {
+    regional_new_with_profile_and_namespace_and_audit_checkpoint(
+        model,
+        snapshot_sha256,
+        centre,
+        cfg,
+        profile,
+        DEFAULT_SESSION_NAMESPACE,
+        checkpoint,
+    )
+}
+
+/// Result of an explicit manual quarantine handoff, bound to the durable audit chain.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct QuarantineMaintenanceReceipt {
+    pub event: QuarantineEvent,
+    pub audit_checkpoint: oa_audit_core::Checkpoint,
+}
+
+/// Audit and acknowledge the selected front item as an explicit manual-responsibility handoff.
+/// The principal, role, timestamp and note are caller claims; this path authenticates no identity
+/// and does not imply that the external manual workflow itself was performed.
+pub struct QuarantineMaintenanceRequest<'a> {
+    pub source: InputSource,
+    pub expected_identity: InputIdentity,
+    pub audit_log: &'a Path,
+    pub expected_checkpoint: oa_audit_core::Checkpoint,
+    pub principal: u64,
+    pub role: oa_audit_core::Role,
+    pub time_ns: u64,
+    pub manual_handoff_ref: &'a str,
+}
+
+pub fn regional_acknowledge_quarantine_before_commit(
+    runtime: &mut RegionalRuntime,
+    request: QuarantineMaintenanceRequest<'_>,
+) -> Result<QuarantineMaintenanceReceipt, String> {
+    let QuarantineMaintenanceRequest {
+        source,
+        expected_identity,
+        audit_log,
+        expected_checkpoint,
+        principal,
+        role,
+        time_ns,
+        manual_handoff_ref,
+    } = request;
+    if runtime.failed {
+        return Err("session failed; reconstruct before quarantine maintenance".into());
+    }
+    if principal == 0 || time_ns == 0 {
+        return Err("audit principal and timestamp must be positive".into());
+    }
+    if manual_handoff_ref.is_empty()
+        || manual_handoff_ref.len() > 256
+        || !manual_handoff_ref
+            .bytes()
+            .all(|byte| (0x20..=0x7e).contains(&byte) && byte != b'\t')
+    {
+        return Err("manual-handoff reference must be 1..=256 printable ASCII bytes".into());
+    }
+    let front = queue_front(&runtime.quarantine_queue, source)
+        .map_err(|error| format!("quarantine front: {error:?}"))?
+        .ok_or_else(|| "quarantine source has no pending front item".to_owned())?;
+    if front.identity != expected_identity || expected_identity.source != source {
+        return Err("requested identity does not match the pending quarantine front".into());
+    }
+    let mut details = String::new();
+    details
+        .try_reserve_exact(512)
+        .map_err(|_| "quarantine audit details allocation refused")?;
+    writeln!(
+        details,
+        "QUARANTINE-RELEASE-V1\nsource\t{:?}\nsource_instance\t{}\nitem_id\t{}\nreasons\t{}\nclock_domain_id\t{}\ncompleted_at_ns\t{}\nmanual_handoff_ref\t{}",
+        front.identity.source,
+        front.identity.source_instance,
+        front.identity.item_id,
+        front.reasons.0,
+        front.clock_domain_id,
+        front.completed_at_ns,
+        manual_handoff_ref
+    )
+    .map_err(|_| "quarantine audit detail formatting failed")?;
+    let (target, target_len) = oa_quarantine::release_audit_target(front);
+    let (details, details_len) = oa_audit_core::details(details.as_bytes())
+        .map_err(|error| format!("quarantine audit details: {error:?}"))?;
+    let event = oa_audit_core::Event {
+        principal,
+        role,
+        action: oa_audit_core::Action::QuarantineRelease,
+        target,
+        target_len,
+        time_ns,
+        details,
+        details_len,
+    };
+    oa_audit_core::validate_event(&event)
+        .map_err(|error| format!("quarantine audit event: {error:?}"))?;
+    let (audit_checkpoint, receipt) =
+        oa_audit_log::shell::append_receipt(audit_log, expected_checkpoint, event)
+            .map_err(|error| format!("quarantine audit append: {error:?}"))?;
+    let released = queue_acknowledge(&mut runtime.quarantine_queue, source, receipt)
+        .map_err(|error| format!("quarantine release commit: {error:?}"))?;
+    Ok(QuarantineMaintenanceReceipt {
+        event: released,
+        audit_checkpoint,
+    })
+}
+
 /// Returns the immutable validated capacities selected at construction.
 pub fn regional_profile_limits(runtime: &RegionalRuntime) -> RegionalRunProfile {
     runtime.profile
@@ -452,6 +572,26 @@ fn regional_new_with_profile_and_namespace(
     profile: RegionalRunProfile,
     session_namespace: u16,
 ) -> Result<RegionalRuntime, String> {
+    regional_new_with_profile_and_namespace_and_audit_checkpoint(
+        model,
+        snapshot_sha256,
+        centre,
+        cfg,
+        profile,
+        session_namespace,
+        oa_audit_core::genesis(),
+    )
+}
+
+fn regional_new_with_profile_and_namespace_and_audit_checkpoint(
+    model: Model,
+    snapshot_sha256: [u8; 32],
+    centre: [u8; 4],
+    cfg: SurveillanceConfig,
+    profile: RegionalRunProfile,
+    session_namespace: u16,
+    audit_checkpoint: oa_audit_core::Checkpoint,
+) -> Result<RegionalRuntime, String> {
     if !centre.iter().all(u8::is_ascii_alphanumeric) {
         return Err("centre must be four ASCII alphanumeric bytes".into());
     }
@@ -493,7 +633,7 @@ fn regional_new_with_profile_and_namespace(
         frame_sequence: 0,
         failed: false,
         session_namespace,
-        quarantine_queue: oa_quarantine::queue_new(),
+        quarantine_queue: oa_quarantine::queue_new_with_audit_checkpoint(audit_checkpoint),
         interaction: oa_display::interaction::interaction_new(),
         views: Vec::with_capacity(profile.max_flights),
         observed: Vec::with_capacity(profile.surveillance.max_tracks),
@@ -501,6 +641,13 @@ fn regional_new_with_profile_and_namespace(
         console_text: String::with_capacity(128),
         profile,
     })
+}
+
+/// Read the final quarantine counters after an optional on-demand release.
+pub fn regional_quarantine_stats(
+    runtime: &RegionalRuntime,
+) -> Result<[SourceStats; oa_quarantine::INPUT_SOURCE_COUNT], String> {
+    quarantine_stats(&runtime.quarantine_queue)
 }
 
 fn execute(
@@ -974,6 +1121,9 @@ mod transaction_tests {
     use super::*;
     use crate::cli::synthetic_model;
     use crate::input::parse_event_line;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_QUARANTINE_AUDIT_TEST: AtomicU64 = AtomicU64::new(0);
 
     fn intern(model: &mut Model, text: &str) -> oa_airspace::core::model::StrIx {
         let raw = model.strings.offsets.len().checked_sub(1).unwrap();
@@ -984,6 +1134,138 @@ mod transaction_tests {
             .offsets
             .push(u32::try_from(model.strings.text.len()).unwrap());
         index
+    }
+
+    // REQ: OA-QUAR-004, OA-AUDIT-002, OA-AUDIT-003, OA-AUDIT-005, OA-AUDIT-006
+    #[test]
+    fn quarantine_maintainer_appends_before_ack_and_refuses_audit_failure() {
+        let model = synthetic_model().expect("public synthetic model");
+        let snapshot = oa_airspace::core::snapshot::encode(&model).expect("encode model");
+        let checkpoint = oa_audit_core::genesis();
+        let mut runtime = regional_new_with_profile_and_quarantine_audit_checkpoint(
+            model,
+            oa_sha256::sha256(&snapshot),
+            *b"ZAU1",
+            SurveillanceConfig {
+                centre_lat_e7: 410_000_000,
+                centre_lon_e7: -870_000_000,
+                range_nm: 180.0,
+            },
+            DEFAULT_REGIONAL_RUN_PROFILE,
+            checkpoint,
+        )
+        .expect("new synthetic runtime");
+        let source = InputSource::Surveillance;
+        let identity = InputIdentity {
+            source,
+            source_instance: 2,
+            item_id: 77,
+        };
+        assert!(matches!(
+            route_input(
+                &mut runtime.quarantine_queue,
+                InputOutcome {
+                    identity,
+                    refusal_reasons: ReasonFlags(REASON_SURVEILLANCE_INVALID),
+                    clock_domain_id: 1,
+                    started_at_ns: 10,
+                    completed_at_ns: 20,
+                    elapsed_limit_ns: 10,
+                    work_units: 1,
+                    work_limit: 1,
+                },
+            ),
+            Ok(Disposition::Queued(_))
+        ));
+        let before = queue_front(&runtime.quarantine_queue, source)
+            .expect("read synthetic queue")
+            .expect("queued event");
+        let serial = NEXT_QUARANTINE_AUDIT_TEST.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "oa-regional-quarantine-maintenance-{}-{serial}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir(&root).expect("create synthetic output directory");
+        let protected_alias = root
+            .join("scds")
+            .join("rec-20261119")
+            .join("day2-synthetic")
+            .join("audit.log");
+        assert!(regional_acknowledge_quarantine_before_commit(
+            &mut runtime,
+            QuarantineMaintenanceRequest {
+                source,
+                expected_identity: identity,
+                audit_log: &protected_alias,
+                expected_checkpoint: checkpoint,
+                principal: 51,
+                role: oa_audit_core::Role::Operate,
+                time_ns: 100,
+                manual_handoff_ref: "manual-case-77",
+            },
+        )
+        .is_err());
+        assert_eq!(
+            queue_front(&runtime.quarantine_queue, source).expect("queue still available"),
+            Some(before)
+        );
+        assert!(!protected_alias.exists());
+
+        let wrong_role_path = root.join("wrong-role.audit");
+        assert!(regional_acknowledge_quarantine_before_commit(
+            &mut runtime,
+            QuarantineMaintenanceRequest {
+                source,
+                expected_identity: identity,
+                audit_log: &wrong_role_path,
+                expected_checkpoint: checkpoint,
+                principal: 51,
+                role: oa_audit_core::Role::Monitor,
+                time_ns: 100,
+                manual_handoff_ref: "manual-case-77",
+            },
+        )
+        .is_err());
+        assert!(!wrong_role_path.exists());
+        assert_eq!(
+            queue_front(&runtime.quarantine_queue, source).expect("queue still available"),
+            Some(before)
+        );
+
+        let audit_path = root.join("quarantine.audit");
+        let receipt = regional_acknowledge_quarantine_before_commit(
+            &mut runtime,
+            QuarantineMaintenanceRequest {
+                source,
+                expected_identity: identity,
+                audit_log: &audit_path,
+                expected_checkpoint: checkpoint,
+                principal: 51,
+                role: oa_audit_core::Role::Operate,
+                time_ns: 101,
+                manual_handoff_ref: "manual-case-77",
+            },
+        )
+        .expect("append and acknowledge selected queue front");
+        assert_eq!(receipt.event, before);
+        assert_eq!(receipt.audit_checkpoint.count, 1);
+        assert_eq!(
+            oa_audit_log::shell::verify(&audit_path, receipt.audit_checkpoint)
+                .expect("verify durable release record"),
+            receipt.audit_checkpoint
+        );
+        assert_eq!(
+            queue_front(&runtime.quarantine_queue, source).expect("queue empty after release"),
+            None
+        );
+        assert_eq!(
+            source_stats(&runtime.quarantine_queue, source)
+                .expect("release counter")
+                .acknowledged,
+            1
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     fn insert_bit(bits: &mut oa_airspace::core::model::BitSet, index: usize, value: bool) {

@@ -53,6 +53,7 @@ struct Arguments {
     safety: oa_regional_session::cli::MsawSource,
     performance: Option<PathBuf>,
     profile: oa_regional_session::cli::RegionalCliProfile,
+    quarantine_release: Option<oa_regional_session::cli::QuarantineReleaseOptions>,
 }
 
 fn arguments() -> Result<Arguments, CliError> {
@@ -69,10 +70,20 @@ fn arguments() -> Result<Arguments, CliError> {
     let mut safety = None;
     let mut performance = None;
     let mut profile = None;
+    let mut quarantine_source = None;
+    let mut quarantine_instance = None;
+    let mut quarantine_item = None;
+    let mut manual_handoff_ref = None;
+    let mut audit_log = None;
+    let mut audit_count = None;
+    let mut audit_tail = None;
+    let mut audit_principal = None;
+    let mut audit_role = None;
+    let mut audit_time_ns = None;
     let mut count = 0;
     while let Some(arg) = args.next() {
         count += 1;
-        if count > 6 {
+        if count > 40 {
             return Err(CliError::Usage);
         }
         match arg.to_str() {
@@ -111,6 +122,96 @@ fn arguments() -> Result<Arguments, CliError> {
                     },
                 );
             }
+            Some("--quarantine-release-source") if execute && quarantine_source.is_none() => {
+                quarantine_source = args
+                    .next()
+                    .and_then(|value| value.into_string().ok())
+                    .and_then(|value| match value.as_str() {
+                        "flight-data" => Some(oa_quarantine::InputSource::FlightData),
+                        "surveillance" => Some(oa_quarantine::InputSource::Surveillance),
+                        _ => None,
+                    });
+                if quarantine_source.is_none() {
+                    return Err(CliError::Usage);
+                }
+            }
+            Some("--quarantine-release-instance") if execute && quarantine_instance.is_none() => {
+                quarantine_instance = Some(
+                    args.next()
+                        .and_then(|value| value.into_string().ok())
+                        .and_then(|value| value.parse::<u16>().ok())
+                        .filter(|value| *value > 0)
+                        .ok_or(CliError::Usage)?,
+                );
+            }
+            Some("--quarantine-release-item") if execute && quarantine_item.is_none() => {
+                quarantine_item = Some(
+                    args.next()
+                        .and_then(|value| value.into_string().ok())
+                        .and_then(|value| value.parse::<u64>().ok())
+                        .filter(|value| *value > 0)
+                        .ok_or(CliError::Usage)?,
+                );
+            }
+            Some("--manual-handoff-ref") if execute && manual_handoff_ref.is_none() => {
+                manual_handoff_ref = Some(
+                    args.next()
+                        .and_then(|value| value.into_string().ok())
+                        .filter(|value| !value.is_empty() && value.len() <= 256)
+                        .ok_or(CliError::Usage)?,
+                );
+            }
+            Some("--audit-log") if execute && audit_log.is_none() => {
+                audit_log = args.next().map(PathBuf::from);
+            }
+            Some("--audit-count") if execute && audit_count.is_none() => {
+                audit_count = Some(
+                    args.next()
+                        .and_then(|value| value.into_string().ok())
+                        .and_then(|value| value.parse::<u64>().ok())
+                        .ok_or(CliError::Usage)?,
+                );
+            }
+            Some("--audit-tail") if execute && audit_tail.is_none() => {
+                audit_tail = Some(
+                    args.next()
+                        .and_then(|value| value.into_string().ok())
+                        .and_then(|value| parse_audit_digest(&value).ok())
+                        .ok_or(CliError::Usage)?,
+                );
+            }
+            Some("--audit-principal") if execute && audit_principal.is_none() => {
+                audit_principal = Some(
+                    args.next()
+                        .and_then(|value| value.into_string().ok())
+                        .and_then(|value| value.parse::<u64>().ok())
+                        .filter(|value| *value > 0)
+                        .ok_or(CliError::Usage)?,
+                );
+            }
+            Some("--audit-role") if execute && audit_role.is_none() => {
+                audit_role = Some(
+                    match args
+                        .next()
+                        .and_then(|value| value.into_string().ok())
+                        .as_deref()
+                    {
+                        Some("monitor") => oa_audit_core::Role::Monitor,
+                        Some("operate") => oa_audit_core::Role::Operate,
+                        Some("configure") => oa_audit_core::Role::Configure,
+                        _ => return Err(CliError::Usage),
+                    },
+                );
+            }
+            Some("--audit-time-ns") if execute && audit_time_ns.is_none() => {
+                audit_time_ns = Some(
+                    args.next()
+                        .and_then(|value| value.into_string().ok())
+                        .and_then(|value| value.parse::<u64>().ok())
+                        .filter(|value| *value > 0)
+                        .ok_or(CliError::Usage)?,
+                );
+            }
             _ => return Err(CliError::Usage),
         }
     }
@@ -119,6 +220,40 @@ fn arguments() -> Result<Arguments, CliError> {
     if execute && model.is_none() {
         return Err(CliError::Usage);
     }
+    let any_quarantine_release = quarantine_source.is_some()
+        || quarantine_instance.is_some()
+        || quarantine_item.is_some()
+        || manual_handoff_ref.is_some()
+        || audit_log.is_some()
+        || audit_count.is_some()
+        || audit_tail.is_some()
+        || audit_principal.is_some()
+        || audit_role.is_some()
+        || audit_time_ns.is_some();
+    let quarantine_release = if any_quarantine_release {
+        let source = quarantine_source.ok_or(CliError::Usage)?;
+        let source_instance = quarantine_instance.ok_or(CliError::Usage)?;
+        let item_id = quarantine_item.ok_or(CliError::Usage)?;
+        Some(oa_regional_session::cli::QuarantineReleaseOptions {
+            source,
+            identity: oa_quarantine::InputIdentity {
+                source,
+                source_instance,
+                item_id,
+            },
+            manual_handoff_ref: manual_handoff_ref.ok_or(CliError::Usage)?,
+            audit_log: audit_log.ok_or(CliError::Usage)?,
+            audit_checkpoint: oa_audit_core::Checkpoint {
+                count: audit_count.ok_or(CliError::Usage)?,
+                tail: audit_tail.ok_or(CliError::Usage)?,
+            },
+            principal: audit_principal.ok_or(CliError::Usage)?,
+            role: audit_role.ok_or(CliError::Usage)?,
+            time_ns: audit_time_ns.ok_or(CliError::Usage)?,
+        })
+    } else {
+        None
+    };
     Ok(Arguments {
         input,
         output,
@@ -126,7 +261,35 @@ fn arguments() -> Result<Arguments, CliError> {
         safety: safety.unwrap_or(oa_regional_session::cli::MsawSource::Disabled),
         performance,
         profile: profile.unwrap_or(oa_regional_session::cli::RegionalCliProfile::Default),
+        quarantine_release,
     })
+}
+
+fn parse_audit_digest(value: &str) -> Result<[u8; 32], ()> {
+    if value.len() != 64 {
+        return Err(());
+    }
+    let mut digest = [0; 32];
+    for (index, byte) in digest.iter_mut().enumerate() {
+        let offset = index.checked_mul(2).ok_or(())?;
+        let high = value.as_bytes().get(offset).copied().ok_or(())?;
+        let low = value.as_bytes().get(offset + 1).copied().ok_or(())?;
+        *byte = (hex_nibble(high).ok_or(())? << 4) | hex_nibble(low).ok_or(())?;
+    }
+    Ok(digest)
+}
+
+fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => byte.checked_sub(b'0'),
+        b'a'..=b'f' => byte
+            .checked_sub(b'a')
+            .and_then(|value| value.checked_add(10)),
+        b'A'..=b'F' => byte
+            .checked_sub(b'A')
+            .and_then(|value| value.checked_add(10)),
+        _ => None,
+    }
 }
 
 fn read_input(path: &Path) -> Result<Vec<u8>, CliError> {
@@ -333,6 +496,7 @@ fn run() -> Result<(), CliError> {
         safety,
         performance,
         profile,
+        quarantine_release,
     } = arguments()?;
     oa_sealed::refuse_io(&input).map_err(CliError::Io)?;
     oa_sealed::refuse_io(&output).map_err(CliError::Io)?;
@@ -341,6 +505,9 @@ fn run() -> Result<(), CliError> {
     }
     if let Some(path) = &performance {
         oa_sealed::refuse_io(path).map_err(CliError::Io)?;
+    }
+    if let Some(request) = &quarantine_release {
+        oa_sealed::refuse_io(&request.audit_log).map_err(CliError::Io)?;
     }
     let bytes = read_input(&input)?;
     let max_events = match profile {
@@ -351,15 +518,18 @@ fn run() -> Result<(), CliError> {
     };
     let frames = parse_input_with_limit(&bytes, max_events)?;
     match model {
-        Some(source) => oa_regional_session::cli::run_session_with_profile_options(
-            &bytes,
-            &output,
-            &source,
-            &safety,
-            performance.as_deref(),
-            profile,
-        )
-        .map_err(CliError::Runtime),
+        Some(source) => {
+            oa_regional_session::cli::run_session_with_profile_options_and_quarantine_release(
+                &bytes,
+                &output,
+                &source,
+                &safety,
+                performance.as_deref(),
+                profile,
+                quarantine_release.as_ref(),
+            )
+            .map_err(CliError::Runtime)
+        }
         None => write_report(&output, &frames),
     }
 }
@@ -367,7 +537,7 @@ fn run() -> Result<(), CliError> {
 fn main() {
     if let Err(error) = run() {
         let message = match error {
-            CliError::Usage => "usage: oa-regional-session run --input FILE --out NEW_DIR (--snapshot FILE | --synthetic-model) [--msaw-inputs MANIFEST | --synthetic-msaw] [--performance MANIFEST] [--profile recorded-peak-rendered]; stage --input FILE --out NEW_DIR".to_owned(),
+            CliError::Usage => "usage: oa-regional-session run --input FILE --out NEW_DIR (--snapshot FILE | --synthetic-model) [--msaw-inputs MANIFEST | --synthetic-msaw] [--performance MANIFEST] [--profile recorded-peak-rendered] [--quarantine-release-source flight-data|surveillance --quarantine-release-instance N --quarantine-release-item N --manual-handoff-ref TEXT --audit-log FILE --audit-count N --audit-tail SHA256 --audit-principal N --audit-role monitor|operate|configure --audit-time-ns N]; stage --input FILE --out NEW_DIR".to_owned(),
             CliError::Io(error) => format!("I/O error: {error}"),
             CliError::InputTooLarge => "input exceeds the 16 MiB limit".to_owned(),
             CliError::InvalidUtf8 => "input is not UTF-8".to_owned(),
