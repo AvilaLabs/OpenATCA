@@ -25,6 +25,7 @@ pub mod awy;
 pub mod cls;
 pub mod fix;
 pub mod nav;
+pub mod pfr;
 pub mod position;
 pub mod procedure;
 mod row;

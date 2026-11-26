@@ -4,6 +4,8 @@ nasr/   rows of the NASR CSV files, unchanged, for: the ZAU boundary (ARB_BASE, 
         airports ORD, MDW, JFK (APT_BASE, APT_RWY_END, CLS_ARSP); STARs BENKY, ENDEE, CAMRN;
         DPs O'HARE and MIDWAY (radar-vector, no coded route); airways V156 and V227; and the
         FIX_BASE / NAV_BASE rows those reference. The *_CSV_DATA_STRUCTURE files are whole.
+        PFR_BASE.csv and PFR_SEG.csv are header-only synthetic empty files for parser/build
+        coverage; they do not contain or represent FAA preferred-route records.
 cifp/   FAACIFP18 records, unchanged, for: KORD, KMDW, KJFK airport, runway, localizer and
         terminal waypoint records; KORD STAR BENKY6, approach I09L; KMDW STAR ENDEE8, approach
         I04R; KJFK STAR CAMRN5; KORD class B airspace; a few MOA records (outside ZAU); four Grid MORA rows; the enroute waypoints and navaids those reference.

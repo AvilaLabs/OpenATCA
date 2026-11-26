@@ -288,6 +288,24 @@ impl LegIx {
     }
 }
 
+/// Row of [`PreferredRouteSegments`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(transparent)]
+pub struct PreferredRouteSegmentIx(u32);
+
+impl PreferredRouteSegmentIx {
+    pub const NONE: PreferredRouteSegmentIx = PreferredRouteSegmentIx(NONE_U32);
+    pub const fn new(raw: u32) -> PreferredRouteSegmentIx {
+        PreferredRouteSegmentIx(raw)
+    }
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+    pub const fn row(self) -> usize {
+        self.0 as usize
+    }
+}
+
 /// A latitude/longitude pair in 1e-7 degree. Stored as an array element, so it is guarded.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(C)]
@@ -311,6 +329,7 @@ const _: () = assert!(core::mem::size_of::<Span<SegIx>>() == 8);
 const _: () = assert!(core::mem::size_of::<Span<AirwayLegIx>>() == 8);
 const _: () = assert!(core::mem::size_of::<Span<RouteIx>>() == 8);
 const _: () = assert!(core::mem::size_of::<Span<LegIx>>() == 8);
+const _: () = assert!(core::mem::size_of::<Span<PreferredRouteSegmentIx>>() == 8);
 
 /// Latitude/longitude sentinel: no position (a circle's missing point, an absent arc centre).
 pub const POS_NONE: i32 = i32::MIN;
@@ -837,6 +856,48 @@ pub struct Routes {
     pub legs: Vec<Span<LegIx>>,
 }
 
+/// Published FAA preferred IFR routes, retained as advisory source records. Nonempty condition
+/// descriptions remain opaque source text because the NASR schema provides no parsing grammar.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+// A7.2: cold struct, size guard waived
+pub struct PreferredRoutes {
+    pub eff_date: Vec<StrIx>,
+    pub origin: Vec<StrIx>,
+    pub destination: Vec<StrIx>,
+    pub route_type: Vec<StrIx>,
+    pub route_no: Vec<u32>,
+    pub area_description: Vec<StrIx>,
+    pub altitude_description: Vec<StrIx>,
+    pub aircraft_description: Vec<StrIx>,
+    pub hours_description: Vec<StrIx>,
+    pub direction_description: Vec<StrIx>,
+    pub route_string: Vec<StrIx>,
+    pub segments: Vec<Span<PreferredRouteSegmentIx>>,
+}
+
+/// Ordered FAA `PFR_SEG` rows for [`PreferredRoutes`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+// A7.2: cold struct, size guard waived
+pub struct PreferredRouteSegments {
+    pub sequence: Vec<u32>,
+    pub value: Vec<StrIx>,
+    pub segment_type: Vec<StrIx>,
+    pub state_code: Vec<StrIx>,
+    pub country_code: Vec<StrIx>,
+    pub icao_region_code: Vec<StrIx>,
+    pub nav_type: Vec<StrIx>,
+    pub next_segment: Vec<StrIx>,
+}
+
+/// Versioned capability for preferred-route data in an adaptation snapshot.
+pub mod preferred_route_state {
+    /// This model version predates the PFR table or the source was unavailable at build time.
+    pub const UNAVAILABLE: u8 = 0;
+    /// A complete NASR PFR source was parsed and included (it may contain zero records).
+    pub const PRESENT: u8 = 1;
+    pub const MAX: u8 = PRESENT;
+}
+
 /// Procedure legs in sequence order within each route.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 // A7.2: cold struct, size guard waived
@@ -917,6 +978,10 @@ pub struct Model {
     pub procs: Procs,
     pub routes: Routes,
     pub legs: Legs,
+    /// NASR PFR source availability. Old snapshot versions decode as [`preferred_route_state::UNAVAILABLE`].
+    pub preferred_route_state: u8,
+    pub preferred_routes: PreferredRoutes,
+    pub preferred_route_segments: PreferredRouteSegments,
     pub mora: Mora,
     pub unresolved: Unresolved,
     pub disagreements: Disagreements,
@@ -965,6 +1030,9 @@ pub fn empty_model(meta: Meta) -> Model {
         procs: Procs::default(),
         routes: Routes::default(),
         legs: Legs::default(),
+        preferred_route_state: preferred_route_state::UNAVAILABLE,
+        preferred_routes: PreferredRoutes::default(),
+        preferred_route_segments: PreferredRouteSegments::default(),
         mora: Mora::default(),
         unresolved: Unresolved::default(),
         disagreements: Disagreements::default(),
@@ -1523,6 +1591,128 @@ pub fn validate_model(m: &Model) -> Result<(), ModelError> {
     )?;
     str_ok("routes", "transition", &r.transition, n_str, true)?;
     spans_tile("routes", "legs", &r.legs, |i| i.0, nlg)?;
+
+    let pfr = &m.preferred_routes;
+    let npfr = pfr.origin.len();
+    let pfr_segments = &m.preferred_route_segments;
+    let n_pfr_segments = pfr_segments.sequence.len();
+    same_len(
+        "preferred_routes",
+        npfr,
+        &[
+            ("eff_date", pfr.eff_date.len()),
+            ("destination", pfr.destination.len()),
+            ("route_type", pfr.route_type.len()),
+            ("route_no", pfr.route_no.len()),
+            ("area_description", pfr.area_description.len()),
+            ("altitude_description", pfr.altitude_description.len()),
+            ("aircraft_description", pfr.aircraft_description.len()),
+            ("hours_description", pfr.hours_description.len()),
+            ("direction_description", pfr.direction_description.len()),
+            ("route_string", pfr.route_string.len()),
+            ("segments", pfr.segments.len()),
+        ],
+    )?;
+    if m.preferred_route_state > preferred_route_state::MAX {
+        return Err(bad("preferred_routes", "unknown source availability state"));
+    }
+    if m.preferred_route_state == preferred_route_state::UNAVAILABLE && npfr != 0 {
+        return Err(bad(
+            "preferred_routes",
+            "unavailable source state carries route rows",
+        ));
+    }
+    for (name, col) in [
+        ("eff_date", &pfr.eff_date),
+        ("origin", &pfr.origin),
+        ("destination", &pfr.destination),
+        ("route_type", &pfr.route_type),
+    ] {
+        str_ok("preferred_routes", name, col, n_str, false)?;
+    }
+    for (name, col) in [
+        ("area_description", &pfr.area_description),
+        ("altitude_description", &pfr.altitude_description),
+        ("aircraft_description", &pfr.aircraft_description),
+        ("hours_description", &pfr.hours_description),
+        ("direction_description", &pfr.direction_description),
+        ("route_string", &pfr.route_string),
+    ] {
+        str_ok("preferred_routes", name, col, n_str, true)?;
+    }
+    spans_tile(
+        "preferred_routes",
+        "segments",
+        &pfr.segments,
+        |i| i.0,
+        n_pfr_segments,
+    )?;
+    increasing(
+        "preferred_routes",
+        pfr.origin
+            .iter()
+            .zip(&pfr.destination)
+            .zip(&pfr.route_type)
+            .zip(&pfr.route_no)
+            .map(|(((origin, destination), kind), number)| {
+                (
+                    str_or_empty(s, *origin),
+                    str_or_empty(s, *destination),
+                    str_or_empty(s, *kind),
+                    *number,
+                )
+            }),
+    )?;
+    same_len(
+        "preferred_route_segments",
+        n_pfr_segments,
+        &[
+            ("value", pfr_segments.value.len()),
+            ("segment_type", pfr_segments.segment_type.len()),
+            ("state_code", pfr_segments.state_code.len()),
+            ("country_code", pfr_segments.country_code.len()),
+            ("icao_region_code", pfr_segments.icao_region_code.len()),
+            ("nav_type", pfr_segments.nav_type.len()),
+            ("next_segment", pfr_segments.next_segment.len()),
+        ],
+    )?;
+    for (name, col, none_ok) in [
+        ("value", &pfr_segments.value, false),
+        ("segment_type", &pfr_segments.segment_type, false),
+        ("state_code", &pfr_segments.state_code, true),
+        ("country_code", &pfr_segments.country_code, true),
+        ("icao_region_code", &pfr_segments.icao_region_code, true),
+        ("nav_type", &pfr_segments.nav_type, true),
+        ("next_segment", &pfr_segments.next_segment, true),
+    ] {
+        str_ok("preferred_route_segments", name, col, n_str, none_ok)?;
+    }
+    for span in &pfr.segments {
+        let start = usize::try_from(span.start.get()).map_err(|_| {
+            bad(
+                "preferred_routes",
+                "preferred segment span start does not fit",
+            )
+        })?;
+        let end = start
+            .checked_add(usize::try_from(span.len).map_err(|_| {
+                bad(
+                    "preferred_routes",
+                    "preferred segment span length does not fit",
+                )
+            })?)
+            .ok_or_else(|| bad("preferred_routes", "preferred segment span overflows"))?;
+        let rows = pfr_segments
+            .sequence
+            .get(start..end)
+            .ok_or_else(|| bad("preferred_routes", "preferred segment span is out of range"))?;
+        if rows.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return Err(bad(
+                "preferred_route_segments",
+                "segments are not strictly increasing by sequence within a route",
+            ));
+        }
+    }
     let lg = &m.legs;
     same_len(
         "legs",
@@ -1683,6 +1873,46 @@ pub fn find_airway(m: &Model, designator: &str, location: u8) -> Option<AirwayIx
         .position(|(d, l)| *l == location && str_or_empty(&m.strings, *d) == designator)
         .and_then(|i| u32::try_from(i).ok())
         .map(AirwayIx)
+}
+
+/// The sorted PFR records for one exact airport pair. `start..end` is empty when the pair is
+/// not published. This is an advisory lookup; absence never rejects a filed route.
+pub fn preferred_route_range(m: &Model, origin: &str, destination: &str) -> std::ops::Range<usize> {
+    let table = &m.preferred_routes;
+    let key_at = |row: usize| {
+        Some((
+            str_at(&m.strings, *table.origin.get(row)?)?,
+            str_at(&m.strings, *table.destination.get(row)?)?,
+        ))
+    };
+    let key = (origin, destination);
+    let mut lo = 0usize;
+    let mut hi = table.origin.len();
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        let Some(candidate) = key_at(mid) else {
+            return 0..0;
+        };
+        if candidate < key {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    let start = lo;
+    hi = table.origin.len();
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        let Some(candidate) = key_at(mid) else {
+            return 0..0;
+        };
+        if candidate <= key {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    start..lo
 }
 
 /// Finds a procedure by airport identity (identifier and ICAO region), kind and identifier.
