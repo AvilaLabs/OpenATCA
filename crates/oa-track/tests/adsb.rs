@@ -9,7 +9,9 @@
 use oa_adsb::{
     reports_push, Reports, Row, F_ALT_GEOM, F_STALE, NONE_I32, NONE_U16, NONE_U8, ROW_EMPTY,
 };
-use oa_track::adsb::{adsb_measurements, check_adsb_config, AdsbConfig};
+use oa_track::adsb::{
+    adsb_measurements, adsb_measurements_with_indices, check_adsb_config, AdsbConfig,
+};
 use oa_track::params::{NACV_BOUND_VEL_SIGMA_MPS, NACV_VEL_SIGMA_MPS};
 use oa_track::{M_ALT_GEOMETRIC, M_HAS_VEL};
 use oa_truth::{build_truth, DEFAULT_CONFIG, REMOVE_NAMES};
@@ -85,6 +87,26 @@ fn measurement_noise_comes_from_nacp_and_nacv() {
                 < 0.01 * (bound / S95).powi(2) + 1e-3
         );
     }
+}
+
+// REQ: OA-TRK-018
+#[test]
+fn indexed_measurements_keep_exact_same_time_source_row_lineage() {
+    let mut first = row(10, 0xABCDEF, 41.9, -88.3);
+    let mut second = first;
+    first.nac_p = 9;
+    second.nac_p = 10;
+    second.sda = 2;
+    let (measurements, source_rows, stats) =
+        adsb_measurements_with_indices(&reports(&[first, second]), &bound_cfg());
+    assert_eq!(stats.passed, 2);
+    assert_eq!(source_rows, [0, 1]);
+    assert_eq!(measurements[0].toa_ns, measurements[1].toa_ns);
+    assert_ne!(measurements[0].pos_cov_m2[0], measurements[1].pos_cov_m2[0]);
+    assert_eq!(
+        adsb_measurements(&reports(&[first, second]), &bound_cfg()).0,
+        measurements
+    );
 }
 
 // REQ: OA-TRK-019

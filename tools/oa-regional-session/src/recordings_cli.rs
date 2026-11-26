@@ -1,5 +1,5 @@
 //! Thin shell adapter facade for root CLI dispatch. It opens sealed-guarded files, validates OAF
-//! frames, decodes source payloads, and produces the ordinary OA-RS v1 normalized input text.
+//! frames, decodes source payloads, and produces OA-RS v1 or v2 normalized input text.
 
 use crate::recordings::{
     adapt_recorded_frames, serialize_provenance, serialize_quarantine, serialize_recorded_events,

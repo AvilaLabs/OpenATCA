@@ -705,6 +705,7 @@
     "OA-REG-019",
     "OA-REG-020",
     "OA-REG-023",
+    "OA-REG-024",
     "OA-RPL-027",
     "OA-RPL-028",
     "OA-RPL-029",
@@ -14850,6 +14851,7 @@
       "severity_rationale": "Corrupted or lost track state can contribute to loss of separation; this is not a facility system safety assessment.",
       "mitigation_requirement_ids": [
         "OA-REG-023",
+        "OA-REG-024",
         "OA-TRK-017",
         "OA-TRK-066",
         "OA-TRK-210",
@@ -15313,6 +15315,21 @@
           "requirement_id": "OA-REG-023",
           "file": "tools/oa-regional-session/src/runtime.rs",
           "test_name": "regional_mode_call_uses_unknown_sensor_fallback_and_emits_fusion_symbol_choice"
+        },
+        {
+          "requirement_id": "OA-REG-024",
+          "file": "tools/oa-regional-session/tests/protocol.rs",
+          "test_name": "version_two_position_evidence_is_domain_checked_and_round_trips_without_changing_v1"
+        },
+        {
+          "requirement_id": "OA-REG-024",
+          "file": "crates/oa-track/tests/adsb.rs",
+          "test_name": "indexed_measurements_keep_exact_same_time_source_row_lineage"
+        },
+        {
+          "requirement_id": "OA-REG-024",
+          "file": "tools/oa-regional-session/src/runtime.rs",
+          "test_name": "regional_v2_adsb_evidence_does_not_claim_reliability_or_enable_fusion_cue"
         },
         {
           "requirement_id": "OA-REG-023",
@@ -17349,6 +17366,12 @@
       "function": "surveillance_mode_policy_and_target_presentation",
       "hazard_id": "HZ-SURV-STATE-001",
       "rationale": "Engineering safety candidate: an incorrect surveillance-mode minimum or a misleading 3 NM cue can misstate target separation eligibility. The regional caller accepts exact-epoch caller evidence, preserves missing source/reliability/ISR/flight-level evidence as unknown, leaves FLAT unavailable because the current flight-view join does not aid tracking, reports refusal and the selected minimum, uses the terminal FUSION solid-circle cue only for an explicitly evidenced, separation-eligible 3 NM result, and leaves the independent conservative conflict-alert engine unchanged. This is a bounded policy/presentation path; caller claims are not authenticated, no facility adaptation is supplied or validated, no 3 NM symbology is inferred for ERAM, and no operational separation assurance is claimed."
+    },
+    {
+      "id": "OA-REG-024",
+      "function": "surveillance_track_state_and_numeric_integrity",
+      "hazard_id": "HZ-SURV-STATE-001",
+      "rationale": "Engineering safety candidate: a quality row matched to the wrong same-address/time position could alter uncertainty or source classification. The normalized v2 protocol carries source, quality, category, version, flags, squawk and callsign values from the exact decoder row alongside the position; original row indices survive quality filtering and the companion provenance binds event sequence to stream/frame/row. Version 1 remains readable. Missing values remain unknown, and raw metadata is not treated as a validated reliability or separation rule. The current decoder does not distinguish missing from blank callsign bytes and provides no physical receiver/site identity, so this clause makes no site, sensor-health, ISR, or facility operational claim."
     },
     {
       "id": "OA-RTE-001",
