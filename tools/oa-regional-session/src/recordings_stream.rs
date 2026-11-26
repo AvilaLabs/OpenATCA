@@ -1099,7 +1099,6 @@ mod tests {
         add_adapter_loss_counts, stream_oaf_segments, stream_oaf_segments_in_window,
         AdapterLossCounts, RecordingSource, StreamInput,
     };
-    use crate::recordings::RecordedAdapterCounts;
     use std::error::Error;
     use std::fs::{self, OpenOptions};
     use std::io::Write;
@@ -1112,7 +1111,7 @@ mod tests {
     #[test]
     fn adapter_loss_aggregation_handles_recorded_hour_message_scale_and_overflow() {
         let mut aggregate = AdapterLossCounts::default();
-        let mut adsb_frame = RecordedAdapterCounts::default();
+        let mut adsb_frame = crate::recordings::zero_recorded_adapter_counts();
         adsb_frame.frames_adsb = 1;
         adsb_frame.adsb_rows_in = 1_228;
         adsb_frame.adsb_rows_dropped = 3;
@@ -1121,7 +1120,7 @@ mod tests {
             add_adapter_loss_counts(&mut aggregate, &adsb_frame)
                 .expect("aggregate source counters without overflow");
         }
-        let mut sfdps_frame = RecordedAdapterCounts::default();
+        let mut sfdps_frame = crate::recordings::zero_recorded_adapter_counts();
         sfdps_frame.frames_sfdps = 1;
         sfdps_frame.sfdps_rows_decoded = 2;
         sfdps_frame.sfdps_rows_no_operations = 1;
@@ -1139,7 +1138,7 @@ mod tests {
         assert_eq!(aggregate.sfdps_rows_no_operations, 66_475);
         assert_eq!(aggregate.sfdps_unsupported_operations, 1_063_600);
 
-        let mut overflowing = RecordedAdapterCounts::default();
+        let mut overflowing = crate::recordings::zero_recorded_adapter_counts();
         overflowing.adsb_rows_in = u64::MAX;
         assert!(add_adapter_loss_counts(&mut aggregate, &overflowing).is_err());
     }
