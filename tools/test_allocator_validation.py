@@ -34,6 +34,7 @@ def result(injected=False):
             "display_controller_interaction_queue",
             "safety_state_inhibit_display",
             "airspace_route_direct_airway_procedure_atomic_refusal",
+            "h5_mirror_4096_rows_100_switch_rollback_cycles",
         ],
         "route_ids": [
             'safety_banner_clamp', 'safety_banner_draw', 'safety_build_error',
@@ -127,6 +128,7 @@ def result(injected=False):
             'route_airway_expansion',
             'route_procedure_transition',
             'route_atomic_refusal',
+            'h5_replay_selector_storage',
         ],
         "controls": {"alloc": 2, "zeroed": 1, "realloc": 1, "overflow": False},
         "tracker": {
@@ -223,6 +225,12 @@ def result(injected=False):
             "connected_links": 4, "refusals": 1, "atomic_empty": True, "recoveries": 1,
             "work_used": 100, "work_limit": 1_048_576, "injected": True,
         },
+        "h5_profile": {
+            "alloc": 1 if injected else 0, "zeroed": 0, "realloc": 0, "overflow": False,
+            "rows_per_family": 4096, "cycles_completed": 100, "trace_records": 200,
+            "coordination_records": 3200, "storage_budget_bytes": 5_343_808,
+            "diff_budget_bytes": 2_097_152, "injected": True,
+        },
     }
 
 
@@ -278,6 +286,8 @@ oa-scope-replay = { path = "../../crates/oa-scope-replay" }
 oa-airspace = { path = "../../crates/oa-airspace" }
 oa-geo = { path = "../../crates/oa-geo" }
 oa-safety = { path = "../../crates/oa-safety" }
+oa-migration = { path = "../../crates/oa-migration" }
+oa-migration-switch = { path = "../../crates/oa-migration-switch" }
 ''')
     write(root / "validation/oa-alloc-check/src/main.rs", '''
 #![deny(unsafe_code)]

@@ -26,6 +26,8 @@ oa-airspace = { path = "../../crates/oa-airspace" }
 oa-geo = { path = "../../crates/oa-geo" }
 # F1: the safety-net state and inhibition core, by local path only.
 oa-safety = { path = "../../crates/oa-safety" }
+oa-migration = { path = "../../crates/oa-migration" }
+oa-migration-switch = { path = "../../crates/oa-migration-switch" }
 
 [profile.release]
 debug = 1

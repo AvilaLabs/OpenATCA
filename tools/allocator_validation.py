@@ -31,8 +31,10 @@ HARNESS_DEPS = {
     "oa-display": "../../crates/oa-display", "oa-scope-replay": "../../crates/oa-scope-replay",
     "oa-airspace": "../../crates/oa-airspace", "oa-geo": "../../crates/oa-geo",
     "oa-safety": "../../crates/oa-safety",
+    "oa-migration": "../../crates/oa-migration",
+    "oa-migration-switch": "../../crates/oa-migration-switch",
 }
-HELPER_MODULES = ("pending_windows.rs", "nam_window.rs", "display_window.rs", "safety_window.rs", "route_window.rs")
+HELPER_MODULES = ("pending_windows.rs", "nam_window.rs", "display_window.rs", "safety_window.rs", "route_window.rs", "h5_window.rs")
 FIXTURE_IDS = {
     "tracker_update_ooo_refusal_capacity_advance_flush",
     "tracker_default_4096_capacity_recovery",
@@ -49,6 +51,7 @@ FIXTURE_IDS = {
     "display_controller_interaction_queue",
     "safety_state_inhibit_display",
     "airspace_route_direct_airway_procedure_atomic_refusal",
+    "h5_mirror_4096_rows_100_switch_rollback_cycles",
 }
 TRACKER_FIELDS = {
     "applied": 4, "refiltered": 1, "refused": 1, "capacity_refused": 1,
@@ -177,6 +180,7 @@ ROUTE_LEDGER = {
     "route_airway_expansion": ("crates/oa-airspace/src/core/route.rs", "route_conversion.airway_points"),
     "route_procedure_transition": ("crates/oa-airspace/src/core/route.rs", "route_conversion.procedure_points"),
     "route_atomic_refusal": ("crates/oa-airspace/src/core/route.rs", "route_conversion.refusals"),
+    "h5_replay_selector_storage": ("crates/oa-migration-switch/src/lib.rs", "h5_profile.cycles_completed"),
 }
 
 ROUTE_SYMBOLS = {
@@ -269,6 +273,7 @@ ROUTE_SYMBOLS = {
     "route_airway_expansion": "convert_route",
     "route_procedure_transition": "convert_route",
     "route_atomic_refusal": "convert_route",
+    "h5_replay_selector_storage": "select_candidate",
 }
 
 
@@ -951,7 +956,7 @@ def allocation_layout_errors(repo: Path) -> list[str]:
     elif root_sources == ["allocator.rs", "main.rs"] and not src_dir.exists():
         base = harness_dir
     else:
-        errors.append("allocator harness source files must be main.rs, allocator.rs and optional pending_windows.rs, nam_window.rs and display_window.rs")
+        errors.append("allocator harness source files must be main.rs, allocator.rs and declared safe helper modules")
         base = src_dir if src_dir.is_dir() else harness_dir
     try:
         if base.is_dir() and any(p.is_symlink() or p.is_dir() for p in base.iterdir()):
@@ -1014,7 +1019,7 @@ def _object(value) -> bool:
 
 
 def evaluate_allocator_result(text: str, expect_injected: bool = False) -> list[str]:
-    """Validate one JSON result from the bounded M3 allocator harness."""
+    """Validate one JSON result from bounded M3 and H5 allocator fixtures."""
     errors: list[str] = []
     if not isinstance(expect_injected, bool):
         return ["expect_injected must be a boolean"]
@@ -1027,7 +1032,7 @@ def evaluate_allocator_result(text: str, expect_injected: bool = False) -> list[
     required_keys = {"status", "injection_requested", "fixture_ids", "route_ids", "controls",
                      "tracker", "default_capacity", "output_log", "clock_gate",
                      "bucket_capacity", "adsb_pending", "plot_pending", "fusion", "nam_session",
-                     "display_frame", "safety", "route_conversion"}
+                     "display_frame", "safety", "route_conversion", "h5_profile"}
     if set(result) != required_keys:
         errors.append("result must contain exactly the required allocator evidence fields")
     expected_status = "FAIL_M3_ALLOCATION" if expect_injected else "PASS_M3_EXERCISED"
@@ -1118,6 +1123,9 @@ def evaluate_allocator_result(text: str, expect_injected: bool = False) -> list[
         "route_conversion": {"iterations": 10, "direct_points": 2, "airway_points": 2,
                              "procedure_points": 2, "connected_links": 4, "refusals": 1,
                              "recoveries": 1, "work_used": 1, "work_limit": ROUTE_CONVERSION_WORK_LIMIT},
+        "h5_profile": {"rows_per_family": 4096, "cycles_completed": 100,
+                       "trace_records": 200, "coordination_records": 3200,
+                       "storage_budget_bytes": 5_343_808, "diff_budget_bytes": 2_097_152},
         "default_capacity": {"occupied": 4096, "confirmed": 4096, "refused": 1, "recovered": 1,
                              "history_refiltered": 1, "history_replayed": 1, "late_ring": 1},
         "output_log": {"output_overflow": 1, "output_rows_after_reuse": 1,
@@ -1172,8 +1180,10 @@ def evaluate_allocator_result(text: str, expect_injected: bool = False) -> list[
             required |= {"final_inactive"}
         if group == "output_log":
             required |= {"output_aligned", "output_preserved_addr", "output_payload_unchanged", "log_aligned"}
-        if group == "route_conversion":
+        if group in {"route_conversion", "h5_profile"}:
             required |= {"atomic_empty", "injected"}
+        if group == "h5_profile":
+            required.discard("atomic_empty")
         if not _object(evidence) or set(evidence) != required:
             errors.append(f"{group} must contain exactly its declared route evidence and allocator counters")
             evidence = {}
@@ -1198,6 +1208,10 @@ def evaluate_allocator_result(text: str, expect_injected: bool = False) -> list[
                              "procedure_points": 2, "connected_links": 4, "refusals": 1,
                              "atomic_empty": True, "recoveries": 1, "work_limit": ROUTE_CONVERSION_WORK_LIMIT,
                              "injected": True},
+        "h5_profile": {"rows_per_family": 4096, "cycles_completed": 100,
+                       "trace_records": 200, "coordination_records": 3200,
+                       "storage_budget_bytes": 5_343_808, "diff_budget_bytes": 2_097_152,
+                       "injected": True},
         "default_capacity": {"occupied": 4096, "confirmed": 4096, "refused": 1,
                              "history_refiltered": 1, "history_replayed": 1, "late_ring": 1},
         "output_log": {"log_overflow": 1, "log_rows": 1},

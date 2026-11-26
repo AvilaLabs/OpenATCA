@@ -38,7 +38,7 @@ def run(args):
         raise ValueError("target and evidence directories must be outside the repository")
     out.mkdir(parents=True, exist_ok=False)
     env = dict(os.environ, CARGO_BUILD_JOBS="1", CARGO_NET_OFFLINE="true", RUSTFLAGS="")
-    report = {"scope": "M3 exercised routes only; not all inputs or all real-time crates",
+    report = {"scope": "M3 exercised routes plus the H5 4096-row selector profile; not all inputs or all real-time crates",
               "commands": [], "errors": [], "layout_errors": [], "binary_sha256": None}
     manifest = repo / "validation/oa-alloc-check/Cargo.toml"
     binary = target / "release/oa-alloc-check"
