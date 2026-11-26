@@ -3,9 +3,9 @@
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::indexing_slicing)]
 
 use oa_runway::final_monitor::{
-    prepare_centerline_pair, update, FinalAlertBuffer, FinalMonitorState, FinalSeverity,
-    PredictedTracks, RunwayFinalSelection, UpdateError, DEFAULT_CENTERLINE_EXTENSION_M,
-    DEFAULT_CONFIG,
+    prepare_centerline_pair, update, FinalAlertBuffer, FinalMonitorConfig, FinalMonitorState,
+    FinalSeverity, PredictedTracks, RunwayFinalSelection, UpdateError,
+    DEFAULT_CENTERLINE_EXTENSION_M, DEFAULT_CONFIG, DEGRADED_AFTER_NS,
 };
 use oa_runway::plane::{plane_new, to_local, Geo};
 use oa_runway::runway::{build_runway, DeclaredFt, EndInput, Runway, RunwayInput};
@@ -15,11 +15,13 @@ use oa_sensorsim::radar::{simulate_radar, RadarSite as SimRadarSite};
 use oa_track::radar::{plot_convert, radar_geom, RadarPlot, RadarSite, NO_BIAS};
 use oa_track::synth_truth::{build_synthetic_truth, Seg, Traj};
 use oa_track::{
-    output_clear, output_len, output_new, tracker_new, tracker_update, DEFAULT_CONFIG as TRACKER,
+    output_clear, output_len, output_new, tracker_new, tracker_update, TrackerConfig,
+    DEFAULT_CONFIG as TRACKER,
 };
 
 const EPOCH_NS: i64 = 1_700_000_000_000_000_000;
-const SENSOR_PERIOD_NS: i64 = 1_200_000_000;
+const DEFAULT_SENSOR_PERIOD_NS: i64 = 1_200_000_000;
+const TERMINAL_SENSOR_PERIOD_NS: i64 = 4_800_000_000;
 
 fn end(name: &'static str, alignment: f64, lat: f64, lon: f64) -> EndInput<'static> {
     EndInput {
@@ -38,7 +40,9 @@ fn end(name: &'static str, alignment: f64, lat: f64, lon: f64) -> EndInput<'stat
     }
 }
 
-fn kord_pair() -> (
+fn kord_pair(
+    config: FinalMonitorConfig,
+) -> (
     oa_runway::plane::Plane,
     Runway,
     Runway,
@@ -79,7 +83,7 @@ fn kord_pair() -> (
             end_name: *b"27L",
         },
         DEFAULT_CENTERLINE_EXTENSION_M,
-        DEFAULT_CONFIG,
+        config,
     )
     .expect("pinned parallel centerlines");
     (plane, r27r, r27l, pair)
@@ -118,10 +122,14 @@ fn synthetic_truth(pair: oa_runway::final_monitor::FinalPair) -> oa_truth::Truth
     .expect("synthetic truth")
 }
 
-// REQ: OA-RWY-015, OA-RWY-016
-#[test]
-fn synthetic_1_2s_reports_track_a_blunder_from_caution_to_warning() {
-    let (plane, _r27r, _r27l, pair) = kord_pair();
+// REQ: OA-RWY-015, OA-RWY-016, OA-RWY-017
+// HAZARD: HZ-CA-001, HZ-NET-STATE-001
+fn run_blunder_pipeline(sensor_period_ns: i64, monitor_update_ns: u64, minimum_reports: usize) {
+    let config = FinalMonitorConfig {
+        update_ns: monitor_update_ns,
+        ..DEFAULT_CONFIG
+    };
+    let (plane, _r27r, _r27l, pair) = kord_pair(config);
     let truth = synthetic_truth(pair);
     // Keep this deterministic scenario focused on pipeline timing, not detection-probability
     // luck. Geometry/noise remain the named Mode S profile; the explicit synthetic run sets
@@ -139,7 +147,7 @@ fn synthetic_1_2s_reports_track_a_blunder_from_caution_to_warning() {
         lat_deg: 41.97694027,
         lon_deg: -87.90814972,
         height_m: 207.264,
-        rotation_period_s: SENSOR_PERIOD_NS as f64 / 1_000_000_000.0,
+        rotation_period_s: sensor_period_ns as f64 / 1_000_000_000.0,
         initial_az_deg: 0.0,
         epoch_ns: EPOCH_NS,
         coverage_range_m: 60.0 * 1_852.0,
@@ -170,13 +178,25 @@ fn synthetic_1_2s_reports_track_a_blunder_from_caution_to_warning() {
         sigma_az_deg: profile.az_sigma_deg,
         range_quantum_m: profile.range_quantum_m,
         alt_quantum_ft: profile.alt_quantum_ft as u16,
-        period_ns: SENSOR_PERIOD_NS,
+        period_ns: sensor_period_ns,
         epoch_ns: EPOCH_NS,
         sensor: 1,
     };
     let sensor_geom = radar_geom(&sensor_site);
 
-    let mut tracker = tracker_new(&TRACKER).expect("tracker config");
+    // This fixture is an explicitly declared sensor-cadence profile. The tracker defaults are
+    // calibrated for 1 s reports; initiation timing follows this site's declared scan period,
+    // while the configured 2-of-3 confirmation policy remains unchanged.
+    let tracker_config = TrackerConfig {
+        expected_interval_ns: sensor_period_ns,
+        init_interval_ns: sensor_period_ns,
+        ..TRACKER
+    };
+    assert_eq!(tracker_config.expected_interval_ns, sensor_site.period_ns);
+    assert_eq!(tracker_config.init_interval_ns, sensor_site.period_ns);
+    assert_eq!(tracker_config.init_m, 2);
+    assert_eq!(tracker_config.init_n, 3);
+    let mut tracker = tracker_new(&tracker_config).expect("sensor-cadence tracker config");
     let mut output = output_new(4096);
     let mut report_times = Vec::with_capacity(plots_len(&simulated));
     let mut monitor = FinalMonitorState::new();
@@ -205,6 +225,7 @@ fn synthetic_1_2s_reports_track_a_blunder_from_caution_to_warning() {
     let mut monitor_bad_input_refusals = 0u64;
     let mut monitor_capacity_refusals = 0u64;
     let mut monitor_clock_refusals = 0u64;
+    let mut monitor_degraded_updates = 0u64;
     for plot_ix in 0..plots_len(&simulated) {
         let Some(plot) = plots_row(&simulated, plot_ix) else {
             malformed_plot_rows += 1;
@@ -331,6 +352,9 @@ fn synthetic_1_2s_reports_track_a_blunder_from_caution_to_warning() {
             monitor_not_due_updates += 1;
         }
         monitor_alert_rows += u64::from(result.alerts);
+        if result.degraded {
+            monitor_degraded_updates += 1;
+        }
         assert!(
             result.alerts <= 1,
             "one predicted track fits the alert buffer"
@@ -342,7 +366,10 @@ fn synthetic_1_2s_reports_track_a_blunder_from_caution_to_warning() {
             };
         }
     }
-    assert!(true_plots >= 30, "simulator omitted too many target scans");
+    assert!(
+        true_plots >= minimum_reports,
+        "simulator omitted too many target scans for the configured sensor cadence"
+    );
     assert_eq!(malformed_plot_rows, 0);
     assert_eq!(sim_stats.missed, 0);
     assert_eq!(sim_stats.unsolved, 0);
@@ -365,17 +392,24 @@ fn synthetic_1_2s_reports_track_a_blunder_from_caution_to_warning() {
     assert_eq!(monitor_bad_input_refusals, 0);
     assert_eq!(monitor_capacity_refusals, 0);
     assert_eq!(monitor_clock_refusals, 0);
+    assert_eq!(monitor_degraded_updates, 0);
     assert_eq!(monitor_calls, monitor_due_updates + monitor_not_due_updates);
     assert!(monitor_due_updates > 0);
     assert_eq!(monitor_examined_rows, monitor_due_updates);
     assert!(monitor_alert_rows > 0);
     assert!(!report_times.is_empty());
+    let cadence_tolerance_ns = 200_000_000;
     assert!(
-        report_times
-            .iter()
-            .all(|&dt| (1_000_000_000..=1_400_000_000).contains(&dt)),
+        report_times.iter().all(|&dt| {
+            (sensor_period_ns - cadence_tolerance_ns..=sensor_period_ns + cadence_tolerance_ns)
+                .contains(&dt)
+        }),
         "beam-crossing timestamps, not tracker ticks, define report cadence"
     );
+    let tracker_stats = oa_track::tracker_stats(&tracker);
+    assert_eq!(tracker_stats.refused.iter().sum::<u64>(), 0);
+    assert_eq!(tracker_stats.capacity_refused, 0);
+    assert_eq!(tracker_stats.rows_unrepresentable, 0);
     assert!(
         caution_at.is_some(),
         "the real tracker output should predict NTZ entry"
@@ -387,5 +421,24 @@ fn synthetic_1_2s_reports_track_a_blunder_from_caution_to_warning() {
     assert!(
         caution_at < warning_at,
         "the track should progress from caution to warning"
+    );
+}
+
+#[test]
+fn synthetic_1_2s_reports_track_a_blunder_from_caution_to_warning() {
+    run_blunder_pipeline(
+        DEFAULT_SENSOR_PERIOD_NS,
+        DEFAULT_SENSOR_PERIOD_NS as u64,
+        30,
+    );
+}
+
+#[test]
+fn synthetic_4_8s_reports_track_a_blunder_without_false_degraded_status() {
+    assert_eq!(DEGRADED_AFTER_NS, TERMINAL_SENSOR_PERIOD_NS as u64);
+    run_blunder_pipeline(
+        TERMINAL_SENSOR_PERIOD_NS,
+        TERMINAL_SENSOR_PERIOD_NS as u64,
+        10,
     );
 }
