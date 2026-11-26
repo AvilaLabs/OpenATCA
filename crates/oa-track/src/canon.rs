@@ -72,6 +72,11 @@ pub const DIGEST_HEADER: &str =
 pub const ROWS_MAGIC: &[u8; 8] = b"OATKROWS";
 pub const ROWS_VERSION: u32 = 2;
 const ROWS_V1_BYTES: usize = 85;
+// A7.1 appends only the source identity payload: Mode A (u16), source observation time (i64),
+// and same-time conflict state (u8). The v1 row remains 85 bytes; v2 is exactly 11 bytes longer.
+const IDENTITY_BYTES: usize =
+    core::mem::size_of::<u16>() + core::mem::size_of::<i64>() + core::mem::size_of::<u8>();
+const _: () = assert!(ROW_BYTES == ROWS_V1_BYTES + IDENTITY_BYTES);
 pub const ROWS_HEADER_BYTES: usize = 24;
 /// Most rows one Unix second may hold (C2): about 89 MB of canonical rows, three orders of
 /// magnitude above the busiest second of the national airspace. A reader holds one second whole.
