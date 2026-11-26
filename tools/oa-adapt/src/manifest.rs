@@ -190,11 +190,6 @@ impl VerifiedPackage {
     pub fn runway_aids_bytes(&self) -> Option<&[u8]> {
         self.runway_aids.as_deref()
     }
-
-    /// Exact versioned runway-aid bytes from the manifest-bound companion, if present.
-    pub fn runway_aids_bytes(&self) -> Option<&[u8]> {
-        self.runway_aids.as_deref()
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
