@@ -179,7 +179,22 @@ pub fn parse_routes<R1: BufRead, R2: BufRead>(
             );
             continue;
         };
-        let route = routes.get_mut(index).expect("indexed PFR base row");
+        let Some(route) = routes.get_mut(index) else {
+            crate::reject(
+                &mut rejected,
+                &mut rejected_dropped,
+                RowError {
+                    file: segment_source.to_string(),
+                    line: segment.line,
+                    column: "ROUTE_NO".to_string(),
+                    kind: RowErrorKind::OrphanRecord(format!(
+                        "{} base index {} is out of range",
+                        identity.2, index
+                    )),
+                },
+            );
+            continue;
+        };
         if route.eff_date != segment.eff_date {
             crate::reject(
                 &mut rejected,
