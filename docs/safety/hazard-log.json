@@ -1083,7 +1083,13 @@
     "OA-DSP-079",
     "OA-DSP-082",
     "OA-DSP-083",
-    "OA-IWXXM-005"
+    "OA-IWXXM-005",
+    "OA-RWY-018",
+    "OA-RWY-015",
+    "OA-RWY-016",
+    "OA-RWY-019",
+    "OA-RWY-014",
+    "OA-RWY-017"
   ],
   "non_safety_requirement_assessments": [
     {
@@ -9342,9 +9348,13 @@
         "OA-CA-032",
         "OA-CA-033",
         "OA-CA-034",
-        "OA-CA-036",
-        "OA-SAF-021",
         "OA-CA-035",
+        "OA-CA-036",
+        "OA-RWY-015",
+        "OA-RWY-016",
+        "OA-RWY-018",
+        "OA-RWY-019",
+        "OA-SAF-021",
         "OA-SAF-022",
         "OA-SAF-023"
       ],
@@ -9364,6 +9374,22 @@
         {
           "document": "REQUIREMENTS.md",
           "locator": "OA-CA-036"
+        },
+        {
+          "document": "REQUIREMENTS.md",
+          "locator": "OA-RWY-015"
+        },
+        {
+          "document": "REQUIREMENTS.md",
+          "locator": "OA-RWY-016"
+        },
+        {
+          "document": "REQUIREMENTS.md",
+          "locator": "OA-RWY-018"
+        },
+        {
+          "document": "REQUIREMENTS.md",
+          "locator": "OA-RWY-019"
         }
       ],
       "verification_refs": [
@@ -9528,14 +9554,39 @@
           "test_name": "the_chord_is_finite_symmetric_and_not_negative_and_flat_validity_only_narrows"
         },
         {
+          "requirement_id": "OA-CA-035",
+          "file": "crates/oa-ca/tests/ca.rs",
+          "test_name": "pair_suppression_keeps_the_detected_conflict_and_reveals_the_same_alert_after_expiry"
+        },
+        {
+          "requirement_id": "OA-CA-036",
+          "file": "tools/oa-ca/src/run.rs",
+          "test_name": "verified_issued_preset_loads_into_runtime_settings_before_ca_cycle"
+        },
+        {
+          "requirement_id": "OA-RWY-015",
+          "file": "crates/oa-display/tests/alert_markers.rs",
+          "test_name": "final_monitor_hook_renders_caution_warning_and_degraded_status"
+        },
+        {
+          "requirement_id": "OA-RWY-016",
+          "file": "crates/oa-runway/src/final_monitor.rs",
+          "test_name": "thirty_degree_blunder_caution_within_prediction"
+        },
+        {
+          "requirement_id": "OA-RWY-018",
+          "file": "crates/oa-runway/src/final_monitor.rs",
+          "test_name": "close_parallel_finals_are_refused"
+        },
+        {
+          "requirement_id": "OA-RWY-019",
+          "file": "crates/oa-runway/src/final_monitor.rs",
+          "test_name": "predicted_zone_entry_beyond_final_endpoint_is_clear"
+        },
+        {
           "requirement_id": "OA-SAF-021",
           "file": "crates/oa-safety/tests/safety.rs",
           "test_name": "pair_suppression_acknowledges_only_the_named_alert_instance"
-        },
-        {
-          "requirement_id": "OA-SAF-022",
-          "file": "crates/oa-safety/tests/safety.rs",
-          "test_name": "group_suppression_requires_both_aircraft_to_belong_to_the_selected_set"
         },
         {
           "requirement_id": "OA-SAF-022",
@@ -9545,37 +9596,7 @@
         {
           "requirement_id": "OA-SAF-023",
           "file": "crates/oa-safety/tests/safety.rs",
-          "test_name": "pair_suppression_acknowledges_only_the_named_alert_instance"
-        },
-        {
-          "requirement_id": "OA-SAF-023",
-          "file": "crates/oa-safety/tests/safety.rs",
           "test_name": "group_suppression_requires_both_aircraft_to_belong_to_the_selected_set"
-        },
-        {
-          "requirement_id": "OA-CA-035",
-          "file": "crates/oa-ca/tests/ca.rs",
-          "test_name": "an_area_inhibit_uses_its_altitude_and_half_open_time_window_for_conflict_alert"
-        },
-        {
-          "requirement_id": "OA-CA-035",
-          "file": "crates/oa-ca/tests/ca.rs",
-          "test_name": "pair_suppression_keeps_the_detected_conflict_and_reveals_the_same_alert_after_expiry"
-        },
-        {
-          "requirement_id": "OA-CA-036",
-          "file": "tools/oa-adapt/src/manifest.rs",
-          "test_name": "v3_issued_facility_preset_roundtrips_exact_body_and_refuses_identity_damage"
-        },
-        {
-          "requirement_id": "OA-CA-036",
-          "file": "crates/oa-ca/src/preset.rs",
-          "test_name": "runtime_applies_exact_issued_facility_preset_values_before_configuration_check"
-        },
-        {
-          "requirement_id": "OA-CA-036",
-          "file": "tools/oa-ca/src/run.rs",
-          "test_name": "verified_issued_preset_loads_into_runtime_settings_before_ca_cycle"
         }
       ],
       "proof_refs": [
@@ -12606,12 +12627,17 @@
         "OA-MATH-036",
         "OA-MATH-037",
         "OA-MATH-038",
-        "OA-MATH-039"
+        "OA-MATH-039",
+        "OA-RWY-014"
       ],
       "source_refs": [
         {
           "document": "REQUIREMENTS.md",
           "locator": "OA-GEO-001 through OA-MATH-039 in the owning functional sections"
+        },
+        {
+          "document": "REQUIREMENTS.md",
+          "locator": "OA-RWY-014"
         }
       ],
       "verification_refs": [
@@ -12929,6 +12955,11 @@
           "requirement_id": "OA-MATH-038",
           "file": "crates/oa-math/src/root_split_tests.rs",
           "test_name": "the_split_hypot_agrees_bit_for_bit_with_the_unsplit_code"
+        },
+        {
+          "requirement_id": "OA-RWY-014",
+          "file": "crates/oa-runway/src/final_monitor.rs",
+          "test_name": "kord_parallel_pair_uses_public_runway_geometry"
         }
       ],
       "proof_refs": [
@@ -13374,6 +13405,7 @@
       "severity_status": "engineering_candidate",
       "severity_rationale": "A hidden unavailable or inhibited safety net can remove a barrier; no external barriers are credited.",
       "mitigation_requirement_ids": [
+        "OA-RWY-017",
         "OA-SAF-001",
         "OA-SAF-002",
         "OA-SAF-003",
@@ -13399,9 +13431,18 @@
         {
           "document": "REQUIREMENTS.md",
           "locator": "OA-SAF-001 through OA-SAF-020 in the owning functional sections"
+        },
+        {
+          "document": "REQUIREMENTS.md",
+          "locator": "OA-RWY-017"
         }
       ],
       "verification_refs": [
+        {
+          "requirement_id": "OA-RWY-017",
+          "file": "crates/oa-runway/src/final_monitor.rs",
+          "test_name": "stale_prediction_sets_degraded"
+        },
         {
           "requirement_id": "OA-SAF-001",
           "file": "crates/oa-safety/tests/safety.rs",
@@ -22175,6 +22216,42 @@
       "function": "weather_and_pressure_altitude_inputs",
       "hazard_id": "HZ-WEATHER-001",
       "rationale": "Engineering safety candidate: dropping, misclassifying, or over-accepting official METAR/SPECI and bounded TAF weather values could mislead a downstream weather or warning consumer. The decoder tests the full named official example set, retaining supported typed values and refusing unsupported collection, translation-failed, and cancellation constructs with context. The example corpus and tests do not establish general IWXXM conformance or operational weather truth."
+    },
+    {
+      "id": "OA-RWY-018",
+      "function": "conflict_alert",
+      "hazard_id": "HZ-CA-001",
+      "rationale": "Engineering safety candidate: a too-close parallel-final pair refused before evaluation could otherwise be silently absent from monitoring. The pure helper returns an explicit refusal below the configured minimum separation. The test proves the refusal result only; caller reporting/degraded-state integration and facility authorization are not established by this module."
+    },
+    {
+      "id": "OA-RWY-015",
+      "function": "conflict_alert",
+      "hazard_id": "HZ-CA-001",
+      "rationale": "Engineering safety candidate: a missed caution or warning for a track entering the NTZ, or a misleading rendered state, could delay response. The bounded segment rule limits warning to the interval from outer fix to threshold; prediction timing and the display hook are tested, including invalid packet/capacity refusal. Cadence/lookahead values are engineering policy, not facility adaptation or operational detection evidence."
+    },
+    {
+      "id": "OA-RWY-016",
+      "function": "conflict_alert",
+      "hazard_id": "HZ-CA-001",
+      "rationale": "Engineering safety candidate: a blunder trajectory that reaches the NTZ can be missed if bounded prediction columns are incomplete, misidentified, or evaluated after output mutation. The monitor validates the complete bounded prediction set before output and uses stable runway/end and track identity; the test is a synthetic engineering case, not operational effectiveness evidence."
+    },
+    {
+      "id": "OA-RWY-019",
+      "function": "conflict_alert",
+      "hazard_id": "HZ-CA-001",
+      "rationale": "Engineering safety candidate: warning for a track beyond the final-monitor segment or for a predicted entry only after the threshold can mislead the controller. The monitor explicitly clears those endpoint cases. Synthetic tests establish this bounded policy only, not the accuracy of operational runway coordinates or the full source-to-display path."
+    },
+    {
+      "id": "OA-RWY-014",
+      "function": "geodetic_and_navigation_geometry",
+      "hazard_id": "HZ-GEOMETRY-001",
+      "rationale": "Engineering safety candidate: an incorrectly constructed runway pair or NTZ can place a final-monitor volume incorrectly. The source now tests adaptation from built runway geometry by bounded centerline extension and course/separation checks. These extension endpoints are engineering geometry, not published FAF/procedure fixes; profile thresholds are not universal minima or facility authorization."
+    },
+    {
+      "id": "OA-RWY-017",
+      "function": "safety_net_state_and_display",
+      "hazard_id": "HZ-NET-STATE-001",
+      "rationale": "Engineering safety candidate: a stale prediction shown as current can conceal that the monitor is degraded. The profile marks a report at least 4.8 s old as degraded; this is a development threshold, not a facility-approved adaptation or live-feed freshness claim."
     }
   ],
   "unresolved_requirement_assessments": []

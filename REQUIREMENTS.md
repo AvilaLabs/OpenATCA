@@ -7510,6 +7510,30 @@ FAA value.
   position it gives is finite, within 20 km on each axis and inside the extent's disc. Tested, not proved: on
   30,000 random origins and points, up to `f64::MAX`, NaN and infinity included
   (`a_point_in_the_local_plane_is_finite_and_inside_the_extent_or_refused_for_random_origins_and_points`).
+- **OA-RWY-014** A final-monitor pair can be adapted from two distinct built runway geometries by extending each
+  selected runway end's centerline by a bounded configured distance. The resulting midpoint NTZ requires inbound
+  courses within 3 degrees, consistent-side geometry, adequate configured minimum separation, and a zone narrower
+  than course separation. The centerline extension is an engineering geometry endpoint, not a published FAF or
+  procedure fix. The 2,000 ft NTZ and 3,100 ft minimum-separation defaults are configurable profile values, not
+  universal minima or facility authorization. Tested by `kord_parallel_pair_uses_public_runway_geometry`,
+  `pair_uses_endpoints_and_midway_ntz_default`, and `close_parallel_finals_are_refused`.
+- **OA-RWY-015** On a due prediction update, a track inside the configured NTZ and between the outer-fix and
+  threshold limits is a warning; a predicted linear
+  entry within the configured lookahead is a caution; a track remaining on its own course is clear. The default
+  cadence is 1.2 s and default caution horizon is 10 s. These are this monitor's engineering policy. Tested by
+  `on_course_clear` and `drift_caution_then_warning`.
+- **OA-RWY-016** Prediction evaluation consumes bounded tracker-prediction columns, validates them as a complete
+  set before output mutation, and identifies alerts by stable runway/end and track identifiers. A 30-degree inward
+  blunder that reaches the NTZ within the prediction horizon is cautioned. Tested by
+  `thirty_degree_blunder_caution_within_prediction`.
+- **OA-RWY-017** A prediction report at least 4.8 s old sets the degraded output flag; the 4.8 s value is a
+  development threshold, not a statement of facility adaptation. Tested by `stale_prediction_sets_degraded`.
+- **OA-RWY-018** A parallel-final pair below its configured minimum separation is refused before evaluation.
+  Tested by `close_parallel_finals_are_refused`.
+- **OA-RWY-019** A track beyond either longitudinal end of the final-monitor segment is not warned for NTZ overlap,
+  and a predicted entry that occurs only after passing the threshold end is not cautioned. Tested by
+  `warning_is_limited_to_the_final_segment_endpoints` and `predicted_zone_entry_beyond_final_endpoint_is_clear`.
+
 ## Feed damage check (oa-feed-gaps, P-006 section 6 and P-007)
 
 - **OA-GAP-001** An interval between consecutive times of a feed over 600 s is an excluded interval (P-007), not damage by itself; exactly 600 s is not over.

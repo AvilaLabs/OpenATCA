@@ -39,6 +39,17 @@ fn unknown_marker(address: u32, state: MarkerState) -> AlertMarker {
     }
 }
 
+fn final_marker(address: u32, severity: u8) -> FinalMonitorMarker {
+    FinalMonitorMarker {
+        address,
+        lat_e7: CENTRE.0,
+        lon_e7: CENTRE.1,
+        severity,
+        position_known: 1,
+        reserved: [0; 2],
+    }
+}
+
 fn list_for(markers: usize) -> DisplayList {
     list_new(ListCaps {
         lines: 0,
@@ -268,4 +279,82 @@ fn view_and_header_width_are_checked_before_writing() {
     // The documented minimum width fits this header. Refusing it would turn the
     // stated minimum into a misleading contract.
     assert!(append_alert_markers(&mut list, &projection(500, 160), &markers).is_ok());
+}
+
+// REQ: OA-RWY-015
+#[test]
+fn final_monitor_hook_renders_caution_warning_and_degraded_status() {
+    let p = projection(800, 160);
+    let markers = [final_marker(1, 0), final_marker(2, 1)];
+    let mut list = list_for(markers.len());
+    let stats = append_final_monitor_frame(&mut list, &p, &markers, true).unwrap();
+    assert_eq!(stats.caution, 1);
+    assert_eq!(stats.warning, 1);
+    assert_eq!(stats.drawn, 2);
+    let labels = texts(&list);
+    assert_eq!(labels.first().map(String::as_str), Some("C"));
+    assert_eq!(labels.get(1).map(String::as_str), Some("W"));
+    assert_eq!(
+        labels.get(2).map(String::as_str),
+        Some("FINAL DEGRADED WARNING 1 CAUTION 1 OFF 0 UNLOCATED 0")
+    );
+
+    let mut fresh = list_for(markers.len());
+    append_final_monitor_markers(&mut fresh, &p, &markers).unwrap();
+    assert!(texts(&fresh)
+        .get(2)
+        .is_some_and(|header| header.starts_with("FINAL WARNING")));
+}
+
+// REQ: OA-RWY-015
+#[test]
+fn final_monitor_invalid_packets_and_capacity_refuse_atomically() {
+    let p = projection(800, 160);
+    let valid = final_marker(1, 1);
+    let mut list = list_for(2);
+    for invalid in [
+        FinalMonitorMarker {
+            severity: 2,
+            ..valid
+        },
+        FinalMonitorMarker {
+            reserved: [1, 0],
+            ..valid
+        },
+        FinalMonitorMarker {
+            lat_e7: 900_000_001,
+            ..valid
+        },
+        FinalMonitorMarker {
+            position_known: 0,
+            ..valid
+        },
+    ] {
+        let before = list.clone();
+        assert!(matches!(
+            append_final_monitor_frame(&mut list, &p, &[invalid], false),
+            Err(DisplayError::BadView(_))
+        ));
+        assert_eq!(list, before);
+    }
+
+    let mut short = list_new(ListCaps {
+        lines: 0,
+        rects: 0,
+        circles: 1,
+        polylines: 0,
+        poly_vertices: 0,
+        texts: 2,
+        text_bytes: 128,
+    })
+    .unwrap();
+    let before = short.clone();
+    assert!(matches!(
+        append_final_monitor_frame(&mut short, &p, &[valid], false),
+        Err(DisplayError::Full {
+            table: "circles",
+            ..
+        })
+    ));
+    assert_eq!(short, before);
 }

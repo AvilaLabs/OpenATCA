@@ -132,6 +132,20 @@ fn header(stats: MarkerStats) -> crate::core::text::TextBuf {
     text
 }
 
+/// Plain final-monitor packet: severity 0 caution, 1 warning. Unknown positions use the shared
+/// E7 sentinels; this presentation adapter has no dependency on oa-runway or its decoder.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(C)]
+pub struct FinalMonitorMarker {
+    pub address: u32,
+    pub lat_e7: i32,
+    pub lon_e7: i32,
+    pub severity: u8,
+    pub position_known: u8,
+    pub reserved: [u8; 2],
+}
+const _: () = assert!(core::mem::size_of::<FinalMonitorMarker>() == 16);
+
 /// Append current alert markers and their bounded count header to an existing display list.
 ///
 /// The view must provide a 128 px top strip and at least 500 px of width. The header occupies
@@ -141,6 +155,77 @@ pub fn append_alert_markers(
     list: &mut DisplayList,
     projection: &Projection,
     markers: &[AlertMarker],
+) -> Result<MarkerStats, DisplayError> {
+    append_alert_markers_titled(list, projection, markers, "MSAW")
+}
+
+/// Append final-monitor packets using the existing alert marker palette, symbols, and bounded
+/// layout. The packet remains a plain shared value and its severity is validated before drawing.
+pub fn append_final_monitor_markers(
+    list: &mut DisplayList,
+    projection: &Projection,
+    markers: &[FinalMonitorMarker],
+) -> Result<MarkerStats, DisplayError> {
+    append_final_monitor_frame(list, projection, markers, false)
+}
+
+/// Append the final-monitor alert packets and expose a stale-feed degraded state in its header.
+pub fn append_final_monitor_frame(
+    list: &mut DisplayList,
+    projection: &Projection,
+    markers: &[FinalMonitorMarker],
+    degraded: bool,
+) -> Result<MarkerStats, DisplayError> {
+    if markers.len() > MAX_ALERT_MARKERS {
+        return Err(DisplayError::TooLarge {
+            what: "final monitor marker records",
+            requested: markers.len() as u128,
+            limit: MAX_ALERT_MARKERS as u128,
+        });
+    }
+    let mut converted = [AlertMarker {
+        address: 0,
+        lat_e7: NO_POSITION_E7,
+        lon_e7: NO_POSITION_E7,
+        state: MarkerState::Caution,
+        position_known: 0,
+        reserved: [0; 2],
+    }; MAX_ALERT_MARKERS];
+    for (i, marker) in markers.iter().enumerate() {
+        if marker.severity > 1 {
+            return Err(bad_alert("final monitor severity must be zero or one"));
+        }
+        *converted
+            .get_mut(i)
+            .ok_or_else(|| bad_alert("final monitor conversion index"))? = AlertMarker {
+            address: marker.address,
+            lat_e7: marker.lat_e7,
+            lon_e7: marker.lon_e7,
+            state: if marker.severity == 0 {
+                MarkerState::Caution
+            } else {
+                MarkerState::Warning
+            },
+            position_known: marker.position_known,
+            reserved: marker.reserved,
+        };
+    }
+    let converted = converted
+        .get(..markers.len())
+        .ok_or_else(|| bad_alert("final monitor converted packet extent"))?;
+    append_alert_markers_titled(
+        list,
+        projection,
+        converted,
+        if degraded { "FINAL DEGRADED" } else { "FINAL" },
+    )
+}
+
+fn append_alert_markers_titled(
+    list: &mut DisplayList,
+    projection: &Projection,
+    markers: &[AlertMarker],
+    title: &'static str,
 ) -> Result<MarkerStats, DisplayError> {
     if projection.width < MIN_ALERT_VIEW_WIDTH
         || projection.top_inset < MIN_ALERT_TOP_INSET
@@ -222,7 +307,21 @@ pub fn append_alert_markers(
         }
     }
 
-    let header_text = header(stats);
+    let header_text = if title == "MSAW" {
+        header(stats)
+    } else {
+        let mut text = text_new();
+        text_push_str(&mut text, title);
+        text_push_str(&mut text, " WARNING ");
+        text_push_dec(&mut text, u64::from(stats.warning), 0);
+        text_push_str(&mut text, " CAUTION ");
+        text_push_dec(&mut text, u64::from(stats.caution), 0);
+        text_push_str(&mut text, " OFF ");
+        text_push_dec(&mut text, u64::from(stats.off_map), 0);
+        text_push_str(&mut text, " UNLOCATED ");
+        text_push_dec(&mut text, u64::from(stats.unlocated), 0);
+        text
+    };
     if crate::core::text::text_clipped(&header_text) {
         return Err(bad_alert("MSAW count header exceeds its fixed text buffer"));
     }
