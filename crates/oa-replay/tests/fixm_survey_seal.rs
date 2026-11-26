@@ -1,4 +1,4 @@
-//! The `survey` example drops a file with a message in the sealed window whole and prints the
+//! The oa-replay `fixm_survey` example/CLI drops a file with a message in the sealed window whole and prints the
 //! count (OA-SEAL-014). The example is run as built by cargo for this package.
 #![allow(
     clippy::unwrap_used,
@@ -14,20 +14,16 @@ fn message(ts: &str) -> String {
 }
 
 fn example() -> std::path::PathBuf {
-    // target/<profile>/deps/<test> -> target/<profile>/examples/survey
-    let exe = std::env::current_exe().unwrap();
-    exe.parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join("examples")
-        .join("survey")
+    // Cargo builds this package's CLI even for a single selected integration test in an empty
+    // target directory. An independently cached examples directory is never consulted.
+    std::path::PathBuf::from(env!("CARGO_BIN_EXE_fixm_survey"))
 }
 
 // REQ: OA-SEAL-014
 #[test]
 fn the_survey_drops_a_file_with_a_message_in_the_window_whole_and_prints_the_count() {
-    let dir = std::env::temp_dir().join(format!("oa-fixm-survey-seal-{}", std::process::id()));
+    let dir =
+        std::env::temp_dir().join(format!("oa-replay-fixm-survey-seal-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("a.msg"), message("2030-01-02T03:04:05.000Z")).unwrap();
     std::fs::write(dir.join("b.msg"), message("2026-11-21T00:00:00.000Z")).unwrap();

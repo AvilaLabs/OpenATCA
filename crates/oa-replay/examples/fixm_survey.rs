@@ -35,7 +35,7 @@ fn s(d: &Doc<'_>, sp: oa_xml::Span) -> String {
     String::from_utf8_lossy(span_bytes(d.input, sp).unwrap()).into_owned()
 }
 
-fn main() -> ExitCode {
+pub fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
