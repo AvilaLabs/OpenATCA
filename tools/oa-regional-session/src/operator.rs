@@ -1014,89 +1014,90 @@ fn init_runner(
         centre_lon_e7: -870_000_000,
         range_nm: 180.0,
     };
-    let (runtime, model_sha, model_label, local_activation, mut processor_report) =
-        match model_source {
-            crate::cli::ModelSource::IssuedPackage {
+    let (runtime, model_label, local_activation, processor_report) = match model_source {
+        crate::cli::ModelSource::IssuedPackage {
+            root,
+            expected_manifest_sha256,
+            processor_id,
+        } => {
+            let (package, activation) = match oa_adapt::local_inventory::verify_local_startup(
                 root,
-                expected_manifest_sha256,
-                processor_id,
-            } => {
-                let (package, activation) = match oa_adapt::local_inventory::verify_local_startup(
-                    root,
-                    *expected_manifest_sha256,
-                    *processor_id,
-                ) {
-                    Ok(verified) => verified,
-                    Err(_) => {
-                        fs::create_dir(output).map_err(|e| e.to_string())?;
-                        let refusal = crate::processor_inventory::startup_refusal_report(
-                            *processor_id,
-                            *expected_manifest_sha256,
-                            crate::processor_inventory::observed_unix_time_ns(),
-                        );
-                        write_new(&output.join("processor-report.tsv"), refusal.as_bytes())?;
-                        return Err(
-                            "issued adaptation startup verification refused; no model activated"
-                                .into(),
-                        );
-                    }
-                };
-                let runtime = match regional_new_from_issued_package(
-                    package,
-                    *b"ZAU1",
-                    cfg,
-                    crate::runtime::DEFAULT_REGIONAL_RUN_PROFILE,
-                ) {
-                    Ok(runtime) => runtime,
-                    Err(_) => {
-                        fs::create_dir(output).map_err(|e| e.to_string())?;
-                        let refusal = crate::processor_inventory::startup_refusal_report(
-                            *processor_id,
-                            *expected_manifest_sha256,
-                            crate::processor_inventory::observed_unix_time_ns(),
-                        );
-                        write_new(&output.join("processor-report.tsv"), refusal.as_bytes())?;
-                        return Err(
-                            "verified adaptation model did not activate; no runtime started".into(),
-                        );
-                    }
-                };
-                let report = crate::processor_inventory::check_active_runtime_adaptation(
-                    &runtime,
-                    &activation,
-                    crate::processor_inventory::observed_unix_time_ns(),
-                )
-                .map_err(str::to_owned)?;
-                if report.status != oa_adapt::local_inventory::LocalInventoryStatus::Match {
+                *expected_manifest_sha256,
+                *processor_id,
+            ) {
+                Ok(verified) => verified,
+                Err(_) => {
                     fs::create_dir(output).map_err(|e| e.to_string())?;
-                    let refusal =
-                        oa_adapt::local_inventory::render_processor_report_tsv("STARTUP", &report);
-                    write_new(&output.join("processor-report.tsv"), refusal.as_bytes())?;
-                    return Err("issued adaptation startup disk recheck refused; loaded package retained and run not activated".into());
+                    let refusal = crate::processor_inventory::startup_refusal_report(
+                        *processor_id,
+                        *expected_manifest_sha256,
+                        crate::processor_inventory::observed_unix_time_ns(),
+                    );
+                    write_processor_report(
+                        &output.join("processor-report.tsv"),
+                        refusal.as_bytes(),
+                    )?;
+                    return Err(
+                        "issued adaptation startup verification refused; no model activated".into(),
+                    );
                 }
-                let processor_report =
+            };
+            let runtime = match regional_new_from_issued_package(
+                package,
+                *b"ZAU1",
+                cfg,
+                crate::runtime::DEFAULT_REGIONAL_RUN_PROFILE,
+            ) {
+                Ok(runtime) => runtime,
+                Err(_) => {
+                    fs::create_dir(output).map_err(|e| e.to_string())?;
+                    let refusal = crate::processor_inventory::startup_refusal_report(
+                        *processor_id,
+                        *expected_manifest_sha256,
+                        crate::processor_inventory::observed_unix_time_ns(),
+                    );
+                    write_processor_report(
+                        &output.join("processor-report.tsv"),
+                        refusal.as_bytes(),
+                    )?;
+                    return Err(
+                        "verified adaptation model did not activate; no runtime started".into(),
+                    );
+                }
+            };
+            let report = crate::processor_inventory::check_active_runtime_adaptation(
+                &runtime,
+                &activation,
+                crate::processor_inventory::observed_unix_time_ns(),
+            )
+            .map_err(str::to_owned)?;
+            if report.status != oa_adapt::local_inventory::LocalInventoryStatus::Match {
+                fs::create_dir(output).map_err(|e| e.to_string())?;
+                let refusal =
                     oa_adapt::local_inventory::render_processor_report_tsv("STARTUP", &report);
-                let model_sha = regional_adaptation_sha256(&runtime);
-                (
-                    runtime,
-                    model_sha,
-                    "ISSUED_PACKAGE_PIN_VERIFIED",
-                    Some(activation),
-                    processor_report,
-                )
+                write_processor_report(&output.join("processor-report.tsv"), refusal.as_bytes())?;
+                return Err("issued adaptation startup disk recheck refused; loaded package retained and run not activated".into());
             }
-            _ => {
-                let (model, model_sha, model_label) = load_model(model_source)?;
-                let runtime = regional_new(model, model_sha, *b"ZAU1", cfg)?;
-                (
-                    runtime,
-                    model_sha,
-                    model_label,
-                    None,
-                    crate::processor_inventory::unpinned_source_report(),
-                )
-            }
-        };
+            let processor_report =
+                oa_adapt::local_inventory::render_processor_report_tsv("STARTUP", &report);
+            (
+                runtime,
+                "ISSUED_PACKAGE_PIN_VERIFIED",
+                Some(activation),
+                processor_report,
+            )
+        }
+        _ => {
+            let (model, model_sha, model_label) = load_model(model_source)?;
+            let runtime = regional_new(model, model_sha, *b"ZAU1", cfg)?;
+            (
+                runtime,
+                model_label,
+                None,
+                crate::processor_inventory::unpinned_source_report(),
+            )
+        }
+    };
     let model_sha = regional_adaptation_sha256(&runtime);
     if let Some(activation) = local_activation.as_ref() {
         if model_sha != activation.loaded_adaptation_sha256() {
@@ -1146,7 +1147,7 @@ fn close_output(
     executable_sha: [u8; 32],
     script_sha: [u8; 32],
 ) -> Result<(), String> {
-    write_new(
+    write_processor_report(
         &runner.output.join("processor-report.tsv"),
         runner.processor_report.as_bytes(),
     )?;
@@ -1213,7 +1214,7 @@ fn finish_processor_inventory(runner: &mut SessionRunner) -> Result<(), String> 
                 "ON_DEMAND",
                 &report,
             ));
-        write_new(
+        write_processor_report(
             &runner.output.join("processor-report.tsv"),
             runner.processor_report.as_bytes(),
         )?;
@@ -1222,6 +1223,13 @@ fn finish_processor_inventory(runner: &mut SessionRunner) -> Result<(), String> 
         }
     }
     Ok(())
+}
+
+fn write_processor_report(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    if bytes.len() > MAX_PROCESSOR_REPORT_BYTES {
+        return Err("processor report exceeds 1 MiB bound".into());
+    }
+    write_new(path, bytes)
 }
 
 /// Headless recorded-session runner. Logical frames and pixels are deterministic; receipt-time
