@@ -735,6 +735,20 @@ mod tests {
         let (result, severity) = evaluate(&mut state, 1_000, 1_000, 0.0, -550.0, 86.6, 50.0);
         assert_eq!(result.alerts, 1);
         assert_eq!(severity, Some(FinalSeverity::Caution));
+
+        // At 50 m/s lateral speed, this predicted trajectory enters the 306.3 m half-width
+        // after about 4.9 s. Feed the corresponding modeled sample on the next due update.
+        let (crossing, severity) = evaluate(
+            &mut state,
+            5_000_001_000,
+            5_000_001_000,
+            86.6 * 5.0,
+            -550.0 + 50.0 * 5.0,
+            86.6,
+            50.0,
+        );
+        assert_eq!(crossing.alerts, 1);
+        assert_eq!(severity, Some(FinalSeverity::Warning));
     }
 
     // REQ: OA-RWY-017
