@@ -70,13 +70,19 @@ fn write_synthetic_adsb(path: &Path) {
     let mut receive_ns = H5_CAPTURE_START_NS;
     while receive_ns < H5_MEASUREMENT_END_NS {
         sequence += 1;
+        let lon_delta = i64::try_from(sequence - 1)
+            .expect("synthetic row index")
+            .checked_mul(2_500)
+            .expect("synthetic longitude progression");
+        let lon_e7 = i32::try_from(i64::from(-873_000_000) + lon_delta)
+            .expect("synthetic longitude coordinate");
         let row = oa_adsb::Row {
             time_ns: receive_ns,
             icao: 0x00ab_cdef,
             lat_e7: 419_000_000,
-            lon_e7: -873_000_000,
+            lon_e7,
             baro_alt_ft: 35_000,
-            gs_dkt: 4_500,
+            gs_dkt: 100,
             track_ddeg: 900,
             nic: 8,
             nac_p: 9,
