@@ -951,8 +951,13 @@ pub fn regional_enable_msaw(
     runtime: &mut RegionalRuntime,
     data: oa_msaw_run::regional::RegionalData,
 ) -> Result<(), String> {
+    let start_ns = data
+        .provenance
+        .cutoff_ms
+        .checked_mul(1_000_000)
+        .ok_or("MSAW first cutoff cannot be represented in nanoseconds")?;
     let service = crate::msaw_bridge::regional_msaw_new(data, surveillance::MAX_TRACKS)?;
-    regional_attach_msaw(runtime, service)
+    regional_attach_msaw_at(runtime, service, start_ns)
 }
 
 pub fn regional_enable_synthetic_msaw(runtime: &mut RegionalRuntime) -> Result<(), String> {
@@ -964,7 +969,15 @@ pub fn regional_attach_msaw(
     runtime: &mut RegionalRuntime,
     service: crate::msaw_bridge::RegionalMsaw,
 ) -> Result<(), String> {
-    surveillance::surveillance_enable_msaw(&mut runtime.surveillance, service)
+    regional_attach_msaw_at(runtime, service, 0)
+}
+
+fn regional_attach_msaw_at(
+    runtime: &mut RegionalRuntime,
+    service: crate::msaw_bridge::RegionalMsaw,
+    start_ns: i64,
+) -> Result<(), String> {
+    surveillance::surveillance_enable_msaw(&mut runtime.surveillance, service, start_ns)
 }
 
 #[cfg(test)]

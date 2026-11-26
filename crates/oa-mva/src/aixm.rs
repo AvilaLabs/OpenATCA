@@ -1196,12 +1196,20 @@ pub struct DirLoad {
 pub fn load_directory(dir: &Path) -> Result<DirLoad, MvaError> {
     oa_sealed::refuse_io(dir).map_err(|e| MvaError::Io(e.to_string()))?;
     // seal-allow: the directory was refused by the guard above; each file is read through the guarded read_file
-    let mut names: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
-        .map_err(|e| MvaError::Io(e.to_string()))?
-        .filter_map(Result::ok)
-        .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|x| x == "xml"))
-        .collect();
+    const MAX_DIRECTORY_XML_FILES: usize = 64;
+    let mut names = Vec::new();
+    for entry in std::fs::read_dir(dir).map_err(|e| MvaError::Io(e.to_string()))? {
+        let entry = entry.map_err(|e| MvaError::Io(e.to_string()))?;
+        let path = entry.path();
+        if path.extension().is_some_and(|x| x == "xml") {
+            if names.len() == MAX_DIRECTORY_XML_FILES {
+                return Err(MvaError::Io(format!(
+                    "chart directory exceeds {MAX_DIRECTORY_XML_FILES} XML files"
+                )));
+            }
+            names.push(path);
+        }
+    }
     names.sort();
     let mut parser = new_parser()?;
     let mut model = Model::default();

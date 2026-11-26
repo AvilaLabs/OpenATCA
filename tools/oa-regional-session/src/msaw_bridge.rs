@@ -10,8 +10,9 @@ use oa_msaw_run::config::Settings;
 use oa_msaw_run::floors::Floors;
 use oa_msaw_run::qnh::Qnh;
 use oa_msaw_run::regional::RegionalData;
+use oa_safety::geom::Vertex;
 use oa_safety::inhibit::InhibitTable;
-use oa_safety::net::{NetReport, StateTable};
+use oa_safety::net::{NetId, NetReport, StateTable};
 use std::path::{Path, PathBuf};
 
 const MAX_REGIONAL_MSAW_SAMPLES: usize = 64;
@@ -40,16 +41,20 @@ pub fn load_msaw_manifest(path: &Path, cutoff_ms: i64) -> Result<(RegionalData, 
     };
     let mut config = None;
     let mut terrain_dir = None;
+    let mut mva_dir = None;
+    let mut cifp_file = None;
     let mut dof_files = Vec::new();
     let mut metar_files = Vec::new();
     for (index, line) in lines.enumerate() {
-        if index >= 66 || line.len() > 1100 {
+        if index >= 68 || line.len() > 1100 {
             return Err("MSAW manifest row/byte budget exceeded".into());
         }
         let fields: Vec<_> = line.split('\t').collect();
         match fields.as_slice() {
             ["CONFIG", name] if config.is_none() => config = Some(resolve(name)?),
             ["TERRAIN", name] if terrain_dir.is_none() => terrain_dir = Some(resolve(name)?),
+            ["MVA", name] if mva_dir.is_none() => mva_dir = Some(resolve(name)?),
+            ["CIFP", name] if cifp_file.is_none() => cifp_file = Some(resolve(name)?),
             ["DOF", name] if dof_files.len() < 32 => {
                 let candidate = resolve(name)?;
                 if dof_files.contains(&candidate) {
@@ -87,6 +92,8 @@ pub fn load_msaw_manifest(path: &Path, cutoff_ms: i64) -> Result<(RegionalData, 
     let paths = RegionalDataPaths {
         config: config.ok_or("MSAW configuration is required")?,
         terrain_dir,
+        mva_dir,
+        cifp_file,
         dof_files,
         metar_files,
     };
@@ -159,14 +166,10 @@ fn assemble(
     {
         return Err("MSAW configuration exceeds regional row/sample/log budgets".into());
     }
-    // These settings need the corresponding coordinator service, not silent omission.
-    if !settings.inhibits.is_empty() || !settings.requests.is_empty() {
-        return Err(
-            "configured MSAW inhibitions/service requests require an authority adapter".into(),
-        );
-    }
-    if !settings.cifp_airports.is_empty() || settings.cifp_area_margin_nm.is_some() {
-        return Err("automatic CIFP MSAW adaptation requires the corridor-loading adapter".into());
+    // Requests need source-backed pilot/flight eligibility (Mode A and callsign data). Area
+    // inhibitions are installed into the session's existing shared table at its admitted cutoff.
+    if !settings.requests.is_empty() {
+        return Err("MSAW service requests need source-backed VFR eligibility inputs".into());
     }
     let max_points = max_rows
         .checked_mul(settings.msaw.samples)
@@ -206,6 +209,58 @@ pub fn regional_msaw_new(data: RegionalData, max_rows: usize) -> Result<Regional
     )?;
     service.admitted_cutoff_ms = admitted_cutoff_ms;
     Ok(service)
+}
+
+/// Install only the explicit, parsed configuration inhibitions into the shared regional table.
+/// This runs before the first frame; no facility policy is synthesized by the caller.
+pub fn regional_msaw_install_inhibits(
+    service: &RegionalMsaw,
+    table: &mut InhibitTable,
+    start_ns: i64,
+) -> Result<usize, String> {
+    let mut installed = 0;
+    for (index, spec) in service.settings.inhibits.iter().enumerate() {
+        let start_delta = (spec.start_s * 1_000_000_000.0).round();
+        let end_delta = (spec.end_s * 1_000_000_000.0).round();
+        if !start_delta.is_finite()
+            || !end_delta.is_finite()
+            || start_delta < 0.0
+            || end_delta < 0.0
+            || start_delta > i64::MAX as f64
+            || end_delta > i64::MAX as f64
+        {
+            return Err(format!(
+                "MSAW inhibit line {} has unrepresentable relative time",
+                index + 1
+            ));
+        }
+        let start = start_ns
+            .checked_add(start_delta as i64)
+            .ok_or_else(|| format!("MSAW inhibit line {} start time overflow", index + 1))?;
+        let end = start_ns
+            .checked_add(end_delta as i64)
+            .ok_or_else(|| format!("MSAW inhibit line {} end time overflow", index + 1))?;
+        let vertices: Vec<Vertex> = spec.vertices.clone();
+        let request = oa_safety::inhibit::InhibitRequest {
+            net: NetId::Msaw,
+            vertices: &vertices,
+            alt_low_ft: spec.alt_lo_ft,
+            alt_high_ft: spec.alt_hi_ft,
+            start_ns: start,
+            end_ns: end,
+            reason: &spec.reason,
+            author: &spec.author,
+        };
+        oa_safety::inhibit::inhibit_create(
+            table,
+            &service.settings.inhibit_cfg,
+            &request,
+            start_ns,
+        )
+        .map_err(|error| format!("MSAW inhibit line {} refused: {error:?}", index + 1))?;
+        installed += 1;
+    }
+    Ok(installed)
 }
 
 /// Explicit public test model: a flat 500-ft floor in the Chicago test box and one synthetic
@@ -504,6 +559,40 @@ mod tests {
         assert_eq!(later.open[0].warning_ns, Some(42_000_000_000));
         assert_eq!(later.planned_points, later.completed_floor_samples);
         assert!(later.synthetic);
+    }
+
+    // REQ: OA-MSAW-007
+    #[test]
+    fn configured_msaw_area_inhibit_is_applied_and_expires_in_the_regional_caller() {
+        let mut service = regional_msaw_synthetic(32).unwrap();
+        service
+            .settings
+            .inhibits
+            .push(oa_msaw_run::config::InhibitSpec {
+                start_s: 0.0,
+                end_s: 3.0,
+                alt_lo_ft: 0,
+                alt_hi_ft: 3000,
+                author: "FACILITY".into(),
+                reason: "PRACTICE".into(),
+                vertices: vec![
+                    (400_000_000, -880_000_000),
+                    (420_000_000, -880_000_000),
+                    (420_000_000, -860_000_000),
+                    (400_000_000, -860_000_000),
+                ],
+            });
+        let mut runtime = regional(service);
+        let active = crate::runtime::regional_step(&mut runtime, &receipt(1, Some(1500))).unwrap();
+        assert_eq!(
+            active.surveillance.msaw.unwrap().stats.unwrap().suppressed,
+            1
+        );
+        let expired = crate::runtime::regional_step(&mut runtime, &receipt(4, Some(1200))).unwrap();
+        assert_eq!(
+            expired.surveillance.msaw.unwrap().stats.unwrap().suppressed,
+            0
+        );
     }
 
     // REQ: OA-REG-011

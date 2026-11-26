@@ -336,11 +336,13 @@ pub fn surveillance_new_with_profile(
 pub fn surveillance_enable_msaw(
     s: &mut Surveillance,
     service: crate::msaw_bridge::RegionalMsaw,
+    start_ns: i64,
 ) -> Result<(), String> {
     if s.frames != 0 || s.previous_ns.is_some() || s.msaw.is_some() {
         return Err("MSAW must be configured exactly once before the first frame".into());
     }
     let (stale_ns, future_ns) = crate::msaw_bridge::regional_msaw_net_policy(&service);
+    crate::msaw_bridge::regional_msaw_install_inhibits(&service, &mut s.inhibits, start_ns)?;
     s.states = state_table_new(stale_ns, future_ns).map_err(err)?;
     s.msaw = Some(service);
     Ok(())

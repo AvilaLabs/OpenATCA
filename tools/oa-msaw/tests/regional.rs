@@ -23,6 +23,8 @@ fn base_paths(root: &Path) -> RegionalDataPaths {
     RegionalDataPaths {
         config,
         terrain_dir: None,
+        mva_dir: None,
+        cifp_file: None,
         dof_files: Vec::new(),
         metar_files: Vec::new(),
     }
@@ -54,6 +56,45 @@ fn config_and_dof_bytes_are_refused_before_parsing_when_over_limit() {
     paths.dof_files.push(dof);
     let result = load_regional_data(&paths, limits, WeatherAdmission { cutoff_ms: 0 });
     assert!(result.err().unwrap().contains("exceeds"));
+}
+
+// REQ: OA-MSAW-080
+#[test]
+fn regional_data_loader_turns_the_issued_cifp_airport_into_runtime_corridors() {
+    let root = scratch("regional-cifp");
+    let mut paths = base_paths(&root);
+    let config = format!("{}\ncifp_airport = KORD\n", DEV_CFG);
+    std::fs::write(&paths.config, config).unwrap();
+
+    let header = include_str!("../../../crates/oa-arinc424/tests/fixtures/header.txt");
+    let body = [
+        include_str!("../../../crates/oa-arinc424/tests/fixtures/airports.txt"),
+        include_str!("../../../crates/oa-arinc424/tests/fixtures/runways.txt"),
+        include_str!("../../../crates/oa-arinc424/tests/fixtures/terminal_waypoints.txt"),
+        include_str!("../../../crates/oa-arinc424/tests/fixtures/approach.txt"),
+    ]
+    .concat();
+    let mut fields: Vec<String> = header.lines().map(str::to_owned).collect();
+    fields[0].replace_range(28..35, &format!("{:07}", body.lines().count()));
+    let mut cifp = fields.join("\n");
+    cifp.push('\n');
+    cifp.push_str(&body);
+    let cifp_path = root.join("FAACIFP18");
+    std::fs::write(&cifp_path, cifp).unwrap();
+    paths.cifp_file = Some(cifp_path);
+
+    let data = load_regional_data(
+        &paths,
+        RegionalDataLimits::default(),
+        WeatherAdmission { cutoff_ms: 0 },
+    )
+    .unwrap();
+    assert!(!data.settings.msaw.corridors.is_empty());
+    assert!(data.provenance.cifp_corridors > 0);
+    assert_eq!(
+        data.provenance.cifp_corridors,
+        data.settings.msaw.corridors.len()
+    );
 }
 
 #[test]
