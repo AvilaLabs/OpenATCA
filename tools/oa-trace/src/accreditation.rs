@@ -409,12 +409,10 @@ fn check_evidence_ref(root: &Path, canonical_root: &Path, value: &JsonValue) -> 
 /// Metadata rejects known oversize files early; the bounded read also handles file growth after
 /// that check. UTF-8 validation occurs only after the cap has been enforced.
 fn read_bounded_utf8(path: &Path, max_bytes: usize) -> Result<String, String> {
-    let mut file = fs::File::open(path).map_err(|error| error.to_string())?;
-    let metadata = file.metadata().map_err(|error| error.to_string())?;
-    if !metadata.is_file() {
-        return Err("not a regular file".to_string());
-    }
-    if metadata.len() > max_bytes as u64 {
+    let (mut file, file_bytes) = oa_sealed::Sealed::production()
+        .open_regular(path)
+        .map_err(|error| error.to_string())?;
+    if file_bytes > max_bytes as u64 {
         return Err(format!("exceeds {max_bytes} byte limit"));
     }
     let read_limit = max_bytes
@@ -769,6 +767,31 @@ mod tests {
                 && error.contains("exceeds 16384 byte limit")
         }));
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    #[test]
+    fn fifo_cited_source_is_refused_without_waiting_for_a_writer() {
+        let root = scratch();
+        let path = root.join("source.rs");
+        assert!(std::process::Command::new("mkfifo")
+            .arg(&path)
+            .status()
+            .unwrap()
+            .success());
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let reader = std::thread::spawn(move || {
+            let _ = sender.send(read_bounded_utf8(&path, MAX_CITED_SOURCE_BYTES));
+        });
+        let result = receiver
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("a source FIFO must refuse before waiting for a writer");
+        assert!(result.unwrap_err().contains("not a regular file"));
+        reader.join().unwrap();
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
