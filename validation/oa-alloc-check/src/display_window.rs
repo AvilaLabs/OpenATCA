@@ -26,8 +26,8 @@ use oa_display::safety::{FeedState, FeedStatus};
 use oa_display::scene::{build_scene, scene_caps, scene_index, scratch_for, view_new};
 use oa_display::traffic::{
     build_traffic, caps_add, targets_clear, targets_columns, targets_new, targets_push,
-    traffic_caps, Target, TrafficError, TrafficStats, DEFAULT_STYLE, MAX_TRAIL, NO_ALT, NO_REACQ,
-    NO_U16, T_COAST, T_CS_CONFLICT, T_UNCERTAIN,
+    traffic_caps, Target, TrafficError, TrafficStats, DEFAULT_STYLE, IDENT_UNKNOWN, MAX_TRAIL,
+    NO_ALT, NO_IDENT, NO_IDENT_NS, NO_REACQ, NO_U16, T_COAST, T_CS_CONFLICT, T_UNCERTAIN,
 };
 use oa_safety::inhibit::inhibits_new;
 use oa_safety::net::state_table_new;
@@ -271,6 +271,9 @@ fn model() -> Model {
 struct Cols {
     t: Vec<i64>,
     addr: Vec<u32>,
+    ident: Vec<u16>,
+    ident_ns: Vec<i64>,
+    ident_conflict: Vec<u8>,
     lat: Vec<i32>,
     lon: Vec<i32>,
     v: Vec<f32>,
@@ -314,6 +317,9 @@ fn fixture_columns() -> Cols {
             }
             c.t.push(T0 + k * S);
             c.addr.push(0xA00000 + a);
+            c.ident.push(NO_IDENT);
+            c.ident_ns.push(NO_IDENT_NS);
+            c.ident_conflict.push(0);
             c.lat.push(ORD.0 + row * 200_000 + (k as i32) * 300);
             c.lon.push(ORD.1 + col * 300_000 + (k as i32) * 900);
             c.v.push(110.0);
@@ -335,6 +341,9 @@ fn fixture_columns() -> Cols {
         for (addr, (lat, lon)) in rows {
             c.t.push(T0 + k * S);
             c.addr.push(addr);
+            c.ident.push(NO_IDENT);
+            c.ident_ns.push(NO_IDENT_NS);
+            c.ident_conflict.push(0);
             c.lat.push(lat);
             c.lon.push(lon);
             c.v.push(110.0);
@@ -378,6 +387,9 @@ fn busy_target(n: i32) -> Target {
         track_ddeg: (n as u16 * 37) % 3_600,
         gs_dkt: 2_400 + n as u16,
         reacq_age_s: if n % 5 == 0 { 2 } else { NO_REACQ },
+        ident: NO_IDENT,
+        ident_age_s: u32::MAX,
+        ident_state: IDENT_UNKNOWN,
         flags: 0,
         trail_len: 5,
     };
@@ -479,6 +491,9 @@ pub(super) fn display_window(inject: bool) -> Result<DisplayEvidence, &'static s
     let cols = RowColumns {
         t_ns: &c.t,
         addr: &c.addr,
+        ident: &c.ident,
+        ident_ns: &c.ident_ns,
+        ident_conflict: &c.ident_conflict,
         lat_e7: &c.lat,
         lon_e7: &c.lon,
         vel_east_mps: &c.v,
