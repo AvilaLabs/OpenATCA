@@ -818,6 +818,18 @@ mod tests {
         model.airway_legs.dogleg = air_model::bit_zeros(1);
     }
 
+    fn add_test_airport(model: &mut Model, ident: &str) {
+        model.points.kind.push(air_model::point_kind::AIRPORT);
+        model.points.lat.push(0);
+        model.points.lon.push(0);
+        model.points.elev_ft.push(air_model::ELEV_NONE);
+        model.points.ident.push(intern(model, ident));
+        model.points.alt_ident.push(StrIx::NONE);
+        model.points.region.push(StrIx::NONE);
+        model.points.scope.push(StrIx::NONE);
+        model.points.name.push(StrIx::NONE);
+    }
+
     fn preferred_route(
         model: &mut Model,
         origin: &str,
@@ -1309,6 +1321,23 @@ mod tests {
             assess_preferred_route(&constrained, b"KAAA", b"KBBB", &filed, Some(35_000), &[],)
                 .status,
             PreferredRouteStatus::SourceUnavailable
+        );
+    }
+
+    // REQ: OA-NAM-039
+    #[test]
+    fn iata_only_airport_aliases_cannot_bind_a_pfr_pair() {
+        let mut model = model_fixture();
+        add_test_airport(&mut model, "KAAA");
+        add_test_airport(&mut model, "KBBB");
+        preferred_route(&mut model, "ORD", "JFK", "H", "FIXA FIXB", None, None);
+        let elements = vec!["FIXA".to_string(), "FIXB".to_string()];
+        let filed = resolve_icao_item15(&model, &elements, Some(35_000), "KAAA", "KBBB", &[])
+            .expect("accepted route geometry");
+
+        assert_eq!(
+            assess_preferred_route(&model, b"KAAA", b"KBBB", &filed, Some(35_000), &[]).status,
+            PreferredRouteStatus::NoPublishedPair
         );
     }
 
