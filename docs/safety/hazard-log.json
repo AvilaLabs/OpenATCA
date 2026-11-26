@@ -23,6 +23,11 @@
     "OA-424-006",
     "OA-424-007",
     "OA-424-008",
+    "OA-A7-001",
+    "OA-A7-002",
+    "OA-A7-003",
+    "OA-A7-004",
+    "OA-A7-005",
     "OA-ADAPT-001",
     "OA-ADAPT-002",
     "OA-ADAPT-003",
@@ -9616,6 +9621,11 @@
       "severity_status": "engineering_candidate",
       "severity_rationale": "A coordination error can increase workload or contribute to an incorrect transfer of control. The operational integration, procedures, and independent barriers are not assessed; this is an engineering candidate only.",
       "mitigation_requirement_ids": [
+        "OA-A7-001",
+        "OA-A7-002",
+        "OA-A7-003",
+        "OA-A7-004",
+        "OA-A7-005",
         "OA-NAM-001",
         "OA-NAM-002",
         "OA-NAM-003",
@@ -9654,10 +9664,49 @@
       "source_refs": [
         {
           "document": "REQUIREMENTS.md",
+          "locator": "OA-A7-001 through OA-A7-005 in the ACC-to-ACC framed-byte peer fixture section"
+        },
+        {
+          "document": "REQUIREMENTS.md",
           "locator": "OA-NAM-001 through OA-NAM-035 in the owning functional sections"
         }
       ],
       "verification_refs": [
+        {
+          "requirement_id": "OA-A7-001",
+          "file": "crates/oa-nam/tests/handoff_peer.rs",
+          "test_name": "initiating_facility_retracts_an_rti_with_rta_bytes"
+        },
+        {
+          "requirement_id": "OA-A7-001",
+          "file": "crates/oa-nam/tests/handoff_peer.rs",
+          "test_name": "radar_handoff_messages_cross_two_facilities_as_encoded_bytes"
+        },
+        {
+          "requirement_id": "OA-A7-002",
+          "file": "crates/oa-nam/tests/handoff_peer.rs",
+          "test_name": "rejection_recoordination_and_duplicate_or_out_of_order_rti_are_visible"
+        },
+        {
+          "requirement_id": "OA-A7-003",
+          "file": "crates/oa-nam/tests/handoff_peer.rs",
+          "test_name": "rejection_recoordination_and_duplicate_or_out_of_order_rti_are_visible"
+        },
+        {
+          "requirement_id": "OA-A7-004",
+          "file": "crates/oa-nam/tests/handoff_peer.rs",
+          "test_name": "flight_plan_timeout_and_est_then_chg_are_wire_ordered"
+        },
+        {
+          "requirement_id": "OA-A7-004",
+          "file": "crates/oa-nam/tests/handoff_peer.rs",
+          "test_name": "rti_no_response_uses_only_the_explicit_local_timer_policy"
+        },
+        {
+          "requirement_id": "OA-A7-005",
+          "file": "crates/oa-nam/tests/handoff_peer.rs",
+          "test_name": "flight_plan_timeout_and_est_then_chg_are_wire_ordered"
+        },
         {
           "requirement_id": "OA-NAM-001",
           "file": "crates/oa-nam/tests/roundtrip.rs",
@@ -15803,6 +15852,36 @@
     }
   ],
   "safety_requirement_assessments": [
+    {
+      "id": "OA-A7-001",
+      "function": "acc_to_acc_flight_coordination_interface",
+      "hazard_id": "HZ-COORDINATION-001",
+      "rationale": "Engineering safety candidate: a malformed, misordered, or misattributed inter-center message can leave coordination state unclear. The fixture exercises Rev G RTI/RLA/RTA/LAM bytes through encode, frame, unframe, and parse while retaining message numbers and peer identity. RLA and LAM are not treated as proof of operational ownership; both facility sessions are synthetic."
+    },
+    {
+      "id": "OA-A7-002",
+      "function": "acc_to_acc_flight_coordination_interface",
+      "hazard_id": "HZ-COORDINATION-001",
+      "rationale": "Engineering safety candidate: failing to surface an LRM rejection or confusing a later sequence with an automatic retry could misstate flight coordination. The fixture surfaces rejection and uses a new sequence for a later attempt; this is not an automatic retry or a protocol-defined recoordination algorithm."
+    },
+    {
+      "id": "OA-A7-003",
+      "function": "acc_to_acc_flight_coordination_interface",
+      "hazard_id": "HZ-COORDINATION-001",
+      "rationale": "Engineering safety candidate: duplicate or gapped RTI sequence information hidden from the application can make coordination message state ambiguous. The fixture exposes First/InOrder/Duplicate/Gap classifications and preserves messages for application handling; it does not decide operational ownership or response."
+    },
+    {
+      "id": "OA-A7-004",
+      "function": "acc_to_acc_flight_coordination_interface",
+      "hazard_id": "HZ-COORDINATION-001",
+      "rationale": "Engineering safety candidate: a locally timed-out FPL or RTI may be mistaken for a protocol-mandated timeout or external peer response. The implementation uses explicit local timer configuration and reports no response; it does not claim Rev G sets the tested RTI timer or implements a VSP failure rule."
+    },
+    {
+      "id": "OA-A7-005",
+      "function": "acc_to_acc_flight_coordination_interface",
+      "hazard_id": "HZ-COORDINATION-001",
+      "rationale": "Engineering safety candidate: misordering an EST and CHG can leave a flight-plan message sequence ambiguous. The fixture tests framed transport ordering and parsing only; applying the amendment to shared flight state remains a separate caller integration."
+    },
     {
       "id": "OA-CA-036",
       "function": "conflict_alert",

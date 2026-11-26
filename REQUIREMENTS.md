@@ -5060,6 +5060,29 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
 - **OA-NAM-037** The field codec parses and round-trips the ICAO Appendix 3 DLA message fields
   3, 7, 13, 16 and 18. A DLA updates departure time and does not create, replace or amend Item 15.
 
+## ACC-to-ACC framed-byte peer fixture (A7)
+- **OA-A7-001** Two active facility sessions exchange Rev G RTI, RLA, RTA and LAM messages through
+  the canonical encoder, four-digit transport frame, unframe and parser. Message numbers,
+  sender/receiver and response references are preserved. Both receiving-center RTA acceptance and
+  initiating-center RTA retraction are exercised. RLA is the protocol response to RTI; LAM only
+  confirms computer handling of RTA. Neither is treated as proof of the other center's operational
+  ownership state.
+- **OA-A7-002** A framed LRM matched to an outstanding RTI is surfaced as that RTI's rejection
+  (Rev G Part II B.1.8.1 and Table B-1); a subsequent RTI uses a new sequence number. This is a
+  fixture-level later attempt, not an automatic retry or a Rev G-defined recoordination algorithm.
+- **OA-A7-003** The peer fixture exposes the session's `First`, `InOrder`, `Duplicate`, and `Gap`
+  classifications for framed RTI traffic, including a lower number after a gap; messages remain
+  visible to the application with their classification (Rev G Part II B.2.1).
+- **OA-A7-004** The locally configured response timer for a flight-planning FPL reports an
+  unanswered message at its configured 60-second deadline. Rev G Part III §6.1 specifies under
+  60 seconds for at least 99% of flight-planning LAM/LRM responses in normal operations; this is
+  not an RTI/RTA decision timeout, for which §6.1 states a less-than-six-second interface
+  communication maximum. A separate RTI test exercises a 100 ms local response-timer setting only;
+  it does not claim Rev G sets that interval or implements the application-level VSP failure rule.
+- **OA-A7-005** The framed peer delivers an EST followed by a CHG in sequence (Rev G Part II
+  §§3.1.2–3.1.3). It asserts NAM transport ordering and parsing only; applying the amendment to
+  `oa-flight` remains a separate caller integration requirement.
+
 ## Release replay comparison (oa-track canonical output, oa-replay-diff)
 - **OA-TRK-360** A tracker output row has one canonical byte form of 85 bytes: track address, time,
   position, velocity, turn rate, altitude terms, position and velocity covariance terms, model
