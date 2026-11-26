@@ -2,7 +2,7 @@
 //! when required paired system state is unavailable. This is an offline diagnostic, not a switch.
 #![forbid(unsafe_code)]
 
-use oa_audit_core::{Checkpoint, PrincipalRegistry};
+use oa_audit_core::Checkpoint;
 use oa_migration_switch::EndpointClass;
 use oa_regional_session::migration_drill::{
     consumer_worker, run_recorded_stream, RecordedAuditOptions, RecordedDrillReport,
@@ -44,9 +44,13 @@ fn parse_digest(text: &str) -> Result<[u8; 32], String> {
     }
     let mut digest = [0; 32];
     for (i, pair) in text.as_bytes().chunks_exact(2).enumerate() {
-        let hi = (pair[0] as char).to_digit(16).ok_or("invalid SHA-256")? as u8;
-        let lo = (pair[1] as char).to_digit(16).ok_or("invalid SHA-256")? as u8;
-        digest[i] = (hi << 4) | lo;
+        let hi = (*pair.first().ok_or("invalid SHA-256")? as char)
+            .to_digit(16)
+            .ok_or("invalid SHA-256")? as u8;
+        let lo = (*pair.get(1).ok_or("invalid SHA-256")? as char)
+            .to_digit(16)
+            .ok_or("invalid SHA-256")? as u8;
+        *digest.get_mut(i).ok_or("invalid SHA-256")? = (hi << 4) | lo;
     }
     Ok(digest)
 }
