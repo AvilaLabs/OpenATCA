@@ -5714,8 +5714,7 @@ mod tests {
             flags: 0,
             trail_len: 0,
         };
-        let with_rendered =
-            snapshot_output_payloads(snapshot.view(), &[rendered], Output::Legacy)?;
+        let with_rendered = snapshot_output_payloads(snapshot.view(), &[rendered], Output::Legacy)?;
         assert_eq!(with_rendered.family_counts[0], 1);
         let orphan = oa_display::core::traffic::Target {
             addr: 8,
