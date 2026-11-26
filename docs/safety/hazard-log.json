@@ -8646,6 +8646,12 @@
       "function": "workspace_static_boundary_verification",
       "rationale": "This pins the shape checked for a build script; it does not alter the generated runtime logic. Register clause: `oa-demo-wasm/build.rs` matches the reviewed guarded-input and two-output source shape. No additional file or process effects are accepted; a changed build script requires a deliberate update to the checker\u2019s pinned source and negative regressions.",
       "register_clause": "`oa-demo-wasm/build.rs` matches the reviewed guarded-input and two-output source shape. No additional file or process effects are accepted; a changed build script requires a deliberate update to the checker\u2019s pinned source and negative regressions."
+    },
+    {
+      "id": "OA-TRC-266",
+      "function": "workspace_static_boundary_verification",
+      "rationale": "This verifies repository dependency boundaries at build time and does not change runtime safety decisions.",
+      "register_clause": "The F1a dependency check reads offline Cargo metadata for every workspace package and dependency kind, refuses cycles, refuses outside-repository dependencies without an adjacent F1 approval reference, and refuses every core-to-shell or core-to-tool edge. Internal path dependencies must resolve to a classified workspace package."
     }
   ],
   "unclassified_requirement_policy": {

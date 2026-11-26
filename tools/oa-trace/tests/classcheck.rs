@@ -252,6 +252,26 @@ fn core_code_may_name_only_core_crates_and_the_core_module_of_split_crates() {
     assert_eq!(t, ["as", "fx_shell"]);
 }
 
+// REQ: OA-TRC-205, OA-TRC-266
+#[test]
+fn specifically_approved_shell_external_dependency_is_not_rejected_as_unresolved_workspace_crate() {
+    let ws = Ws::named(
+        "f1a-approved-shell",
+        "fx-a",
+        "shell",
+        &[("src/lib.rs", "pub fn shell() {}\n")],
+    );
+    ws.put(
+        "crates/fx-a/Cargo.toml",
+        "[package]\nname = \"fx-a\"\n\n[package.metadata.openatca]\nclass = \"shell\"\n\n[dependencies]\nexternal = { path = \"../../external\" } # F1-APPROVAL: F1-DEC-TEST-001\n",
+    );
+    let failures = ws.failures();
+    assert!(
+        !has(&failures, "external: B8: dependency") && !has(&failures, "path dependency"),
+        "approved shell external edge was rejected: {failures:#?}"
+    );
+}
+
 // REQ: OA-TRC-206
 #[test]
 fn a_split_crate_needs_both_modules_and_a_lib_rs_declaring_exactly_them() {

@@ -114,6 +114,8 @@ jobs:
           python3 tools/test_reproduce_zau.py
       - name: Requirements and assurance traceability
         run: |
+          python3 tools/test_f1a_dependency_graph.py
+          python3 tools/check_f1a_dependency_graph.py
           cargo +1.89.0 run --locked -p oa-trace
           python3 -m unittest discover -s tools/oa-encounter/tests -p 'test_*.py'
           python3 tools/test_generate_oscal_control_map.py

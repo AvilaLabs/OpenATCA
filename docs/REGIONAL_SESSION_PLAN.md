@@ -24,7 +24,7 @@ supplied evidence; an independent route converter remains outside this slice.
 
 ## Proposed dependency approval
 
-RULESET F1 requires Connor's approval even for links to existing workspace crates. No external
+Internal workspace links follow RULESET F1a. No external
 crate is proposed. The new shell tool may use the following existing workspace crates, with
 the stated reason written beside each dependency in its Cargo.toml. Remove unused links.
 
@@ -56,7 +56,7 @@ the stated reason written beside each dependency in its Cargo.toml. Remove unuse
 Three bounded implementation lanes: session runner; source-order trajectory selection and
 flight-view adapter; failure scenarios. Coordinator freezes their interfaces, reviews each
 change against the ruleset, owns all local builds, and integrates onto the existing coordinator
-branch. No new remote branches. No new dependency is added before F1 approval.
+branch. No new remote branches. No new outside dependency is added before F1 approval.
 
 Acceptance requires independently calculated fixture answers, positive full-identifier joins,
 no future input leakage, explicit counts for every refusal and omission, retained ownership

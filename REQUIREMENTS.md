@@ -691,6 +691,8 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
   shape. No additional file or process effects are accepted; a changed build script requires a
   deliberate update to the checker’s pinned source and negative regressions.
 
+- **OA-TRC-266** The F1a dependency check reads offline Cargo metadata for every workspace package and dependency kind, refuses cycles, refuses outside-repository dependencies without an adjacent F1 approval reference, and refuses every core-to-shell or core-to-tool edge. Internal path dependencies must resolve to a classified workspace package.
+
 ### Hashing (oa-sha256)
 
 - **OA-SHA-001** Computes SHA-256 per FIPS 180-4, matching every NIST CAVP SHA-256 byte-oriented

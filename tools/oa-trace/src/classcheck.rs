@@ -2359,6 +2359,68 @@ fn resolve_dep(
     }
 }
 
+/// Returns true only for the adjacent machine-readable approval convention used by the F1a
+/// metadata check. The Python checker validates the reference against the dependency's exact
+/// path/source; this lets the older class checker avoid rejecting an already-approved shell
+/// external edge merely because it cannot resolve that package as a workspace member.
+fn has_f1_approval(root: &Path, member_dir: &str, dep: &Dep) -> bool {
+    let key = &dep.key;
+    let package_file = root.join(member_dir).join("Cargo.toml");
+    let workspace_file = root.join("Cargo.toml");
+    for path in [package_file, workspace_file] {
+        let Ok(text) = fs::read_to_string(path) else {
+            continue;
+        };
+        let mut in_dependency_section = false;
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with('[') && trimmed.ends_with(']') {
+                in_dependency_section = matches!(
+                    trimmed,
+                    "[dependencies]"
+                        | "[dev-dependencies]"
+                        | "[build-dependencies]"
+                        | "[workspace.dependencies]"
+                ) || trimmed.ends_with(".dependencies]")
+                    || trimmed.ends_with(".dev-dependencies]")
+                    || trimmed.ends_with(".build-dependencies]");
+                continue;
+            }
+            if !in_dependency_section {
+                continue;
+            }
+            let Some((name, value)) = trimmed.split_once('=') else {
+                continue;
+            };
+            if name.trim() != key {
+                continue;
+            }
+            let Some((_, comment)) = value.split_once('#') else {
+                continue;
+            };
+            let Some(reference) = comment.trim().strip_prefix("F1-APPROVAL:") else {
+                continue;
+            };
+            let reference = reference.trim();
+            if !reference.is_empty()
+                && ![
+                    "approved",
+                    "approval",
+                    "justification",
+                    "yes",
+                    "true",
+                    "external",
+                ]
+                .iter()
+                .any(|generic| reference.eq_ignore_ascii_case(generic))
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Checks every workspace member under `root` (B7 to B9) against [`UNSPLIT_ALLOWED`].
 pub fn check(root: &Path) -> ClassReport {
     check_inner(root, &UNSPLIT_ALLOWED, true)
@@ -3516,6 +3578,7 @@ fn check_member(
         w.libs.iter().map(|(n, l)| (l.clone(), n.clone())).collect();
     for d in &m.man.deps {
         match resolve_dep(d, &m.rel_dir, w.ws_deps, w.by_dir, w.classes) {
+            Err(_) if m.class != Class::Core && has_f1_approval(root, &m.rel_dir, d) => {}
             Err(e) => fails.push(format!("{name}: {}: B8: {e}", d.key)),
             Ok(target) => {
                 if m.class == Class::Core {

@@ -465,9 +465,13 @@ Rust has no stable allocator parameter, so the Zig rules C1–C2 are met by stro
 
 ## F. Dependencies and simplicity
 
-- **F1 [MUST]** No dependency, including dev-dependencies, without a written justification at the
-  import site and Connor's approval. The default is no. Exceptions only for proven cryptography or
-  entropy, and the minimal platform layer for windowing and sockets.
+- **F1 [MUST]** No dependency on code from outside this repository, including dev-dependencies,
+  without a written justification at the import site and Connor's approval. The default is no.
+  Exceptions only for proven cryptography or entropy, and the minimal platform layer for
+  windowing and sockets.
+- **F1a [MUST]** A link to another crate in this workspace needs no approval. It needs a one-line
+  reason beside it in Cargo.toml, and it must pass the layering check: no dependency cycles, and
+  no core crate depending on a shell or tool crate (F6).
 - **F2 [MUST]** Prefer `const` evaluation and the standard library over a crate.
 - **F3 [MUST NOT]** No hidden control flow or cost: no operator overloading that hides work, no
   `Deref` tricks, no implicit conversions that allocate, no macros that hide control flow.
@@ -532,5 +536,5 @@ tracker (M3) is the first fully real-time core and is held to every rule from it
 - [ ] Identity from full identifiers only; ambiguity kept visible (E7)
 - [ ] Arithmetic on input and configuration checked before it can overflow or truncate (E8)
 - [ ] Measurements fail on lost work; generators checked against their description (G6)
-- [ ] No new dependency without justification and approval (F1)
+- [ ] No new outside dependency without justification and approval (F1); internal links justified and layered (F1a)
 - [ ] Measurements behind performance claims; worst case against deadline (G1, G5)
