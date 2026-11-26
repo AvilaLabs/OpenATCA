@@ -7,7 +7,7 @@
 use crate::flight::{self, FlightDriver, FlightViewStatus, SharedFlightView};
 use crate::nam_handoff::{
     accepted_delivery_seq, accepted_message, nam_session_ingress_local_event,
-    nam_session_ingress_receive, NamHandoffError, NamIngressResult, NamSessionIngress,
+    nam_session_ingress_receive, NamIngressResult, NamSessionIngress,
 };
 use crate::route;
 use crate::surveillance::ObservedTrack;
@@ -98,7 +98,7 @@ pub enum PointOutError {
     SessionResponse,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct PointOutResult {
     pub ingress: NamIngressResult,
     /// Logical computer response actions, when POI needs a PLA. They do not represent approval.
@@ -217,6 +217,7 @@ fn receive_poi(
     if message.header.id.receiver.0 != local_facility
         || message
             .f31
+            .as_ref()
             .is_none_or(|f31| f31.facility.0 != local_facility)
     {
         return Err(PointOutError::WrongPeer);
@@ -308,6 +309,7 @@ fn receive_decision(
     }
     if message
         .f31
+        .as_ref()
         .is_none_or(|field| field.facility.0 != message.header.id.sender.0)
     {
         return Err(PointOutError::WrongPeer);
