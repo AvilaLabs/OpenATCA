@@ -72,7 +72,9 @@ pub enum Intent {
     TakeHandoff(u32),
     CancelHandoff(u32),
     /// Acknowledge one MSAW aural request by its alert episode start time.
-    AcknowledgeMsaw { alert_start_ns: i64 },
+    AcknowledgeMsaw {
+        alert_start_ns: i64,
+    },
 }
 const _: () = assert!(core::mem::size_of::<Intent>() == 16);
 

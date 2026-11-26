@@ -414,8 +414,8 @@ fn aural_area(v: &str) -> Result<AuralArea, String> {
             Ok((lat, lon))
         })
         .collect::<Result<Vec<_>, String>>()?;
-    let polygon = polygon_new(&vertices)
-        .map_err(|error| format!("msaw_aural_area polygon: {error}"))?;
+    let polygon =
+        polygon_new(&vertices).map_err(|error| format!("msaw_aural_area polygon: {error}"))?;
     Ok(AuralArea {
         id: (*id).to_string(),
         polygon,
@@ -577,7 +577,10 @@ pub fn parse_config(text: &str) -> Result<Settings, String> {
     let mut parsed_aural_areas = Vec::with_capacity(aural_areas.len());
     for value in &aural_areas {
         let area = aural_area(value)?;
-        if parsed_aural_areas.iter().any(|prior: &AuralArea| prior.id == area.id) {
+        if parsed_aural_areas
+            .iter()
+            .any(|prior: &AuralArea| prior.id == area.id)
+        {
             return Err(format!("msaw_aural_area `{}` is repeated", area.id));
         }
         parsed_aural_areas.push(area);

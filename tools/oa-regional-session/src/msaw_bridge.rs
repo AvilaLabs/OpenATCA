@@ -68,6 +68,7 @@ pub struct AuralReport {
     pub states: Vec<AuralAlarmState>,
     pub events: Vec<AuralEvent>,
     pub unlatched_alerts: u32,
+    pub unreported_events: u32,
 }
 
 /// Explicit, bounded startup manifest. Observation time is never substituted for a METAR
@@ -235,7 +236,7 @@ fn assemble(
         .checked_mul(settings.msaw.samples)
         .ok_or("MSAW point budget overflow")?;
     let max_aural_events = max_rows
-        .checked_mul(2)
+        .checked_add(settings.alert_log_capacity)
         .and_then(|events| events.checked_add(MAX_PENDING_AURAL_EVENTS))
         .ok_or("MSAW aural event budget overflow")?;
     let max_aural_latches = settings.alert_log_capacity;
@@ -518,6 +519,7 @@ fn evaluate_cycle(
             states: Vec::new(),
             events: Vec::new(),
             unlatched_alerts: 0,
+            unreported_events: 0,
         },
     })
 }
@@ -682,9 +684,6 @@ fn update_aural(
         }
     }
 
-    let unlatched_alerts = unlatched_alerts
-        .saturating_add(pending_overflow)
-        .saturating_add(service.aural_event_overflow);
     let report = AuralReport {
         sink: if service.settings.aural_areas.is_empty() {
             AuralSinkStatus::NotConfigured
@@ -694,6 +693,7 @@ fn update_aural(
         states: service.aural_latches.clone(),
         events: service.aural_events.clone(),
         unlatched_alerts,
+        unreported_events: pending_overflow.saturating_add(service.aural_event_overflow),
     };
     service
         .aural_latches
@@ -719,6 +719,10 @@ pub fn regional_msaw_acknowledge_aural(
     else {
         return Err("MSAW aural acknowledgement names no retained alert instance".into());
     };
+    if service.aural_pending_events.len() >= MAX_PENDING_AURAL_EVENTS {
+        service.aural_pending_overflow = service.aural_pending_overflow.saturating_add(1);
+        return Err("MSAW aural acknowledgement event capacity is exhausted".into());
+    }
     let Some(state) = service.aural_latches.get_mut(index) else {
         return Err("MSAW aural acknowledgement state disappeared".into());
     };
@@ -803,7 +807,10 @@ pub fn regional_msaw_cycle(
                     },
                     states: service.aural_latches.clone(),
                     events: service.aural_pending_events.clone(),
-                    unlatched_alerts: service.aural_event_overflow,
+                    unlatched_alerts: 0,
+                    unreported_events: service
+                        .aural_pending_overflow
+                        .saturating_add(service.aural_event_overflow),
                 },
             })
         }
@@ -926,7 +933,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(ongoing.open.len(), 1);
-        assert_eq!(ongoing.aural.events.len(), 0, "ordinary scans do not replay request");
+        assert_eq!(
+            ongoing.aural.events.len(),
+            0,
+            "ordinary scans do not replay request"
+        );
 
         regional_msaw_acknowledge_aural(
             &mut service,
@@ -950,7 +961,11 @@ mod tests {
             &mut inhibits,
         )
         .unwrap();
-        assert_eq!(acknowledged.open.len(), 1, "acknowledgement does not clear visual alert");
+        assert_eq!(
+            acknowledged.open.len(),
+            1,
+            "acknowledgement does not clear visual alert"
+        );
         assert!(acknowledged
             .aural
             .events

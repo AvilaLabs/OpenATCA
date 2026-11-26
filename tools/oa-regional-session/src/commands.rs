@@ -310,55 +310,55 @@ fn apply(
         None
     } else {
         Some(match request.intent {
-        Intent::SetAssignedAltitude(altitude_ft) if actor == view.owner_unit => {
-            FlightOperation::AssignAltitude { altitude_ft }
-        }
-        Intent::ClearAssignedAltitude if actor == view.owner_unit => {
-            FlightOperation::ClearAssignedAltitude
-        }
-        Intent::SetInterimAltitude(altitude_ft) if actor == view.owner_unit => {
-            FlightOperation::SetInterimAltitude {
-                altitude_ft: Some(altitude_ft),
+            Intent::SetAssignedAltitude(altitude_ft) if actor == view.owner_unit => {
+                FlightOperation::AssignAltitude { altitude_ft }
             }
-        }
-        Intent::ClearInterimAltitude if actor == view.owner_unit => {
-            FlightOperation::SetInterimAltitude { altitude_ft: None }
-        }
-        Intent::OfferHandoff(to) if actor == view.owner_unit && to != request.actor_unit => {
-            let offered = match unit(to) {
-                Ok(unit) => unit,
-                Err(e) => return queued_refusal(interaction, e, false),
-            };
-            FlightOperation::Handoff {
-                operation: HandoffOperation::Offer,
-                unit: offered,
+            Intent::ClearAssignedAltitude if actor == view.owner_unit => {
+                FlightOperation::ClearAssignedAltitude
             }
-        }
-        Intent::AcceptHandoff(by) if by == request.actor_unit && actor == view.handoff_to => {
-            FlightOperation::Handoff {
-                operation: HandoffOperation::Accept,
-                unit: actor,
+            Intent::SetInterimAltitude(altitude_ft) if actor == view.owner_unit => {
+                FlightOperation::SetInterimAltitude {
+                    altitude_ft: Some(altitude_ft),
+                }
             }
-        }
-        Intent::TakeHandoff(by) if by == request.actor_unit && actor == view.handoff_to => {
-            FlightOperation::Handoff {
-                operation: HandoffOperation::Take,
-                unit: actor,
+            Intent::ClearInterimAltitude if actor == view.owner_unit => {
+                FlightOperation::SetInterimAltitude { altitude_ft: None }
             }
-        }
-        Intent::CancelHandoff(by) if by == request.actor_unit && actor == view.owner_unit => {
-            FlightOperation::Handoff {
-                operation: HandoffOperation::Fail,
-                unit: actor,
+            Intent::OfferHandoff(to) if actor == view.owner_unit && to != request.actor_unit => {
+                let offered = match unit(to) {
+                    Ok(unit) => unit,
+                    Err(e) => return queued_refusal(interaction, e, false),
+                };
+                FlightOperation::Handoff {
+                    operation: HandoffOperation::Offer,
+                    unit: offered,
+                }
             }
-        }
-        _ => {
-            return queued_refusal(
-                interaction,
-                "operator unit has no authority for this request".into(),
-                false,
-            )
-        }
+            Intent::AcceptHandoff(by) if by == request.actor_unit && actor == view.handoff_to => {
+                FlightOperation::Handoff {
+                    operation: HandoffOperation::Accept,
+                    unit: actor,
+                }
+            }
+            Intent::TakeHandoff(by) if by == request.actor_unit && actor == view.handoff_to => {
+                FlightOperation::Handoff {
+                    operation: HandoffOperation::Take,
+                    unit: actor,
+                }
+            }
+            Intent::CancelHandoff(by) if by == request.actor_unit && actor == view.owner_unit => {
+                FlightOperation::Handoff {
+                    operation: HandoffOperation::Fail,
+                    unit: actor,
+                }
+            }
+            _ => {
+                return queued_refusal(
+                    interaction,
+                    "operator unit has no authority for this request".into(),
+                    false,
+                )
+            }
         })
     };
     // Recheck both queue identity and command payload before applying authoritative state.
@@ -390,16 +390,22 @@ fn apply(
     } else if let Some(operation) = operation {
         let mut authoritative = *event;
         authoritative.kind = EventKind::Flight(operation);
-        flight::flight_apply_event(driver, &authoritative)
-            .map_err(|e| terminal_failure(format!("operator flight operation after preflight: {e:?}")))
+        flight::flight_apply_event(driver, &authoritative).map_err(|e| {
+            terminal_failure(format!("operator flight operation after preflight: {e:?}"))
+        })
     } else {
-        Err(terminal_failure("operator operation was absent after preflight"))
+        Err(terminal_failure(
+            "operator operation was absent after preflight",
+        ))
     };
     let accepted = result.as_ref().is_ok_and(|outcome| {
         aural_ack.is_some()
             || (outcome.adapter_refusal.is_none()
                 && outcome.operation.is_some_and(|operation| {
-                    matches!(operation, oa_flight::Outcome::Applied | oa_flight::Outcome::Unchanged)
+                    matches!(
+                        operation,
+                        oa_flight::Outcome::Applied | oa_flight::Outcome::Unchanged
+                    )
                 }))
     });
     finish_queued(
