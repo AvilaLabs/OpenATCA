@@ -19,7 +19,8 @@
 //!
 //! # Layers
 //!
-//! * [`field`] and [`message`]: the 25 messages of the core set (Part II Table 2) as plain
+//! * [`field`] and [`message`]: the 25 NAM messages of the core set (Part II Table 2), plus the
+//!   public ICAO Appendix 3 DLA field message, as plain
 //!   data ([`model`]), parsed and encoded from one table of definitions ([`schema`]).
 //!   [`parse`] is strict and canonical; [`encode`] refuses an invalid value and checks that its
 //!   output parses back to the same value. Encoding what [`parse`] accepted gives the same

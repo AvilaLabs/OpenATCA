@@ -134,6 +134,7 @@ pub fn fmt_level(l: &Level, out: &mut String) {
         Level::MetricAltitude(v) => {
             let _ = write!(out, "M{v:04}");
         }
+        Level::Vfr => out.push_str("VFR"),
     }
 }
 
@@ -221,7 +222,7 @@ pub fn valid_point(b: &[u8]) -> bool {
         let (name, rest) = (sub(b, 0, split), tail(b, split));
         return name_ok(name, 2, 5)
             && num(sub(rest, 0, 3)).is_some_and(|v| v <= 360)
-            && num(sub(rest, 3, 6)).is_some();
+            && num(sub(rest, 3, 6)).is_some_and(|distance| distance > 0);
     }
     false
 }
@@ -781,18 +782,24 @@ pub fn parse_f15(b: &[u8]) -> Result<Field15, NamError> {
     let Some((head, route)) = split_at_byte(b, b' ') else {
         return Err(e(K::RouteElement, 15));
     };
-    let (speed, level) = match head.first() {
-        Some(b'N') => (sub(head, 0, 5), tail(head, 5)),
-        Some(b'M') => (sub(head, 0, 4), tail(head, 4)),
+    let speed_len = match head.first() {
+        Some(b'N' | b'K') => 5,
+        Some(b'M') => 4,
         _ => return Err(e(K::Speed, 15)),
     };
-    let Some(speed) = parse_speed(speed, false) else {
+    let Some(speed) = parse_speed(sub(head, 0, speed_len), true) else {
         return Err(e(K::Speed, 15));
     };
-    if level.is_empty() {
+    let level_text = tail(head, speed_len);
+    let level = if level_text == b"VFR" {
+        Some(Level::Vfr)
+    } else {
+        parse_level(level_text, true)
+    };
+    if level_text.is_empty() {
         return Err(e(K::LevelMissing, 15));
     }
-    let Some(level) = parse_level(level, false) else {
+    let Some(level) = level else {
         return Err(e(K::Level, 15));
     };
     let mut elements = Vec::new();

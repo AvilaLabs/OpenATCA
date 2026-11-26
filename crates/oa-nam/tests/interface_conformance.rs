@@ -24,8 +24,8 @@ fn registry_pins_nam_sources_profiles_and_partial_scope() {
         "\"profile\": \"EramAttachment2\"",
         "\"profile\": \"RevE\"",
         "No comparison to unavailable ERAM/NAM production messages or live traffic is made.",
-        "Part II 2.2.6 candidate future message mnemonics are explicit refusal vectors",
-        "interface_conformance::public_future_message_candidates_are_refused_as_undefined_core_mnemonics",
+        "Part II 2.2.6 candidate future message mnemonics except DLA are explicit refusal vectors",
+        "interface_conformance::public_future_message_candidates_except_dla_are_refused_as_undefined_core_mnemonics",
     ] {
         assert!(REGISTRY.contains(marker), "registry lacks {marker}");
     }
@@ -47,14 +47,15 @@ fn public_nam_example_defect_is_refused_and_rev_e_profile_is_explicit() {
 
 // REQ: OA-NAM-032
 #[test]
-fn public_future_message_candidates_are_refused_as_undefined_core_mnemonics() {
+fn public_future_message_candidates_except_dla_are_refused_as_undefined_core_mnemonics() {
     // NAS-IC-21009205 Rev G Part II 2.2.6 pp. 14–15 lists these as candidate messages for future
-    // implementation, not as members of the 25-message core set in Table 2. Table A-1 code 60
-    // identifies an ineligible/unknown message mnemonic. MIS appears in both the future list and
-    // the core set, so it is intentionally not included here.
+    // implementation, not as members of the 25-message core set in Table 2. DLA is separately
+    // supported by the ICAO Appendix 3 field codec. Table A-1 code 60 identifies an
+    // ineligible/unknown message mnemonic. MIS appears in both the future list and the core set,
+    // so it is intentionally not included here.
     for mnemonic in [
-        "CDN", "ACP", "REJ", "ALR", "RCF", "ARR", "DEP", "RQP", "CRQ", "CAK", "CLR", "SUA", "DLA",
-        "SPL", "RQS",
+        "CDN", "ACP", "REJ", "ALR", "RCF", "ARR", "DEP", "RQP", "CRQ", "CAK", "CLR", "SUA", "SPL",
+        "RQS",
     ] {
         let wire = format!("({mnemonic}KZBW/CZWG001)");
         let bytes = wire.as_bytes();

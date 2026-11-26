@@ -109,8 +109,8 @@ const F18_RMK_OPT: Rule = Rule::F18 {
     required: false,
 };
 
-/// Every message of the core set, Table 2 order.
-pub const SPECS: [Spec; 25] = [
+/// Every message of the NAM set and the ICAO DLA field message.
+pub const SPECS: [Spec; 26] = [
     Spec {
         kind: Kind::Fpl,
         mnemonic: "FPL",
@@ -129,6 +129,13 @@ pub const SPECS: [Spec; 25] = [
             },
             F18_ANY,
         ],
+    },
+    Spec {
+        kind: Kind::Dla,
+        mnemonic: "DLA",
+        section: "ICAO Doc 4444 Appendix 3 2.3.4",
+        reference: Req::Opt,
+        fields: &[F07_NO_SSR, F13_TIME, F16_A, F18_ANY],
     },
     Spec {
         kind: Kind::Chg,

@@ -21,7 +21,7 @@ place where this crate decided something the ICD did not. Validation runs under 
 
 | Layer | Module | Content |
 |---|---|---|
-| Messages | `model`, `field`, `schema`, `message` | All 25 messages of the Rev G core set (Part II Table 2): FPL CHG EST CNL CPL MOD ABI MIS IRQ IRS TRQ TRS ASM RTI RTU RLA RTA POI PLA POA POJ TOC AOC LAM LRM. Fields 03, 07, 08, 09, 10, 13, 14, 15, 16, 18, 22, 31, 32 and their elements, validated one by one. |
+| Messages | `model`, `field`, `schema`, `message` | All 25 messages of the Rev G core set (Part II Table 2): FPL CHG EST CNL CPL MOD ABI MIS IRQ IRS TRQ TRS ASM RTI RTU RLA RTA POI PLA POA POJ TOC AOC LAM LRM, plus ICAO Appendix 3 DLA. Fields 03, 07, 08, 09, 10, 13, 14, 15, 16, 18, 22, 31, 32 and their elements, validated one by one. |
 | Codec | `message::{parse, parse_tolerant, encode}` | One table of message definitions drives both directions. `encode` refuses an invalid value, and re-parses its own output and compares it with the input. |
 | Transport | `frame` | The four-hex-digit length header, 17 to 1800 byte messages. |
 | Session | `session` | INACTIVE / ACTIVATING / ACTIVE / DEACTIVATING as the pure function `step(config, session, event, now) -> (session, actions)`; message numbers 000 to 999; unanswered-message table; ASM keep-alive; IRQ retry; TRQ/TRS. |

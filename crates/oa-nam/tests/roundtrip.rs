@@ -120,5 +120,5 @@ fn every_kind_has_a_spec_and_a_mnemonic_that_parses_back() {
             Some(k)
         );
     }
-    assert_eq!(ALL_KINDS.len(), 25);
+    assert_eq!(ALL_KINDS.len(), 26);
 }

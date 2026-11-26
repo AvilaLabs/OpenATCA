@@ -5037,6 +5037,15 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   message traffic, retries, a full pending table and deactivation (the `nam_session` route of
   `validation/oa-alloc-check`).
 
+- **OA-NAM-036** Item 15 preserves and validates the ICAO speed/level header, DCT and ATS
+  designators, significant-point forms, speed/level changes, IFR/VFR transitions, and cruise
+  climbs in FPL and CHG. Missing or malformed groups return a Field 15 refusal. Parsing preserves
+  filed point spellings and does not guess coordinates or resolve duplicate names; route
+  expansion and semantic refusal remain the responsibility of a caller using the current
+  NASR/CIFP model.
+- **OA-NAM-037** The field codec parses and round-trips the ICAO Appendix 3 DLA message fields
+  3, 7, 13, 16 and 18. A DLA updates departure time and does not create, replace or amend Item 15.
+
 ## Release replay comparison (oa-track canonical output, oa-replay-diff)
 - **OA-TRK-360** A tracker output row has one canonical byte form of 85 bytes: track address, time,
   position, velocity, turn rate, altitude terms, position and velocity covariance terms, model

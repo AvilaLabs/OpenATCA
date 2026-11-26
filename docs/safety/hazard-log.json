@@ -1075,7 +1075,9 @@
     "OA-CA-036",
     "OA-SAF-021",
     "OA-SAF-022",
-    "OA-SAF-023"
+    "OA-SAF-023",
+    "OA-NAM-037",
+    "OA-NAM-036"
   ],
   "non_safety_requirement_assessments": [
     {
@@ -11235,6 +11237,8 @@
         "OA-FIXM-025",
         "OA-FIXM-026",
         "OA-FIXM-027",
+        "OA-NAM-036",
+        "OA-NAM-037",
         "OA-STD-001",
         "OA-STD-002",
         "OA-STD-003",
@@ -11327,6 +11331,14 @@
         {
           "document": "REQUIREMENTS.md",
           "locator": "OA-FIXM-001 through OA-TFMS-030 in the owning functional sections"
+        },
+        {
+          "document": "REQUIREMENTS.md",
+          "locator": "OA-NAM-036"
+        },
+        {
+          "document": "REQUIREMENTS.md",
+          "locator": "OA-NAM-037"
         }
       ],
       "verification_refs": [
@@ -11464,6 +11476,16 @@
           "requirement_id": "OA-FIXM-027",
           "file": "crates/oa-fixm/tests/decode.rs",
           "test_name": "aircraft_address_is_six_hex_digits"
+        },
+        {
+          "requirement_id": "OA-NAM-036",
+          "file": "crates/oa-nam/tests/icao_item15.rs",
+          "test_name": "fpl_chg_and_cnl_item15_handling_is_confined_to_defined_messages"
+        },
+        {
+          "requirement_id": "OA-NAM-037",
+          "file": "crates/oa-nam/tests/icao_item15.rs",
+          "test_name": "dla_uses_public_appendix3_fields_and_carries_no_route_update"
         },
         {
           "requirement_id": "OA-STD-001",
@@ -22055,6 +22077,18 @@
       "function": "conflict_alert",
       "hazard_id": "HZ-CA-001",
       "rationale": "Engineering safety candidate: missing or misbound acknowledgement for a suppressed alert could leave the controller without an accurate warning state. Receipts are bounded and bind the canonical pair and exact alert start; lost receipt entries are counted and degrade the net, and acknowledgements do not close or transfer to another alert instance. Receipt source/time remain supplied claims. Register clause: Every actual pair, group or area suppression records a bounded receipt with the canonical aircraft pair, the alert instance start, source and time; that receipt is the acknowledgement of that instance. A full receipt log counts the lost entry while suppression still applies and degrades the net. Acknowledgement does not resolve or close the detected conflict, and cannot carry to a later alert instance."
+    },
+    {
+      "id": "OA-NAM-037",
+      "function": "flight_plan_and_coordination_message_ingestion",
+      "hazard_id": "HZ-FLIGHTDATA-001",
+      "rationale": "Engineering safety candidate: misparsed DLA fields could associate a revised departure time with the wrong flight or alter route state. The codec validates the public Appendix 3 fields and deliberately exposes no Item 15 route update from DLA. This clause claims message syntax and round-trip only."
+    },
+    {
+      "id": "OA-NAM-036",
+      "function": "flight_plan_and_coordination_message_ingestion",
+      "hazard_id": "HZ-FLIGHTDATA-001",
+      "rationale": "Engineering safety candidate: malformed or misparsed Field 15 groups in FPL/CHG can present flight-plan route information incorrectly or conceal an unsupported form. The parser preserves filed spellings and issues bounded syntax refusals, while explicitly leaving point resolution, duplicate-name resolution, route expansion and semantic refusal to the caller using current NASR/CIFP data. This clause does not claim that syntax acceptance validates a route or updates operational flight state."
     }
   ],
   "unresolved_requirement_assessments": []

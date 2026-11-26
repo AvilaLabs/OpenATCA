@@ -91,6 +91,8 @@ pub enum Level {
     MetricLevel(u16),
     /// `Mnnnn`, metric altitude (not permitted in the same places).
     MetricAltitude(u16),
+    /// Uncontrolled VFR route level, `VFR` (ICAO Doc 4444 Appendix 2, Item 15(b)).
+    Vfr,
 }
 
 /// Field 14(c): the cleared level, or the block altitude of Attachment 2 2.6.

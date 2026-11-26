@@ -2,10 +2,11 @@
 //! the validation [`Profile`]. Core (pure, B1): `Copy` data with no allocation, split out of
 //! the codec's message model so the session core names nothing in the shell (B7).
 
-/// The 25 messages of the NAM core set (Part II Table 2).
+/// The NAM coordination messages and the ICAO standard DLA field message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Kind {
     Fpl,
+    Dla,
     Chg,
     Est,
     Cnl,
@@ -34,9 +35,10 @@ pub enum Kind {
 // Budget: a one-byte discriminant; carried in every Header, Pending and Action.
 const _: () = assert!(core::mem::size_of::<Kind>() == 1);
 
-/// Every [`Kind`], in Table 2 order.
-pub const ALL_KINDS: [Kind; 25] = [
+/// Every [`Kind`] supported by the field codec.
+pub const ALL_KINDS: [Kind; 26] = [
     Kind::Fpl,
+    Kind::Dla,
     Kind::Chg,
     Kind::Est,
     Kind::Cnl,

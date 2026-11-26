@@ -390,6 +390,16 @@ fn post_checks(m: &Message, sp: &Spec, _profile: Profile) -> Result<(), NamError
             }
         }
     }
+    // ICAO Doc 4444 Appendix 2, Item 15(b): VFR is a cruising level only on an
+    // uncontrolled VFR flight. The field codec preserves it; the containing message supplies
+    // the flight-rule context needed for this consistency check.
+    if m.f15
+        .as_ref()
+        .is_some_and(|field| field.level == Level::Vfr)
+        && m.f08.as_ref().is_some_and(|rules| rules.rules != b'V')
+    {
+        return Err(NamError::new(K::Level, 15));
+    }
     // Items 10 and 18 together.
     if let (Some(f10), Some(f18)) = (&m.f10, &m.f18) {
         check_items_10_18(f10, f18)?;
