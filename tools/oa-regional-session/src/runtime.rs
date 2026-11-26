@@ -742,15 +742,17 @@ fn runway_aid_packets(
         }
         let atpa = if invalid {
             None
-        } else {
+        } else if let Some(surveillance) = surveillance {
             evaluate_assigned_atpa(
                 aid,
                 assignments,
-                surveillance?,
+                surveillance,
                 tracks,
                 scan_time_ns,
                 atpa_scratch,
             )
+        } else {
+            None
         };
         if atpa.is_none() {
             invalid = true;
