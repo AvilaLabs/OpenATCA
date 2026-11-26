@@ -122,7 +122,7 @@ fn synthetic_truth(pair: oa_runway::final_monitor::FinalPair) -> oa_truth::Truth
     .expect("synthetic truth")
 }
 
-// REQ: OA-RWY-015, OA-RWY-016, OA-RWY-017
+// Shared implementation exercised by both named sensor-cadence tests below.
 // HAZARD: HZ-CA-001, HZ-NET-STATE-001
 fn run_blunder_pipeline(sensor_period_ns: i64, monitor_update_ns: u64, minimum_reports: usize) {
     let config = FinalMonitorConfig {
@@ -434,6 +434,7 @@ fn synthetic_1_2s_reports_track_a_blunder_from_caution_to_warning() {
     );
 }
 
+// REQ: OA-RWY-015, OA-RWY-016, OA-RWY-017
 #[test]
 fn synthetic_4_8s_reports_track_a_blunder_without_false_degraded_status() {
     assert_eq!(DEGRADED_AFTER_NS, TERMINAL_SENSOR_PERIOD_NS as u64);
