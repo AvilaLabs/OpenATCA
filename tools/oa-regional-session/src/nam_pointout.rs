@@ -370,6 +370,7 @@ fn next_id(
 
 /// Send a caller-prepared POI through the active peer session. Flight identity is an explicit
 /// full-key/address binding; no callsign or beacon-code lookup is performed.
+#[allow(clippy::too_many_arguments)] // The shell composes explicit ingress, identity, and observation inputs.
 pub fn nam_pointout_send_offer(
     runtime: &mut NamPointOutRuntime,
     flights: &mut FlightDriver,
@@ -631,6 +632,7 @@ fn mode_a_ssr(code: u16) -> Ssr {
 /// Receive actual encoded POI/PLA/POA/POJ through NAM session admission and update only local
 /// point-out presentation state. POI gets PLA after syntactic/logic acceptance; Enhanced POA/POJ
 /// are correlated to one exact POI and reverse peer pair before being applied.
+#[allow(clippy::too_many_arguments)] // The shell composes explicit ingress, identity, and observation inputs.
 pub fn nam_pointout_receive(
     runtime: &mut NamPointOutRuntime,
     flights: &mut FlightDriver,
@@ -852,6 +854,7 @@ fn pointout_response_record<'a>(
     record.ok_or(PointOutError::ReferenceMismatch)
 }
 
+#[allow(clippy::too_many_arguments)] // Keeps the validated admission and explicit context dependencies visible.
 fn receive_poi(
     runtime: &mut NamPointOutRuntime,
     ingress: &mut NamSessionIngress,
@@ -969,6 +972,7 @@ fn receive_poi(
     })
 }
 
+#[allow(clippy::too_many_arguments)] // Keeps the validated admission and explicit context dependencies visible.
 fn receive_decision(
     runtime: &mut NamPointOutRuntime,
     ingress_state: &mut NamSessionIngress,
