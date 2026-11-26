@@ -115,6 +115,7 @@ jobs:
       - name: Requirements and assurance traceability
         run: |
           cargo +1.89.0 run --locked -p oa-trace
+          python3 -m unittest discover -s tools/oa-encounter/tests -p 'test_*.py'
           python3 tools/test_generate_oscal_control_map.py
           python3 tools/generate_oscal_control_map.py --check
           python3 tools/test_generate_safety_tables.py
