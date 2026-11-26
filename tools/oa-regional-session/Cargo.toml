@@ -63,6 +63,14 @@ oa-nam = { path = "../../crates/oa-nam" }
 oa-audit-log = { path = "../../crates/oa-audit-log" }
 # F1a: the regional shell constructs the core audit intent and checkpoint values.
 oa-audit-core = { path = "../../crates/oa-audit-core" }
+# F1: Connor approved this offline H5 drill caller link on 2026-11-26; it exercises the
+# published M2 candidate/rollback gates against replay-derived snapshots. Import site:
+# migration_drill.rs.
+oa-migration-switch = { path = "../../crates/oa-migration-switch" }
+# F1: Connor approved this H5 synthetic M1 authority-fixture link on 2026-11-26; the drill
+# reports fixture authority as unauthenticated and never claims external approvals. Import site:
+# migration_drill.rs.
+oa-migration = { path = "../../crates/oa-migration" }
 # F1: Connor approved this shell-only M4 projection edge on 2026-11-26. The regional shell is the
 # existing boundary that receives flight and alert outputs; import site: migration_shadow.rs.
 oa-migration-shadow = { path = "../../crates/oa-migration-shadow" }
@@ -85,6 +93,10 @@ path = "src/bin/regional-recording-import.rs"
 [[bin]]
 name = "regional-m4-h2-full-day"
 path = "src/bin/regional-m4-h2-full-day.rs"
+
+[[bin]]
+name = "regional-m3-recorded-drill"
+path = "src/bin/regional-m3-recorded-drill.rs"
 
 [[bin]]
 name = "oa-regional-console"

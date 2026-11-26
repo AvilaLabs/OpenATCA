@@ -530,6 +530,7 @@
     "OA-MIG-411",
     "OA-MIG-412",
     "OA-MIG-413",
+    "OA-MIG-414",
     "OA-MIG-415",
     "OA-MIG-416",
     "OA-MIG-601",
@@ -10179,6 +10180,7 @@
         "OA-MIG-303",
         "OA-MIG-304",
         "OA-MIG-305",
+        "OA-MIG-414",
         "OA-AUDIT-001",
         "OA-AUDIT-002",
         "OA-AUDIT-003",
@@ -10190,6 +10192,10 @@
         {
           "document": "REQUIREMENTS.md",
           "locator": "OA-MIG-101 through OA-MIG-305 in the owning functional sections"
+        },
+        {
+          "document": "REQUIREMENTS.md",
+          "locator": "OA-MIG-414"
         }
       ],
       "verification_refs": [
@@ -10332,6 +10338,31 @@
           "requirement_id": "OA-AUDIT-006",
           "file": "tools/oa-regional-session/src/runtime.rs",
           "test_name": "quarantine_maintainer_appends_before_ack_and_refuses_audit_failure"
+        },
+        {
+          "requirement_id": "OA-MIG-414",
+          "file": "tools/oa-regional-session/src/migration_drill.rs",
+          "test_name": "selected_snapshot_rows_apply_to_typed_worker_tables_with_the_same_digest"
+        },
+        {
+          "requirement_id": "OA-MIG-414",
+          "file": "tools/oa-regional-session/tests/migration_drill_consumer.rs",
+          "test_name": "worker_applies_exact_selected_state_rows_before_acknowledging_generation"
+        },
+        {
+          "requirement_id": "OA-MIG-414",
+          "file": "tools/oa-regional-session/tests/migration_drill_consumer.rs",
+          "test_name": "worker_does_not_ack_a_hash_valid_but_semantically_invalid_state_row"
+        },
+        {
+          "requirement_id": "OA-MIG-414",
+          "file": "tools/oa-regional-session/tests/migration_drill_consumer.rs",
+          "test_name": "worker_does_not_ack_a_partial_state_generation"
+        },
+        {
+          "requirement_id": "OA-MIG-414",
+          "file": "tools/oa-regional-session/tests/migration_drill_consumer.rs",
+          "test_name": "worker_does_not_apply_duplicate_family_business_keys"
         }
       ],
       "proof_refs": []
@@ -17243,6 +17274,12 @@
       "function": "migration_comparison_and_safety_evidence",
       "hazard_id": "HZ-EVIDENCE-001",
       "rationale": "Engineering safety candidate: comparing source facts against hidden or unexported candidate state can falsely imply support for unavailable fields. Restricting comparisons to immutable SharedFlightView fields and marking absent fields CandidateNotModeled limits that evidence risk; it does not make those unmodeled values available."
+    },
+    {
+      "id": "OA-MIG-414",
+      "function": "migration_selector_and_rollback",
+      "hazard_id": "HZ-CUTOVER-001",
+      "rationale": "Engineering safety candidate: acknowledging a selected generation before its complete typed state is validated and applied can leave the consumer using stale or partial migration state. The worker requires bounded family counts, unique business keys, ordered rows and the next generation; invalid, partial or duplicate transactions do not replace prior state or emit an applied ACK. This is a local development consumer, not an external operational endpoint, and does not upgrade M2 health, provenance, coverage or authority."
     },
     {
       "id": "OA-MIG-415",
