@@ -71,8 +71,10 @@ pub enum Intent {
     AcceptHandoff(u32),
     TakeHandoff(u32),
     CancelHandoff(u32),
+    /// Acknowledge one MSAW aural request by its alert episode start time.
+    AcknowledgeMsaw { alert_start_ns: i64 },
 }
-const _: () = assert!(core::mem::size_of::<Intent>() == 8);
+const _: () = assert!(core::mem::size_of::<Intent>() == 16);
 
 /// Named operator and evidence failures. Rejections are returned synchronously and retained in
 /// the status shown for the selected target (E5/E6).
@@ -128,7 +130,7 @@ pub struct QueuedIntent {
     pub source_time_micros: u64,
     pub intent: Intent,
 }
-const _: () = assert!(core::mem::size_of::<QueuedIntent>() == 64);
+const _: () = assert!(core::mem::size_of::<QueuedIntent>() == 72);
 
 /// Fixed controller interaction state. The queue is 32 rows (small enough that fixed-array SoA
 /// columns are clear and bounded); each column's exact per-row size is asserted at definition.
@@ -157,7 +159,7 @@ pub struct InteractionState {
     queue_len: u8,
 }
 // A7.1: 2,144 bytes includes the accepted-command clock anchor for monotonic timestamp evidence.
-const _: () = assert!(core::mem::size_of::<InteractionState>() == 2144);
+const _: () = assert!(core::mem::size_of::<InteractionState>() == 2400);
 const _: () =
     assert!(core::mem::size_of::<[FlightIdentity; COMMAND_CAPACITY]>() == 36 * COMMAND_CAPACITY);
 const _: () = assert!(core::mem::size_of::<[Intent; COMMAND_CAPACITY]>() == 8 * COMMAND_CAPACITY);

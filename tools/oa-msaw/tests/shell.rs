@@ -203,11 +203,25 @@ fn the_configuration_has_no_defaults_and_names_what_is_wrong() {
     assert_eq!(s.inhibits[0].reason, "NUISANCE ALERTS");
     assert_eq!(s.inhibits[0].author, "SUP 1");
     assert_eq!(s.inhibits[0].vertices.len(), 4);
+    let aural = parse_config(&with(
+        "msaw_aural_area = TOWER 13.2,144.6 13.2,145 13.6,145 13.6,144.6",
+    ))
+    .unwrap();
+    assert_eq!(aural.aural_areas.len(), 1);
+    assert_eq!(aural.aural_areas[0].id, "TOWER");
+    assert_eq!(aural.aural_areas[0].polygon.n, 4);
+    assert!(parse_config(&format!(
+        "{}\nmsaw_aural_area = TOWER 13.2,144.6 13.2,145 13.6,145\nmsaw_aural_area = TOWER 13.2,144.6 13.2,145 13.6,145",
+        DEV_CFG
+    ))
+    .unwrap_err()
+    .contains("repeated"));
     for bad in [
         "corridor = 40 -88 180 9260 556 1852 600",
         "corridor = 40 -88 x 9260 556 1852 600 2250",
         "corridor = 40 -88 400 9260 556 1852 600 2250",
         "inhibit = 5 4 0 1 A B 1,1 1,2 2,2",
+        "msaw_aural_area = BAD 1,1 1,2",
         "inhibit = 5 6 0 1 A B 1,1 1,2",
         "inhibit = 5 6 0 1 A",
     ] {

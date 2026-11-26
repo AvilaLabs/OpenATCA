@@ -348,6 +348,23 @@ pub fn surveillance_enable_msaw(
     Ok(())
 }
 
+pub fn surveillance_acknowledge_msaw_aural(
+    s: &mut Surveillance,
+    address: u32,
+    alert_start_ns: i64,
+    source_time_ns: i64,
+) -> Result<(), String> {
+    let Some(service) = s.msaw.as_mut() else {
+        return Err("MSAW aural acknowledgement refused because MSAW is not configured".into());
+    };
+    crate::msaw_bridge::regional_msaw_acknowledge_aural(
+        service,
+        address,
+        alert_start_ns,
+        source_time_ns,
+    )
+}
+
 pub fn source_index(source: SourceKind) -> usize {
     match source {
         SourceKind::Surveillance => 0,

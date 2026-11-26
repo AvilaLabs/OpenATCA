@@ -162,6 +162,7 @@ fn refuse_queued(
 fn apply(
     driver: &mut FlightDriver,
     interaction: &mut ui::InteractionState,
+    surveillance: &mut crate::surveillance::Surveillance,
     views: &[TargetView],
     observed: &[ObservedTrack],
     view_sequence: u32,
@@ -292,7 +293,23 @@ fn apply(
             false,
         );
     }
-    let operation = match request.intent {
+    let aural_ack = match request.intent {
+        Intent::AcknowledgeMsaw { alert_start_ns } if actor == view.owner_unit => {
+            Some(alert_start_ns)
+        }
+        Intent::AcknowledgeMsaw { .. } => {
+            return queued_refusal(
+                interaction,
+                "operator unit does not own the selected flight for MSAW acknowledgement",
+                false,
+            )
+        }
+        _ => None,
+    };
+    let operation = if aural_ack.is_some() {
+        None
+    } else {
+        Some(match request.intent {
         Intent::SetAssignedAltitude(altitude_ft) if actor == view.owner_unit => {
             FlightOperation::AssignAltitude { altitude_ft }
         }
@@ -342,6 +359,7 @@ fn apply(
                 false,
             )
         }
+        })
     };
     // Recheck both queue identity and command payload before applying authoritative state.
     if ui::next_intent(interaction).is_none_or(|head| {
@@ -356,18 +374,33 @@ fn apply(
     {
         return queued_refusal(interaction, format!("operator dispatch: {other:?}"), true);
     }
-    let mut authoritative = *event;
-    authoritative.kind = EventKind::Flight(operation);
-    let result = flight::flight_apply_event(driver, &authoritative)
-        .map_err(|e| terminal_failure(format!("operator flight operation after preflight: {e:?}")));
-    let accepted = result.as_ref().is_ok_and(|r| {
-        r.adapter_refusal.is_none()
-            && r.operation.is_some_and(|outcome| {
-                matches!(
-                    outcome,
-                    oa_flight::Outcome::Applied | oa_flight::Outcome::Unchanged
-                )
-            })
+    let result = if let Some(alert_start_ns) = aural_ack {
+        crate::surveillance::surveillance_acknowledge_msaw_aural(
+            surveillance,
+            key.aircraft_address,
+            alert_start_ns,
+            event.source_ns,
+        )
+        .map_err(refusal)
+        .map(|()| FlightApplyOutcome {
+            operation: None,
+            adapter_refusal: None,
+            ignored_non_flight_event: true,
+        })
+    } else if let Some(operation) = operation {
+        let mut authoritative = *event;
+        authoritative.kind = EventKind::Flight(operation);
+        flight::flight_apply_event(driver, &authoritative)
+            .map_err(|e| terminal_failure(format!("operator flight operation after preflight: {e:?}")))
+    } else {
+        Err(terminal_failure("operator operation was absent after preflight"))
+    };
+    let accepted = result.as_ref().is_ok_and(|outcome| {
+        aural_ack.is_some()
+            || (outcome.adapter_refusal.is_none()
+                && outcome.operation.is_some_and(|operation| {
+                    matches!(operation, oa_flight::Outcome::Applied | oa_flight::Outcome::Unchanged)
+                }))
     });
     finish_queued(
         interaction,
@@ -384,6 +417,7 @@ fn apply(
 pub fn dispatch(
     driver: &mut FlightDriver,
     interaction: &mut ui::InteractionState,
+    surveillance: &mut crate::surveillance::Surveillance,
     views: &[TargetView],
     observed: &[ObservedTrack],
     view_sequence: u32,
@@ -405,6 +439,7 @@ pub fn dispatch(
     match apply(
         driver,
         interaction,
+        surveillance,
         views,
         observed,
         view_sequence,

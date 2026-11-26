@@ -553,6 +553,7 @@ fn execute(
                 let dispatch = commands::dispatch(
                     &mut runtime.flights,
                     &mut runtime.interaction,
+                    &mut runtime.surveillance,
                     &runtime.views,
                     &runtime.observed,
                     u32::try_from(runtime.frame_sequence).map_err(|_| "view sequence exhausted")?,

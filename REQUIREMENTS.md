@@ -7507,6 +7507,7 @@ FAA value.
 - **OA-MSAW-081** A floor lookup is made at the point itself over its own radius, with no cell and no radius bucket.
 - **OA-MSAW-082** `--rows-of <8 hex digits of an address hash>` writes `rows_of.csv`: that aircraft's clip rows
   (barometric and geometric altitude, vertical rate and its kind), its measurements and the tracker's rows.
+- **OA-MSAW-083** Aural alarm requests are created only for an MSAW episode whose first-cycle position is inside exactly one explicitly configured `msaw_aural_area`. The request is keyed by the full aircraft address and alert start time, appears once while the episode persists, and retains clear and acknowledgement timestamps. Overlapping areas, fixed-ledger exhaustion, missing area configuration and an absent sound backend remain explicit; acknowledgement of one episode does not clear its visual alert or acknowledge a later episode for the same address.
 - **OA-MSAW-041** The 95 % radius of a covariance is the chi-square radius of its larger eigenvalue, and the
   ground codes of the core are the close-encounter record's.
 

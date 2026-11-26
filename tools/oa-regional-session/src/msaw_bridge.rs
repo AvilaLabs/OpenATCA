@@ -17,6 +17,58 @@ use std::path::{Path, PathBuf};
 
 const MAX_REGIONAL_MSAW_SAMPLES: usize = 64;
 const MAX_REGIONAL_MSAW_LOGS: usize = 4096;
+const MAX_AURAL_AREA_ID_BYTES: usize = 24;
+const MAX_PENDING_AURAL_EVENTS: usize = 256;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum AuralSinkStatus {
+    NotConfigured,
+    Unavailable,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum AuralEventKind {
+    Requested,
+    Cleared,
+    Acknowledged,
+    AmbiguousArea,
+    LedgerFull,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(C)]
+pub struct AuralEvent {
+    pub kind: AuralEventKind,
+    pub address: u32,
+    pub alert_start_ns: i64,
+    pub event_time_ns: i64,
+    pub area_id: [u8; MAX_AURAL_AREA_ID_BYTES],
+    pub area_id_len: u8,
+}
+const _: () = assert!(core::mem::size_of::<AuralEvent>() == 56);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(C)]
+pub struct AuralAlarmState {
+    pub address: u32,
+    pub alert_start_ns: i64,
+    pub raised_at_ns: i64,
+    pub cleared_at_ns: Option<i64>,
+    pub acknowledged_at_ns: Option<i64>,
+    pub area_id: [u8; MAX_AURAL_AREA_ID_BYTES],
+    pub area_id_len: u8,
+}
+const _: () = assert!(core::mem::size_of::<AuralAlarmState>() == 80);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AuralReport {
+    pub sink: AuralSinkStatus,
+    pub states: Vec<AuralAlarmState>,
+    pub events: Vec<AuralEvent>,
+    pub unlatched_alerts: u32,
+}
 
 /// Explicit, bounded startup manifest. Observation time is never substituted for a METAR
 /// file's actual receipt time. Relative paths resolve beside this manifest.
@@ -123,6 +175,13 @@ pub struct RegionalMsaw {
     cycles: usize,
     failed: bool,
     admitted_cutoff_ms: i64,
+    aural_latches: Vec<AuralAlarmState>,
+    aural_pending_events: Vec<AuralEvent>,
+    aural_events: Vec<AuralEvent>,
+    max_aural_latches: usize,
+    max_aural_events: usize,
+    aural_event_overflow: u32,
+    aural_pending_overflow: u32,
 }
 
 // A3/C6: bounded cold frame evidence; all rows are copied before the core logs are drained.
@@ -144,6 +203,7 @@ pub struct RegionalMsawFrame {
     pub planned_points: usize,
     pub completed_floor_samples: usize,
     pub evaluation_attempted: bool,
+    pub aural: AuralReport,
 }
 
 fn assemble(
@@ -174,6 +234,11 @@ fn assemble(
     let max_points = max_rows
         .checked_mul(settings.msaw.samples)
         .ok_or("MSAW point budget overflow")?;
+    let max_aural_events = max_rows
+        .checked_mul(2)
+        .and_then(|events| events.checked_add(MAX_PENDING_AURAL_EVENTS))
+        .ok_or("MSAW aural event budget overflow")?;
+    let max_aural_latches = settings.alert_log_capacity;
     let state = msaw_new(&settings.msaw).map_err(str::to_owned)?;
     let alerts = alert_log_new(settings.alert_log_capacity).map_err(str::to_owned)?;
     let skips = skip_log_new(settings.skip_log_capacity).map_err(str::to_owned)?;
@@ -194,6 +259,13 @@ fn assemble(
         cycles: 0,
         failed: false,
         admitted_cutoff_ms: 0,
+        aural_latches: Vec::with_capacity(max_aural_latches),
+        aural_pending_events: Vec::with_capacity(MAX_PENDING_AURAL_EVENTS),
+        aural_events: Vec::with_capacity(max_aural_events),
+        max_aural_latches,
+        max_aural_events,
+        aural_event_overflow: 0,
+        aural_pending_overflow: 0,
     })
 }
 
@@ -437,7 +509,233 @@ fn evaluate_cycle(
         planned_points,
         completed_floor_samples: service.samples.len(),
         evaluation_attempted: true,
+        aural: AuralReport {
+            sink: if service.settings.aural_areas.is_empty() {
+                AuralSinkStatus::NotConfigured
+            } else {
+                AuralSinkStatus::Unavailable
+            },
+            states: Vec::new(),
+            events: Vec::new(),
+            unlatched_alerts: 0,
+        },
     })
+}
+
+fn aural_area_id(id: &str) -> Result<([u8; MAX_AURAL_AREA_ID_BYTES], u8), String> {
+    if id.is_empty() || id.len() > MAX_AURAL_AREA_ID_BYTES || !id.is_ascii() {
+        return Err("MSAW aural area identifier violates its fixed representation".into());
+    }
+    let mut bytes = [0; MAX_AURAL_AREA_ID_BYTES];
+    let len = u8::try_from(id.len()).map_err(|_| "MSAW aural area identifier length overflow")?;
+    bytes[..id.len()].copy_from_slice(id.as_bytes());
+    Ok((bytes, len))
+}
+
+fn emit_aural_event(service: &mut RegionalMsaw, event: AuralEvent, pending: bool) {
+    let events = if pending {
+        &mut service.aural_pending_events
+    } else {
+        &mut service.aural_events
+    };
+    let limit = if pending {
+        MAX_PENDING_AURAL_EVENTS
+    } else {
+        service.max_aural_events
+    };
+    if events.len() < limit {
+        events.push(event);
+    } else if pending {
+        service.aural_pending_overflow = service.aural_pending_overflow.saturating_add(1);
+    } else {
+        service.aural_event_overflow = service.aural_event_overflow.saturating_add(1);
+    }
+}
+
+fn update_aural(
+    service: &mut RegionalMsaw,
+    time_ns: i64,
+    current_rows: &[MsawTrack],
+    open: &[Alert],
+) -> AuralReport {
+    service.aural_events.clear();
+    service.aural_event_overflow = 0;
+    let pending_overflow = service.aural_pending_overflow;
+    service.aural_pending_overflow = 0;
+    // A cycle can emit at most two events per admitted row (new request and old clear),
+    // plus the separately capped operator acknowledgements retained between cycles.
+    service
+        .aural_events
+        .append(&mut service.aural_pending_events);
+    let mut unlatched_alerts = 0u32;
+
+    for alert in open {
+        if service
+            .aural_latches
+            .iter()
+            .any(|state| state.address == alert.addr && state.alert_start_ns == alert.start_ns)
+        {
+            continue;
+        }
+        if !current_rows.iter().any(|track| track.addr == alert.addr) {
+            continue;
+        }
+        let mut matched = None;
+        let mut ambiguous = false;
+        for (index, area) in service.settings.aural_areas.iter().enumerate() {
+            if oa_safety::geom::polygon_contains(&area.polygon, alert.lat_e7, alert.lon_e7) {
+                if matched.is_some() {
+                    ambiguous = true;
+                    break;
+                }
+                matched = Some(index);
+            }
+        }
+        if ambiguous {
+            unlatched_alerts = unlatched_alerts.saturating_add(1);
+            emit_aural_event(
+                service,
+                AuralEvent {
+                    kind: AuralEventKind::AmbiguousArea,
+                    address: alert.addr,
+                    alert_start_ns: alert.start_ns,
+                    event_time_ns: time_ns,
+                    area_id: [0; MAX_AURAL_AREA_ID_BYTES],
+                    area_id_len: 0,
+                },
+                false,
+            );
+            continue;
+        }
+        let Some(index) = matched else { continue };
+        let Some(area) = service.settings.aural_areas.get(index) else {
+            unlatched_alerts = unlatched_alerts.saturating_add(1);
+            continue;
+        };
+        if service.aural_latches.len() >= service.max_aural_latches {
+            unlatched_alerts = unlatched_alerts.saturating_add(1);
+            emit_aural_event(
+                service,
+                AuralEvent {
+                    kind: AuralEventKind::LedgerFull,
+                    address: alert.addr,
+                    alert_start_ns: alert.start_ns,
+                    event_time_ns: time_ns,
+                    area_id: [0; MAX_AURAL_AREA_ID_BYTES],
+                    area_id_len: 0,
+                },
+                false,
+            );
+            continue;
+        }
+        let Ok((area_id, area_id_len)) = aural_area_id(&area.id) else {
+            unlatched_alerts = unlatched_alerts.saturating_add(1);
+            continue;
+        };
+        service.aural_latches.push(AuralAlarmState {
+            address: alert.addr,
+            alert_start_ns: alert.start_ns,
+            raised_at_ns: time_ns,
+            cleared_at_ns: None,
+            acknowledged_at_ns: None,
+            area_id,
+            area_id_len,
+        });
+        emit_aural_event(
+            service,
+            AuralEvent {
+                kind: AuralEventKind::Requested,
+                address: alert.addr,
+                alert_start_ns: alert.start_ns,
+                event_time_ns: time_ns,
+                area_id,
+                area_id_len,
+            },
+            false,
+        );
+    }
+
+    for index in 0..service.aural_latches.len() {
+        let event = if let Some(state) = service.aural_latches.get_mut(index) {
+            if state.cleared_at_ns.is_none()
+                && !open.iter().any(|alert| {
+                    alert.addr == state.address && alert.start_ns == state.alert_start_ns
+                })
+            {
+                state.cleared_at_ns = Some(time_ns);
+                Some(AuralEvent {
+                    kind: AuralEventKind::Cleared,
+                    address: state.address,
+                    alert_start_ns: state.alert_start_ns,
+                    event_time_ns: time_ns,
+                    area_id: state.area_id,
+                    area_id_len: state.area_id_len,
+                })
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if let Some(event) = event {
+            emit_aural_event(service, event, false);
+        }
+    }
+
+    let unlatched_alerts = unlatched_alerts
+        .saturating_add(pending_overflow)
+        .saturating_add(service.aural_event_overflow);
+    let report = AuralReport {
+        sink: if service.settings.aural_areas.is_empty() {
+            AuralSinkStatus::NotConfigured
+        } else {
+            AuralSinkStatus::Unavailable
+        },
+        states: service.aural_latches.clone(),
+        events: service.aural_events.clone(),
+        unlatched_alerts,
+    };
+    service
+        .aural_latches
+        .retain(|state| state.cleared_at_ns.is_none() || state.acknowledged_at_ns.is_none());
+    report
+}
+
+/// Acknowledge one existing alert-instance aural request. The instance start and exact aircraft
+/// address are both required; the caller must validate its current selected view as well.
+pub fn regional_msaw_acknowledge_aural(
+    service: &mut RegionalMsaw,
+    address: u32,
+    alert_start_ns: i64,
+    source_time_ns: i64,
+) -> Result<(), String> {
+    if address == 0 || alert_start_ns <= 0 || source_time_ns < service.last_ns.unwrap_or(0) {
+        return Err("MSAW aural acknowledgement has a stale or invalid instance/time".into());
+    }
+    let Some(index) = service
+        .aural_latches
+        .iter()
+        .position(|state| state.address == address && state.alert_start_ns == alert_start_ns)
+    else {
+        return Err("MSAW aural acknowledgement names no retained alert instance".into());
+    };
+    let Some(state) = service.aural_latches.get_mut(index) else {
+        return Err("MSAW aural acknowledgement state disappeared".into());
+    };
+    if state.acknowledged_at_ns.is_some() || source_time_ns < state.raised_at_ns {
+        return Err("MSAW aural acknowledgement is duplicate or predates its request".into());
+    }
+    state.acknowledged_at_ns = Some(source_time_ns);
+    let event = AuralEvent {
+        kind: AuralEventKind::Acknowledged,
+        address,
+        alert_start_ns,
+        event_time_ns: source_time_ns,
+        area_id: state.area_id,
+        area_id_len: state.area_id_len,
+    };
+    emit_aural_event(service, event, true);
+    Ok(())
 }
 
 /// An I/O/provider failure isolates this net. Observed CA, tracking and presentation keep
@@ -462,7 +760,10 @@ pub fn regional_msaw_cycle(
         evaluate_cycle(service, time_ns, pressure_rows, states, inhibits)
     };
     match result {
-        Ok(frame) => Ok(frame),
+        Ok(mut frame) => {
+            frame.aural = update_aural(service, time_ns, pressure_rows, &frame.open);
+            Ok(frame)
+        }
         Err(reason) => {
             service.failed = true;
             service.last_ns = Some(time_ns);
@@ -494,6 +795,16 @@ pub fn regional_msaw_cycle(
                 },
                 completed_floor_samples: service.samples.len(),
                 evaluation_attempted: attempted,
+                aural: AuralReport {
+                    sink: if service.settings.aural_areas.is_empty() {
+                        AuralSinkStatus::NotConfigured
+                    } else {
+                        AuralSinkStatus::Unavailable
+                    },
+                    states: service.aural_latches.clone(),
+                    events: service.aural_pending_events.clone(),
+                    unlatched_alerts: service.aural_event_overflow,
+                },
             })
         }
     }
