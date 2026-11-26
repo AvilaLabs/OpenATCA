@@ -765,41 +765,6 @@ fn display_target_rows(
     Ok(rows)
 }
 
-#[cfg(test)]
-mod display_target_capture_tests {
-    use super::display_target_rows;
-
-    // REQ: OA-MIG-414
-    #[test]
-    fn captured_target_is_the_existing_builder_target_not_a_reformatted_row() -> Result<(), String>
-    {
-        use oa_display::core::traffic::{self, Target, MAX_TRAIL};
-        let mut trail = [(0, 0); MAX_TRAIL];
-        *trail
-            .first_mut()
-            .ok_or("synthetic trail capacity missing")? = (1, 2);
-        let target = Target {
-            lat_e7: 385_000_000,
-            lon_e7: -935_000_000,
-            alt_ft: 1000,
-            addr: 0xabc123,
-            r95_m: 95.5,
-            trail,
-            callsign: *b"TEST123\0",
-            track_ddeg: 900,
-            gs_dkt: 1234,
-            reacq_age_s: 2,
-            flags: 3,
-            trail_len: 1,
-        };
-        let mut set = traffic::targets_new(1).map_err(|_| "target set refused")?;
-        traffic::targets_push(&mut set, &target).map_err(|_| "synthetic target refused")?;
-        let rows = display_target_rows(traffic::targets_columns(&set), 1)?;
-        assert_eq!(rows, [target]);
-        Ok(())
-    }
-}
-
 pub fn surveillance_finish(
     s: &mut Surveillance,
     ownership: Option<&OwnershipStatus>,
@@ -1200,6 +1165,41 @@ pub fn surveillance_finish(
         off_map,
         warnings,
     })
+}
+
+#[cfg(test)]
+mod display_target_capture_tests {
+    use super::display_target_rows;
+
+    // REQ: OA-MIG-414
+    #[test]
+    fn captured_target_is_the_existing_builder_target_not_a_reformatted_row() -> Result<(), String>
+    {
+        use oa_display::core::traffic::{self, Target, MAX_TRAIL};
+        let mut trail = [(0, 0); MAX_TRAIL];
+        *trail
+            .first_mut()
+            .ok_or("synthetic trail capacity missing")? = (1, 2);
+        let target = Target {
+            lat_e7: 385_000_000,
+            lon_e7: -935_000_000,
+            alt_ft: 1000,
+            addr: 0xabc123,
+            r95_m: 95.5,
+            trail,
+            callsign: *b"TEST123\0",
+            track_ddeg: 900,
+            gs_dkt: 1234,
+            reacq_age_s: 2,
+            flags: 3,
+            trail_len: 1,
+        };
+        let mut set = traffic::targets_new(1).map_err(|_| "target set refused")?;
+        traffic::targets_push(&mut set, &target).map_err(|_| "synthetic target refused")?;
+        let rows = display_target_rows(traffic::targets_columns(&set), 1)?;
+        assert_eq!(rows, [target]);
+        Ok(())
+    }
 }
 
 /// Pixels are borrowed only while the completed immutable frame is being published by the shell.
