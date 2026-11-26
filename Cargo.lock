@@ -112,6 +112,7 @@ version = "0.0.1"
 dependencies = [
  "oa-adapt",
  "oa-adsb",
+ "oa-airspace",
  "oa-bench",
  "oa-ca",
  "oa-encounter-run",
