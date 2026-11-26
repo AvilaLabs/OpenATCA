@@ -1,7 +1,9 @@
 """Synthetic coverage for each VDD section and the clean-source gate."""
 from __future__ import annotations
 
+import contextlib
 import hashlib
+import io
 from pathlib import Path
 import subprocess
 import sys
@@ -199,6 +201,38 @@ class VddFixture(unittest.TestCase):
         self.assertIn("Python: `", text)
         self.assertIn(hashlib.sha256(self.provenance.read_bytes()).hexdigest(), text)
         self.assertIn(hashlib.sha256((self.base / "sbom.spdx.json").read_bytes()).hexdigest(), text)
+
+    def test_malformed_duplicate_deep_and_nonfinite_provenance_refuse_before_output(self):
+        valid = self.provenance.read_text(encoding="utf-8").rstrip()
+        invalid_documents = {
+            "malformed": "{",
+            "duplicate-key": valid[:-1] + ',"unused":1,"unused":2}',
+            "deep": "[" * 2048 + "0" + "]" * 2048,
+            "nan": valid[:-1] + ',"unused":NaN}',
+            "infinity": valid[:-1] + ',"unused":Infinity}',
+            "overflow-float": valid[:-1] + ',"unused":1e999}',
+        }
+        for name, raw in invalid_documents.items():
+            with self.subTest(name=name):
+                self.provenance.write_text(raw, encoding="utf-8")
+                output = self.base / f"refused-{name}" / "vdd.md"
+                stderr = io.StringIO()
+                with contextlib.redirect_stderr(stderr):
+                    status = generate_vdd.main([
+                        "--repo", str(self.repo), "--out", str(output),
+                        "--mode", "release", "--tag", "v1.2.4",
+                        "--release-date", "2026-11-26", "--previous-tag", "v1.2.3",
+                        "--trace-file", str(self.trace), "--build-dir", str(self.build),
+                        "--provenance-file", str(self.provenance),
+                    ])
+                self.assertEqual(status, 2)
+                self.assertIn(
+                    "VDD refused: toolchain provenance has an unsupported schema",
+                    stderr.getvalue(),
+                )
+                self.assertNotIn("Traceback", stderr.getvalue())
+                self.assertFalse(output.exists())
+                self.assertFalse(output.parent.exists())
 
     def test_section_8_adaptation_compatibility(self):
         text = self.render()

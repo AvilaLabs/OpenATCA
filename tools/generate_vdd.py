@@ -6,6 +6,7 @@ import argparse
 from datetime import date as date_type, datetime, timezone
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -514,6 +515,26 @@ def _build_outputs(build_dir: Path | None) -> tuple[str, list[tuple[str, str, in
     return rendered.render(), results
 
 
+def _unique_json_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON object key")
+        result[key] = value
+    return result
+
+
+def _finite_json_float(value: str) -> float:
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError("non-finite JSON number")
+    return number
+
+
+def _reject_json_constant(_value: str):
+    raise ValueError("non-finite JSON constant")
+
+
 def _build_environment(provenance_path: Path | None) -> str:
     if provenance_path is None:
         return "Build host/provenance record was not supplied."
@@ -521,13 +542,25 @@ def _build_environment(provenance_path: Path | None) -> str:
     sbom_path = provenance_path.with_name("sbom.spdx.json")
     sbom = _read(sbom_path, MAX_SBOM_BYTES)
     try:
-        data = json.loads(raw)
+        data = json.loads(
+            raw,
+            object_pairs_hook=_unique_json_object,
+            parse_float=_finite_json_float,
+            parse_constant=_reject_json_constant,
+        )
         rust = data["toolchain"]["rustc_fields"]
         cargo = data["toolchain"]["cargo_fields"]
         host = data["host"]
         machine = host["kernel"]["machine"]
         pretty = host["os_release"]["pretty_name"]
-    except (json.JSONDecodeError, KeyError, TypeError) as exc:
+    except (
+        json.JSONDecodeError,
+        UnicodeDecodeError,
+        KeyError,
+        TypeError,
+        ValueError,
+        RecursionError,
+    ) as exc:
         raise VddError("toolchain provenance has an unsupported schema") from exc
     if (not isinstance(rust, dict) or not isinstance(cargo, dict)
             or not isinstance(machine, str) or not isinstance(pretty, str)):
