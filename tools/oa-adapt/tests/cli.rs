@@ -87,6 +87,9 @@ fn issue_cli_binds_catalog_companion_and_reads_it_back_from_v4() {
     let catalog_path = scratch.path("pver.csv");
     let catalog = include_bytes!("../../oa-certification/data/synthetic-pver-v1.csv");
     std::fs::write(&catalog_path, catalog).expect("synthetic catalog");
+    let registry_path = scratch.path("principals.tsv");
+    let registry = b"OACERT-LOCAL-PRINCIPALS-V1\n11\tconfigure\n";
+    std::fs::write(&registry_path, registry).expect("synthetic principal registry");
     let audit = scratch.path("adaptation.audit");
     let output = scratch.path("issued");
     let issue_args = args(&[
@@ -113,6 +116,10 @@ fn issue_cli_binds_catalog_companion_and_reads_it_back_from_v4() {
         "approver-b",
         "--reason",
         "issue synthetic PVER catalog",
+        "--audit-registry",
+        registry_path.to_str().unwrap(),
+        "--audit-registry-sha256",
+        &to_hex(&sha256(registry)),
         "--audit-log",
         audit.to_str().unwrap(),
         "--audit-count",
