@@ -807,7 +807,7 @@ fn runway_aid_packets(
 
 #[cfg(test)]
 mod runway_aid_packet_tests {
-    use super::{runway_aid_packets, AtpaScratch};
+    use super::{runway_aid_packets, AtpaScratch, RunwayAidFrame};
     use oa_display::core::runway_aids::Availability;
 
     // REQ: OA-RWY-022
