@@ -284,14 +284,23 @@ pub fn parse_recording(bytes: &[u8]) -> Result<Vec<RecordedBatch>, String> {
         return Err("recording exceeds 16 MiB".into());
     }
     let text = std::str::from_utf8(bytes).map_err(|_| "recording is not UTF-8")?;
-    if text.lines().next() != Some("OA-RS\t1") {
-        return Err("expected OA-RS header".into());
-    }
+    let version = match text.lines().next() {
+        Some("OA-RS\t1") => 1,
+        Some("OA-RS\t2") => 2,
+        _ => return Err("expected OA-RS v1 or v2 header".into()),
+    };
     let mut cursor = session_cursor_new();
     let mut pending: Vec<RecordedEvent> = Vec::with_capacity(crate::MAX_EVENTS_PER_RECEIPT);
     let mut batches = Vec::with_capacity(MAX_FRAMES);
     let mut ordinal = 0u64;
     for line in text.lines().skip(1).filter(|line| !line.is_empty()) {
+        if !(if version == 1 {
+            line.starts_with("v1\t")
+        } else {
+            line.starts_with("v2\t")
+        }) {
+            return Err("event row version does not match OA-RS header".into());
+        }
         if line.len() > MAX_EVENT_LINE_BYTES {
             return Err("recording event row exceeds input line limit".into());
         }

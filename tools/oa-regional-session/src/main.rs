@@ -377,11 +377,12 @@ fn parse_input(bytes: &[u8]) -> Result<Vec<FrameEvidence>, CliError> {
 fn parse_input_with_limit(bytes: &[u8], max_events: usize) -> Result<Vec<FrameEvidence>, CliError> {
     let text = std::str::from_utf8(bytes).map_err(|_| CliError::InvalidUtf8)?;
     let mut lines = text.split('\n');
-    match lines.next() {
-        Some("OA-RS\t1") => {}
+    let version = match lines.next() {
+        Some("OA-RS\t1") => 1,
+        Some("OA-RS\t2") => 2,
         Some(_) => return Err(CliError::BadHeader),
         None => return Err(CliError::MissingHeader),
-    }
+    };
     let mut cursor =
         session_cursor_new_with_limit(max_events).map_err(|_| CliError::TooManyEvents)?;
     let mut evidence = Vec::new();
@@ -392,6 +393,18 @@ fn parse_input_with_limit(bytes: &[u8], max_events: usize) -> Result<Vec<FrameEv
             continue;
         }
         let line = raw.strip_suffix('\r').unwrap_or(raw);
+        if !(if version == 1 {
+            line.starts_with("v1\t")
+        } else {
+            line.starts_with("v2\t")
+        }) {
+            let accounting = row_failure_accounting(&cursor, lines)?;
+            return Err(CliError::BadLine {
+                line: line_number,
+                error: InputError::BadVersion,
+                accounting,
+            });
+        }
         if line.len() > MAX_EVENT_LINE_BYTES {
             let accounting = row_failure_accounting(&cursor, lines)?;
             return Err(CliError::BadLine {
@@ -572,7 +585,7 @@ fn main() {
             CliError::Io(error) => format!("I/O error: {error}"),
             CliError::InputTooLarge => "input exceeds the 16 MiB limit".to_owned(),
             CliError::InvalidUtf8 => "input is not UTF-8".to_owned(),
-            CliError::BadHeader => "expected header OA-RS<TAB>1".to_owned(),
+            CliError::BadHeader => "expected header OA-RS<TAB>1 or OA-RS<TAB>2".to_owned(),
             CliError::MissingHeader => "input header is missing".to_owned(),
             CliError::BadLine { line, error, accounting } => format!(
                 "invalid protocol row at line {line}: {error:?}; normalized_event_rows admitted={} refused={} unexamined={} denominator={}",
@@ -663,6 +676,29 @@ mod tests {
             }
         );
         assert!(parse_input(input.as_bytes()).is_ok());
+    }
+
+    // REQ: OA-REG-024
+    #[test]
+    fn v2_file_header_requires_v2_rows_and_keeps_v1_rows_compatible() {
+        let v2 = "v2\t1000000000\t900000000\t1\tSURVEILLANCE\t00000000000000000000000000000385\tABC123\tZAU1\tPOS\t410000000\t-870000000\t35000\t180000\t0\t0\t0\t0\t2\t8\t9\t4\t2\t1\t2\t1\t1\t0\t1200\t4C494E4530313233";
+        assert!(parse_input(format!("OA-RS\t2\n{v2}\n").as_bytes()).is_ok());
+        assert_eq!(
+            bad_line_accounting(
+                parse_input(format!("OA-RS\t1\n{v2}\n").as_bytes()),
+                InputError::BadVersion,
+            ),
+            RowAccounting {
+                admitted: 0,
+                refused: 1,
+                unexamined: 0,
+                denominator: 1,
+            }
+        );
+        assert!(
+            parse_input(format!("OA-RS\t1\n{}\n", ROW.replace("{sequence}", "1")).as_bytes())
+                .is_ok()
+        );
     }
 
     #[test]

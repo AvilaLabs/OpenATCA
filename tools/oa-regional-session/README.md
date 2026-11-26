@@ -136,10 +136,20 @@ acknowledgement workflow yet.
 
 ## Protocol and identity
 
-The UTF-8 file starts with `OA-RS<TAB>1`. All fields are tab separated:
+The UTF-8 file starts with `OA-RS<TAB>1` or `OA-RS<TAB>2`. Version 1 remains accepted
+unchanged. Version 2 uses the same event grammar and adds fourteen per-position ADS-B source-row
+fields to `POS`: source type, emitter category, ADS-B version, NIC, NACp, NACv, SIL, SIL type,
+SDA, GVA, NICbaro, row flags, squawk, and callsign. Numeric quality fields use `-` for an
+unavailable decoder value. Squawk
+is retained as the original four decimal digits (each 0–7) or `-`; this layer does not convert
+it to a Mode A octal value. Callsign is the exact eight decoder bytes in hex; all-zero bytes do
+not distinguish absent from explicitly blank. These values are copied from the exact decoder
+row that yielded the accepted position, not rejoined by address/time. They do not identify a
+physical receiver/site and are not a reliability, ISR, or separation-eligibility assessment.
+Unrecognized source types and absent values remain unknown. All fields are tab separated:
 
 ```text
-v1  receipt_ns  source_ns  sequence  source  GUFI_HEX  ADDRESS_HEX  CENTRE  KIND  payload...
+vN  receipt_ns  source_ns  sequence  source  GUFI_HEX  ADDRESS_HEX  CENTRE  KIND  payload...
 ```
 
 GUFI is the full 128-bit value; zero explicitly means unknown for raw positions and feed status.
@@ -152,7 +162,8 @@ numbers increase per category. Older source stamps remain visible and cannot sil
 newer source state. Flight/trajectory timestamps require exact whole milliseconds.
 
 `POS` carries lat/lon in 1e-7 degrees, optional altitude feet (`-` absent), east/north velocity
-mm/s, and optional vertical rate ft/min. `FLIGHT` carries authoritative upstream plan, address,
+mm/s, and optional vertical rate ft/min. In v2, its fourteen final columns are the raw evidence
+fields listed above, in that order. `FLIGHT` carries authoritative upstream plan, address,
 identity, clearance and ownership updates. Its bootstrap `OWNER` operation is trusted normalized
 source state, not controller authority. `FEED` carries `UP`/`DOWN` and a reason code.
 

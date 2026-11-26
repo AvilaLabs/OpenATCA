@@ -1,7 +1,7 @@
 //! Offline regional surveillance composition (**shell**, B1/B3/C6). Real tracker output at
 //! the issue tick feeds both conflict alert and scope; intended routes never suppress CA.
 
-use crate::input::{EventKind, NormalizedEvent, SourceKind};
+use crate::input::{AdsbSourceEvidence, EventKind, NormalizedEvent, SourceKind};
 use oa_airspace::core::model::Model;
 use oa_ca::{
     alert_log_clear, alert_log_new, ca_cycle, ca_new, ca_open, event_log_clear, event_log_new,
@@ -138,7 +138,15 @@ pub struct Surveillance {
     presentation_updates: usize,
     msaw: Option<crate::msaw_bridge::RegionalMsaw>,
     baro_seen: BTreeMap<u32, i64>,
+    adsb_source_seen: BTreeMap<u32, AdsbSourceObservation>,
     profile: SurveillanceProfile,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AdsbSourceObservation {
+    source_ns: i64,
+    event_sequence: u64,
+    evidence: AdsbSourceEvidence,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -148,6 +156,8 @@ pub enum SurveillanceStageError {
     WrongReceiptOrTimestamp,
     WrongSourceKind,
     InvalidPosition,
+    InvalidSourceEvidence,
+    SourceEvidenceCapacity,
     BarometricEvidenceCapacity,
 }
 
@@ -161,6 +171,8 @@ impl SurveillanceStageError {
             Self::WrongReceiptOrTimestamp => "event does not belong to the current receipt cutoff",
             Self::WrongSourceKind => "event kind/source category mismatch",
             Self::InvalidPosition => "position fields are outside the supported input bounds",
+            Self::InvalidSourceEvidence => "ADS-B source evidence is outside field bounds",
+            Self::SourceEvidenceCapacity => "ADS-B source evidence capacity exhausted",
             Self::BarometricEvidenceCapacity => "barometric evidence capacity exhausted",
         }
     }
@@ -218,6 +230,12 @@ pub struct SurveillanceFrame {
 pub struct ModeDecisionRecord {
     pub address: u32,
     pub evidence_ns: i64,
+    /// Source time of the raw ADS-B row that supplied `adsb_evidence`; zero means absent.
+    pub adsb_source_ns: i64,
+    /// Normalized event sequence that binds this observation to its EventProvenance row.
+    pub adsb_event_sequence: u64,
+    pub adsb_evidence_present: u8,
+    pub adsb_evidence: AdsbSourceEvidence,
     pub flight_level_hundreds: i16,
     pub source: TargetSource,
     pub reliability: ReliabilityEvidence,
@@ -231,7 +249,7 @@ pub struct ModeDecisionRecord {
     pub reserved: [u8; 2],
     pub result: ModeResult,
 }
-const _: () = assert!(core::mem::size_of::<ModeDecisionRecord>() == 40);
+const _: () = assert!(core::mem::size_of::<ModeDecisionRecord>() == 88);
 
 fn err(e: impl std::fmt::Debug) -> String {
     format!("{e:?}")
@@ -354,6 +372,7 @@ pub fn surveillance_new_with_profile(
         track_down: false,
         msaw: None,
         baro_seen: BTreeMap::new(),
+        adsb_source_seen: BTreeMap::new(),
         track_measurement_seen_ns: None,
         measurement_rejections: 0,
         profile,
@@ -442,7 +461,9 @@ pub fn surveillance_stage_event(
         return Err(SurveillanceStageError::WrongReceiptOrTimestamp);
     }
     let source_matches = match event.kind {
-        EventKind::Position { .. } => event.source == SourceKind::Surveillance,
+        EventKind::Position { .. } | EventKind::PositionV2 { .. } => {
+            event.source == SourceKind::Surveillance
+        }
         EventKind::Flight(_) | EventKind::Operator(_) => event.source == SourceKind::Flight,
         EventKind::Route { .. } | EventKind::FiledRoute { .. } | EventKind::ActiveCursor { .. } => {
             event.source == SourceKind::Route
@@ -452,7 +473,25 @@ pub fn surveillance_stage_event(
     if !source_matches {
         return Err(SurveillanceStageError::WrongSourceKind);
     }
+    if let EventKind::PositionV2 { evidence, .. } = event.kind {
+        if !valid_adsb_source_evidence(evidence) {
+            return Err(SurveillanceStageError::InvalidSourceEvidence);
+        }
+        if !s
+            .adsb_source_seen
+            .contains_key(&event.identity.aircraft_address)
+            && s.adsb_source_seen.len() >= s.profile.max_tracks
+        {
+            return Err(SurveillanceStageError::SourceEvidenceCapacity);
+        }
+    }
     if let EventKind::Position {
+        latitude_e7,
+        longitude_e7,
+        altitude_ft,
+        ..
+    }
+    | EventKind::PositionV2 {
         latitude_e7,
         longitude_e7,
         altitude_ft,
@@ -477,8 +516,65 @@ pub fn surveillance_stage_event(
     Ok(())
 }
 
+fn valid_adsb_source_evidence(evidence: AdsbSourceEvidence) -> bool {
+    let in_range = |value: u8, max: u8| value == u8::MAX || value <= max;
+    in_range(evidence.source_type, 13)
+        && in_range(evidence.version, 7)
+        && in_range(evidence.nic, 11)
+        && in_range(evidence.nac_p, 15)
+        && in_range(evidence.nac_v, 7)
+        && in_range(evidence.sil, 3)
+        && in_range(evidence.sil_type, 2)
+        && in_range(evidence.sda, 3)
+        && in_range(evidence.gva, 3)
+        && in_range(evidence.nic_baro, 1)
+        && (evidence.row_flags == u8::MAX || evidence.row_flags <= 31)
+        && valid_squawk_decimal(evidence.squawk)
+        && evidence
+            .callsign
+            .iter()
+            .all(|byte| *byte == 0 || (0x20..=0x7e).contains(byte))
+}
+
+fn valid_squawk_decimal(squawk: u16) -> bool {
+    if squawk == u16::MAX {
+        return true;
+    }
+    let mut value = squawk;
+    for _ in 0..4 {
+        if value % 10 > 7 {
+            return false;
+        }
+        value /= 10;
+    }
+    value == 0
+}
+
+const fn missing_adsb_source_evidence() -> AdsbSourceEvidence {
+    AdsbSourceEvidence {
+        source_type: u8::MAX,
+        category: 0,
+        version: u8::MAX,
+        nic: u8::MAX,
+        nac_p: u8::MAX,
+        nac_v: u8::MAX,
+        sil: u8::MAX,
+        sil_type: u8::MAX,
+        sda: u8::MAX,
+        gva: u8::MAX,
+        nic_baro: u8::MAX,
+        row_flags: u8::MAX,
+        squawk: u16::MAX,
+        callsign: [0; 8],
+    }
+}
+
 pub fn surveillance_event(s: &mut Surveillance, event: &NormalizedEvent) -> Result<(), String> {
     surveillance_stage_event(s, event).map_err(|error| error.message().to_owned())?;
+    let source_evidence = match event.kind {
+        EventKind::PositionV2 { evidence, .. } => Some(evidence),
+        _ => None,
+    };
     let index = source_index(event.source);
     let seen = s.seen.get_mut(index).ok_or("source index")?;
     let down = s.down.get_mut(index).ok_or("source index")?;
@@ -497,6 +593,15 @@ pub fn surveillance_event(s: &mut Surveillance, event: &NormalizedEvent) -> Resu
             east_mmps,
             north_mmps,
             vertical_rate_fpm,
+        }
+        | EventKind::PositionV2 {
+            latitude_e7,
+            longitude_e7,
+            altitude_ft,
+            east_mmps,
+            north_mmps,
+            vertical_rate_fpm,
+            ..
         } => {
             *seen = Some(event.receipt_ns);
             *down = false;
@@ -530,6 +635,7 @@ pub fn surveillance_event(s: &mut Surveillance, event: &NormalizedEvent) -> Resu
             // conservatively: only this accepted altitude can seed new freshness evidence.
             if after.time_steps_back > before.time_steps_back {
                 s.baro_seen.clear();
+                s.adsb_source_seen.clear();
             } else if after.started > before.started
                 || after.init_implausible > before.init_implausible
                 || after.init_window_expired > before.init_window_expired
@@ -537,6 +643,7 @@ pub fn surveillance_event(s: &mut Surveillance, event: &NormalizedEvent) -> Resu
                 || after.refiltered > before.refiltered
             {
                 s.baro_seen.remove(&event.identity.aircraft_address);
+                s.adsb_source_seen.remove(&event.identity.aircraft_address);
             }
             if measurement_rejected(before, after) {
                 s.measurement_rejections = s.measurement_rejections.saturating_add(1);
@@ -556,6 +663,28 @@ pub fn surveillance_event(s: &mut Surveillance, event: &NormalizedEvent) -> Resu
                     let known = s.baro_seen.entry(address).or_insert(event.source_ns);
                     if event.source_ns > *known {
                         *known = event.source_ns;
+                    }
+                }
+                let address = event.identity.aircraft_address;
+                match source_evidence {
+                    Some(evidence) => {
+                        let prior_source_ns = s
+                            .adsb_source_seen
+                            .get(&address)
+                            .map(|prior| prior.source_ns);
+                        if prior_source_ns.is_none_or(|prior| event.source_ns >= prior) {
+                            s.adsb_source_seen.insert(
+                                address,
+                                AdsbSourceObservation {
+                                    source_ns: event.source_ns,
+                                    event_sequence: event.sequence,
+                                    evidence,
+                                },
+                            );
+                        }
+                    }
+                    None => {
+                        s.adsb_source_seen.remove(&address);
                     }
                 }
             }
@@ -689,6 +818,30 @@ fn offline_projection_digest(
         hash.update(&decision.address.to_le_bytes()).map_err(err)?;
         hash.update(&decision.evidence_ns.to_le_bytes())
             .map_err(err)?;
+        hash.update(&decision.adsb_source_ns.to_le_bytes())
+            .map_err(err)?;
+        hash.update(&decision.adsb_event_sequence.to_le_bytes())
+            .map_err(err)?;
+        hash.update(&[decision.adsb_evidence_present])
+            .map_err(err)?;
+        hash.update(&[
+            decision.adsb_evidence.source_type,
+            decision.adsb_evidence.category,
+            decision.adsb_evidence.version,
+            decision.adsb_evidence.nic,
+            decision.adsb_evidence.nac_p,
+            decision.adsb_evidence.nac_v,
+            decision.adsb_evidence.sil,
+            decision.adsb_evidence.sil_type,
+            decision.adsb_evidence.sda,
+            decision.adsb_evidence.gva,
+            decision.adsb_evidence.nic_baro,
+            decision.adsb_evidence.row_flags,
+        ])
+        .map_err(err)?;
+        hash.update(&decision.adsb_evidence.squawk.to_le_bytes())
+            .map_err(err)?;
+        hash.update(&decision.adsb_evidence.callsign).map_err(err)?;
         hash.update(&decision.flight_level_hundreds.to_le_bytes())
             .map_err(err)?;
         hash.update(&[
@@ -775,6 +928,8 @@ pub fn surveillance_finish_with_mode(
     if newest.len() > s.profile.max_tracks {
         return Err("tracker live identity budget exceeded".into());
     }
+    s.adsb_source_seen
+        .retain(|address, _| newest.contains_key(address));
     if mode_evidence
         .iter()
         .any(|evidence| !last.contains_key(&evidence.address))
@@ -820,6 +975,18 @@ pub fn surveillance_finish_with_mode(
         } else {
             NONE_I32
         };
+        let adsb_observation = s
+            .adsb_source_seen
+            .get(&address)
+            .copied()
+            .filter(|item| item.source_ns == source_ns);
+        let actual_source = adsb_observation.map_or(TargetSource::Unknown, |item| {
+            if matches!(item.evidence.source_type, 0 | 1 | 8) {
+                TargetSource::AdsB
+            } else {
+                TargetSource::Unknown
+            }
+        });
         tracks.push(ObservedTrack {
             state_ns: time_ns,
             newest_source_ns: source_ns,
@@ -839,9 +1006,13 @@ pub fn surveillance_finish_with_mode(
                 .and_then(|index| mode_evidence.get(index));
             let evidence_row = evidence.copied().unwrap_or(TargetModeEvidence {
                 address,
-                state_ns: 0,
+                state_ns: if adsb_observation.is_some() {
+                    time_ns
+                } else {
+                    0
+                },
                 flight_level_hundreds: i16::MIN,
-                source: TargetSource::Unknown,
+                source: actual_source,
                 reliability: ReliabilityEvidence::Unknown,
                 isr: IsrEvidence::Unknown,
                 controller_initiated_coast: 0,
@@ -861,6 +1032,9 @@ pub fn surveillance_finish_with_mode(
                 // trajectory forecast; it does not aid the tracker. Never synthesize FLAT here.
                 flight_plan_aided: 0,
             };
+            if adsb_observation.is_some() {
+                target_mode.source = actual_source;
+            }
             let decision = surveillance_mode_result(adaptation, target_mode);
             let (refusal, result) = match decision {
                 Ok(result) => (0, result),
@@ -880,13 +1054,18 @@ pub fn surveillance_finish_with_mode(
             mode_decisions.push(ModeDecisionRecord {
                 address,
                 evidence_ns: evidence_row.state_ns,
+                adsb_source_ns: adsb_observation.map_or(0, |item| item.source_ns),
+                adsb_event_sequence: adsb_observation.map_or(0, |item| item.event_sequence),
+                adsb_evidence_present: u8::from(adsb_observation.is_some()),
+                adsb_evidence: adsb_observation
+                    .map_or_else(missing_adsb_source_evidence, |item| item.evidence),
                 flight_level_hundreds: evidence_row.flight_level_hundreds,
-                source: evidence_row.source,
+                source: target_mode.source,
                 reliability: evidence_row.reliability,
                 isr: evidence_row.isr,
                 controller_initiated_coast: evidence_row.controller_initiated_coast,
                 flight_plan_aided: result.flat_aided,
-                evidence_present: u8::from(evidence.is_some()),
+                evidence_present: u8::from(evidence.is_some() || adsb_observation.is_some()),
                 coasting: target_mode.coasting,
                 refusal,
                 reserved: [0; 2],

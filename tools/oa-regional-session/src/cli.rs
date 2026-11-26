@@ -297,13 +297,22 @@ pub fn run_session_with_profile_options_and_runway_aids(
         regional_install_verified_runway_aids(&mut runtime, &package)?;
     }
     let text = std::str::from_utf8(bytes).map_err(|_| "input not UTF-8")?;
-    if text.lines().next() != Some("OA-RS\t1") {
-        return Err("expected OA-RS header".into());
-    }
+    let version = match text.lines().next() {
+        Some("OA-RS\t1") => 1,
+        Some("OA-RS\t2") => 2,
+        _ => return Err("expected OA-RS v1 or v2 header".into()),
+    };
     let mut cursor = session_cursor_new_with_limit(profile.max_total_events)
         .map_err(|error| format!("session profile event capacity: {error:?}"))?;
     let mut batches = Vec::with_capacity(MAX_FRAMES);
     for row in text.lines().skip(1).filter(|line| !line.is_empty()) {
+        if !(if version == 1 {
+            row.starts_with("v1\t")
+        } else {
+            row.starts_with("v2\t")
+        }) {
+            return Err("event row version does not match OA-RS header".into());
+        }
         let event = parse_event_line(row).map_err(|e| format!("input: {e:?}"))?;
         if let Some(batch) =
             push_event(&mut cursor, event).map_err(|e| format!("input order: {e:?}"))?

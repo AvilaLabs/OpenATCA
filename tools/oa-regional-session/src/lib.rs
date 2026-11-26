@@ -30,8 +30,8 @@ pub mod session;
 pub mod surveillance;
 
 pub use input::{
-    parse_event_line, EventKind, FlightOperation, HandoffOperation, Identity, InputError,
-    NormalizedEvent, RouteFixInput, SourceKind, MAX_EVENT_LINE_BYTES,
+    parse_event_line, AdsbSourceEvidence, EventKind, FlightOperation, HandoffOperation, Identity,
+    InputError, NormalizedEvent, RouteFixInput, SourceKind, MAX_EVENT_LINE_BYTES,
 };
 pub use runtime::{
     regional_new_with_profile, regional_profile_limits, RegionalRunProfile,

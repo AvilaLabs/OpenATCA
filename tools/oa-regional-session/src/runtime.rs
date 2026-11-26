@@ -828,6 +828,7 @@ mod runway_aid_packet_tests {
 fn transaction_item(event: &crate::input::NormalizedEvent) -> bool {
     match event.kind {
         crate::input::EventKind::Position { .. }
+        | crate::input::EventKind::PositionV2 { .. }
         | crate::input::EventKind::Flight(_)
         | crate::input::EventKind::FiledRoute { .. }
         | crate::input::EventKind::ActiveCursor { .. } => true,
@@ -2432,6 +2433,76 @@ mod transaction_tests {
         assert_eq!(decision.result.three_nm_symbol, 1);
         assert_eq!(decision.result.flat_aided, 0);
         assert_eq!(decision.flight_plan_aided, 0);
+    }
+
+    // REQ: OA-REG-024
+    #[test]
+    fn v2_adsb_provenance_reaches_mode_result_but_does_not_claim_reliability() {
+        let mut engine = runtime();
+        let adaptation = ModeAdaptation {
+            mode: oa_track::surveillance_mode::SurveillanceMode::TerminalFusion,
+            radar_class: oa_track::surveillance_mode::RadarClass::AsrOrDtas,
+            preferred_radar_lat_e7: 0,
+            preferred_radar_lon_e7: 0,
+            has_preferred_radar: 0,
+            track_based_display: 0,
+            area_3nm_adapted: 0,
+            map_3nm_visible: 0,
+        };
+        let mut last = None;
+        for sequence in 1..=5 {
+            let receipt_ns = i64::from(sequence) * surveillance::SECOND_NS;
+            let source_ns = receipt_ns - 100_000_000;
+            let line = format!(
+                "v2\t{receipt_ns}\t{source_ns}\t{sequence}\tSURVEILLANCE\t00000000000000000000000000000001\tABC123\tZAU1\tPOS\t410000000\t-870000000\t35000\t0\t0\t0\t0\t0\t2\t8\t9\t4\t2\t1\t2\t1\t1\t0\t1200\t0000000000000000"
+            );
+            let event = parse_event_line(&line).expect("bounded v2 synthetic ADS-B row");
+            last = Some(
+                regional_step_with_surveillance_mode(
+                    &mut engine,
+                    &ReceiptBatch {
+                        receipt_ns,
+                        source_clock_regressions: 0,
+                        events: vec![event],
+                    },
+                    adaptation,
+                    &[],
+                )
+                .expect("mode-selected receipt"),
+            );
+        }
+        let decision = last
+            .expect("at least one receipt")
+            .surveillance
+            .mode_decisions
+            .into_iter()
+            .find(|row| row.address == 0x00ab_c123)
+            .expect("confirmed track gets a mode result");
+        assert_eq!(decision.evidence_present, 1);
+        assert_eq!(
+            decision.source,
+            oa_track::surveillance_mode::TargetSource::AdsB
+        );
+        assert_eq!(
+            decision.reliability,
+            oa_track::surveillance_mode::ReliabilityEvidence::Unknown
+        );
+        assert_eq!(
+            decision.isr,
+            oa_track::surveillance_mode::IsrEvidence::Unknown
+        );
+        assert_eq!(decision.adsb_source_ns, 4_900_000_000);
+        assert_eq!(decision.adsb_event_sequence, 5);
+        assert_eq!(decision.adsb_evidence_present, 1);
+        assert_eq!(decision.adsb_evidence.source_type, 0);
+        assert_eq!(decision.adsb_evidence.category, 0);
+        assert_eq!(decision.adsb_evidence.version, 2);
+        assert_eq!(decision.adsb_evidence.nic, 8);
+        assert_eq!(decision.adsb_evidence.nac_p, 9);
+        assert_eq!(decision.adsb_evidence.squawk, 1200);
+        assert_eq!(decision.adsb_evidence.callsign, [0; 8]);
+        assert_eq!(decision.result.minimum_nm, 5);
+        assert_eq!(decision.result.fusion_solid_circle, 0);
     }
 
     // REQ: OA-REG-018
