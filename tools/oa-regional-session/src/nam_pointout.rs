@@ -1071,6 +1071,7 @@ mod tests {
         let mut poa = poi(PEER, LOCAL, 9);
         poa.header.kind = Kind::Poa;
         poa.header.reference = Some(sent.view.point_out_id);
+        poa.f32 = None;
         let accepted = nam_pointout_receive(
             &mut runtime,
             &mut flights,
