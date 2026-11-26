@@ -217,6 +217,30 @@ fn emit(report: &RecordedDrillReport) {
         continuity.max_decision_to_first_output_ns.map_or_else(|| "UNAVAILABLE".into(), |v| v.to_string()),
         continuity.status,
     );
+    let stages = report.stage_progress;
+    println!(
+        "H5_STAGE_PROGRESS\tstatus=complete_pass_only\ttotal_elapsed_ns={}\treader_frames={}\treader_messages={}\treader_status_frames={}\treader_reject_frames={}\tnormalized_events={}\tregion_admitted_events={}\taccepted_positions={}\taccepted_flights={}\taccepted_handoffs={}\tpaired_runtime_frames={}\tlast_closed_cycle={}\treader_decode_ns={}\tnormalization_ns={}\tstream_callback_ns={}\tpaired_runtime_step_render_ns={}\tsnapshot_projection_ns={}\tselector_consumer_ns={}\tselector_validation_ns={}\tconsumer_apply_ns={}\ttiming_scope=offline_wall_clock_diagnostics_nested_stages_overlap_not_canonical_operational_latency",
+        stages.total_elapsed_ns,
+        stages.reader_frames,
+        stages.reader_messages,
+        stages.reader_status_frames,
+        stages.reader_reject_frames,
+        stages.normalized_events_seen,
+        stages.region_admitted_events,
+        stages.position_events,
+        stages.flight_events,
+        stages.handoff_events,
+        stages.paired_runtime_frames,
+        stages.last_closed_cycle_index.map_or_else(|| "none".into(), |value| value.to_string()),
+        stages.reader_decode_ns,
+        stages.normalization_ns,
+        stages.stream_callback_ns,
+        stages.paired_runtime_ns,
+        stages.projection_ns,
+        stages.selector_consumer_ns,
+        stages.selector_validation_ns,
+        stages.consumer_apply_ns,
+    );
     let profile = report.run_profile.surveillance;
     let ca_candidate_bytes = (profile.max_candidate_pairs as u128) * 16;
     let ca_open_alert_bytes = (profile.max_open_alerts as u128) * 96;

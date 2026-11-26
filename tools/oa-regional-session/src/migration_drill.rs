@@ -9,8 +9,9 @@ use crate::input::{EventKind, FlightOperation, SourceKind};
 use crate::recordings_cli::convert_recordings;
 use crate::recordings_reader::{RecordingInput, RecordingSource};
 use crate::recordings_stream::{
-    source_coverage, stream_normalized_events, AdapterLossCounts, NormalizedStreamSummary,
-    StreamCounts, StreamInput,
+    source_coverage, stream_normalized_events, stream_normalized_events_with_progress,
+    AdapterLossCounts, NormalizedStreamProgress, NormalizedStreamSummary, StreamCounts,
+    StreamInput,
 };
 use crate::runtime::{regional_new_with_profile, regional_step, RegionalFrame, RegionalRunProfile};
 use crate::session::{flush_receipt_group, push_event, session_cursor_new_with_limit};
@@ -302,6 +303,89 @@ pub struct RecordedDrillReport {
     pub flip_rollback_attempt_count: u64,
     pub flip_rollback_complete_count: u64,
     pub max_retained_snapshot_bytes_per_replica: usize,
+    pub stage_progress: H5StageProgress,
+}
+
+/// Aggregate-only engineering counters/timers. Timings are wall-clock CPU-path observations for
+/// this offline process, not operational latency measurements. Projection is nested within the
+/// paired-runtime timing; M2/consumer times are separately measured within that path.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct H5StageProgress {
+    pub reader_frames: u64,
+    pub reader_messages: u64,
+    pub reader_status_frames: u64,
+    pub reader_reject_frames: u64,
+    pub normalized_events_seen: u64,
+    pub region_admitted_events: u64,
+    pub position_events: u64,
+    pub flight_events: u64,
+    pub handoff_events: u64,
+    pub paired_runtime_frames: u64,
+    pub last_closed_cycle_index: Option<usize>,
+    pub total_elapsed_ns: u128,
+    pub reader_decode_ns: u128,
+    pub normalization_ns: u128,
+    pub stream_callback_ns: u128,
+    pub selector_consumer_ns: u128,
+    pub paired_runtime_ns: u128,
+    pub projection_ns: u128,
+    pub selector_validation_ns: u128,
+    pub consumer_apply_ns: u128,
+}
+
+fn h5_abort_diagnostics(
+    progress: &NormalizedStreamProgress,
+    stages: &H5StageProgress,
+    error: &str,
+) -> String {
+    let losses = &progress.adapter_counts;
+    format!(
+        "{error}; H5_STAGE_PROGRESS elapsed_ns={} frames={} messages={} status={} reject={} physical_bytes={} expanded_bytes={} frame_work={} source_normalized_events={} runtime_callback_events={} source_adsb_rows={} source_sfdps_rows={} accepted_positions={} accepted_flights={} accepted_handoffs={} paired_frames={} last_closed_cycle={} reader_decode_ns={} normalize_ns={} stream_callback_ns={} runtime_step_render_ns={} projection_ns={} selector_consumer_ns={} selector_ns={} consumer_apply_ns={} adsb_invalid_position={} adsb_after_receipt={} adsb_quality_removed={:?} adsb_dropped={} adsb_ground_excluded={} adsb_unknown_ground={} adsb_payload_refused={} sfdps_decoded={} sfdps_refused={} sfdps_no_operations={} sfdps_bad_centre={} sfdps_bad_identity={} sfdps_bad_address={} sfdps_bad_time={} sfdps_unsupported={} sfdps_after_receipt={} quarantine={} manual={} unprocessed={}",
+        stages.total_elapsed_ns,
+        progress.reader.frames,
+        progress.reader.messages,
+        progress.reader.status_frames,
+        progress.reader.reject_frames,
+        progress.reader.physical_bytes,
+        progress.reader.expanded_bytes,
+        progress.reader.frame_work_units,
+        progress.normalized_events,
+        stages.normalized_events_seen,
+        losses.adsb_rows_in,
+        losses.sfdps_rows_decoded,
+        stages.position_events,
+        stages.flight_events,
+        stages.handoff_events,
+        stages.paired_runtime_frames,
+        stages.last_closed_cycle_index.map_or_else(|| "none".into(), |value| value.to_string()),
+        progress.reader_decode_ns,
+        progress.adapter_ns,
+        stages.stream_callback_ns,
+        stages.paired_runtime_ns,
+        stages.projection_ns,
+        stages.selector_consumer_ns,
+        stages.selector_validation_ns,
+        stages.consumer_apply_ns,
+        losses.adsb_invalid_position_rows,
+        losses.adsb_source_after_receipt,
+        losses.adsb_quality_removed,
+        losses.adsb_rows_dropped,
+        losses.adsb_ground_excluded,
+        losses.adsb_unknown_ground_refused,
+        losses.adsb_payload_refused,
+        losses.sfdps_rows_decoded,
+        losses.sfdps_rows_refused,
+        losses.sfdps_rows_no_operations,
+        losses.sfdps_invalid_operation_centre,
+        losses.sfdps_invalid_operation_identity,
+        losses.sfdps_invalid_operation_address,
+        losses.sfdps_invalid_operation_time,
+        losses.sfdps_unsupported_operations,
+        losses.sfdps_source_after_receipt,
+        progress.quarantine_rows,
+        progress.manual_handling_required,
+        progress.unprocessed_frames,
+    )
 }
 
 /// Coverage accounting for the explicit `oa_adsb::ZAU_BOX` rectangle. This is not an ARTCC
@@ -4019,6 +4103,7 @@ pub fn run_recorded(
         flip_rollback_attempt_count: 0,
         flip_rollback_complete_count: 0,
         max_retained_snapshot_bytes_per_replica,
+        stage_progress: H5StageProgress::default(),
     })
 }
 
@@ -4077,6 +4162,16 @@ struct LivePairProcessor<'a> {
     generation: u64,
     peak_legacy_snapshot_bytes: usize,
     peak_candidate_snapshot_bytes: usize,
+    stage_progress: H5StageProgress,
+}
+
+struct AppliedSnapshotResult {
+    family_counts: [u64; 4],
+    digest: String,
+    rows: u64,
+    ack_ns: u128,
+    generation: u64,
+    elapsed_ns: u128,
 }
 
 fn apply_live_snapshot(
@@ -4084,7 +4179,8 @@ fn apply_live_snapshot(
     generation: &mut u64,
     snapshot: &ReplaySnapshot,
     selected_side: Output,
-) -> Result<([u64; 4], String, u64, u128, u64), String> {
+) -> Result<AppliedSnapshotResult, String> {
+    let apply_started = Instant::now();
     let next_generation = generation
         .checked_add(1)
         .ok_or("H5 state generation overflow")?;
@@ -4099,7 +4195,14 @@ fn apply_live_snapshot(
         selected_side,
     )?;
     *generation = next_generation;
-    Ok((applied.0, applied.1, applied.2, applied.3, next_generation))
+    Ok(AppliedSnapshotResult {
+        family_counts: applied.0,
+        digest: applied.1,
+        rows: applied.2,
+        ack_ns: applied.3,
+        generation: next_generation,
+        elapsed_ns: apply_started.elapsed().as_nanos(),
+    })
 }
 
 fn checked_frame_gap(previous_ns: Option<i64>, current_ns: i64) -> Result<Option<i64>, String> {
@@ -4117,6 +4220,13 @@ fn checked_frame_gap(previous_ns: Option<i64>, current_ns: i64) -> Result<Option
 
 fn exceeds_latency_limit(elapsed_ns: u128, limit_ns: i64) -> bool {
     elapsed_ns > limit_ns as u128
+}
+
+fn add_stage_ns(slot: &mut u128, amount: u128, label: &str) -> Result<(), String> {
+    *slot = slot
+        .checked_add(amount)
+        .ok_or_else(|| format!("{label} timing overflow"))?;
+    Ok(())
 }
 
 impl LivePairProcessor<'_> {
@@ -4173,24 +4283,43 @@ impl LivePairProcessor<'_> {
             let decision_started = Instant::now();
             let unit = legacy.unit;
             if self.local_authority_fixture {
-                match prepare_local_fixture_candidate(
+                let selector_started = Instant::now();
+                let fixture_result = prepare_local_fixture_candidate(
                     unit,
                     self.policy,
                     virtual_ns,
                     legacy.view(),
                     candidate.view(),
                     cycle_index,
-                ) {
+                );
+                add_stage_ns(
+                    &mut self.stage_progress.selector_validation_ns,
+                    selector_started.elapsed().as_nanos(),
+                    "selector validation",
+                )?;
+                match fixture_result {
                     Ok(fixture) => {
                         state.m2_validation_ns = Some(fixture.m2_validation_ns);
                         state.m1_validation_ns = Some(fixture.m1_fixture_ns);
                         state.flip_attempted = true;
                         let mut selector = fixture.selector;
-                        let (counts, digest, rows, ack_ns, generation) = apply_live_snapshot(
+                        let AppliedSnapshotResult {
+                            family_counts: counts,
+                            digest,
+                            rows,
+                            ack_ns,
+                            generation,
+                            elapsed_ns: apply_ns,
+                        } = apply_live_snapshot(
                             self.consumer,
                             &mut self.generation,
                             &candidate,
                             Output::Candidate,
+                        )?;
+                        add_stage_ns(
+                            &mut self.stage_progress.consumer_apply_ns,
+                            apply_ns,
+                            "consumer apply",
                         )?;
                         let candidate_ack_ns = virtual_ns
                             .checked_add(
@@ -4258,18 +4387,38 @@ impl LivePairProcessor<'_> {
                             event_id: oa_sha256::sha256(&event_material),
                             observed_ns: candidate_ack_ns,
                         };
-                        rollback(
+                        let rollback_started = Instant::now();
+                        let rollback_result = rollback(
                             &mut selector,
                             rollback_receipt,
                             candidate_ack_ns,
                             self.policy.max_snapshot_age_ns,
-                        )
-                        .map_err(|error| format!("local fixture rollback refused: {error:?}"))?;
-                        let (counts, digest, rows, ack_ns, generation) = apply_live_snapshot(
+                        );
+                        add_stage_ns(
+                            &mut self.stage_progress.selector_validation_ns,
+                            rollback_started.elapsed().as_nanos(),
+                            "selector rollback",
+                        )?;
+                        rollback_result.map_err(|error| {
+                            format!("local fixture rollback refused: {error:?}")
+                        })?;
+                        let AppliedSnapshotResult {
+                            family_counts: counts,
+                            digest,
+                            rows,
+                            ack_ns,
+                            generation,
+                            elapsed_ns: apply_ns,
+                        } = apply_live_snapshot(
                             self.consumer,
                             &mut self.generation,
                             &legacy,
                             Output::Legacy,
+                        )?;
+                        add_stage_ns(
+                            &mut self.stage_progress.consumer_apply_ns,
+                            apply_ns,
+                            "consumer apply",
                         )?;
                         let rollback_ack_ns = candidate_ack_ns
                             .checked_add(
@@ -4317,6 +4466,7 @@ impl LivePairProcessor<'_> {
                     }
                 }
             } else {
+                let selector_started = Instant::now();
                 let (refusal, elapsed, selected_side) = m2_attempt_for_runtime_snapshots(
                     unit,
                     self.policy,
@@ -4324,6 +4474,11 @@ impl LivePairProcessor<'_> {
                     legacy.view(),
                     candidate.view(),
                 );
+                add_stage_ns(
+                    &mut self.stage_progress.selector_validation_ns,
+                    selector_started.elapsed().as_nanos(),
+                    "selector validation",
+                )?;
                 state.m2_refusal = Some(refusal);
                 state.m2_validation_ns = Some(elapsed);
                 let m1_key = oa_migration::SwapUnitKey {
@@ -4344,8 +4499,19 @@ impl LivePairProcessor<'_> {
                     Output::Legacy => &legacy,
                     Output::Candidate => &candidate,
                 };
-                let (counts, digest, rows, ack_ns, generation) =
-                    apply_live_snapshot(self.consumer, &mut self.generation, snapshot, output)?;
+                let AppliedSnapshotResult {
+                    family_counts: counts,
+                    digest,
+                    rows,
+                    ack_ns,
+                    generation,
+                    elapsed_ns: apply_ns,
+                } = apply_live_snapshot(self.consumer, &mut self.generation, snapshot, output)?;
+                add_stage_ns(
+                    &mut self.stage_progress.consumer_apply_ns,
+                    apply_ns,
+                    "consumer apply",
+                )?;
                 self.record_rows(rows)?;
                 state.output_row_acks = state
                     .output_row_acks
@@ -4375,8 +4541,19 @@ impl LivePairProcessor<'_> {
                 Output::Legacy => &legacy,
                 Output::Candidate => &candidate,
             };
-            let (counts, digest, rows, ack_ns, generation) =
-                apply_live_snapshot(self.consumer, &mut self.generation, snapshot, output)?;
+            let AppliedSnapshotResult {
+                family_counts: counts,
+                digest,
+                rows,
+                ack_ns,
+                generation,
+                elapsed_ns: apply_ns,
+            } = apply_live_snapshot(self.consumer, &mut self.generation, snapshot, output)?;
+            add_stage_ns(
+                &mut self.stage_progress.consumer_apply_ns,
+                apply_ns,
+                "consumer apply",
+            )?;
             self.record_rows(rows)?;
             state.output_row_acks = state
                 .output_row_acks
@@ -4482,6 +4659,7 @@ impl LivePairProcessor<'_> {
 struct CapturedReplayFrame {
     cycle: usize,
     snapshot: ReplaySnapshot,
+    projection_ns: u128,
 }
 
 fn capture_replay_frame(
@@ -4489,6 +4667,7 @@ fn capture_replay_frame(
     frame: &RegionalFrame,
     spec: ReplaySpec<'_>,
 ) -> Result<CapturedReplayFrame, String> {
+    let projection_started = Instant::now();
     let unit = cycle_window(index, spec.start, spec.end)?;
     let snapshot = snapshot_from_runtime_frame(
         frame,
@@ -4501,6 +4680,7 @@ fn capture_replay_frame(
     Ok(CapturedReplayFrame {
         cycle: index,
         snapshot,
+        projection_ns: projection_started.elapsed().as_nanos(),
     })
 }
 
@@ -4594,6 +4774,7 @@ pub fn run_recorded_stream(
         generation: 0,
         peak_legacy_snapshot_bytes: 0,
         peak_candidate_snapshot_bytes: 0,
+        stage_progress: H5StageProgress::default(),
     };
     let mut counts = StreamPassCounts {
         normalized_events: 0,
@@ -4610,6 +4791,7 @@ pub fn run_recorded_stream(
         cycle_handoffs: [0; CYCLES],
     };
     let mut region_filter = ZauBoxFilter::default();
+    let mut last_input_cycle = None;
     let legacy_spec = ReplaySpec {
         model_bytes,
         model_sha,
@@ -4628,10 +4810,12 @@ pub fn run_recorded_stream(
         source_epoch: 2,
         ..legacy_spec
     };
-    let summary = stream_normalized_events(
+    let mut stream_progress = NormalizedStreamProgress::default();
+    let summary_result = stream_normalized_events_with_progress(
         inputs,
         Some((H5_CAPTURE_START_NS, H5_MEASUREMENT_END_NS)),
         centre,
+        &mut stream_progress,
         |event, _provenance| {
             if run_started.elapsed() > MAX_RUNTIME {
                 return Err("recorded H5 runtime cap exceeded".into());
@@ -4640,11 +4824,29 @@ pub fn run_recorded_stream(
                 .normalized_events
                 .checked_add(1)
                 .ok_or("normalized event count overflow")?;
+            processor.stage_progress.normalized_events_seen = counts.normalized_events;
             if counts.normalized_events > profile.max_total_events as u64 {
                 return Err("recorded profile normalized event cap exceeded".into());
             }
             if !region_filter.admit(&event)? {
                 return Ok(());
+            }
+            processor.stage_progress.region_admitted_events = processor
+                .stage_progress
+                .region_admitted_events
+                .checked_add(1)
+                .ok_or("region-admitted event count overflow")?;
+            if event.receipt_ns >= H5_MEASUREMENT_START_NS {
+                let cycle = row_cycle_in_span(
+                    event.receipt_ns,
+                    H5_MEASUREMENT_START_NS,
+                    H5_MEASUREMENT_END_NS,
+                )?;
+                if let Some(previous) = last_input_cycle.replace(cycle) {
+                    if cycle > previous {
+                        processor.stage_progress.last_closed_cycle_index = Some(previous);
+                    }
+                }
             }
             if event.receipt_ns < H5_MEASUREMENT_START_NS {
                 counts.warmup_events = counts
@@ -4682,42 +4884,116 @@ pub fn run_recorded_stream(
                         .positions
                         .checked_add(1)
                         .ok_or("position count overflow")?;
+                    processor.stage_progress.position_events = counts.positions;
                 }
                 (SourceKind::Flight, EventKind::Flight(_)) => {
                     counts.flights = counts
                         .flights
                         .checked_add(1)
                         .ok_or("flight count overflow")?;
+                    processor.stage_progress.flight_events = counts.flights;
                     if handoff_event(&event) {
                         counts.handoffs = counts
                             .handoffs
                             .checked_add(1)
                             .ok_or("handoff count overflow")?;
+                        processor.stage_progress.handoff_events = counts.handoffs;
                     }
                 }
                 _ => (),
             }
+            let runtime_started = Instant::now();
             let left = push_replay_frame(&mut legacy_replay, event, legacy_spec)?;
             let right = push_replay_frame(&mut candidate_replay, event, candidate_spec)?;
+            add_stage_ns(
+                &mut processor.stage_progress.paired_runtime_ns,
+                runtime_started.elapsed().as_nanos(),
+                "paired runtime step/render",
+            )?;
             match (left, right) {
                 (Some(left), Some(right)) if left.cycle == right.cycle => {
+                    add_stage_ns(
+                        &mut processor.stage_progress.projection_ns,
+                        left.projection_ns
+                            .checked_add(right.projection_ns)
+                            .ok_or("projection time overflow")?,
+                        "snapshot projection",
+                    )?;
+                    let visit_started = Instant::now();
                     processor.visit(left.cycle, left.snapshot, right.snapshot)?;
+                    add_stage_ns(
+                        &mut processor.stage_progress.selector_consumer_ns,
+                        visit_started.elapsed().as_nanos(),
+                        "selector/consumer callback",
+                    )?;
+                    processor.stage_progress.paired_runtime_frames = processor
+                        .stage_progress
+                        .paired_runtime_frames
+                        .checked_add(1)
+                        .ok_or("paired runtime frame count overflow")?;
                 }
                 (None, None) => (),
                 _ => return Err("independent runtime frame boundaries diverged".into()),
             }
             Ok(())
         },
-    )?;
+    );
+    let summary = match summary_result {
+        Ok(summary) => summary,
+        Err(error) => {
+            let progress = &mut processor.stage_progress;
+            progress.total_elapsed_ns = run_started.elapsed().as_nanos();
+            progress.reader_frames = stream_progress.reader.frames;
+            progress.reader_messages = stream_progress.reader.messages;
+            progress.reader_status_frames = stream_progress.reader.status_frames;
+            progress.reader_reject_frames = stream_progress.reader.reject_frames;
+            progress.reader_decode_ns = stream_progress.reader_decode_ns;
+            progress.normalization_ns = stream_progress.adapter_ns;
+            progress.stream_callback_ns = stream_progress.downstream_callback_ns;
+            return Err(h5_abort_diagnostics(&stream_progress, progress, &error));
+        }
+    };
+    processor.stage_progress.reader_frames = summary.recording.counts.frames;
+    processor.stage_progress.reader_messages = summary.recording.counts.messages;
+    processor.stage_progress.reader_status_frames = summary.recording.counts.status_frames;
+    processor.stage_progress.reader_reject_frames = summary.recording.counts.reject_frames;
+    processor.stage_progress.reader_decode_ns = stream_progress.reader_decode_ns;
+    processor.stage_progress.normalization_ns = stream_progress.adapter_ns;
+    processor.stage_progress.stream_callback_ns = stream_progress.downstream_callback_ns;
+    processor.stage_progress.last_closed_cycle_index = Some(CYCLES - 1);
     if summary.normalized_events != counts.normalized_events {
         return Err("stream callback/reader normalized event count mismatch".into());
     }
+    let final_runtime_started = Instant::now();
     let (legacy_cycles, legacy_final) = finish_replay_frames(legacy_replay, legacy_spec)?;
     let (candidate_cycles, candidate_final) =
         finish_replay_frames(candidate_replay, candidate_spec)?;
+    add_stage_ns(
+        &mut processor.stage_progress.paired_runtime_ns,
+        final_runtime_started.elapsed().as_nanos(),
+        "paired runtime finalization",
+    )?;
     match (legacy_final, candidate_final) {
         (Some(left), Some(right)) if left.cycle == right.cycle => {
+            add_stage_ns(
+                &mut processor.stage_progress.projection_ns,
+                left.projection_ns
+                    .checked_add(right.projection_ns)
+                    .ok_or("final projection time overflow")?,
+                "final snapshot projection",
+            )?;
+            let visit_started = Instant::now();
             processor.visit(left.cycle, left.snapshot, right.snapshot)?;
+            add_stage_ns(
+                &mut processor.stage_progress.selector_consumer_ns,
+                visit_started.elapsed().as_nanos(),
+                "final selector/consumer callback",
+            )?;
+            processor.stage_progress.paired_runtime_frames = processor
+                .stage_progress
+                .paired_runtime_frames
+                .checked_add(1)
+                .ok_or("paired runtime frame count overflow")?;
         }
         (None, None) => (),
         _ => return Err("independent runtime final frame boundaries diverged".into()),
@@ -4727,8 +5003,14 @@ pub fn run_recorded_stream(
     }
     processor.consumer.finish()?;
     if run_started.elapsed() > MAX_RUNTIME {
-        return Err("recorded H5 runtime cap exceeded after paired replay".into());
+        processor.stage_progress.total_elapsed_ns = run_started.elapsed().as_nanos();
+        return Err(h5_abort_diagnostics(
+            &stream_progress,
+            &processor.stage_progress,
+            "recorded H5 runtime cap exceeded after paired replay",
+        ));
     }
+    processor.stage_progress.total_elapsed_ns = run_started.elapsed().as_nanos();
     let region_report = region_filter.finish()?;
     let streams = h5_stream_reports(
         &summary,
@@ -4984,6 +5266,7 @@ pub fn run_recorded_stream(
         max_retained_snapshot_bytes_per_replica: processor
             .peak_legacy_snapshot_bytes
             .max(processor.peak_candidate_snapshot_bytes),
+        stage_progress: processor.stage_progress,
     })
 }
 
@@ -5515,6 +5798,7 @@ pub fn run_recorded_stream_cycle_summary(
         flip_rollback_attempt_count,
         flip_rollback_complete_count,
         max_retained_snapshot_bytes_per_replica,
+        stage_progress: H5StageProgress::default(),
     })
 }
 
@@ -5537,6 +5821,35 @@ fn row_cycle_in_span(time_ns: i64, start: i64, end: i64) -> Result<usize, String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // REQ: OA-MIG-414
+    #[test]
+    fn stage_abort_diagnostic_is_aggregate_only_and_marks_partial_failure() {
+        let mut stream = NormalizedStreamProgress::default();
+        stream.reader.frames = 9;
+        stream.reader.messages = 7;
+        stream.normalized_events = 12;
+        stream.adapter_counts.adsb_rows_in = 12;
+        stream.adapter_counts.adsb_quality_removed[3] = 2;
+        let mut stages = H5StageProgress {
+            normalized_events_seen: 10,
+            position_events: 8,
+            paired_runtime_frames: 3,
+            last_closed_cycle_index: Some(1),
+            ..H5StageProgress::default()
+        };
+        stages.total_elapsed_ns = 301_000_000_000;
+        let text = h5_abort_diagnostics(&stream, &stages, "watchdog refused");
+        assert!(text.starts_with("watchdog refused; H5_STAGE_PROGRESS"));
+        assert!(text.contains("frames=9 messages=7"));
+        assert!(text.contains("source_normalized_events=12 runtime_callback_events=10"));
+        assert!(text.contains(
+            "accepted_positions=8 accepted_flights=0 accepted_handoffs=0 paired_frames=3 last_closed_cycle=1"
+        ));
+        assert!(text.contains("adsb_quality_removed=[0, 0, 0, 2"));
+        assert!(!text.contains("TEST123"));
+        assert!(!text.contains("abc123"));
+    }
 
     // REQ: OA-MIG-414
     #[test]
