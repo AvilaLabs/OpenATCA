@@ -35,6 +35,7 @@ flags (defaults in brackets):
   --layout nas|stress  traffic layout [stress]: stress puts every aircraft under every radar,
                      nas spreads them at the whole-NAS density
   --radars e,t,t     radars: e en-route (12 s), t terminal (4.8 s) [e,t,t]
+  --network-profile  opt in to up to 64 distinct physical radar sites (one command only)
   --adsb-frac F      fraction of aircraft sending ADS-B [0.5]
   --radar-only       stress run: suppress ADS-B for the full radar-covered aircraft cohort
   --warmup S --duration S   seconds fed before the statistics, and seconds measured [60, 60]
@@ -63,6 +64,8 @@ pub struct Opts {
     pub n: usize,
     pub layout: Layout,
     pub radars: String,
+    /// Opt in to the separate bounded eight-unit / 64-physical-source fusion profile.
+    pub network_profile: bool,
     pub adsb_frac: f64,
     pub radar_only: bool,
     pub warmup: i64,
@@ -94,6 +97,7 @@ impl Default for Opts {
             n: 1_000,
             layout: Layout::Stress,
             radars: "e,t,t".to_string(),
+            network_profile: false,
             adsb_frac: 0.5,
             radar_only: false,
             warmup: 60,
@@ -183,6 +187,7 @@ pub fn parse_args(args: &[String]) -> Result<Opts, String> {
                 o.layout = Layout::parse(v).ok_or("--layout: nas or stress")?;
             }
             "--radars" => o.radars = it.next().ok_or("--radars needs a value")?.clone(),
+            "--network-profile" => o.network_profile = true,
             "--adsb-frac" => o.adsb_frac = num(a, it.next())?,
             "--radar-only" => o.radar_only = true,
             "--warmup" => o.warmup = num(a, it.next())?,
@@ -238,6 +243,14 @@ pub fn parse_args(args: &[String]) -> Result<Opts, String> {
     if o.radar_only && o.cmd != "one" {
         return Err("--radar-only is available with `one` only".to_string());
     }
+    if o.network_profile && o.cmd != "one" {
+        return Err("--network-profile is available with `one` only".to_string());
+    }
+    if o.network_profile && o.truth_score {
+        return Err(
+            "--truth-score is unavailable with the network profile because truth labels are excluded from radar inputs".to_string(),
+        );
+    }
     if o.radar_only && o.layout != Layout::Stress {
         return Err("--radar-only requires --layout stress".to_string());
     }
@@ -246,6 +259,18 @@ pub fn parse_args(args: &[String]) -> Result<Opts, String> {
     }
     check_times(&o)?;
     let radars = parse_radars(&o.radars)?;
+    if radars.len() > oa_track::fusion_params::MAX_RADARS && !o.network_profile {
+        return Err(format!(
+            "more than {} physical sites requires --network-profile",
+            oa_track::fusion_params::MAX_RADARS
+        ));
+    }
+    if radars.len() > oa_track::fusion_params::MAX_NETWORK_RADARS {
+        return Err(format!(
+            "network profile admits at most {} physical sites",
+            oa_track::fusion_params::MAX_NETWORK_RADARS
+        ));
+    }
     if o.radar_only && radars.is_empty() {
         return Err("--radar-only requires at least one radar".to_string());
     }
@@ -264,6 +289,7 @@ pub fn cap_cfg(o: &Opts, n: usize) -> Result<CapCfg, String> {
             radars: parse_radars(&o.radars)?,
             horizon_s: o.warmup.saturating_add(o.duration) as f64 + HORIZON_PAD_S as f64,
         },
+        network_profile: o.network_profile,
         warmup_s: o.warmup,
         measure_s: o.duration,
         max_tracks: o.max_tracks,
@@ -285,7 +311,20 @@ fn tag(o: &Opts, n: usize) -> String {
 }
 
 fn result_tag(o: &Opts, n: usize) -> String {
-    if o.radar_only {
+    if o.network_profile {
+        let suffix = if o.radar_only {
+            "_radar_only"
+        } else if o.adsb_dropout_s.is_some() {
+            "_dropout"
+        } else if o.assignment_forensics {
+            "_assignment_forensics"
+        } else if o.truth_score {
+            "_truthscore"
+        } else {
+            ""
+        };
+        format!("network_{}_n{n}{suffix}", o.layout.name())
+    } else if o.radar_only {
         format!("{}_n{n}_radar_only", o.layout.name())
     } else if o.adsb_dropout_s.is_some() {
         format!("{}_n{n}_dropout", o.layout.name())
@@ -668,7 +707,15 @@ fn clip_part(o: &Opts, kvs: &mut Kv, drops: &mut oa_sealed::DropReport) -> Resul
 }
 
 fn header(o: &Opts) -> String {
-    let mode = if o.radar_only { " radar-only" } else { "" };
+    let mode = format!(
+        "{}{}",
+        if o.radar_only { " radar-only" } else { "" },
+        if o.network_profile {
+            " bounded-network-profile"
+        } else {
+            ""
+        }
+    );
     format!(
         "oa-perf {} | cpu: {} | nproc {} | load before: {}\nlayout {} radars {} adsb-frac {}{} warm-up {} s, measured {} s per run, seed {}\n",
         o.cmd,
@@ -781,6 +828,21 @@ mod tests {
         assert!(parse_args(&a("one --stage-timings")).unwrap().stage_timings);
         assert!(parse_args(&a("sweep --stage-timings")).is_err());
         assert_eq!(cap_cfg(&o, 20).unwrap().traffic.n, 20);
+    }
+
+    #[test]
+    fn multi_unit_network_is_explicit_and_limited_to_one_run() {
+        let sites = vec!["e"; 9].join(",");
+        let args = format!("one --network-profile --radars {sites}");
+        let opts = parse_args(&a(&args)).unwrap();
+        assert!(opts.network_profile);
+        assert!(parse_args(&a(&format!("one --radars {sites}"))).is_err());
+        assert!(parse_args(&a(&format!("sweep --network-profile --radars {sites}"))).is_err());
+        assert!(parse_args(&a(&format!(
+            "one --network-profile --radars {sites} --truth-score"
+        )))
+        .is_err());
+        assert_eq!(result_tag(&opts, 1_900), "network_stress_n1900");
     }
 
     // REQ: OA-PRF-007

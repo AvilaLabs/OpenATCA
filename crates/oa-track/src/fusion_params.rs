@@ -116,6 +116,11 @@ pub const REG_MIN_RANGE_M: f64 = 5_000.0;
 pub const REG_PUBLISH_NS: i64 = 10 * NS_PER_S;
 /// Limit: published estimates per radar, 1 Mi (a day at one per 10 s is 8,640).
 pub const REG_HISTORY_MAX: usize = 1 << 20;
+/// Per-source published registration samples in the 64-source network profile. At one sample
+/// per ten seconds this retains 45.5 hours, including the full required day with over 1.8x room.
+/// This is deliberately a stricter diagnostic-history cap than the legacy per-source ceiling;
+/// hitting it is counted and never affects registration decisions.
+pub const NETWORK_REG_HISTORY_MAX: usize = 16_384;
 /// Largest bias the estimator accepts, range metres and azimuth degrees; an estimate beyond is
 /// counted and held at the limit (a radar that far off is faulty, not mis-registered).
 pub const REG_LIMIT_RANGE_M: f64 = 2_000.0;
@@ -165,8 +170,12 @@ pub const REG_CUSUM_CLIP: f64 = 3.0;
 
 // ---- Capacity -------------------------------------------------------------------------
 
-/// Limit: radars.
+/// Maximum sources in one radar work unit. Existing unit limits remain unchanged.
 pub const MAX_RADARS: usize = 8;
+/// Maximum bounded units in the opt-in network profile: 8 units of 8 physical sources.
+pub const MAX_RADAR_NETWORK_UNITS: usize = 8;
+/// Maximum physical radar sources in the opt-in network profile.
+pub const MAX_NETWORK_RADARS: usize = MAX_RADARS * MAX_RADAR_NETWORK_UNITS;
 /// Radar-only tracks are keyed above every 24-bit address (and the non-ICAO bit 24).
 pub const KEY_RADAR_BASE: u32 = crate::types::RADAR_KEY_BASE;
 /// Limit: plots of one radar associated in one bucket; later ones are counted and dropped (a
@@ -175,10 +184,12 @@ pub const KEY_RADAR_BASE: u32 = crate::types::RADAR_KEY_BASE;
 pub const MAX_BUCKET_PLOTS: usize = 16_384;
 /// Limit: gated candidate pairs of one association; pairs beyond are counted and not formed.
 pub const MAX_BUCKET_PAIRS: usize = 1 << 18;
-/// Limit: charged association work in one bucket, all radars together, 1 Mi: each candidate visit
+/// Limit: charged association work in one bucket, all radars of one eight-source work unit, 1 Mi:
+/// each candidate visit
 /// and each exact pair costs one unit. This is a work budget, not a measured time or latency bound.
 pub const MAX_BUCKET_TESTS: usize = 1 << 20;
-/// Limit: polar posting construction and query work of one bucket, all radars together, 16 Mi.
+/// Limit: polar posting construction and query work of one bucket, all radars of one eight-source
+/// work unit, 16 Mi.
 /// The per-radar wide-track classification pass and posting-build pass each charge input-track
 /// visits; posting ordering charges its in-place heapsort operations. Queries charge prefix
 /// probes, inspected postings, and candidate ordering. Exhaustion makes that radar's anonymous
@@ -191,7 +202,8 @@ pub const MAX_BUCKET_POLAR_WORK: usize = 1 << 24;
 /// entire ordering even at the configured track limit. An incomplete ordering defers its gates.
 pub const MAX_ASSOC_ORDER_WORK: usize =
     MAX_ASSOC_TRACKS * (5 + 6 * MAX_ASSOC_TRACKS.ilog2() as usize);
-/// Initiation work units shared by every radar in one bucket. One million units matches the
+/// Initiation work units shared by every radar in one eight-source work unit in one bucket. One
+/// million units matches the
 /// existing association work ceiling, so their separate caps give two million charged units
 /// combined. One unit is a candidate visit or exact pair. Grid construction charges input visits
 /// and bounded sorting work. Queries charge each column, probe, and key visit.
@@ -222,10 +234,11 @@ pub const RADAR_PLOTS_MAX: usize = MAX_BUCKET_PLOTS;
 /// Capacity of the inputs ready to process at one call, ADS-B and plots each: at most what can be
 /// pending, [`MAX_PENDING`].
 pub const READY_MAX: usize = MAX_PENDING;
-/// Capacity of the time-ordered events of one bucket: every ADS-B measurement of it (at most
-/// [`MAX_PENDING`]) and every applied plot (at most [`MAX_BUCKET_PLOTS`] of each of
-/// [`MAX_RADARS`] radars).
+/// Legacy one-work-unit capacity of the time-ordered bucket events. The network profile derives
+/// exact capacity from configured source count and refuses beyond pending/source bounds.
 pub const BUCKET_EVENTS_MAX: usize = MAX_PENDING + MAX_RADARS * MAX_BUCKET_PLOTS;
+/// Absolute event capacity of the largest admitted eight-unit network profile.
+pub const NETWORK_BUCKET_EVENTS_MAX: usize = MAX_PENDING + MAX_NETWORK_RADARS * MAX_BUCKET_PLOTS;
 /// Capacity of the candidate indices of one radar's association: the candidates, at most
 /// [`MAX_CANDIDATES`].
 pub const CAND_IX_MAX: usize = MAX_CANDIDATES;

@@ -58,8 +58,9 @@ use crate::assoc::{
     ambiguous_pairs, assigned_pairs, assoc_alternate_pair, assoc_ambiguous, assoc_component_path,
     assoc_component_size, assoc_metadata_writes, assoc_pair_of, assoc_plot_track, assoc_regret,
     assoc_regret_status, assoc_regret_work, assoc_scratch_buffers, assoc_scratch_new,
-    assoc_scratch_new_forensics, gnn, gnn_forensics, nearest, AssocScratch, GnnStats, Pair,
-    NONE as NO_TRACK, PATH_NONE, REGRET_EXACT, REGRET_NONE, REGRET_OUT_OF_SCOPE, REGRET_SINGLE,
+    assoc_scratch_new_forensics, assoc_scratch_storage_bytes, gnn, gnn_forensics, nearest,
+    AssocScratch, GnnStats, Pair, NONE as NO_TRACK, PATH_NONE, REGRET_EXACT, REGRET_NONE,
+    REGRET_OUT_OF_SCOPE, REGRET_SINGLE,
 };
 use crate::coarse::{
     coarse_distance, coarse_passes, point_grid_buffer, point_grid_build_budgeted, point_grid_new,
@@ -72,17 +73,18 @@ use crate::coarse_polar::{
 };
 use crate::fixed_map::FixedMap;
 use crate::fusion_params::{
-    AMBIGUITY_MARGIN, ASSIGN_LOG_MAX, ASSOC_FORENSICS_MAX, BUCKET_EVENTS_MAX, BUCKET_NS,
-    CAND_ALT_SLACK_FT, CAND_IX_MAX, CAND_MAX_ACCEL_MPS2, CAND_MAX_SPEED_MPS, CAND_MAX_VRATE_FPS,
-    CAND_ORDER_WORDS, CAND_SLACK_M, COARSE_M, COARSE_STD_M, GATE_H_CHI2, GATE_MANEUVER_MAX_DT_S,
-    GATE_MANEUVER_MPS2, GATE_TOTAL_CHI2, GATE_VRATE_SIGMA_FPM, GATE_V_CHI2, HARD_GATE_CHI2,
-    HOLD_MAX_RUN, INIT_CELL_M, INIT_STD_M, INIT_WIDE_MAX, KEY_RADAR_BASE, KEY_TABLE_SLOTS,
-    MAX_ASSOC_ORDER_WORK, MAX_ASSOC_TRACKS, MAX_BUCKET_PAIRS, MAX_BUCKET_PLOTS,
-    MAX_BUCKET_POLAR_WORK, MAX_BUCKET_TESTS, MAX_CANDIDATES, MAX_INIT_WORK, MAX_PENDING,
-    MAX_RADARS, MAX_SOLVE_TRACKS, MAX_TRACK_RECS, RADAR_DISAGREE_SCANS, RADAR_INIT_M, RADAR_INIT_N,
-    RADAR_PLOTS_MAX, READY_MAX, REG_HISTORY_MAX, REG_MAX_ADSB_AGE_NS, REG_MAX_TRACK_SIGMA_M,
-    REG_MIN_ADSB_UPDATES, REG_MIN_NACP, REG_MIN_RANGE_M, REG_MIN_REFS, REG_PUBLISH_NS,
-    REG_REF_SLOTS, REG_REF_SLOTS_MAX, RESCUED_COST_FRACTION, WIDE_TRACKS_MAX,
+    AMBIGUITY_MARGIN, ASSIGN_LOG_MAX, ASSOC_FORENSICS_MAX, BUCKET_NS, CAND_ALT_SLACK_FT,
+    CAND_IX_MAX, CAND_MAX_ACCEL_MPS2, CAND_MAX_SPEED_MPS, CAND_MAX_VRATE_FPS, CAND_ORDER_WORDS,
+    CAND_SLACK_M, COARSE_M, COARSE_STD_M, GATE_H_CHI2, GATE_MANEUVER_MAX_DT_S, GATE_MANEUVER_MPS2,
+    GATE_TOTAL_CHI2, GATE_VRATE_SIGMA_FPM, GATE_V_CHI2, HARD_GATE_CHI2, HOLD_MAX_RUN, INIT_CELL_M,
+    INIT_STD_M, INIT_WIDE_MAX, KEY_RADAR_BASE, KEY_TABLE_SLOTS, MAX_ASSOC_ORDER_WORK,
+    MAX_ASSOC_TRACKS, MAX_BUCKET_PAIRS, MAX_BUCKET_PLOTS, MAX_BUCKET_POLAR_WORK, MAX_BUCKET_TESTS,
+    MAX_CANDIDATES, MAX_INIT_WORK, MAX_NETWORK_RADARS, MAX_PENDING, MAX_RADARS,
+    MAX_RADAR_NETWORK_UNITS, MAX_SOLVE_TRACKS, MAX_TRACK_RECS, NETWORK_REG_HISTORY_MAX,
+    RADAR_DISAGREE_SCANS, RADAR_INIT_M, RADAR_INIT_N, RADAR_PLOTS_MAX, READY_MAX, REG_HISTORY_MAX,
+    REG_MAX_ADSB_AGE_NS, REG_MAX_TRACK_SIGMA_M, REG_MIN_ADSB_UPDATES, REG_MIN_NACP,
+    REG_MIN_RANGE_M, REG_MIN_REFS, REG_PUBLISH_NS, REG_REF_SLOTS, REG_REF_SLOTS_MAX,
+    RESCUED_COST_FRACTION, WIDE_TRACKS_MAX,
 };
 use crate::params::{ALT_BASE_SIGMA_FT, NS_PER_S, OOO_WINDOW_NS};
 use crate::radar::{
@@ -273,6 +275,8 @@ pub struct FusionStats {
     /// Addressed inputs refused before queuing because they claim a non-aircraft key.
     pub adsb_address_refused: u64,
     pub plots_in: u64,
+    /// Plots submitted to an unknown physical source through the network-profile API.
+    pub plots_source_refused: u64,
     /// Plots refused by validation, by [`RadarError`]: range/azimuth/altitude, no height.
     pub plots_refused: u64,
     /// Plots dropped because their bucket was already processed.
@@ -407,10 +411,26 @@ pub struct FusionStats {
     pub init_refusal_pass_visits: u64,
     /// Per-radar initiation budget use. Work includes all charged grid, pair, and cleanup work;
     /// it is not a wall-time measure. The fixed slots follow radar order in the configured sites.
-    pub init_radar: [RadarInitStats; MAX_RADARS],
+    pub init_radar: [RadarInitStats; MAX_NETWORK_RADARS],
     /// Per-radar association totals. Outcomes are gate completion, independent of assignment
     /// verdicts. A7.2: cold diagnostic records in a fixed-size array.
-    pub association_radar: [RadarAssociationStats; MAX_RADARS],
+    pub association_radar: [RadarAssociationStats; MAX_NETWORK_RADARS],
+    /// Configured physical sources and eight-source work units in the selected profile.
+    pub network_radars: u8,
+    pub network_units: u8,
+    /// Aggregate ceilings for this profile: unit ceiling multiplied by its bounded unit count.
+    pub network_bucket_tests_limit: u64,
+    pub network_polar_work_limit: u64,
+    pub network_init_work_limit: u64,
+    /// Per-source published registration-history ceiling for this profile.
+    pub network_reg_history_per_source_limit: u32,
+    /// Aggregate fixed slots for the per-source `(track, source)` freshness maps. At 64 sources
+    /// this is 8,388,608 slots; the byte meter multiplies each vector capacity by its exact Rust
+    /// element size instead of hard-coding a platform-dependent layout.
+    pub network_plot_scan_slots: u64,
+    /// Exact bytes reserved by the Fusion shell and its vector storage; tracker-owned heap buffers
+    /// and caller-provided output are excluded.
+    pub network_fusion_owned_bytes: u64,
     /// Most candidates alive at once.
     pub cands_live_max: u64,
     /// Radar-buckets that had plots to associate, and the sum and the largest of the coarse
@@ -480,7 +500,10 @@ pub struct AssignLog {
     pub key: Vec<u32>,
     /// The plot's scoring label.
     pub label: Vec<u32>,
+    /// Source ordinal in the configured site list.
     pub radar: Vec<u8>,
+    /// Unchanged physical source ID from `RadarSite::sensor`.
+    pub physical_sensor_id: Vec<u16>,
     /// [`HOW_HARD`], [`HOW_ASSOC`] or [`HOW_INIT`].
     pub how: Vec<u8>,
 }
@@ -512,6 +535,8 @@ pub struct AssocForensics {
     pub label: Vec<u32>,
     pub plot_mode_a: Vec<u16>,
     pub radar: Vec<u8>,
+    /// Unchanged physical source ID corresponding to the source ordinal.
+    pub physical_sensor_id: Vec<u16>,
     pub action: Vec<u8>,
     pub selected_key: Vec<u32>,
     pub selected_cost: Vec<f64>,
@@ -545,6 +570,7 @@ fn forensic_log_new_with_capacity(max_rows: usize) -> AssocForensics {
         label: Vec::with_capacity(max_rows),
         plot_mode_a: Vec::with_capacity(max_rows),
         radar: Vec::with_capacity(max_rows),
+        physical_sensor_id: Vec::with_capacity(max_rows),
         action: Vec::with_capacity(max_rows),
         selected_key: Vec::with_capacity(max_rows),
         selected_cost: Vec::with_capacity(max_rows),
@@ -607,6 +633,7 @@ fn assign_log_new() -> AssignLog {
         key: Vec::with_capacity(ASSIGN_LOG_MAX),
         label: Vec::with_capacity(ASSIGN_LOG_MAX),
         radar: Vec::with_capacity(ASSIGN_LOG_MAX),
+        physical_sensor_id: Vec::with_capacity(ASSIGN_LOG_MAX),
         how: Vec::with_capacity(ASSIGN_LOG_MAX),
     }
 }
@@ -615,7 +642,10 @@ fn assign_log_new() -> AssignLog {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RadarTrackRec {
     pub key: u32,
+    /// Ordinal in the configured site list.
     pub radar: u8,
+    /// Unchanged physical source ID from `RadarSite::sensor`.
+    pub physical_sensor_id: u16,
     /// Time of the first plot, Unix ns.
     pub first_ns: i64,
     /// Time of the plot that confirmed it (the decision), Unix ns.
@@ -686,16 +716,17 @@ struct RadarScratch {
     conv_own: Vec<Option<Converted>>,
     hard: Vec<(u32, f64, usize, Decision)>,
     taken: Vec<u32>,
-    /// The live tracks at the start of the bucket, and the ones that took a hard plot: the
-    /// tracker's capacity.
+}
+
+/// Large, transient association arrays reused by each eight-source work unit. A7.2: cold
+/// workspace owner; each member has a fixed startup capacity derived from existing limits.
+struct RadarWorkspace {
     tracks: Vec<TrackAt>,
     skip: Vec<bool>,
-    /// Indices of the tracks of `tracks` whose coarse window is wider than the standard one
-    /// ([`WIDE_TRACKS_MAX`]).
     wide: Vec<u32>,
 }
 
-fn radar_scratch_new(max_tracks: usize) -> RadarScratch {
+fn radar_scratch_new() -> RadarScratch {
     RadarScratch {
         plots: Vec::with_capacity(RADAR_PLOTS_MAX),
         dec: Vec::with_capacity(RADAR_PLOTS_MAX),
@@ -703,6 +734,11 @@ fn radar_scratch_new(max_tracks: usize) -> RadarScratch {
         conv_own: Vec::with_capacity(RADAR_PLOTS_MAX),
         hard: Vec::with_capacity(RADAR_PLOTS_MAX),
         taken: Vec::with_capacity(RADAR_PLOTS_MAX),
+    }
+}
+
+fn radar_workspace_new(max_tracks: usize) -> RadarWorkspace {
+    RadarWorkspace {
         tracks: Vec::with_capacity(max_tracks),
         skip: Vec::with_capacity(max_tracks),
         wide: Vec::with_capacity(WIDE_TRACKS_MAX.min(max_tracks)),
@@ -728,6 +764,7 @@ pub struct Fusion {
     geoms: Vec<RadarGeom>,
     reg: Vec<RegState>,
     reg_hist: Vec<Vec<RegSample>>,
+    reg_history_max: usize,
     reg_pub_ns: Vec<i64>,
     /// Inputs waiting for their bucket, made with [`MAX_PENDING`] each (a full queue counts
     /// `pending_overflow`).
@@ -741,7 +778,9 @@ pub struct Fusion {
     ready_p: Vec<PendPlot>,
     /// Per radar, the scratch of its association of a bucket.
     rscratch: Vec<RadarScratch>,
-    /// The time-ordered events of a bucket: [`BUCKET_EVENTS_MAX`].
+    /// Eight large track/index workspaces reused by successive network units.
+    workspaces: Vec<RadarWorkspace>,
+    /// The time-ordered events of a bucket, sized from pending inputs and configured sources.
     evs: Vec<Ev>,
     /// Initiation's lists of plot indices ([`RADAR_PLOTS_MAX`]) and of candidate indices
     /// ([`CAND_IX_MAX`]).
@@ -766,7 +805,9 @@ pub struct Fusion {
     /// plot per aircraft per scan, so a candidate of that radar whose latest plot is in a scan the
     /// track already took a plot in is another aircraft, not the track's; and the radars whose
     /// periods set the track's expected interval are those with a plot this recent.
-    plot_scan: FixedMap<(u32, u8), i64>,
+    /// Plot freshness maps; network profile keeps one unchanged-capacity map per physical source,
+    /// while legacy keeps its original single global map.
+    plot_scan: Vec<FixedMap<(u32, u8), i64>>,
     /// The earliest bucket of any pending input; `i64::MAX` with none (so a call that finds
     /// nothing ready is constant time, not a scan of a long queue).
     pend_min_bucket: i64,
@@ -793,7 +834,7 @@ pub struct Fusion {
     polar_work_max: usize,
     /// Initiation allowance shared across the radars of the current bucket.
     init_work_left: usize,
-    init_capped_mask: u16,
+    init_capped_mask: u64,
     #[cfg(test)]
     init_work_max: usize,
     /// Tracks on one association's wide list at most (a field so a test can lower it).
@@ -807,6 +848,7 @@ pub struct Fusion {
     cands: Vec<Cand>,
     next_serial: u32,
     stats: FusionStats,
+    network_profile: bool,
     log: AssignLog,
     forensics: AssocForensics,
     tracks: Vec<RadarTrackRec>,
@@ -819,8 +861,34 @@ pub struct Fusion {
 
 /// A fusion layer over `sites`. Refuses an invalid site or configuration (E5).
 pub fn fusion_new(cfg: &FusionConfig, sites: &[RadarSite]) -> Result<Fusion, FusionError> {
-    if sites.is_empty() || sites.len() > MAX_RADARS {
+    fusion_new_profile(cfg, sites, false)
+}
+
+/// A fusion layer for an explicitly bounded network of up to eight eight-source work units.
+/// The ordinary [`fusion_new`] constructor remains limited to one legacy eight-source unit.
+/// Physical sensor IDs stay in `RadarSite::sensor`; plot submission for this profile can use
+/// [`fusion_plots_for_sensor`] rather than a local unit index.
+pub fn fusion_new_network(cfg: &FusionConfig, sites: &[RadarSite]) -> Result<Fusion, FusionError> {
+    fusion_new_profile(cfg, sites, true)
+}
+
+fn fusion_new_profile(
+    cfg: &FusionConfig,
+    sites: &[RadarSite],
+    network_profile: bool,
+) -> Result<Fusion, FusionError> {
+    let source_limit = if network_profile {
+        MAX_NETWORK_RADARS
+    } else {
+        MAX_RADARS
+    };
+    if sites.is_empty() || sites.len() > source_limit {
         return Err(FusionError::BadConfig("radar count"));
+    }
+    if network_profile && sites.windows(2).any(|w| w[0].sensor >= w[1].sensor) {
+        return Err(FusionError::BadConfig(
+            "network sites must be ordered by unique physical sensor id",
+        ));
     }
     for (i, s) in sites.iter().enumerate() {
         site_check(s).map_err(|e| FusionError::BadSite(i, e))?;
@@ -848,7 +916,23 @@ pub fn fusion_new(cfg: &FusionConfig, sites: &[RadarSite]) -> Result<Fusion, Fus
         return Err(FusionError::BadConfig("tracker max_tracks"));
     }
     let tracker = tracker_new(&cfg.tracker).map_err(FusionError::Tracker)?;
-    Ok(Fusion {
+    let work_units = sites.len().div_ceil(MAX_RADARS);
+    let reg_history_max = if network_profile {
+        NETWORK_REG_HISTORY_MAX
+    } else {
+        REG_HISTORY_MAX
+    };
+    let mut stats = FusionStats::default();
+    stats.network_radars = u8::try_from(sites.len()).unwrap_or(u8::MAX);
+    stats.network_units = u8::try_from(work_units).unwrap_or(u8::MAX);
+    stats.network_bucket_tests_limit = (MAX_BUCKET_TESTS as u64).saturating_mul(work_units as u64);
+    stats.network_polar_work_limit =
+        (MAX_BUCKET_POLAR_WORK as u64).saturating_mul(work_units as u64);
+    stats.network_init_work_limit = (MAX_INIT_WORK as u64).saturating_mul(work_units as u64);
+    stats.network_reg_history_per_source_limit = u32::try_from(reg_history_max).unwrap_or(u32::MAX);
+    let plot_scan_maps = if network_profile { sites.len() } else { 1 };
+    stats.network_plot_scan_slots = (plot_scan_maps as u64).saturating_mul(KEY_TABLE_SLOTS as u64);
+    let mut fusion = Fusion {
         cfg: *cfg,
         tracker,
         sites: sites.to_vec(),
@@ -859,8 +943,9 @@ pub fn fusion_new(cfg: &FusionConfig, sites: &[RadarSite]) -> Result<Fusion, Fus
             .collect(),
         reg_hist: sites
             .iter()
-            .map(|_| Vec::with_capacity(REG_HISTORY_MAX))
+            .map(|_| Vec::with_capacity(reg_history_max))
             .collect(),
+        reg_history_max,
         reg_pub_ns: sites.iter().map(|_| i64::MIN).collect(),
         pend_adsb: Vec::with_capacity(MAX_PENDING),
         pend_plots: Vec::with_capacity(MAX_PENDING),
@@ -868,11 +953,13 @@ pub fn fusion_new(cfg: &FusionConfig, sites: &[RadarSite]) -> Result<Fusion, Fus
         sort_p: Vec::with_capacity(READY_MAX),
         ready_a: Vec::with_capacity(READY_MAX),
         ready_p: Vec::with_capacity(READY_MAX),
-        rscratch: sites
-            .iter()
-            .map(|_| radar_scratch_new(cfg.tracker.max_tracks))
+        rscratch: sites.iter().map(|_| radar_scratch_new()).collect(),
+        workspaces: (0..sites.len().min(MAX_RADARS))
+            .map(|_| radar_workspace_new(cfg.tracker.max_tracks))
             .collect(),
-        evs: Vec::with_capacity(BUCKET_EVENTS_MAX),
+        evs: Vec::with_capacity(
+            MAX_PENDING.saturating_add(sites.len().saturating_mul(MAX_BUCKET_PLOTS)),
+        ),
         init_free: Vec::with_capacity(RADAR_PLOTS_MAX),
         init_anon: Vec::with_capacity(RADAR_PLOTS_MAX),
         cand_ix: Vec::with_capacity(CAND_IX_MAX),
@@ -883,7 +970,9 @@ pub fn fusion_new(cfg: &FusionConfig, sites: &[RadarSite]) -> Result<Fusion, Fus
         init_wide_max: INIT_WIDE_MAX,
         hold_run: FixedMap::new(KEY_TABLE_SLOTS),
         hold_run_max: MAX_ASSOC_TRACKS,
-        plot_scan: FixedMap::new(KEY_TABLE_SLOTS),
+        plot_scan: (0..plot_scan_maps)
+            .map(|_| FixedMap::new(KEY_TABLE_SLOTS))
+            .collect(),
         pend_min_bucket: i64::MAX,
         assoc: if cfg.association_forensics {
             assoc_scratch_new_forensics(MAX_SOLVE_TRACKS, MAX_BUCKET_PLOTS, MAX_BUCKET_PAIRS)
@@ -894,14 +983,17 @@ pub fn fusion_new(cfg: &FusionConfig, sites: &[RadarSite]) -> Result<Fusion, Fus
         ms_buf: Vec::with_capacity(MAX_BUCKET_PAIRS),
         pairs_bufs: sites
             .iter()
+            .take(MAX_RADARS)
             .map(|_| Vec::with_capacity(MAX_BUCKET_PAIRS))
             .collect(),
         infos_bufs: sites
             .iter()
+            .take(MAX_RADARS)
             .map(|_| Vec::with_capacity(MAX_BUCKET_PAIRS))
             .collect(),
         grids: sites
             .iter()
+            .take(MAX_RADARS)
             .map(|_| polar_new(cfg.tracker.max_tracks))
             .collect(),
         cand_buf: Vec::with_capacity(cfg.tracker.max_tracks),
@@ -918,7 +1010,8 @@ pub fn fusion_new(cfg: &FusionConfig, sites: &[RadarSite]) -> Result<Fusion, Fus
         keyinfo: FixedMap::new(KEY_TABLE_SLOTS),
         cands: Vec::with_capacity(MAX_CANDIDATES),
         next_serial: 0,
-        stats: FusionStats::default(),
+        stats,
+        network_profile,
         log: if cfg.log_assign {
             assign_log_new()
         } else {
@@ -933,7 +1026,135 @@ pub fn fusion_new(cfg: &FusionConfig, sites: &[RadarSite]) -> Result<Fusion, Fus
         track_rec_max: MAX_TRACK_RECS,
         scratch: output_new(SCRATCH_ROWS),
         done_bucket: i64::MIN,
-    })
+    };
+    fusion.stats.network_fusion_owned_bytes = fusion_network_owned_bytes(&fusion);
+    Ok(fusion)
+}
+
+/// Bytes reserved by the fusion shell itself, including source and shared workspace vectors.
+/// The tracker's own heap buffers and the caller-provided output buffer are separate bounded
+/// allocations and are excluded. Capacities, not current lengths, are used throughout.
+pub fn fusion_network_owned_bytes(f: &Fusion) -> u64 {
+    fn add<T>(total: &mut u128, capacity: usize) {
+        *total = total.saturating_add((capacity as u128) * (core::mem::size_of::<T>() as u128));
+    }
+    let mut total = 0u128;
+    add::<Fusion>(&mut total, 1);
+    add::<RadarSite>(&mut total, f.sites.capacity());
+    add::<RadarGeom>(&mut total, f.geoms.capacity());
+    add::<RegState>(&mut total, f.reg.capacity());
+    add::<Vec<RegSample>>(&mut total, f.reg_hist.capacity());
+    add::<i64>(&mut total, f.reg_pub_ns.capacity());
+    add::<Measurement>(&mut total, f.pend_adsb.capacity());
+    add::<PendPlot>(&mut total, f.pend_plots.capacity());
+    add::<(u32, Measurement)>(&mut total, f.sort_a.capacity());
+    add::<(u32, PendPlot)>(&mut total, f.sort_p.capacity());
+    add::<Measurement>(&mut total, f.ready_a.capacity());
+    add::<PendPlot>(&mut total, f.ready_p.capacity());
+    add::<RadarScratch>(&mut total, f.rscratch.capacity());
+    add::<RadarWorkspace>(&mut total, f.workspaces.capacity());
+    add::<Ev>(&mut total, f.evs.capacity());
+    add::<usize>(&mut total, f.init_free.capacity());
+    add::<usize>(&mut total, f.init_anon.capacity());
+    add::<usize>(&mut total, f.cand_ix.capacity());
+    add::<CandReach>(&mut total, f.init_reach.capacity());
+    let (init_keys, init_key_capacity) = point_grid_buffer(&f.init_grid);
+    let (init_radix, init_radix_capacity) = point_grid_radix_buffer(&f.init_grid);
+    let _ = (init_keys, init_radix);
+    add::<u64>(&mut total, init_key_capacity);
+    add::<u64>(&mut total, init_radix_capacity);
+    add::<u32>(&mut total, f.init_wide.capacity());
+    add::<u32>(&mut total, f.init_near.capacity());
+    let (hold_addr, hold_slots) = f.hold_run.buffer();
+    let _ = hold_addr;
+    add::<Option<((u32, u8), HoldRun)>>(&mut total, hold_slots);
+    add::<FixedMap<(u32, u8), i64>>(&mut total, f.plot_scan.capacity());
+    add::<Option<((u32, u8), i64)>>(&mut total, f.plot_scan.iter().map(FixedMap::capacity).sum());
+    total = total.saturating_add(u128::from(assoc_scratch_storage_bytes(&f.assoc)));
+    add::<Pair>(&mut total, f.pairs_buf.capacity());
+    add::<Measurement>(&mut total, f.ms_buf.capacity());
+    add::<Vec<Pair>>(&mut total, f.pairs_bufs.capacity());
+    add::<Vec<PairInfo>>(&mut total, f.infos_bufs.capacity());
+    add::<PolarIndex>(&mut total, f.grids.capacity());
+    add::<Pair>(&mut total, f.pairs_bufs.iter().map(Vec::capacity).sum());
+    add::<PairInfo>(&mut total, f.infos_bufs.iter().map(Vec::capacity).sum());
+    for grid in &f.grids {
+        let [keys, order] = polar_buffers(grid);
+        add::<u64>(&mut total, keys.1);
+        add::<u32>(&mut total, order.1);
+    }
+    add::<u32>(&mut total, f.cand_buf.capacity());
+    add::<u128>(&mut total, f.cand_rank_buf.capacity());
+    let (keyinfo_addr, keyinfo_slots) = f.keyinfo.buffer();
+    let _ = keyinfo_addr;
+    add::<Option<(u32, KeyInfo)>>(&mut total, keyinfo_slots);
+    add::<Cand>(&mut total, f.cands.capacity());
+    add::<RadarTrackRec>(&mut total, f.tracks.capacity());
+    add::<RegSample>(&mut total, f.reg_hist.iter().map(Vec::capacity).sum());
+    let refs = f.reg.len().saturating_mul(f.cfg.reg_ref_slots);
+    add::<crate::registration::RegRef>(&mut total, refs);
+    add::<f64>(&mut total, refs.saturating_mul(4));
+    // Optional assignment/forensics records are shell-owned allocations too.
+    add::<i64>(&mut total, f.log.t_ns.capacity());
+    add::<u32>(&mut total, f.log.key.capacity());
+    add::<u32>(&mut total, f.log.label.capacity());
+    add::<u8>(&mut total, f.log.radar.capacity());
+    add::<u16>(&mut total, f.log.physical_sensor_id.capacity());
+    add::<u8>(&mut total, f.log.how.capacity());
+    add::<i64>(&mut total, f.forensics.t_ns.capacity());
+    add::<u32>(&mut total, f.forensics.ordinal.capacity());
+    add::<f64>(&mut total, f.forensics.plot_range_m.capacity());
+    add::<f64>(&mut total, f.forensics.plot_az_deg.capacity());
+    add::<i32>(&mut total, f.forensics.plot_alt_ft.capacity());
+    add::<u32>(&mut total, f.forensics.plot_addr.capacity());
+    add::<u32>(&mut total, f.forensics.label.capacity());
+    add::<u16>(&mut total, f.forensics.plot_mode_a.capacity());
+    add::<u8>(&mut total, f.forensics.radar.capacity());
+    add::<u16>(&mut total, f.forensics.physical_sensor_id.capacity());
+    add::<u8>(&mut total, f.forensics.action.capacity());
+    add::<u32>(&mut total, f.forensics.selected_key.capacity());
+    add::<f64>(&mut total, f.forensics.selected_cost.capacity());
+    add::<u32>(&mut total, f.forensics.alternate_key.capacity());
+    add::<f64>(&mut total, f.forensics.alternate_cost.capacity());
+    add::<bool>(&mut total, f.forensics.ambiguous.capacity());
+    add::<u8>(&mut total, f.forensics.hold_run.capacity());
+    add::<bool>(&mut total, f.forensics.held.capacity());
+    add::<bool>(&mut total, f.forensics.forced.capacity());
+    add::<u32>(&mut total, f.forensics.component_size.capacity());
+    add::<u8>(&mut total, f.forensics.solver_path.capacity());
+    add::<f64>(&mut total, f.forensics.exclusion_regret.capacity());
+    add::<u8>(&mut total, f.forensics.regret_status.capacity());
+    add::<bool>(&mut total, f.forensics.incomplete.capacity());
+    add::<bool>(&mut total, f.forensics.capped.capacity());
+    add::<i64>(&mut total, f.scratch.t_ns.capacity());
+    add::<u32>(&mut total, f.scratch.addr.capacity());
+    add::<i32>(&mut total, f.scratch.lat_e7.capacity());
+    add::<i32>(&mut total, f.scratch.lon_e7.capacity());
+    add::<f32>(&mut total, f.scratch.vel_east_mps.capacity());
+    add::<f32>(&mut total, f.scratch.vel_north_mps.capacity());
+    add::<[f32; 3]>(&mut total, f.scratch.pos_cov_m2.capacity());
+    add::<[f32; 3]>(&mut total, f.scratch.vel_cov_m2s2.capacity());
+    add::<f32>(&mut total, f.scratch.turn_rate_rps.capacity());
+    add::<f32>(&mut total, f.scratch.alt_ft.capacity());
+    add::<f32>(&mut total, f.scratch.alt_var_ft2.capacity());
+    add::<f32>(&mut total, f.scratch.vrate_fpm.capacity());
+    add::<[f32; 2]>(&mut total, f.scratch.mu_h.capacity());
+    add::<[f32; 2]>(&mut total, f.scratch.mu_v.capacity());
+    add::<u8>(&mut total, f.scratch.flags.capacity());
+    for source in &f.rscratch {
+        add::<RadarPlot>(&mut total, source.plots.capacity());
+        add::<Decision>(&mut total, source.dec.capacity());
+        add::<usize>(&mut total, source.anon.capacity());
+        add::<Option<Converted>>(&mut total, source.conv_own.capacity());
+        add::<(u32, f64, usize, Decision)>(&mut total, source.hard.capacity());
+        add::<u32>(&mut total, source.taken.capacity());
+    }
+    for workspace in &f.workspaces {
+        add::<TrackAt>(&mut total, workspace.tracks.capacity());
+        add::<bool>(&mut total, workspace.skip.capacity());
+        add::<u32>(&mut total, workspace.wide.capacity());
+    }
+    u64::try_from(total).unwrap_or(u64::MAX)
 }
 
 /// The counters.
@@ -1001,11 +1222,12 @@ pub fn fusion_buffers(f: &Fusion) -> Vec<(usize, usize)> {
         of(&f.cands),
         of(&f.tracks),
         f.hold_run.buffer(),
-        f.plot_scan.buffer(),
         point_grid_buffer(&f.init_grid),
         point_grid_radix_buffer(&f.init_grid),
         f.keyinfo.buffer(),
     ]);
+    v.push((f.plot_scan.as_ptr() as usize, f.plot_scan.capacity()));
+    v.extend(f.plot_scan.iter().map(FixedMap::buffer));
     v.extend(f.pairs_bufs.iter().map(of));
     v.extend(f.infos_bufs.iter().map(of));
     v.extend(f.reg_hist.iter().map(of));
@@ -1017,9 +1239,13 @@ pub fn fusion_buffers(f: &Fusion) -> Vec<(usize, usize)> {
             of(&r.conv_own),
             of(&r.hard),
             of(&r.taken),
-            of(&r.tracks),
-            of(&r.skip),
-            of(&r.wide),
+        ]);
+    }
+    for workspace in &f.workspaces {
+        v.extend([
+            of(&workspace.tracks),
+            of(&workspace.skip),
+            of(&workspace.wide),
         ]);
     }
     v.extend([
@@ -1027,6 +1253,7 @@ pub fn fusion_buffers(f: &Fusion) -> Vec<(usize, usize)> {
         of(&f.log.key),
         of(&f.log.label),
         of(&f.log.radar),
+        of(&f.log.physical_sensor_id),
         of(&f.log.how),
         of(&f.forensics.t_ns),
         of(&f.forensics.ordinal),
@@ -1037,6 +1264,7 @@ pub fn fusion_buffers(f: &Fusion) -> Vec<(usize, usize)> {
         of(&f.forensics.label),
         of(&f.forensics.plot_mode_a),
         of(&f.forensics.radar),
+        of(&f.forensics.physical_sensor_id),
         of(&f.forensics.action),
         of(&f.forensics.selected_key),
         of(&f.forensics.selected_cost),
@@ -1078,6 +1306,7 @@ pub fn fusion_clear_forensics(f: &mut Fusion) {
     l.label.clear();
     l.plot_mode_a.clear();
     l.radar.clear();
+    l.physical_sensor_id.clear();
     l.action.clear();
     l.selected_key.clear();
     l.selected_cost.clear();
@@ -1148,6 +1377,34 @@ pub fn fusion_plots(f: &mut Fusion, radar: usize, plots: &[RadarPlot]) {
         f.pend_plots.push(PendPlot { radar: r, plot: *p });
         f.pend_min_bucket = f.pend_min_bucket.min(bucket_of(f, p.time_ns));
     }
+}
+
+/// Offers plots by their configured physical sensor ID. This is the preferred interface for
+/// [`fusion_new_network`]: `RadarSite::sensor` remains the source identity while the internal
+/// ordinal is only a bounded array index. Returns `false` and counts every refused plot when the
+/// ID is not configured or the layer is not a network profile.
+pub fn fusion_plots_for_sensor(f: &mut Fusion, sensor_id: u16, plots: &[RadarPlot]) -> bool {
+    if !f.network_profile {
+        f.stats.plots_source_refused = f
+            .stats
+            .plots_source_refused
+            .saturating_add(plots.len() as u64);
+        return false;
+    }
+    let Some(radar) = f.sites.iter().position(|site| site.sensor == sensor_id) else {
+        f.stats.plots_source_refused = f
+            .stats
+            .plots_source_refused
+            .saturating_add(plots.len() as u64);
+        return false;
+    };
+    fusion_plots(f, radar, plots);
+    true
+}
+
+/// Maps an internal source ordinal to its preserved physical sensor ID.
+pub fn fusion_physical_sensor_id(f: &Fusion, radar: usize) -> Option<u16> {
+    f.sites.get(radar).map(|site| site.sensor)
 }
 
 /// Processes every bucket that ended before `until_ns`, then runs the tracker to the end of
@@ -1561,11 +1818,13 @@ fn assoc_prepare(f: &mut Fusion, radar: usize, polar_remaining: &mut usize) -> O
     let (Some(&g), Some(&s)) = (f.geoms.get(radar), f.sites.get(radar)) else {
         return None;
     };
+    let workspace = radar % MAX_RADARS;
     // Everything taken below exists for a radar of the layer; checked before any is taken.
-    if f.grids.get(radar).is_none()
-        || f.pairs_bufs.get(radar).is_none()
-        || f.infos_bufs.get(radar).is_none()
+    if f.grids.get(workspace).is_none()
+        || f.pairs_bufs.get(workspace).is_none()
+        || f.infos_bufs.get(workspace).is_none()
         || f.rscratch.get(radar).is_none()
+        || f.workspaces.get(radar % MAX_RADARS).is_none()
     {
         return None;
     }
@@ -1576,11 +1835,13 @@ fn assoc_prepare(f: &mut Fusion, radar: usize, polar_remaining: &mut usize) -> O
         mut conv_own,
         mut hard,
         mut taken,
+    } = std::mem::take(f.rscratch.get_mut(radar)?);
+    let RadarWorkspace {
         mut tracks,
         mut skip,
         mut wide,
-    } = std::mem::take(f.rscratch.get_mut(radar)?);
-    // Radars are numbered below MAX_RADARS.
+    } = std::mem::take(f.workspaces.get_mut(radar % MAX_RADARS)?);
+    // A source ordinal is below MAX_NETWORK_RADARS; its physical ID remains in the site.
     let r8 = u8::try_from(radar).unwrap_or(u8::MAX);
     let blank = Measurement {
         toa_ns: 0,
@@ -1989,7 +2250,7 @@ fn assoc_prepare(f: &mut Fusion, radar: usize, polar_remaining: &mut usize) -> O
         }
         wide.get(wide_at).copied() == Some(index)
     };
-    let mut grid = std::mem::take(f.grids.get_mut(radar)?);
+    let mut grid = std::mem::take(f.grids.get_mut(workspace)?);
     let built = polar_build(
         &mut grid,
         tracks.len(),
@@ -2012,8 +2273,8 @@ fn assoc_prepare(f: &mut Fusion, radar: usize, polar_remaining: &mut usize) -> O
     };
     f.stats.coarse_width_sum_m = f.stats.coarse_width_sum_m.saturating_add(width_m);
     f.stats.coarse_width_max_m = f.stats.coarse_width_max_m.max(width_m);
-    let mut pairs = std::mem::take(f.pairs_bufs.get_mut(radar)?);
-    let mut infos = std::mem::take(f.infos_bufs.get_mut(radar)?);
+    let mut pairs = std::mem::take(f.pairs_bufs.get_mut(workspace)?);
+    let mut infos = std::mem::take(f.infos_bufs.get_mut(workspace)?);
     pairs.clear();
     infos.clear();
     let anon_len = anon.len();
@@ -2354,7 +2615,8 @@ fn assoc_finish(f: &mut Fusion, ra: RadarAssoc) {
         candidate_set_complete,
         ..
     } = ra;
-    if let Some(slot) = f.grids.get_mut(radar) {
+    let workspace = radar % MAX_RADARS;
+    if let Some(slot) = f.grids.get_mut(workspace) {
         *slot = grid;
     }
     if capped {
@@ -2718,10 +2980,10 @@ fn assoc_finish(f: &mut Fusion, ra: RadarAssoc) {
         }
         f.stats.applied_assoc += 1;
     }
-    if let Some(slot) = f.pairs_bufs.get_mut(radar) {
+    if let Some(slot) = f.pairs_bufs.get_mut(workspace) {
         *slot = pairs;
     }
-    if let Some(slot) = f.infos_bufs.get_mut(radar) {
+    if let Some(slot) = f.infos_bufs.get_mut(workspace) {
         *slot = infos;
     }
     if let Some(slot) = f.rscratch.get_mut(radar) {
@@ -2729,6 +2991,8 @@ fn assoc_finish(f: &mut Fusion, ra: RadarAssoc) {
         slot.dec = dec;
         slot.anon = anon;
         slot.conv_own = conv_own;
+    }
+    if let Some(slot) = f.workspaces.get_mut(radar % MAX_RADARS) {
         slot.tracks = tracks;
         slot.skip = skip;
         slot.wide = wide;
@@ -2742,52 +3006,61 @@ fn assoc_finish(f: &mut Fusion, ra: RadarAssoc) {
 /// every radar has had its share and one radar's flood does not leave the others' plots ungated;
 /// the assignments follow.
 fn associate_bucket(f: &mut Fusion) {
-    // At most `MAX_RADARS` radars (checked by `fusion_new`).
-    let mut ras: [Option<RadarAssoc>; MAX_RADARS] = std::array::from_fn(|_| None);
-    let mut polar_remaining = f.polar_work_max;
-    for (r, slot) in ras.iter_mut().enumerate() {
-        if f.rscratch.get(r).is_some_and(|rs| !rs.plots.is_empty()) {
-            *slot = assoc_prepare(f, r, &mut polar_remaining);
-        }
-    }
-    let budget = f.bucket_tests_max;
-    let mut total = 0usize;
-    loop {
-        let pick = ras
-            .iter()
-            .enumerate()
-            .filter_map(|(i, r)| {
-                r.as_ref()
-                    .filter(|ra| !ra.capped && ra.next < ra.anon.len())
-                    .map(|ra| (ra.work.saturating_add(ra.polar_index_work), i))
-            })
-            .min();
-        let Some((_, i)) = pick else { break };
-        if total >= budget || polar_remaining == 0 {
-            // Out of work for the bucket: the plots still waiting are not gated.
-            for ra in ras.iter_mut().flatten() {
-                ra.capped |= ra.next < ra.anon.len();
+    // Each unit keeps the historical eight-source work ceilings and fair scheduling. All units
+    // read the same bucket-start tracker state; assignments are retained in source-indexed
+    // scratch and applied once, later, by `process_bucket`.
+    for unit_start in (0..f.rscratch.len()).step_by(MAX_RADARS) {
+        let unit_end = unit_start.saturating_add(MAX_RADARS).min(f.rscratch.len());
+        let mut ras: [Option<RadarAssoc>; MAX_RADARS] = std::array::from_fn(|_| None);
+        let mut polar_remaining = f.polar_work_max;
+        for radar in unit_start..unit_end {
+            let local = radar - unit_start;
+            if f.rscratch
+                .get(radar)
+                .is_some_and(|scratch| !scratch.plots.is_empty())
+            {
+                ras[local] = assoc_prepare(f, radar, &mut polar_remaining);
             }
-            break;
         }
-        let Some(ra) = ras.get_mut(i).and_then(Option::as_mut) else {
-            break;
-        };
-        // The plots in a rotation from the start; where it wraps past the last plot, note the
-        // pairs made so far so that they can be put back in plot order.
-        let k = ra.next;
-        ra.next += 1;
-        let n = ra.anon.len();
-        if ra.start + k == n && ra.start > 0 {
-            ra.wrap_pairs = Some(ra.pairs.len());
+        let budget = f.bucket_tests_max;
+        let mut total = 0usize;
+        loop {
+            let pick = ras
+                .iter()
+                .enumerate()
+                .filter_map(|(i, r)| {
+                    r.as_ref()
+                        .filter(|ra| !ra.capped && ra.next < ra.anon.len())
+                        .map(|ra| (ra.work.saturating_add(ra.polar_index_work), i))
+                })
+                .min();
+            let Some((_, i)) = pick else { break };
+            if total >= budget || polar_remaining == 0 {
+                // Out of this unit's work: waiting plots are visibly left ungated.
+                for ra in ras.iter_mut().flatten() {
+                    ra.capped |= ra.next < ra.anon.len();
+                }
+                break;
+            }
+            let Some(ra) = ras.get_mut(i).and_then(Option::as_mut) else {
+                break;
+            };
+            // The plots in a rotation from the start; where it wraps past the last plot, note the
+            // pairs made so far so that they can be put back in plot order.
+            let k = ra.next;
+            ra.next += 1;
+            let n = ra.anon.len();
+            if ra.start + k == n && ra.start > 0 {
+                ra.wrap_pairs = Some(ra.pairs.len());
+            }
+            let a = (ra.start + k) % n.max(1);
+            total += assoc_plot(f, ra, a, budget - total, &mut polar_remaining);
+            ra.last_cut_short = ra.capped;
         }
-        let a = (ra.start + k) % n.max(1);
-        total += assoc_plot(f, ra, a, budget - total, &mut polar_remaining);
-        ra.last_cut_short = ra.capped;
-    }
-    for ra in &mut ras {
-        if let Some(ra) = ra.take() {
-            assoc_finish(f, ra);
+        for ra in &mut ras {
+            if let Some(ra) = ra.take() {
+                assoc_finish(f, ra);
+            }
         }
     }
 }
@@ -2840,6 +3113,11 @@ fn log_assign(f: &mut Fusion, t_ns: i64, key: u32, label: u32, radar: u8, how: u
     f.log.key.push(key);
     f.log.label.push(label);
     f.log.radar.push(radar);
+    f.log.physical_sensor_id.push(
+        f.sites
+            .get(usize::from(radar))
+            .map_or(u16::MAX, |site| site.sensor),
+    );
     f.log.how.push(how);
 }
 
@@ -2859,12 +3137,16 @@ fn log_forensic(f: &mut Fusion, row: ForensicRow) {
     if !f.cfg.association_forensics {
         return;
     }
-    if !forensic_log_push(&mut f.forensics, row) {
+    let physical_sensor_id = f
+        .sites
+        .get(usize::from(row.radar))
+        .map_or(u16::MAX, |site| site.sensor);
+    if !forensic_log_push(&mut f.forensics, row, physical_sensor_id) {
         f.stats.forensics_overflow = f.stats.forensics_overflow.saturating_add(1);
     }
 }
 
-fn forensic_log_push(l: &mut AssocForensics, row: ForensicRow) -> bool {
+fn forensic_log_push(l: &mut AssocForensics, row: ForensicRow, physical_sensor_id: u16) -> bool {
     let n = l.t_ns.len();
     if n >= l.max_rows
         || l.ordinal.len() != n
@@ -2875,6 +3157,7 @@ fn forensic_log_push(l: &mut AssocForensics, row: ForensicRow) -> bool {
         || l.label.len() != n
         || l.plot_mode_a.len() != n
         || l.radar.len() != n
+        || l.physical_sensor_id.len() != n
         || l.action.len() != n
         || l.selected_key.len() != n
         || l.selected_cost.len() != n
@@ -2899,6 +3182,7 @@ fn forensic_log_push(l: &mut AssocForensics, row: ForensicRow) -> bool {
         || l.label.capacity() < l.max_rows
         || l.plot_mode_a.capacity() < l.max_rows
         || l.radar.capacity() < l.max_rows
+        || l.physical_sensor_id.capacity() < l.max_rows
         || l.action.capacity() < l.max_rows
         || l.selected_key.capacity() < l.max_rows
         || l.selected_cost.capacity() < l.max_rows
@@ -2926,6 +3210,7 @@ fn forensic_log_push(l: &mut AssocForensics, row: ForensicRow) -> bool {
     l.label.push(row.label);
     l.plot_mode_a.push(row.mode_a);
     l.radar.push(row.radar);
+    l.physical_sensor_id.push(physical_sensor_id);
     l.action.push(row.action);
     l.selected_key.push(row.selected_key);
     l.selected_cost.push(row.selected_cost);
@@ -3069,33 +3354,47 @@ fn process_bucket(f: &mut Fusion, adsb: &[Measurement], plots: &[PendPlot], out:
     {
         f.init_work_left = MAX_INIT_WORK;
     }
-    // At most MAX_RADARS scratch slots. Each radar with plots gets a share of the remaining
-    // budget. Return its unspent credit to the pool before dividing it among later radars.
-    let mut radars_left = f.rscratch.iter().filter(|rs| !rs.plots.is_empty()).count();
-    for r in 0..f.rscratch.len() {
-        let Some(rs) = f.rscratch.get_mut(r).map(std::mem::take) else {
-            continue;
-        };
-        if !rs.plots.is_empty() {
-            if f.cfg.registration {
-                for (j, dj) in rs.dec.iter().enumerate() {
-                    if let (Some(z), Some(p)) = (dj.resid, rs.plots.get(j)) {
-                        if let Some(st) = f.reg.get_mut(r) {
-                            reg_offer(st, p.time_ns, dj.key, &z);
+    // Initiation work is bounded per eight-source unit. Shares are divided fairly among the
+    // active sources in that unit; the aggregate profile ceiling is `MAX_INIT_WORK * units`.
+    for unit_start in (0..f.rscratch.len()).step_by(MAX_RADARS) {
+        let unit_end = unit_start.saturating_add(MAX_RADARS).min(f.rscratch.len());
+        #[cfg(test)]
+        {
+            f.init_work_left = f.init_work_max;
+        }
+        #[cfg(not(test))]
+        {
+            f.init_work_left = MAX_INIT_WORK;
+        }
+        let mut radars_left = f.rscratch[unit_start..unit_end]
+            .iter()
+            .filter(|rs| !rs.plots.is_empty())
+            .count();
+        for r in unit_start..unit_end {
+            let Some(rs) = f.rscratch.get_mut(r).map(std::mem::take) else {
+                continue;
+            };
+            if !rs.plots.is_empty() {
+                if f.cfg.registration {
+                    for (j, dj) in rs.dec.iter().enumerate() {
+                        if let (Some(z), Some(p)) = (dj.resid, rs.plots.get(j)) {
+                            if let Some(st) = f.reg.get_mut(r) {
+                                reg_offer(st, p.time_ns, dj.key, &z);
+                            }
                         }
                     }
+                    publish_registration(f, r, rs.plots.last().map_or(0, |p| p.time_ns));
                 }
-                publish_registration(f, r, rs.plots.last().map_or(0, |p| p.time_ns));
+                let share = f.init_work_left.checked_div(radars_left).unwrap_or(0);
+                let held_for_later_radars = f.init_work_left - share;
+                f.init_work_left = share;
+                initiate(f, r, &rs.plots, &rs.dec, out);
+                f.init_work_left += held_for_later_radars;
+                radars_left = radars_left.saturating_sub(1);
             }
-            let share = f.init_work_left.checked_div(radars_left).unwrap_or(0);
-            let held_for_later_radars = f.init_work_left - share;
-            f.init_work_left = share;
-            initiate(f, r, &rs.plots, &rs.dec, out);
-            f.init_work_left += held_for_later_radars;
-            radars_left = radars_left.saturating_sub(1);
-        }
-        if let Some(slot) = f.rscratch.get_mut(r) {
-            *slot = rs;
+            if let Some(slot) = f.rscratch.get_mut(r) {
+                *slot = rs;
+            }
         }
     }
 }
@@ -3106,9 +3405,14 @@ fn note_plot_scan(f: &mut Fusion, key: u32, radar: usize, t_ns: i64) {
         return;
     }
     let r8 = u8::try_from(radar).unwrap_or(u8::MAX);
-    if let Some(s) = f.plot_scan.get_mut(&(key, r8)) {
+    let map_index = if f.network_profile { radar } else { 0 };
+    let Some(scan_map) = f.plot_scan.get_mut(map_index) else {
+        f.stats.plot_scan_full = f.stats.plot_scan_full.saturating_add(1);
+        return;
+    };
+    if let Some(s) = scan_map.get_mut(&(key, r8)) {
         *s = (*s).max(t_ns);
-    } else if !f.plot_scan.insert((key, r8), t_ns) {
+    } else if !scan_map.insert((key, r8), t_ns) {
         f.stats.plot_scan_full += 1;
     }
 }
@@ -3120,9 +3424,14 @@ fn refresh_expected(f: &mut Fusion, key: u32, t_ns: i64) {
     let mut best = i64::MAX;
     for (r, s) in f.sites.iter().enumerate() {
         let r8 = u8::try_from(r).unwrap_or(u8::MAX);
-        let near = f.plot_scan.get(&(key, r8)).is_some_and(|&lt| {
-            t_ns.saturating_sub(lt) <= s.period_ns.saturating_mul(EXPECT_PERIODS)
-        });
+        let map_index = if f.network_profile { r } else { 0 };
+        let near = f
+            .plot_scan
+            .get(map_index)
+            .and_then(|map| map.get(&(key, r8)))
+            .is_some_and(|&lt| {
+                t_ns.saturating_sub(lt) <= s.period_ns.saturating_mul(EXPECT_PERIODS)
+            });
         if near {
             best = best.min(s.period_ns);
         }
@@ -3135,15 +3444,18 @@ fn refresh_expected(f: &mut Fusion, key: u32, t_ns: i64) {
 /// full (a note that old can matter to neither candidates, which are at most that many scans old,
 /// nor the expected interval, which looks back three periods).
 fn prune_plot_scan(f: &mut Fusion, t_ns: i64) {
-    if f.plot_scan.len() < f.plot_scan.capacity() / 2 {
-        return;
+    let sites = &f.sites;
+    for map in &mut f.plot_scan {
+        if map.len() < map.capacity() / 2 {
+            continue;
+        }
+        map.retain(|k, s| {
+            sites.get(usize::from(k.1)).is_some_and(|site| {
+                *s >= t_ns
+                    .saturating_sub(site.period_ns.saturating_mul(i64::from(RADAR_INIT_N) + 2))
+            })
+        })
     }
-    let mut min_t = [i64::MIN; MAX_RADARS];
-    for (m, s) in min_t.iter_mut().zip(&f.sites) {
-        *m = t_ns.saturating_sub(s.period_ns.saturating_mul(i64::from(RADAR_INIT_N) + 2));
-    }
-    f.plot_scan
-        .retain(|k, s| *s >= min_t.get(usize::from(k.1)).copied().unwrap_or(i64::MIN));
 }
 
 fn publish_registration(f: &mut Fusion, radar: usize, t_ns: i64) {
@@ -3158,7 +3470,7 @@ fn publish_registration(f: &mut Fusion, radar: usize, t_ns: i64) {
         return;
     }
     if *last == i64::MIN || t_ns.saturating_sub(*last) >= REG_PUBLISH_NS {
-        if hist.len() < REG_HISTORY_MAX {
+        if hist.len() < f.reg_history_max {
             hist.push(reg_sample(st, t_ns));
         } else {
             f.stats.reg_history_full += 1;
@@ -3945,7 +4257,7 @@ fn charge_init_work(f: &mut Fusion, units: usize) -> bool {
 }
 
 fn mark_init_capped(f: &mut Fusion, radar: usize) {
-    let Some(bit) = 1u16.checked_shl(radar as u32) else {
+    let Some(bit) = 1u64.checked_shl(radar as u32) else {
         return;
     };
     if f.init_capped_mask & bit == 0 {
@@ -4102,6 +4414,7 @@ fn confirm(f: &mut Fusion, radar: usize, c: &Cand, out: &mut TrackOutput) -> Opt
         f.tracks.push(RadarTrackRec {
             key,
             radar: radar as u8,
+            physical_sensor_id: f.sites.get(radar).map_or(u16::MAX, |site| site.sensor),
             first_ns: first,
             confirm_ns: last,
         });
@@ -5768,7 +6081,7 @@ mod tests {
         assert_eq!(st.bucket_work_capped, 1, "{st:?}");
         assert_eq!(st.coarse_visits, 75, "{st:?}");
         assert_eq!(fusion_assoc_buffers(&f), buffers_before);
-        let own_track = f.rscratch[0]
+        let own_track = f.workspaces[0]
             .tracks
             .iter()
             .position(|track| track.key == 0x100000 + 4_999)
@@ -6585,6 +6898,148 @@ mod tests {
             fusion_new(&fusion_config(tc), &[SITE]),
             Err(FusionError::BadConfig(_))
         ));
+    }
+
+    // B2 regression: a second eight-source unit shares the same physical tracker and source IDs.
+    #[test]
+    fn network_profile_keeps_physical_ids_and_one_shared_tracker_across_unit_boundary() {
+        let mut sites = Vec::with_capacity(MAX_RADARS + 1);
+        for sensor in 100..=(100 + MAX_RADARS as u16) {
+            sites.push(RadarSite { sensor, ..SITE });
+        }
+        let tc = fusion_tracker_config(&DEFAULT_CONFIG, &sites);
+        let mut cfg = fusion_config(tc);
+        cfg.log_assign = true;
+        assert!(matches!(
+            fusion_new(&cfg, &sites),
+            Err(FusionError::BadConfig("radar count"))
+        ));
+        let beyond_network = vec![SITE; MAX_NETWORK_RADARS + 1];
+        assert!(matches!(
+            fusion_new_network(&cfg, &beyond_network),
+            Err(FusionError::BadConfig("radar count"))
+        ));
+        let unsorted = [sites[1], sites[0]];
+        assert!(matches!(
+            fusion_new_network(&cfg, &unsorted),
+            Err(FusionError::BadConfig(
+                "network sites must be ordered by unique physical sensor id"
+            ))
+        ));
+        let mut fusion = fusion_new_network(&cfg, &sites).unwrap();
+        assert_eq!(fusion_stats(&fusion).network_radars, (MAX_RADARS + 1) as u8);
+        assert_eq!(fusion_stats(&fusion).network_units, 2);
+        assert_eq!(
+            fusion_stats(&fusion).network_plot_scan_slots,
+            ((MAX_RADARS + 1) * KEY_TABLE_SLOTS) as u64
+        );
+        assert_eq!(
+            fusion_stats(&fusion).network_bucket_tests_limit,
+            (MAX_BUCKET_TESTS * 2) as u64
+        );
+        assert_eq!(
+            fusion_stats(&fusion).network_reg_history_per_source_limit,
+            NETWORK_REG_HISTORY_MAX as u32
+        );
+        assert!(fusion_stats(&fusion).network_fusion_owned_bytes > 0);
+        assert_eq!(fusion_physical_sensor_id(&fusion, MAX_RADARS), Some(108));
+
+        let addr = 0xA00001;
+        let mut out = output_new(1 << 18);
+        for second in 0..4i64 {
+            fusion_adsb(&mut fusion, &adsb_fix(addr, second * NS_PER_S));
+        }
+        fusion_advance(&mut fusion, 4 * NS_PER_S, &mut out);
+        let mut reordered = fusion_new_network(&cfg, &sites).unwrap();
+        let mut reordered_out = output_new(1 << 18);
+        for second in 0..4i64 {
+            fusion_adsb(&mut reordered, &adsb_fix(addr, second * NS_PER_S));
+        }
+        fusion_advance(&mut reordered, 4 * NS_PER_S, &mut reordered_out);
+        let position = (42.15, -87.9);
+        for site in &sites {
+            let mut plot = plots_on(site, &[position], 1, 0.0, 7)[0];
+            plot.addr = addr;
+            assert!(fusion_plots_for_sensor(&mut fusion, site.sensor, &[plot]));
+        }
+        for site in sites.iter().rev() {
+            let mut plot = plots_on(site, &[position], 1, 0.0, 7)[0];
+            plot.addr = addr;
+            assert!(fusion_plots_for_sensor(
+                &mut reordered,
+                site.sensor,
+                &[plot]
+            ));
+        }
+        let refused = plots_on(&sites[0], &[position], 1, 0.0, 9);
+        assert!(!fusion_plots_for_sensor(&mut fusion, 500, &refused));
+        assert!(!fusion_plots_for_sensor(&mut reordered, 500, &refused));
+        fusion_advance(&mut fusion, 7 * NS_PER_S, &mut out);
+        fusion_advance(&mut reordered, 7 * NS_PER_S, &mut reordered_out);
+        assert_eq!(out, reordered_out);
+
+        let stats = fusion_stats(&fusion);
+        assert_eq!(stats.applied_hard, (MAX_RADARS + 1) as u64, "{stats:?}");
+        assert_eq!(stats.plots_source_refused, 1, "{stats:?}");
+        assert_eq!(tracker_live(fusion_tracker(&fusion)).len(), 1);
+        assert_eq!(fusion_tracker_stats(&fusion).started, 1);
+        assert_eq!(
+            fusion_assign_log(&fusion).physical_sensor_id,
+            sites.iter().map(|site| site.sensor).collect::<Vec<_>>()
+        );
+        assert_eq!(fusion_assign_log(&fusion), fusion_assign_log(&reordered));
+        assert_eq!(
+            fusion_physical_sensor_id(&fusion, MAX_RADARS),
+            sites.get(MAX_RADARS).map(|site| site.sensor)
+        );
+    }
+
+    // B2 stress source: 10,240 plots spread across all 64 physical source IDs in one bucket.
+    #[test]
+    fn network_profile_accounts_for_more_than_ten_thousand_combined_source_plots() {
+        let sites: Vec<RadarSite> = (1..=MAX_NETWORK_RADARS as u16)
+            .map(|sensor| RadarSite { sensor, ..SITE })
+            .collect();
+        let mut cfg = fusion_config(fusion_tracker_config(&DEFAULT_CONFIG, &sites));
+        cfg.log_assign = true;
+        cfg.association_diagnostics = true;
+        let mut fusion = fusion_new_network(&cfg, &sites).unwrap();
+        let mut out = output_new(1 << 18);
+        let location = (42.15, -87.9);
+        let per_source = 160;
+        for site in &sites {
+            let mut rows = plots_on(site, &vec![location; per_source], per_source, 0.0, 7);
+            for (i, row) in rows.iter_mut().enumerate() {
+                row.time_ns = 5 * NS_PER_S + i as i64 * 1_000;
+            }
+            assert!(fusion_plots_for_sensor(&mut fusion, site.sensor, &rows));
+        }
+        fusion_advance(&mut fusion, 6 * NS_PER_S, &mut out);
+        let stats = fusion_stats(&fusion);
+        assert_eq!(stats.network_radars as usize, MAX_NETWORK_RADARS);
+        assert_eq!(stats.network_units as usize, MAX_RADAR_NETWORK_UNITS);
+        assert_eq!(
+            stats.network_plot_scan_slots,
+            (MAX_NETWORK_RADARS * KEY_TABLE_SLOTS) as u64
+        );
+        assert_eq!(stats.plots_source_refused, 0, "{stats:?}");
+        assert_eq!(stats.bucket_plot_overflow, 0, "{stats:?}");
+        assert_eq!(stats.pending_overflow, 0, "{stats:?}");
+        assert_eq!(stats.scratch_full, 0, "{stats:?}");
+        assert_eq!(
+            stats.plots_in,
+            (MAX_NETWORK_RADARS * per_source) as u64,
+            "{stats:?}"
+        );
+        assert_eq!(
+            stats
+                .association_radar
+                .iter()
+                .map(|per_source| per_source.anonymous_offered)
+                .sum::<u64>(),
+            (MAX_NETWORK_RADARS * per_source) as u64,
+            "{stats:?}"
+        );
     }
 
     // REQ: OA-TRK-054
@@ -8023,6 +8478,7 @@ mod tests {
             f.forensics.label.len(),
             f.forensics.plot_mode_a.len(),
             f.forensics.radar.len(),
+            f.forensics.physical_sensor_id.len(),
             f.forensics.action.len(),
             f.forensics.selected_key.len(),
             f.forensics.selected_cost.len(),

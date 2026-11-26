@@ -217,6 +217,7 @@ fn identity_accounting_counts_swaps_wrong_plots_false_and_duplicate_tracks() {
             a.key.push(key);
             a.label.push(l);
             a.radar.push(0);
+            a.physical_sensor_id.push(0);
             a.how.push(1);
         }
     };
