@@ -1403,13 +1403,14 @@ fn marker_confirms_ownership(recording: &Path) -> io::Result<Option<(i64, FileId
     let Some(value) = value.strip_suffix(b"\n") else {
         return Ok(None);
     };
-    if value.is_empty() || !value.iter().all(u8::is_ascii_digit) {
-        return Ok(None);
-    }
-    let value = std::str::from_utf8(value)
-        .ok()
-        .and_then(|v| v.parse::<i64>().ok());
+    let value = parse_canonical_i64(value);
     Ok(value.map(|end| (end, identity)))
+}
+
+fn parse_canonical_i64(bytes: &[u8]) -> Option<i64> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    let value = text.parse::<i64>().ok()?;
+    (value.to_string().as_bytes() == bytes).then_some(value)
 }
 
 /// Removes only expired canonical feed segments whose V2 receipts match the current inode.
@@ -1558,20 +1559,13 @@ pub fn recordings_overlapping(
         if start_unix_secs >= to_unix_secs {
             continue;
         }
-        let closed = marker_confirms_ownership(&path)?;
-        let end_unix_secs = closed.map(|(end, _)| end);
-        let status = if end_unix_secs.is_some() {
-            RecordingSegmentStatus::Closed
-        } else if marker_is_open(&path)? {
-            RecordingSegmentStatus::Open
-        } else {
-            RecordingSegmentStatus::Unknown
+        let (end_unix_secs, status) = match marker_confirms_ownership(&path)? {
+            Some((end, _)) if end < start_unix_secs => (None, RecordingSegmentStatus::Unknown),
+            Some((end, _)) if end < from_unix_secs => continue,
+            Some((end, _)) => (Some(end), RecordingSegmentStatus::Closed),
+            None if marker_is_open(&path)? => (None, RecordingSegmentStatus::Open),
+            None => (None, RecordingSegmentStatus::Unknown),
         };
-        if let Some(end) = end_unix_secs {
-            if end < start_unix_secs || end < from_unix_secs {
-                continue;
-            }
-        }
         found.push(RecordingSegment {
             path,
             start_unix_secs,
@@ -2395,6 +2389,15 @@ mod i3_retention_tests {
         let mut overflow = policy(MIN_RETENTION_SECS);
         overflow.measured_peak_bytes_per_hour = u64::MAX;
         assert!(retention_storage_budget_bytes(&overflow).is_err());
+        let mut rounded = policy(MIN_RETENTION_SECS + 1);
+        rounded.measured_peak_bytes_per_hour = 1;
+        assert_eq!(
+            retention_storage_budget_bytes(&rounded).expect("rounded-hour budget"),
+            1081
+        );
+        let mut hour_overflow = policy(u64::MAX);
+        hour_overflow.measured_peak_bytes_per_hour = 1;
+        assert!(retention_storage_budget_bytes(&hour_overflow).is_err());
     }
 
     // REQ: OA-FEED-193
@@ -2481,6 +2484,45 @@ mod i3_retention_tests {
         fs::remove_dir_all(dir).expect("remove fixtures");
     }
 
+    // REQ: OA-FEED-192
+    #[test]
+    fn legacy_recorder_does_not_delete_old_marked_segments() {
+        let dir = temp_dir();
+        let expired = dir.join("test-19700101T000000Z-0001.oaf");
+        fs::write(&expired, b"keep in legacy mode").expect("segment fixture");
+        write_ownership_marker(&expired).expect("owner marker");
+        mark_owned_closed(&expired, 0).expect("closed receipt");
+        let mut recorder =
+            Recorder::open(&dir, "test", 1, u64::MAX, Format::Raw).expect("legacy recorder");
+        let now = now_secs();
+        recorder
+            .write_frame(b"new frame", now, now)
+            .expect("legacy write");
+        assert!(expired.exists(), "legacy mode never opts into deletion");
+        recorder.finish().expect("finish");
+        fs::remove_dir_all(dir).expect("remove fixtures");
+    }
+
+    // REQ: OA-FEED-193
+    #[test]
+    fn negative_unix_close_times_can_expire_after_the_full_retention_window() {
+        let dir = temp_dir();
+        let retention = MIN_RETENTION_SECS as i64;
+        let start = -retention - 3;
+        let expired = dir.join(format!(
+            "test-{}-0001.oaf",
+            utc_stamp(start).expect("negative timestamp")
+        ));
+        fs::write(&expired, b"expired before Unix epoch").expect("segment fixture");
+        write_ownership_marker(&expired).expect("owner marker");
+        mark_owned_closed(&expired, start + 1).expect("negative close receipt");
+        let removed = remove_expired_owned(&dir, "test", -1, MIN_RETENTION_SECS)
+            .expect("negative time cleanup");
+        assert!(removed > 0);
+        assert!(!expired.exists());
+        fs::remove_dir_all(dir).expect("remove fixtures");
+    }
+
     // REQ: OA-FEED-194
     #[test]
     fn technician_query_returns_segments_overlapping_half_open_range() {
@@ -2506,6 +2548,11 @@ mod i3_retention_tests {
         write_ownership_marker(&ended_before).expect("owner");
         mark_owned_closed(&ended_before, 99).expect("close");
 
+        let reversed_interval = dir.join(name("test", 97, 2));
+        fs::write(&reversed_interval, b"wall clock stepped backwards").expect("fixture");
+        write_ownership_marker(&reversed_interval).expect("owner");
+        mark_owned_closed(&reversed_interval, 96).expect("backwards close");
+
         let open = dir.join(name("test", 99, 1));
         fs::write(&open, b"open interval").expect("fixture");
         write_ownership_marker(&open).expect("owner");
@@ -2525,6 +2572,7 @@ mod i3_retention_tests {
             vec![
                 unknown.clone(),
                 ending_at_from.clone(),
+                reversed_interval.clone(),
                 spanning.clone(),
                 open.clone()
             ]
@@ -2541,7 +2589,32 @@ mod i3_retention_tests {
         assert_eq!(segment(&open).end_unix_secs, None);
         assert_eq!(segment(&unknown).status, RecordingSegmentStatus::Unknown);
         assert_eq!(segment(&unknown).end_unix_secs, None);
+        assert_eq!(
+            segment(&reversed_interval).status,
+            RecordingSegmentStatus::Unknown
+        );
+        assert_eq!(segment(&reversed_interval).end_unix_secs, None);
         assert!(recordings_overlapping(&dir, "test", 101, 101).is_err());
+        fs::remove_dir_all(dir).expect("remove fixtures");
+    }
+
+    // REQ: OA-FEED-194
+    #[test]
+    fn technician_query_parses_negative_close_times_as_closed_intervals() {
+        let dir = temp_dir();
+        let start = -2;
+        let path = dir.join(format!(
+            "test-{}-0001.oaf",
+            utc_stamp(start).expect("pre-epoch stamp")
+        ));
+        fs::write(&path, b"pre-epoch interval").expect("segment fixture");
+        write_ownership_marker(&path).expect("owner marker");
+        mark_owned_closed(&path, -1).expect("negative close receipt");
+        let found = recordings_overlapping(&dir, "test", -1, 0).expect("query");
+        assert_eq!(found.len(), 1);
+        let segment = found.first().expect("one closed segment");
+        assert_eq!(segment.status, RecordingSegmentStatus::Closed);
+        assert_eq!(segment.end_unix_secs, Some(-1));
         fs::remove_dir_all(dir).expect("remove fixtures");
     }
 
