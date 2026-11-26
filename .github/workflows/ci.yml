@@ -10,6 +10,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Toolchain
         run: rustup toolchain install 1.89.0 --profile minimal --component clippy,rustfmt && rustup default 1.89.0
       - name: Format
@@ -42,6 +44,8 @@ jobs:
         run: timeout 10m cargo +1.89.0 run --offline --manifest-path validation/oa-vectors/Cargo.toml --target-dir "$RUNNER_TEMP/oa-vectors-target" --locked
       - name: Test
         run: cargo +1.89.0 test --workspace --release --locked
+      - name: Build release candidate binaries for VDD digests
+        run: cargo +1.89.0 build --workspace --release --locked --bins
       - name: Actual WASM engine startup and native frame parity
         run: |
           rustup target add wasm32-unknown-unknown --toolchain 1.89.0
@@ -114,9 +118,11 @@ jobs:
           python3 tools/test_reproduce_zau.py
       - name: Requirements and assurance traceability
         run: |
+          set -euo pipefail
+          python3 tools/test_generate_vdd.py
           python3 tools/test_f1a_dependency_graph.py
           python3 tools/check_f1a_dependency_graph.py
-          cargo +1.89.0 run --locked -p oa-trace
+          cargo +1.89.0 run --locked -p oa-trace -- --root "$GITHUB_WORKSPACE" | tee "$RUNNER_TEMP/oa-trace-vdd.txt"
           python3 -m unittest discover -s tools/oa-encounter/tests -p 'test_*.py'
           python3 tools/test_generate_oscal_control_map.py
           python3 tools/generate_oscal_control_map.py --check
@@ -142,6 +148,18 @@ jobs:
             --toolchain 1.89.0
           cp .github/security/ssdf-evidence-map.json \
             "$RUNNER_TEMP/supply-chain-evidence/ssdf-evidence-map.json"
+          cp "$RUNNER_TEMP/oa-trace-vdd.txt" \
+            "$RUNNER_TEMP/supply-chain-evidence/requirements-trace.txt"
+      - name: Generate candidate version description
+        if: always()
+        run: |
+          python3 tools/generate_vdd.py \
+            --repo "$GITHUB_WORKSPACE" \
+            --out "$RUNNER_TEMP/supply-chain-evidence/VERSION_DESCRIPTION.md" \
+            --mode candidate \
+            --trace-file "$RUNNER_TEMP/oa-trace-vdd.txt" \
+            --build-dir target/release \
+            --provenance-file "$RUNNER_TEMP/supply-chain-evidence/toolchain-provenance.json"
       - name: Attach supply-chain evidence to this CI run
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
