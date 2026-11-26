@@ -35,6 +35,8 @@ pub struct RunwayAidPacket {
     pub caution_tracks: u16,
     pub warning_tracks: u16,
     pub alert_tracks: u16,
+    pub atpa_warning_pairs: u16,
+    pub atpa_alert_pairs: u16,
     /// Rows excluded due to absent/stale/invalid prediction evidence; never silently treated clear.
     pub unavailable_tracks: u16,
 }

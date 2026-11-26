@@ -50,6 +50,7 @@ pub struct RegionalRuntime {
     runway_assignments: Vec<ActiveRunwayAssignment>,
     runway_aids_manifest_sha256: Option<[u8; 32]>,
     runway_aids_profile_sha256: Option<[u8; 32]>,
+    atpa_scratch: AtpaScratch,
 }
 
 #[derive(Clone, Copy)]
@@ -57,6 +58,88 @@ struct RunwayAidRuntime {
     config: oa_runway::adaptation::AidPairConfig,
     geometry: crate::runway_aids::RunwayAidGeometry,
     state: oa_runway::final_monitor::FinalMonitorState,
+}
+
+struct AtpaScratch {
+    runway_id: Vec<u32>,
+    end_name: Vec<[u8; 3]>,
+    scan_ns: Vec<u64>,
+    lead_along_m: Vec<f64>,
+    trail_along_m: Vec<f64>,
+    lead_speed_mps: Vec<f64>,
+    trail_speed_mps: Vec<f64>,
+    minimum_spacing_m: Vec<f64>,
+    severity: Vec<oa_runway::terminal_aids::AtpaSeverity>,
+    current_distance_milli_nm: Vec<u32>,
+    seconds_to_loss_milli: Vec<u32>,
+}
+
+impl AtpaScratch {
+    fn new(max_flights: usize) -> Result<Self, String> {
+        let rows = max_flights.min(oa_runway::terminal_aids::MAX_CRDA_ROWS);
+        let pair_capacity = rows
+            .checked_mul(rows.saturating_sub(1))
+            .and_then(|count| count.checked_div(2))
+            .ok_or("ATPA scratch capacity overflow")?;
+        let mut scratch = Self {
+            runway_id: Vec::new(),
+            end_name: Vec::new(),
+            scan_ns: Vec::new(),
+            lead_along_m: Vec::new(),
+            trail_along_m: Vec::new(),
+            lead_speed_mps: Vec::new(),
+            trail_speed_mps: Vec::new(),
+            minimum_spacing_m: Vec::new(),
+            severity: Vec::new(),
+            current_distance_milli_nm: Vec::new(),
+            seconds_to_loss_milli: Vec::new(),
+        };
+        scratch
+            .runway_id
+            .try_reserve_exact(pair_capacity)
+            .map_err(|_| "ATPA runway scratch allocation refused")?;
+        scratch
+            .end_name
+            .try_reserve_exact(pair_capacity)
+            .map_err(|_| "ATPA end scratch allocation refused")?;
+        scratch
+            .scan_ns
+            .try_reserve_exact(pair_capacity)
+            .map_err(|_| "ATPA time scratch allocation refused")?;
+        scratch
+            .lead_along_m
+            .try_reserve_exact(pair_capacity)
+            .map_err(|_| "ATPA lead scratch allocation refused")?;
+        scratch
+            .trail_along_m
+            .try_reserve_exact(pair_capacity)
+            .map_err(|_| "ATPA trail scratch allocation refused")?;
+        scratch
+            .lead_speed_mps
+            .try_reserve_exact(pair_capacity)
+            .map_err(|_| "ATPA lead speed allocation refused")?;
+        scratch
+            .trail_speed_mps
+            .try_reserve_exact(pair_capacity)
+            .map_err(|_| "ATPA trail speed allocation refused")?;
+        scratch
+            .minimum_spacing_m
+            .try_reserve_exact(pair_capacity)
+            .map_err(|_| "ATPA spacing allocation refused")?;
+        scratch
+            .severity
+            .try_reserve_exact(pair_capacity)
+            .map_err(|_| "ATPA severity allocation refused")?;
+        scratch
+            .current_distance_milli_nm
+            .try_reserve_exact(pair_capacity)
+            .map_err(|_| "ATPA distance allocation refused")?;
+        scratch
+            .seconds_to_loss_milli
+            .try_reserve_exact(pair_capacity)
+            .map_err(|_| "ATPA time output allocation refused")?;
+        Ok(scratch)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -78,6 +161,190 @@ pub struct RunwayAssignmentValue {
 }
 
 const MAX_RUNTIME_RUNWAY_AID_PAIRS: usize = oa_runway::adaptation::MAX_AID_PAIRS;
+
+#[derive(Clone, Copy)]
+struct AtpaFlightInput {
+    assignment: ActiveRunwayAssignment,
+    point: oa_runway::plane::Local,
+    east_speed_mps: f64,
+    north_speed_mps: f64,
+}
+
+fn evaluate_assigned_atpa(
+    aid: &RunwayAidRuntime,
+    assignments: &[ActiveRunwayAssignment],
+    tracks: &[crate::surveillance::ObservedTrack],
+    scan_time_ns: i64,
+    scratch: &mut AtpaScratch,
+) -> Option<(u16, u16, u16)> {
+    use oa_runway::terminal_aids::{self, AtpaPairs, AtpaRows, AtpaSeverity};
+    const MAX_FLIGHTS: usize = terminal_aids::MAX_CRDA_ROWS;
+    let scan_ns = u64::try_from(scan_time_ns).ok().filter(|time| *time > 0)?;
+    if assignments.len() > MAX_FLIGHTS {
+        return None;
+    }
+    let local_plane = oa_runway::plane::plane_new(
+        aid.geometry.plane_origin.lat_deg,
+        aid.geometry.plane_origin.lon_deg,
+    )?;
+    let mut flights: [Option<AtpaFlightInput>; MAX_FLIGHTS] = [None; MAX_FLIGHTS];
+    let mut flight_count = 0usize;
+    let mut omitted = 0u16;
+    for assignment in assignments {
+        let matches_first = assignment.runway_id == aid.config.first_runway_id
+            && assignment.end_name == aid.config.first_end_name;
+        let matches_second = assignment.runway_id == aid.config.second_runway_id
+            && assignment.end_name == aid.config.second_end_name;
+        if !matches_first && !matches_second {
+            continue;
+        }
+        let mut matching_track = None;
+        for track in tracks {
+            if track.address == assignment.identity.aircraft_address {
+                if matching_track.replace(track).is_some() {
+                    return None;
+                }
+            }
+        }
+        let Some(track) = matching_track else {
+            omitted = omitted.saturating_add(1);
+            continue;
+        };
+        if !scan_time_ns
+            .checked_sub(track.newest_source_ns)
+            .is_some_and(|age| (0..4_800_000_000).contains(&age))
+        {
+            omitted = omitted.saturating_add(1);
+            continue;
+        }
+        let point = oa_runway::plane::to_local(
+            &local_plane,
+            oa_runway::plane::Geo {
+                lat_deg: f64::from(track.lat_e7) / 10_000_000.0,
+                lon_deg: f64::from(track.lon_e7) / 10_000_000.0,
+            },
+        )?;
+        let Some(slot) = flights.get_mut(flight_count) else {
+            return None;
+        };
+        *slot = Some(AtpaFlightInput {
+            assignment: *assignment,
+            point,
+            east_speed_mps: f64::from(track.east_mmps) / 1_000.0,
+            north_speed_mps: f64::from(track.north_mmps) / 1_000.0,
+        });
+        flight_count += 1;
+    }
+    scratch.runway_id.clear();
+    scratch.end_name.clear();
+    scratch.scan_ns.clear();
+    scratch.lead_along_m.clear();
+    scratch.trail_along_m.clear();
+    scratch.lead_speed_mps.clear();
+    scratch.trail_speed_mps.clear();
+    scratch.minimum_spacing_m.clear();
+    for left in 0..flight_count {
+        let Some(first) = flights.get(left).copied().flatten() else {
+            return None;
+        };
+        for right in left.saturating_add(1)..flight_count {
+            let Some(second) = flights.get(right).copied().flatten() else {
+                return None;
+            };
+            if first.assignment.runway_id != second.assignment.runway_id
+                || first.assignment.end_name != second.assignment.end_name
+            {
+                continue;
+            }
+            let (threshold, inbound_east, inbound_north) = if first.assignment.runway_id
+                == aid.config.first_runway_id
+                && first.assignment.end_name == aid.config.first_end_name
+            {
+                (
+                    aid.geometry.first_threshold,
+                    aid.geometry.first_inbound_east,
+                    aid.geometry.first_inbound_north,
+                )
+            } else if first.assignment.runway_id == aid.config.second_runway_id
+                && first.assignment.end_name == aid.config.second_end_name
+            {
+                (
+                    aid.geometry.second_threshold,
+                    aid.geometry.second_inbound_east,
+                    aid.geometry.second_inbound_north,
+                )
+            } else {
+                return None;
+            };
+            let first_along = (first.point.east_m - threshold.east_m) * inbound_east
+                + (first.point.north_m - threshold.north_m) * inbound_north;
+            let second_along = (second.point.east_m - threshold.east_m) * inbound_east
+                + (second.point.north_m - threshold.north_m) * inbound_north;
+            if (first_along - second_along).abs() <= f64::EPSILON {
+                omitted = omitted.saturating_add(2);
+                continue;
+            }
+            let first_speed =
+                first.east_speed_mps * inbound_east + first.north_speed_mps * inbound_north;
+            let second_speed =
+                second.east_speed_mps * inbound_east + second.north_speed_mps * inbound_north;
+            if first_speed < 0.0 || second_speed < 0.0 {
+                omitted = omitted.saturating_add(2);
+                continue;
+            }
+            let (lead_along, trail_along, lead_speed, trail_speed) = if first_along > second_along {
+                (first_along, second_along, first_speed, second_speed)
+            } else {
+                (second_along, first_along, second_speed, first_speed)
+            };
+            scratch.runway_id.push(first.assignment.runway_id);
+            scratch.end_name.push(first.assignment.end_name);
+            scratch.scan_ns.push(scan_ns);
+            scratch.lead_along_m.push(lead_along);
+            scratch.trail_along_m.push(trail_along);
+            scratch.lead_speed_mps.push(lead_speed);
+            scratch.trail_speed_mps.push(trail_speed);
+            scratch
+                .minimum_spacing_m
+                .push(f64::from(aid.config.minimum_spacing_ft) * oa_runway::final_monitor::FT_TO_M);
+        }
+    }
+    let pair_count = scratch.runway_id.len();
+    scratch.severity.resize(pair_count, AtpaSeverity::Clear);
+    scratch.current_distance_milli_nm.resize(pair_count, 0);
+    scratch.seconds_to_loss_milli.resize(pair_count, 0);
+    let result = terminal_aids::evaluate_atpa_pairs(
+        scan_ns,
+        AtpaPairs {
+            lead_runway_id: &scratch.runway_id,
+            trail_runway_id: &scratch.runway_id,
+            lead_end_name: &scratch.end_name,
+            trail_end_name: &scratch.end_name,
+            scan_ns: &scratch.scan_ns,
+            lead_along_m: &scratch.lead_along_m,
+            trail_along_m: &scratch.trail_along_m,
+            lead_speed_mps: &scratch.lead_speed_mps,
+            trail_speed_mps: &scratch.trail_speed_mps,
+            minimum_spacing_m: &scratch.minimum_spacing_m,
+        },
+        AtpaRows {
+            severity: &mut scratch.severity,
+            current_distance_milli_nm: &mut scratch.current_distance_milli_nm,
+            seconds_to_loss_milli: &mut scratch.seconds_to_loss_milli,
+        },
+    )
+    .ok()?;
+    let mut warnings = 0u16;
+    let mut alerts = 0u16;
+    for severity in &scratch.severity {
+        match severity {
+            AtpaSeverity::Clear => {}
+            AtpaSeverity::Warning => warnings = warnings.saturating_add(1),
+            AtpaSeverity::Alert => alerts = alerts.saturating_add(1),
+        }
+    }
+    Some((warnings, alerts, omitted))
+}
 
 /// Versioned capacities for a single offline replay. Defaults reproduce the historic small
 /// session; `recorded_peak` is an explicitly selected high-volume analysis profile.
@@ -196,6 +463,8 @@ pub const MAX_PERFORMANCE_ENVELOPES: usize = MAX_DRIVER_FLIGHTS;
 
 fn runway_aid_packets(
     aids: &mut [RunwayAidRuntime],
+    assignments: &[ActiveRunwayAssignment],
+    atpa_scratch: &mut AtpaScratch,
     tracks: &[crate::surveillance::ObservedTrack],
     scan_time_ns: i64,
     scan_sequence: u64,
@@ -218,6 +487,8 @@ fn runway_aid_packets(
             caution_tracks: 0,
             warning_tracks: 0,
             alert_tracks: 0,
+            atpa_warning_pairs: 0,
+            atpa_alert_pairs: 0,
             unavailable_tracks: 0,
         }];
     }
@@ -352,6 +623,16 @@ fn runway_aid_packets(
                 }
             }
         }
+        let atpa = if invalid {
+            None
+        } else {
+            evaluate_assigned_atpa(aid, assignments, tracks, scan_time_ns, atpa_scratch)
+        };
+        if atpa.is_none() {
+            invalid = true;
+        }
+        let (atpa_warnings, atpa_alerts, atpa_omitted) = atpa.unwrap_or((0, 0, 0));
+        omitted = omitted.saturating_add(atpa_omitted);
         let degraded = invalid || omitted != 0 || update.is_some_and(|result| result.degraded);
         packets.push(RunwayAidPacket {
             scan_sequence,
@@ -366,7 +647,9 @@ fn runway_aid_packets(
             } else {
                 Availability::Available
             },
-            maximum_severity: if warning_count > 0 {
+            maximum_severity: if atpa_alerts > 0 {
+                Severity::Alert
+            } else if warning_count > 0 || atpa_warnings > 0 {
                 Severity::Warning
             } else if caution_count > 0 {
                 Severity::Caution
@@ -377,6 +660,8 @@ fn runway_aid_packets(
             caution_tracks: caution_count,
             warning_tracks: warning_count,
             alert_tracks: 0,
+            atpa_warning_pairs: atpa_warnings,
+            atpa_alert_pairs: atpa_alerts,
             unavailable_tracks: omitted,
         });
     }
@@ -391,7 +676,8 @@ mod runway_aid_packet_tests {
     // REQ: OA-RWY-022
     #[test]
     fn unconfigured_runtime_emits_explicit_unavailable_packet() {
-        let packets = runway_aid_packets(&mut [], &[], 1_000_000_000, 1);
+        let mut scratch = AtpaScratch::new(1).expect("small bounded ATPA scratch");
+        let packets = runway_aid_packets(&mut [], &[], &mut scratch, &[], 1_000_000_000, 1);
         assert_eq!(packets.len(), 1);
         let packet = packets.first().expect("one unavailable packet");
         assert_eq!(packet.availability, Availability::Unavailable);
@@ -1098,6 +1384,7 @@ fn regional_new_with_profile_and_namespace_and_audit_checkpoint(
         runway_assignments: Vec::with_capacity(profile.max_flights),
         runway_aids_manifest_sha256: None,
         runway_aids_profile_sha256: None,
+        atpa_scratch: AtpaScratch::new(profile.max_flights)?,
     })
 }
 
@@ -1441,6 +1728,8 @@ fn execute(
     runtime.observed.clone_from(&surveillance.tracks);
     let runway_aids = runway_aid_packets(
         &mut runtime.runway_aids,
+        &runtime.runway_assignments,
+        &mut runtime.atpa_scratch,
         &surveillance.tracks,
         surveillance.time_ns,
         runtime.frame_sequence,
