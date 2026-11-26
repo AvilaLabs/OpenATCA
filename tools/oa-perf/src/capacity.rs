@@ -639,6 +639,9 @@ pub const TRACKER_NOT_LOSS: &[&str] = &[
     "moves_old_path_unpredictable",
     "moves_resync_marked",
     "moves_peak_active",
+    // Conflicting same-time identity observations invalidate the code, while preserving track
+    // motion and ownership; count the diagnostic without classifying it as dropped work.
+    "ident_conflicts",
 ];
 
 /// Every counter of work lost or refused: input or output that the run dropped, refused, cut
