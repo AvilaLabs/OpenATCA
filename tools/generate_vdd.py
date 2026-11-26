@@ -146,13 +146,14 @@ def _clean_source(root: Path) -> None:
         raise VddError("refusing a dirty source tree; VDD must describe a clean commit")
 
 
-def _tag_info(root: Path, mode: str, tag: str | None, date: str | None) -> tuple[str, str, str]:
+def _tag_info(root: Path, mode: str, tag: str | None, date: str | None) -> tuple[str, str, str, str]:
     commit = _git_text(root, "rev-parse", "HEAD", cap=256)
     if mode == "candidate":
         if tag or date:
             raise VddError("candidate mode does not accept release tag/date")
-        return "unreleased candidate", "not released", commit
-    if not tag or not VERSION_RE.fullmatch(tag):
+        return "unreleased candidate", "not released", commit, "none"
+    current_match = VERSION_RE.fullmatch(tag or "")
+    if current_match is None:
         raise VddError("release mode requires a vMAJOR.MINOR.PATCH tag")
     tagged = _git_text(root, "rev-parse", f"{tag}^{{commit}}", cap=256)
     if tagged != commit:
@@ -160,7 +161,7 @@ def _tag_info(root: Path, mode: str, tag: str | None, date: str | None) -> tuple
     release_date = date or _git_text(root, "show", "-s", "--format=%cs", tag, cap=256)
     if not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", release_date):
         raise VddError("release date must be YYYY-MM-DD")
-    return tag, release_date, commit
+    return current_match.group(1), release_date, commit, tag
 
 
 def _previous_tag(root: Path, current: str, supplied: str | None) -> str | None:
@@ -401,7 +402,7 @@ def generate(root: Path, output: Path, *, mode: str, tag: str | None,
     if resolved_output == root or root in resolved_output.parents:
         raise VddError("VDD output must be outside the source checkout")
     _clean_source(root)
-    version, date, commit = _tag_info(root, mode, tag, release_date)
+    version, date, commit, tag_label = _tag_info(root, mode, tag, release_date)
     baseline = _previous_tag(root, tag or "candidate", previous_tag)
     if baseline:
         _git_text(root, "merge-base", "--is-ancestor", baseline, commit, cap=256)
@@ -420,7 +421,7 @@ def generate(root: Path, output: Path, *, mode: str, tag: str | None,
         raw = _read(root / rel, MAX_OUTPUT_BYTES)
         evidence_artifacts.append(f"- `{rel}` — SHA-256 `{_sha(raw)}`")
     sections = [
-        f"## 1. Release identity\n\n- Title: OpenATCA\n- Version: `{version}`\n- Date: `{date}`\n- Commit: `{commit}`\n- Status: `{mode}`\n",
+        f"## 1. Release identity\n\n- Title: OpenATCA\n- Version: `{version}`\n- Release tag: `{tag_label}`\n- Date: `{date}`\n- Commit: `{commit}`\n- Status: `{mode}`\n",
         f"## 2. Configuration items and versions\n\n{versions}\n- Source: this repository commit.\n- Adaptation is separately versioned data; this VDD does not identify a facility-specific issued adaptation.\n",
         f"## 3. Changes since the prior baseline\n\n{changes}",
         f"## 4. Requirements trace\n\n- `oa-trace`: {trace_summary}\n- Report attachment: `requirements-trace.txt`; SHA-256 `{trace_digest}`. The trace joins source tags; it does not itself run tests or proofs.\n",

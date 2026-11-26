@@ -81,7 +81,8 @@ class VddFixture(unittest.TestCase):
     def test_section_1_release_identity(self):
         text = self.render()
         self.assertIn("## 1. Release identity", text)
-        self.assertIn("Version: `v1.2.4`", text)
+        self.assertIn("Version: `1.2.4`", text)
+        self.assertIn("Release tag: `v1.2.4`", text)
         self.assertIn("Date: `2026-11-26`", text)
 
     def test_section_2_item_versions(self):
