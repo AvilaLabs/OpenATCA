@@ -76,7 +76,7 @@ struct Counts {
 }
 
 fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Arguments, String> {
-    let values: Vec<OsString> = args.collect();
+    let values: Vec<OsString> = args.into_iter().collect();
     if values.len() != 4 {
         return Err(
             "usage: oa-regional-session soak --candidate-commit HEX40 --out NEW_DIR".into(),
