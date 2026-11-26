@@ -51,7 +51,7 @@ pub enum RecordedIdentity {
 }
 
 // A7.2: cold shell result counters for the position adapter.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct AdapterCounts {
     pub examined: u64,
     pub emitted: u64,
@@ -164,7 +164,7 @@ pub fn event_storage_budget(budget: RecordingBudget) -> Result<usize, AdapterErr
 }
 
 // A7.2: cold shell counters; not used in core hot-path storage.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RecordedAdapterCounts {
     pub frames_adsb: u64,
     pub frames_sfdps: u64,
