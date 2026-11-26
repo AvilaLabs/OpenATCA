@@ -5,12 +5,32 @@
 mod synthetic;
 
 use oa_migration_switch::{
-    observe_delivery, prepare_candidate, rollback, select_candidate, Output,
+    audit_checkpoint, candidate_audit_event, observe_delivery, prepare_candidate, rollback,
+    rollback_audit_event, select_candidate, Output,
 };
 use oa_regional_session::migration_drill::H5_MEASUREMENT_START_NS;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::time::Instant;
+
+fn synthetic_receipt(
+    selector: &oa_migration_switch::Selector,
+    event: oa_audit_core::Event,
+) -> oa_audit_core::AuditReceipt {
+    let checkpoint = audit_checkpoint(selector);
+    let sequence = checkpoint.count.checked_add(1).expect("audit sequence");
+    let mut material = [0; 32];
+    material[..8].copy_from_slice(&sequence.to_le_bytes());
+    material[8..16].copy_from_slice(&event.principal.to_le_bytes());
+    material[16..24].copy_from_slice(&event.time_ns.to_le_bytes());
+    material[24] = event.action as u8;
+    oa_audit_core::receipt_claim(
+        sequence,
+        oa_sha256::sha256(&material),
+        checkpoint.tail,
+        event,
+    )
+}
 
 struct Consumer {
     child: Child,
@@ -139,6 +159,9 @@ fn one_hundred_synthetic_m2_flip_rollbacks_reach_independent_consumer() {
         let intent = synthetic::promotion_intent(&selector, &readiness, &grant, 1, now_ns)
             .expect("M2 intent fixture");
         let flip_started = Instant::now();
+        let flip_event =
+            candidate_audit_event(&selector, &intent, now_ns).expect("candidate audit event");
+        let flip_audit = synthetic_receipt(&selector, flip_event);
         select_candidate(
             &mut selector,
             &readiness,
@@ -146,6 +169,7 @@ fn one_hundred_synthetic_m2_flip_rollbacks_reach_independent_consumer() {
             &intent,
             now_ns,
             policy.max_snapshot_age_ns,
+            flip_audit,
         )
         .expect("M2 candidate selection");
         assert_eq!(oa_migration_switch::selected(&selector), Output::Candidate);
@@ -163,12 +187,16 @@ fn one_hundred_synthetic_m2_flip_rollbacks_reach_independent_consumer() {
         let rollback_at = now_ns + 200_000_000;
         let rollback_cause =
             synthetic::rollback_receipt(unit, policy, 2, 1, 1, rollback_at, rollback_at);
+        let rollback_event = rollback_audit_event(&selector, rollback_cause, rollback_at)
+            .expect("rollback audit event");
+        let rollback_audit = synthetic_receipt(&selector, rollback_event);
         let rollback_started = Instant::now();
         rollback(
             &mut selector,
             rollback_cause,
             rollback_at,
             policy.max_snapshot_age_ns,
+            rollback_audit,
         )
         .expect("M2 rollback");
         assert_eq!(oa_migration_switch::selected(&selector), Output::Legacy);
