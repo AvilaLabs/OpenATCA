@@ -13,6 +13,11 @@ const CATALOG_SHA256: oa_sha256::Digest = [
     0xb9, 0xcf, 0x1e, 0x98, 0xe7, 0x25, 0x65, 0xe0, 0xdd, 0x71, 0xa8, 0x4c, 0xaf, 0x2b, 0x8a, 0xde,
     0x19, 0xf1, 0x60, 0x08, 0xd4, 0x18, 0x0e, 0xa0, 0xde, 0xcf, 0x38, 0x72, 0x73, 0xa5, 0x08, 0x40,
 ];
+const CATALOG_VERSION: &str = "synthetic-pver-v1";
+const CATALOG_DOCUMENT_HEADER: &str =
+    "# OpenATCA synthetic performance verification catalog v1; non-operational fixtures";
+const CATALOG_COLUMNS_HEADER: &str =
+    "# schema,mode,target_id,lat_e7,lon_e7,east_mps,north_mps,position_tolerance_m,velocity_tolerance_mps";
 const MAX_CATALOG_TARGETS: usize = 6;
 const MAX_REPORT_CERTIFICATIONS: usize = 256;
 const MAX_EXCEPTION_BYTES: usize = 1024;
@@ -21,6 +26,7 @@ const DETAILS_MAGIC_V2: &[u8; 8] = b"OACERT02";
 const DETAILS_MAGIC: &[u8; 8] = b"OACERT03";
 const DETAILS_MAGIC_V4: &[u8; 8] = b"OACERT04";
 const DETAILS_MAGIC_V5: &[u8; 8] = b"OACERT05";
+const DETAILS_MAGIC_V6: &[u8; 8] = b"OACERT06";
 const MAX_PROCESSORS: usize = 128;
 const MAX_REQUEST_SOURCES: usize = 128;
 const MAX_SOFTWARE_ARTIFACT_BYTES: u64 = oa_build_info::MAX_ARTIFACT_BYTES;
@@ -55,6 +61,7 @@ pub struct SyntheticTarget {
 pub struct SyntheticCatalog {
     pub version: String,
     pub sha256: oa_sha256::Digest,
+    adaptation_version: Option<u64>,
     full: Vec<SyntheticTarget>,
     abbreviated: Vec<SyntheticTarget>,
 }
@@ -63,12 +70,16 @@ pub struct SyntheticCatalog {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PverResult {
     mode: PverMode,
+    catalog_version: String,
     catalog_sha256: oa_sha256::Digest,
+    adaptation_version: Option<u64>,
     adaptation_evidence: DigestEvidence,
     runner_artifact_evidence: DigestEvidence,
     tracker_config_sha256: oa_sha256::Digest,
     runner_build_claim_sha256: oa_sha256::Digest,
     profile_binding_sha256: Option<oa_sha256::Digest>,
+    full_catalog_targets: Vec<(String, u64, u64)>,
+    abbreviated_catalog_targets: Vec<(String, u64, u64)>,
     target_results: Vec<TargetResult>,
     targets_checked: usize,
     targets_passed: usize,
@@ -83,6 +94,12 @@ impl PverResult {
     }
     pub fn catalog_sha256(&self) -> oa_sha256::Digest {
         self.catalog_sha256
+    }
+    pub fn catalog_version(&self) -> &str {
+        &self.catalog_version
+    }
+    pub fn adaptation_version(&self) -> Option<u64> {
+        self.adaptation_version
     }
     pub fn adaptation_sha256(&self) -> Option<oa_sha256::Digest> {
         self.adaptation_evidence.sha256
@@ -438,16 +455,36 @@ pub fn synthetic_catalog() -> Result<SyntheticCatalog, CertificationError> {
     if digest != CATALOG_SHA256 {
         return Err(CertificationError::Catalog("embedded data digest mismatch"));
     }
-    let text = std::str::from_utf8(CATALOG_BYTES)
+    parse_pver_catalog(CATALOG_BYTES, None)
+}
+
+fn parse_pver_catalog(
+    bytes: &[u8],
+    adaptation_version: Option<u64>,
+) -> Result<SyntheticCatalog, CertificationError> {
+    if bytes.is_empty() || bytes.len() > oa_adapt::manifest::MAX_PVER_CATALOG_BYTES {
+        return Err(CertificationError::Catalog(
+            "catalog byte length exceeds bound",
+        ));
+    }
+    let digest = oa_sha256::sha256(bytes);
+    let text = std::str::from_utf8(bytes)
         .map_err(|_| CertificationError::Catalog("catalog is not UTF-8"))?;
+    let mut lines = text.lines();
+    if lines.next() != Some(CATALOG_DOCUMENT_HEADER) || lines.next() != Some(CATALOG_COLUMNS_HEADER)
+    {
+        return Err(CertificationError::Catalog(
+            "catalog version or column header is invalid",
+        ));
+    }
     let mut full = Vec::new();
     let mut abbreviated = Vec::new();
-    for line in text.lines() {
-        if line.is_empty() || line.starts_with('#') || line.starts_with("schema,") {
+    for line in lines {
+        if line.is_empty() {
             continue;
         }
         let fields: Vec<&str> = line.split(',').collect();
-        if fields.len() != 9 || fields.first().copied() != Some("synthetic-pver-v1") {
+        if fields.len() != 9 || fields.first().copied() != Some(CATALOG_VERSION) {
             return Err(CertificationError::Catalog("row schema is invalid"));
         }
         let mode = fields
@@ -497,9 +534,28 @@ pub fn synthetic_catalog() -> Result<SyntheticCatalog, CertificationError> {
             "catalog does not contain required fixed scopes",
         ));
     }
+    let full_ids = full
+        .iter()
+        .map(|target| target.id.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    let abbreviated_ids = abbreviated
+        .iter()
+        .map(|target| target.id.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    if full_ids.len() != full.len()
+        || abbreviated_ids.len() != abbreviated.len()
+        || abbreviated.iter().any(|target| {
+            full.iter().find(|full_target| full_target.id == target.id) != Some(target)
+        })
+    {
+        return Err(CertificationError::Catalog(
+            "abbreviated scope is not a unique exact full-scope subset",
+        ));
+    }
     Ok(SyntheticCatalog {
-        version: "synthetic-pver-v1".to_owned(),
+        version: CATALOG_VERSION.to_owned(),
         sha256: digest,
+        adaptation_version,
         full,
         abbreviated,
     })
@@ -515,6 +571,14 @@ fn parse_field<T: std::str::FromStr>(
         .map_err(|_| CertificationError::Catalog(label))
 }
 
+fn catalog_target_identity(target: &SyntheticTarget) -> (String, u64, u64) {
+    (
+        target.id.clone(),
+        micro_units(target.position_tolerance_m).unwrap_or(0),
+        micro_units(target.velocity_tolerance_mps).unwrap_or(0),
+    )
+}
+
 /// Execute fixed synthetic target trajectories through the production `oa-track` tracker.
 /// Verify the G2 package before binding the versioned target catalog to its snapshot digest and
 /// running the synthetic profile. The supplied manifest pin must be independent of package bytes.
@@ -523,11 +587,15 @@ pub fn run_bound_performance(
     package_root: &Path,
     expected_manifest_sha256: oa_sha256::Digest,
 ) -> Result<PverResult, CertificationError> {
-    let adaptation = match verified_adaptation_digest(package_root, expected_manifest_sha256) {
-        Ok(digest) => DigestEvidence::present(digest),
-        Err(_) => DigestEvidence::refused(),
-    };
-    let catalog = synthetic_catalog()?;
+    let package = oa_adapt::manifest::verify_current(package_root, expected_manifest_sha256)
+        .map_err(CertificationError::Adaptation)?;
+    let adaptation = DigestEvidence::present(package.identity().snapshot_sha256);
+    let catalog_bytes = package
+        .pver_catalog_bytes()
+        .ok_or(CertificationError::Catalog(
+            "verified package has no issued PVER catalog",
+        ))?;
+    let catalog = parse_pver_catalog(catalog_bytes, package.identity().adaptation_version)?;
     run_catalog(&catalog, mode, adaptation)
 }
 
@@ -692,12 +760,20 @@ fn run_catalog(
     });
     Ok(PverResult {
         mode,
+        catalog_version: catalog.version.clone(),
         catalog_sha256: catalog.sha256,
+        adaptation_version: catalog.adaptation_version,
         adaptation_evidence,
         runner_artifact_evidence,
         tracker_config_sha256,
         runner_build_claim_sha256,
         profile_binding_sha256,
+        full_catalog_targets: catalog.full.iter().map(catalog_target_identity).collect(),
+        abbreviated_catalog_targets: catalog
+            .abbreviated
+            .iter()
+            .map(catalog_target_identity)
+            .collect(),
         target_results,
         targets_checked: count,
         targets_passed,
@@ -976,18 +1052,31 @@ fn prepare_certification(
             "processor inventory or path exceeds its fixed bound",
         ));
     }
-    let catalog = synthetic_catalog()?;
     let pver_adaptation = match sources
         .iter()
         .find_map(|source| source.adaptation_package.as_ref())
     {
-        Some((root, manifest_pin)) => match verified_adaptation_digest(root, *manifest_pin) {
-            Ok(digest) => DigestEvidence::present(digest),
-            Err(_) => DigestEvidence::refused(),
-        },
-        None => DigestEvidence::missing(),
+        Some((root, manifest_pin)) => {
+            let package = oa_adapt::manifest::verify_current(root, *manifest_pin)
+                .map_err(CertificationError::Adaptation)?;
+            let bytes = package
+                .pver_catalog_bytes()
+                .ok_or(CertificationError::Catalog(
+                    "verified package has no issued PVER catalog",
+                ))?;
+            let catalog = parse_pver_catalog(bytes, package.identity().adaptation_version)?;
+            (
+                catalog,
+                DigestEvidence::present(package.identity().snapshot_sha256),
+            )
+        }
+        None => {
+            return Err(CertificationError::Catalog(
+                "issued PVER catalog package is required",
+            ))
+        }
     };
-    let pver = run_catalog(&catalog, mode, pver_adaptation)?;
+    let pver = run_catalog(&pver_adaptation.0, mode, pver_adaptation.1)?;
     let processor_evidence = sources
         .iter()
         .map(|source| {
@@ -1093,23 +1182,17 @@ fn decide_certification(
         PverMode::Full => 6,
         PverMode::Abbreviated => 3,
     };
-    let catalog = synthetic_catalog()?;
     let catalog_targets = match pver.mode {
-        PverMode::Full => &catalog.full,
-        PverMode::Abbreviated => &catalog.abbreviated,
+        PverMode::Full => &pver.full_catalog_targets,
+        PverMode::Abbreviated => &pver.abbreviated_catalog_targets,
     };
     let mut checked_target_results = 0usize;
     let target_results_valid = pver.target_results.len() == expected_targets
-        && pver
-            .target_results
-            .iter()
-            .zip(catalog_targets)
-            .all(|(result, target)| {
-                let expected_position = micro_units(target.position_tolerance_m).ok();
-                let expected_velocity = micro_units(target.velocity_tolerance_mps).ok();
-                result.target_id == target.id
-                    && Some(result.position_tolerance_um) == expected_position
-                    && Some(result.velocity_tolerance_um_s) == expected_velocity
+        && pver.target_results.iter().zip(catalog_targets).all(
+            |(result, (target_id, expected_position, expected_velocity))| {
+                result.target_id == *target_id
+                    && result.position_tolerance_um == *expected_position
+                    && result.velocity_tolerance_um_s == *expected_velocity
                     && match result.state {
                         TargetResultState::MissingOutput => {
                             result.output_time_ns.is_none()
@@ -1146,9 +1229,11 @@ fn decide_certification(
                             true
                         }
                     }
-            });
+            },
+        );
     if !digest_evidence_consistent(pver.adaptation_evidence)
-        || pver.catalog_sha256 != CATALOG_SHA256
+        || pver.full_catalog_targets.len() != MAX_CATALOG_TARGETS
+        || pver.abbreviated_catalog_targets.len() != 3
         || pver.profile_binding_sha256
             != pver.adaptation_evidence.sha256.map(|digest| {
                 profile_binding(
@@ -1367,7 +1452,7 @@ fn encode_details(c: &Certification) -> Result<Vec<u8>, CertificationError> {
     let duplicate_count = u16::try_from(c.duplicate_processor_ids.len())
         .map_err(|_| CertificationError::Invalid("duplicate processor inventory is too large"))?;
     let mut out = Vec::with_capacity(20_480);
-    out.extend_from_slice(DETAILS_MAGIC_V5);
+    out.extend_from_slice(DETAILS_MAGIC_V6);
     out.push(match c.outcome {
         CertificationOutcome::Certified => 1,
         CertificationOutcome::CertifiedWithExceptions => 2,
@@ -1383,6 +1468,13 @@ fn encode_details(c: &Certification) -> Result<Vec<u8>, CertificationError> {
     out.extend_from_slice(&c.pver.tracker_loss_rows.to_le_bytes());
     out.extend_from_slice(&c.pver.tracker_refusals.to_le_bytes());
     out.extend_from_slice(&c.pver.catalog_sha256);
+    let catalog_version = c.pver.catalog_version.as_bytes();
+    out.push(
+        u8::try_from(catalog_version.len())
+            .map_err(|_| CertificationError::Invalid("catalog version is too long"))?,
+    );
+    out.extend_from_slice(catalog_version);
+    out.extend_from_slice(&c.pver.adaptation_version.unwrap_or(0).to_le_bytes());
     out.extend_from_slice(&c.pver.tracker_config_sha256);
     out.extend_from_slice(&c.pver.runner_build_claim_sha256);
     out.extend_from_slice(&c.authorization_registry_sha256);
@@ -1467,7 +1559,8 @@ fn append_digest_evidence(out: &mut Vec<u8>, evidence: DigestEvidence) {
 fn decode_details(bytes: &[u8]) -> Result<String, CertificationError> {
     let mut cursor = 0usize;
     let magic = take(bytes, &mut cursor, DETAILS_MAGIC.len())?;
-    let schema_v5 = magic == DETAILS_MAGIC_V5;
+    let schema_v6 = magic == DETAILS_MAGIC_V6;
+    let schema_v5 = schema_v6 || magic == DETAILS_MAGIC_V5;
     let schema_v4 = schema_v5 || magic == DETAILS_MAGIC_V4;
     let schema_v3 = schema_v4 || magic == DETAILS_MAGIC;
     let schema_v2 = if schema_v3 || magic == DETAILS_MAGIC_V2 {
@@ -1500,6 +1593,20 @@ fn decode_details(bytes: &[u8]) -> Result<String, CertificationError> {
     let losses = read_u64(bytes, &mut cursor)?;
     let refusals = read_u64(bytes, &mut cursor)?;
     let catalog_digest = read_digest(bytes, &mut cursor)?;
+    let (catalog_version, adaptation_version) = if schema_v6 {
+        let len = usize::from(read_u8(bytes, &mut cursor)?);
+        if len == 0 || len > 64 {
+            return Err(CertificationError::Invalid(
+                "audit catalog version length is invalid",
+            ));
+        }
+        let version = std::str::from_utf8(take(bytes, &mut cursor, len)?)
+            .map_err(|_| CertificationError::Invalid("audit catalog version is not UTF-8"))?;
+        let issued = read_u64(bytes, &mut cursor)?;
+        (Some(version.to_owned()), (issued != 0).then_some(issued))
+    } else {
+        (None, None)
+    };
     let (tracker_config_digest, runner_build_digest, target_report) = if schema_v2 {
         let config_digest = read_digest(bytes, &mut cursor)?;
         let runner_digest = read_digest(bytes, &mut cursor)?;
@@ -1763,7 +1870,9 @@ fn decode_details(bytes: &[u8]) -> Result<String, CertificationError> {
     let mut report = String::new();
     let _ = writeln!(
         &mut report,
-        "outcome={outcome}\npver_mode={mode}\npver_passed={passed}\ntargets={passed_targets}/{checked}\ntracker_loss_rows={losses}\ntracker_refusals={refusals}\ncatalog_sha256={}\ntracker_config_sha256={}\nrunner_build_claim_sha256={}\nadaptation_state={:?}\nadaptation_sha256={}\nprofile_binding_sha256={}\nexpected_processors={expected_ids:?}\nobserved_processors={observed_ids:?}\nmissing_processors={missing_ids:?}\nduplicate_processors={duplicate_ids:?}\nunexpected_processors={unexpected_ids:?}\nexceptions={}",
+        "outcome={outcome}\npver_mode={mode}\npver_passed={passed}\ntargets={passed_targets}/{checked}\ntracker_loss_rows={losses}\ntracker_refusals={refusals}\ncatalog_version={}\ncatalog_adaptation_version={}\ncatalog_sha256={}\ntracker_config_sha256={}\nrunner_build_claim_sha256={}\nadaptation_state={:?}\nadaptation_sha256={}\nprofile_binding_sha256={}\nexpected_processors={expected_ids:?}\nobserved_processors={observed_ids:?}\nmissing_processors={missing_ids:?}\nduplicate_processors={duplicate_ids:?}\nunexpected_processors={unexpected_ids:?}\nexceptions={}",
+        catalog_version.as_deref().unwrap_or("legacy_unrecorded"),
+        adaptation_version.map_or_else(|| "unrecorded".to_owned(), |v| v.to_string()),
         oa_sha256::to_hex(&catalog_digest),
         tracker_config_digest.map_or_else(|| "unbound_v1".to_owned(), |digest| oa_sha256::to_hex(&digest)),
         runner_build_digest.map_or_else(|| "unbound_v1".to_owned(), |digest| oa_sha256::to_hex(&digest)),
@@ -2068,6 +2177,16 @@ mod tests {
             .abbreviated
             .iter()
             .all(|target| catalog.full.iter().any(|full| full.id == target.id)));
+        let abbreviated_ids = catalog
+            .abbreviated
+            .iter()
+            .map(|target| target.id.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            abbreviated_ids.len(),
+            3,
+            "declared abbreviated targets are unique"
+        );
     }
 
     // REQ: OA-CERT-002
@@ -2269,9 +2388,12 @@ mod tests {
         .is_err());
         assert!(!refused_path.exists());
 
-        let absent = log_path();
-        let refused_pver = run_bound_performance(PverMode::Full, &absent, [0; 32])
-            .expect("synthetic run completes with refused adaptation binding");
+        let refused_pver = run_catalog(
+            &synthetic_catalog().expect("test catalog is valid"),
+            PverMode::Full,
+            DigestEvidence::refused(),
+        )
+        .expect("synthetic test runner retains refused adaptation binding");
         assert!(!refused_pver.passed());
         assert_eq!(refused_pver.adaptation_state(), EvidenceState::Refused);
         let mut refused_processor = processor();
@@ -2302,6 +2424,19 @@ mod tests {
         assert!(report.contains("missing_processors=[8]"));
         assert!(report.contains("observed_processors=[7]"));
         let _ = std::fs::remove_file(path);
+    }
+
+    // REQ: OA-CERT-001
+    #[test]
+    fn bound_pver_refuses_package_without_issued_catalog() {
+        let snapshot = include_bytes!("../../oa-ca/tests/fixtures/a3-empty-synthetic.oag2");
+        let root = std::env::temp_dir().join(format!("oa-cert-no-catalog-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let pin =
+            oa_adapt::manifest::write_new_package(&root, snapshot, "release", "ZAU", "change")
+                .expect("legacy package fixture");
+        assert!(run_bound_performance(PverMode::Full, &root, pin).is_err());
+        let _ = std::fs::remove_dir_all(root);
     }
 
     // REQ: OA-CERT-004, OA-CERT-005, OA-CERT-006

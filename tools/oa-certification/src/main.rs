@@ -22,9 +22,9 @@ fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             };
             oa_certification::run_bound_performance(mode, std::path::Path::new(package_root), pin).map_err(|error| error.to_string()).and_then(|result| {
-                println!("mode={mode:?} passed={} targets={}/{} refusals={} losses={} catalog_sha256={} adaptation_sha256={} profile_binding_sha256={}",
+                println!("mode={mode:?} passed={} targets={}/{} refusals={} losses={} catalog_version={} catalog_adaptation_version={:?} catalog_sha256={} adaptation_sha256={} profile_binding_sha256={}",
                     result.passed(), result.targets_passed(), result.targets_checked(), result.tracker_refusals(),
-                    result.tracker_loss_rows(), oa_sha256::to_hex(&result.catalog_sha256()),
+                    result.tracker_loss_rows(), result.catalog_version(), result.adaptation_version(), oa_sha256::to_hex(&result.catalog_sha256()),
                     digest_text(result.adaptation_sha256()), digest_text(result.profile_binding_sha256()));
                 println!("tracker_config_sha256={} runner_build_claim_sha256={} runner_artifact_state={:?} runner_artifact_sha256={}", oa_sha256::to_hex(&result.tracker_config_sha256()), oa_sha256::to_hex(&result.runner_build_claim_sha256()), result.runner_artifact_state(), digest_text(result.runner_artifact_sha256()));
                 for target in result.target_results() {
