@@ -1233,6 +1233,15 @@ fn command_line_parsing() {
         Command::Live(l) => assert_eq!((l.record, l.record_raw), (Some(PathBuf::from("/r")), true)),
         c => panic!("{c:?}"),
     }
+    match cli::parse(&a(
+        "--env /source.env --record-raw /r --stop-on-recording-failure",
+    ))
+    .unwrap()
+    {
+        Command::Live(l) => assert!(l.stop_on_recording_failure),
+        c => panic!("{c:?}"),
+    }
+    assert!(cli::parse(&a("--env /source.env --stop-on-recording-failure")).is_err());
     match cli::parse(&a("--stdin --record /r --sync-closed-segments")).unwrap() {
         Command::Live(l) => assert!(l.sync_closed_segments),
         c => panic!("{c:?}"),
@@ -2715,6 +2724,10 @@ fn a_stop_at_the_size_cap_gives_an_exit_reason_and_a_healthy_recording_gives_non
         reason.contains("size cap") && reason.contains("--max-bytes 100"),
         "{reason}"
     );
+    assert_eq!(rec.lost_frames(), 1);
+    assert_eq!(rec.write_frame(&f, 1000, 1000).unwrap(), Outcome::Stopped);
+    assert_eq!(rec.lost_frames(), 2);
+    assert!(format_recording("f", &rec).contains("STOPPED lost_frames=2"));
     // A failure takes precedence over the cap.
     let (mut failing, sw) = switched_recorder("capfail", Format::Raw);
     fail_now(&sw);

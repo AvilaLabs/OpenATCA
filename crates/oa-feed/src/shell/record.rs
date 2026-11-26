@@ -789,6 +789,7 @@ impl Recorder {
             self.implausible_stamps = self.implausible_stamps.saturating_add(1);
         }
         if self.stopped {
+            self.lost_frames = self.lost_frames.saturating_add(1);
             return Ok(Outcome::Stopped);
         }
         let len = raw.len() as u64;
@@ -831,6 +832,7 @@ impl Recorder {
         if over_cap {
             self.finish()?;
             self.stopped = true;
+            self.lost_frames = self.lost_frames.saturating_add(1);
             return Ok(Outcome::StoppedNow);
         }
         if rotate {
@@ -998,9 +1000,9 @@ impl Recorder {
         self.failed.as_deref()
     }
 
-    /// Frames handed to the recorder that were not saved because it had failed: the frame that
-    /// hit the error, and the frames of the open file that the compressor held and had not yet
-    /// flushed to it (a flush or finish that fails loses those too).
+    /// Frames handed to the recorder but not saved because of a write failure or the size cap.
+    /// Includes the frame that hits either condition, later frames after a cap, and buffered frames
+    /// lost when a write, flush, or finish fails.
     pub fn lost_frames(&self) -> u64 {
         self.lost_frames
     }
@@ -1654,8 +1656,7 @@ fn utc_fields(unix_secs: i64) -> Option<(i64, i64, i64, i64, i64, i64)> {
     Some((y, m, d, rem / 3600, rem % 3600 / 60, rem % 60))
 }
 
-/// The summary line for a recording: files and bytes, and, when it failed, the failure, the
-/// frames lost since and the first error.
+/// The summary line for a recording: files and bytes, and any failed or capped recording state.
 pub fn format_recording(feed: &str, r: &Recorder) -> String {
     let mut out = format!(
         "recorded feed={feed} files={} bytes={}",
@@ -1691,6 +1692,11 @@ pub fn format_recording(feed: &str, r: &Recorder) -> String {
     if let Some(e) = r.failure() {
         out.push_str(&format!(
             " FAILED lost_frames={} first_error=\"{e}\"",
+            r.lost_frames()
+        ));
+    } else if let Some(reason) = r.exit_reason() {
+        out.push_str(&format!(
+            " STOPPED lost_frames={} reason=\"{reason}\"",
             r.lost_frames()
         ));
     }
