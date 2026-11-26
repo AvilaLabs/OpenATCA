@@ -4119,10 +4119,8 @@ impl LivePairProcessor<'_> {
             .frames
             .checked_add(1)
             .ok_or("paired cycle frame count overflow")?;
-        state.display_equal &= display_targets_equal(
-            &legacy.display_targets,
-            &candidate.display_targets,
-        );
+        state.display_equal &=
+            display_targets_equal(&legacy.display_targets, &candidate.display_targets);
 
         let virtual_ns = legacy.observed_time_ns;
         let mut frame_ack_ns = None;
@@ -4171,7 +4169,9 @@ impl LivePairProcessor<'_> {
                             .checked_add(rows)
                             .ok_or("cycle output ACK row count overflow")?;
                         state.max_apply_ack_ns = Some(
-                            state.max_apply_ack_ns.map_or(ack_ns, |current| current.max(ack_ns)),
+                            state
+                                .max_apply_ack_ns
+                                .map_or(ack_ns, |current| current.max(ack_ns)),
                         );
                         state.last_generation = Some(generation);
                         state.last_counts = Some(counts);
@@ -4246,7 +4246,9 @@ impl LivePairProcessor<'_> {
                             .checked_add(rows)
                             .ok_or("cycle output ACK row count overflow")?;
                         state.max_apply_ack_ns = Some(
-                            state.max_apply_ack_ns.map_or(ack_ns, |current| current.max(ack_ns)),
+                            state
+                                .max_apply_ack_ns
+                                .map_or(ack_ns, |current| current.max(ack_ns)),
                         );
                         state.last_generation = Some(generation);
                         state.last_counts = Some(counts);
@@ -4297,19 +4299,17 @@ impl LivePairProcessor<'_> {
                     Output::Legacy => &legacy,
                     Output::Candidate => &candidate,
                 };
-                let (counts, digest, rows, ack_ns, generation) = apply_live_snapshot(
-                    self.consumer,
-                    &mut self.generation,
-                    snapshot,
-                    output,
-                )?;
+                let (counts, digest, rows, ack_ns, generation) =
+                    apply_live_snapshot(self.consumer, &mut self.generation, snapshot, output)?;
                 self.record_rows(rows)?;
                 state.output_row_acks = state
                     .output_row_acks
                     .checked_add(rows)
                     .ok_or("cycle output ACK row count overflow")?;
                 state.max_apply_ack_ns = Some(
-                    state.max_apply_ack_ns.map_or(ack_ns, |current| current.max(ack_ns)),
+                    state
+                        .max_apply_ack_ns
+                        .map_or(ack_ns, |current| current.max(ack_ns)),
                 );
                 state.last_generation = Some(generation);
                 state.last_counts = Some(counts);
@@ -4330,19 +4330,17 @@ impl LivePairProcessor<'_> {
                 Output::Legacy => &legacy,
                 Output::Candidate => &candidate,
             };
-            let (counts, digest, rows, ack_ns, generation) = apply_live_snapshot(
-                self.consumer,
-                &mut self.generation,
-                snapshot,
-                output,
-            )?;
+            let (counts, digest, rows, ack_ns, generation) =
+                apply_live_snapshot(self.consumer, &mut self.generation, snapshot, output)?;
             self.record_rows(rows)?;
             state.output_row_acks = state
                 .output_row_acks
                 .checked_add(rows)
                 .ok_or("cycle output ACK row count overflow")?;
             state.max_apply_ack_ns = Some(
-                state.max_apply_ack_ns.map_or(ack_ns, |current| current.max(ack_ns)),
+                state
+                    .max_apply_ack_ns
+                    .map_or(ack_ns, |current| current.max(ack_ns)),
             );
             state.last_generation = Some(generation);
             state.last_counts = Some(counts);
@@ -4353,12 +4351,14 @@ impl LivePairProcessor<'_> {
             );
             frame_ack_ns = Some(ack_ns);
         }
-        if let Some(gap) = self.record_update(
-            virtual_ns,
-            frame_ack_ns.ok_or("frame has no consumer ACK")?,
-        )? {
-            state.max_virtual_gap_ns =
-                Some(state.max_virtual_gap_ns.map_or(gap, |current| current.max(gap)));
+        if let Some(gap) =
+            self.record_update(virtual_ns, frame_ack_ns.ok_or("frame has no consumer ACK")?)?
+        {
+            state.max_virtual_gap_ns = Some(
+                state
+                    .max_virtual_gap_ns
+                    .map_or(gap, |current| current.max(gap)),
+            );
         }
         state.initialized = true;
         *self
@@ -4384,7 +4384,9 @@ impl LivePairProcessor<'_> {
             .checked_add(1)
             .ok_or("decision latency sample count overflow")?;
         self.metrics.max_decision_ns = Some(
-            self.metrics.max_decision_ns.map_or(elapsed_ns, |current| current.max(elapsed_ns)),
+            self.metrics
+                .max_decision_ns
+                .map_or(elapsed_ns, |current| current.max(elapsed_ns)),
         );
         if exceeds_latency_limit(elapsed_ns, self.policy.max_decision_delay_ns) {
             self.metrics.decision_exceeded = self
@@ -4403,16 +4405,21 @@ impl LivePairProcessor<'_> {
             .checked_add(1)
             .ok_or("consumer update count overflow")?;
         self.metrics.max_apply_ack_ns = Some(
-            self.metrics.max_apply_ack_ns.map_or(ack_ns, |current| current.max(ack_ns)),
+            self.metrics
+                .max_apply_ack_ns
+                .map_or(ack_ns, |current| current.max(ack_ns)),
         );
         let update_gap = checked_frame_gap(self.metrics.last_virtual_ns, virtual_ns)?;
         if let Some(gap) = update_gap {
             self.metrics.gap_samples = self
-                .metrics.gap_samples
+                .metrics
+                .gap_samples
                 .checked_add(1)
                 .ok_or("virtual-gap sample count overflow")?;
             self.metrics.max_gap_ns = Some(
-                self.metrics.max_gap_ns.map_or(gap, |current| current.max(gap)),
+                self.metrics
+                    .max_gap_ns
+                    .map_or(gap, |current| current.max(gap)),
             );
             if exceeds_latency_limit(gap as u128, self.policy.update_interval_ns) {
                 self.metrics.gap_exceeded = self
@@ -4485,7 +4492,9 @@ pub fn run_recorded_stream(
         local_authority_fixture,
     } = options;
     if local_authority_fixture
-        && inputs.iter().any(|input| input.source != RecordingSource::Adsb)
+        && inputs
+            .iter()
+            .any(|input| input.source != RecordingSource::Adsb)
     {
         return Err("local authority fixture accepts ADS-B-only replay inputs".into());
     }
@@ -4604,7 +4613,10 @@ pub fn run_recorded_stream(
                 )?;
                 match (&event.source, &event.kind) {
                     (SourceKind::Surveillance, EventKind::Position { .. }) => {
-                        let slot = counts.cycle_positions.get_mut(index).ok_or("position bin")?;
+                        let slot = counts
+                            .cycle_positions
+                            .get_mut(index)
+                            .ok_or("position bin")?;
                         *slot = slot.checked_add(1).ok_or("position count overflow")?;
                     }
                     (SourceKind::Flight, EventKind::Flight(_)) => {
@@ -4620,12 +4632,21 @@ pub fn run_recorded_stream(
             }
             match (&event.source, &event.kind) {
                 (SourceKind::Surveillance, EventKind::Position { .. }) => {
-                    counts.positions = counts.positions.checked_add(1).ok_or("position count overflow")?;
+                    counts.positions = counts
+                        .positions
+                        .checked_add(1)
+                        .ok_or("position count overflow")?;
                 }
                 (SourceKind::Flight, EventKind::Flight(_)) => {
-                    counts.flights = counts.flights.checked_add(1).ok_or("flight count overflow")?;
+                    counts.flights = counts
+                        .flights
+                        .checked_add(1)
+                        .ok_or("flight count overflow")?;
                     if handoff_event(&event) {
-                        counts.handoffs = counts.handoffs.checked_add(1).ok_or("handoff count overflow")?;
+                        counts.handoffs = counts
+                            .handoffs
+                            .checked_add(1)
+                            .ok_or("handoff count overflow")?;
                     }
                 }
                 _ => (),
@@ -4646,7 +4667,8 @@ pub fn run_recorded_stream(
         return Err("stream callback/reader normalized event count mismatch".into());
     }
     let (legacy_cycles, legacy_final) = finish_replay_frames(legacy_replay, legacy_spec)?;
-    let (candidate_cycles, candidate_final) = finish_replay_frames(candidate_replay, candidate_spec)?;
+    let (candidate_cycles, candidate_final) =
+        finish_replay_frames(candidate_replay, candidate_spec)?;
     match (legacy_final, candidate_final) {
         (Some((left_bin, left)), Some((right_bin, right))) if left_bin == right_bin => {
             processor.visit(left_bin, left, right)?;
@@ -4689,9 +4711,16 @@ pub fn run_recorded_stream(
         .map_err(|_| "H5 cycle report allocation refused")?;
     for index in 0..CYCLES {
         let unit = cycle_window(index, H5_MEASUREMENT_START_NS, H5_MEASUREMENT_END_NS)?;
-        let state = processor.cycles.get(index).ok_or("H5 cycle state missing")?;
-        let legacy_cycle = legacy_cycles.get(index).ok_or("legacy cycle aggregate missing")?;
-        let candidate_cycle = candidate_cycles.get(index).ok_or("candidate cycle aggregate missing")?;
+        let state = processor
+            .cycles
+            .get(index)
+            .ok_or("H5 cycle state missing")?;
+        let legacy_cycle = legacy_cycles
+            .get(index)
+            .ok_or("legacy cycle aggregate missing")?;
+        let candidate_cycle = candidate_cycles
+            .get(index)
+            .ok_or("candidate cycle aggregate missing")?;
         let m1_refusal = state.m1_refusal.clone().or_else(|| {
             (!local_authority_fixture).then(|| {
                 m1_refusal_without_authority(
