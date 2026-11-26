@@ -1175,6 +1175,29 @@ fn shared_altitude(altitude: Alt) -> SharedAltitude {
     }
 }
 
+fn stamps_within_cutoff(view: &SharedFlightView, cutoff_ms: i64) -> bool {
+    cutoff_ms >= 0
+        && view.plan_stamp.avail_ms <= cutoff_ms
+        && view.assigned_stamp.avail_ms <= cutoff_ms
+        && view.interim_stamp.avail_ms <= cutoff_ms
+        && view.identity_stamp.avail_ms <= cutoff_ms
+        && view.address_stamp.avail_ms <= cutoff_ms
+        && view.owner_stamp.avail_ms <= cutoff_ms
+        && view.handoff_stamp.avail_ms <= cutoff_ms
+}
+
+fn view_result(
+    status: FlightViewStatus,
+    claimants: usize,
+    views_written: usize,
+) -> FlightViewResult {
+    FlightViewResult {
+        status,
+        claimants,
+        views_written,
+    }
+}
+
 #[cfg(test)]
 mod native_operation_tests {
     #![allow(clippy::expect_used, clippy::unwrap_used, clippy::indexing_slicing)]
@@ -1372,28 +1395,5 @@ mod native_operation_tests {
             view_for_flight(&record, *b"ZAU1").unwrap().plan_state,
             oa_flight::ST_DROPPED
         );
-    }
-}
-
-fn stamps_within_cutoff(view: &SharedFlightView, cutoff_ms: i64) -> bool {
-    cutoff_ms >= 0
-        && view.plan_stamp.avail_ms <= cutoff_ms
-        && view.assigned_stamp.avail_ms <= cutoff_ms
-        && view.interim_stamp.avail_ms <= cutoff_ms
-        && view.identity_stamp.avail_ms <= cutoff_ms
-        && view.address_stamp.avail_ms <= cutoff_ms
-        && view.owner_stamp.avail_ms <= cutoff_ms
-        && view.handoff_stamp.avail_ms <= cutoff_ms
-}
-
-fn view_result(
-    status: FlightViewStatus,
-    claimants: usize,
-    views_written: usize,
-) -> FlightViewResult {
-    FlightViewResult {
-        status,
-        claimants,
-        views_written,
     }
 }
