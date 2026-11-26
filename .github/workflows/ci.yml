@@ -1,7 +1,7 @@
 name: ci
 on:
   push:
-    branches: [main]
+    branches: [main, 'train/**']
   pull_request:
 permissions:
   contents: read
@@ -122,7 +122,13 @@ jobs:
           python3 tools/generate_oscal_control_map.py --check
           python3 tools/test_generate_safety_tables.py
           python3 tools/generate_safety_tables.py
-          git diff --exit-code -- docs/safety/generated
+      - name: Attach generated safety tables
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: safety-tables
+          path: docs/safety/generated/
+          if-no-files-found: error
+          retention-days: 90
       - name: No external dependencies
         run: |
           if grep -q 'source = ' Cargo.lock; then echo "external dependency found in Cargo.lock"; exit 1; fi

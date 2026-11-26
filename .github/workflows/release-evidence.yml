@@ -1,0 +1,24 @@
+name: Release evidence
+on:
+  release:
+    types: [published]
+permissions:
+  contents: write
+jobs:
+  evidence:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: rustup toolchain install 1.89.0 --profile minimal && rustup default 1.89.0
+      - name: Generate safety and supply-chain evidence
+        run: |
+          set -euo pipefail
+          python3 tools/generate_safety_tables.py
+          python3 .github/scripts/supply_chain_evidence.py --repo "$GITHUB_WORKSPACE" --out "$RUNNER_TEMP/release-evidence" --toolchain 1.89.0
+          tar -czf "$RUNNER_TEMP/release-evidence/safety-tables.tar.gz" -C docs/safety generated
+      - name: Attach evidence to the published release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "$RELEASE_TAG" "$RUNNER_TEMP/release-evidence/"* --repo "$GITHUB_REPOSITORY"

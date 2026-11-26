@@ -1,7 +1,7 @@
 name: Rust assurance
 on:
   push:
-    branches: [main]
+    branches: [main, 'train/**']
   pull_request:
   schedule:
     - cron: "17 5 * * *"
@@ -52,7 +52,13 @@ jobs:
           # Scheduled and manual runs take the full suite; a push compares with the previous
           # commit on main and a pull request with its base.
           case "$EVENT" in
-            push) echo "changed_from=$PUSH_BEFORE" >> "$GITHUB_OUTPUT" ;;
+            push)
+              base="$PUSH_BEFORE"
+              if [ "$base" = "0000000000000000000000000000000000000000" ]; then
+                base="$(git merge-base "$GITHUB_SHA" origin/main)"
+              fi
+              echo "changed_from=$base" >> "$GITHUB_OUTPUT"
+              ;;
             pull_request) echo "changed_from=$PR_BASE" >> "$GITHUB_OUTPUT" ;;
             *) echo "changed_from=" >> "$GITHUB_OUTPUT" ;;
           esac

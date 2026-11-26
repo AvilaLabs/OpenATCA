@@ -11,3 +11,6 @@ DEFECTS.md
 
 # Locally generated browser engine artifacts.
 /demo/site/engine/
+
+# CI/release artifacts generated from the hazard and requirement registers.
+/docs/safety/generated/
