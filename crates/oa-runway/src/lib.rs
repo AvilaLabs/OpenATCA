@@ -22,3 +22,4 @@ pub mod final_monitor;
 pub mod occupy;
 pub mod plane;
 pub mod runway;
+pub mod terminal_aids;
