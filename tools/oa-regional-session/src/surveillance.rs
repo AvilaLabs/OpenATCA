@@ -774,13 +774,15 @@ mod display_target_capture_tests {
     fn captured_target_is_the_existing_builder_target_not_a_reformatted_row() -> Result<(), String>
     {
         use oa_display::core::traffic::{self, Target, MAX_TRAIL};
+        let mut trail = [(0, 0); MAX_TRAIL];
+        *trail.first_mut().ok_or("synthetic trail capacity missing")? = (1, 2);
         let target = Target {
             lat_e7: 385_000_000,
             lon_e7: -935_000_000,
             alt_ft: 1000,
             addr: 0xabc123,
             r95_m: 95.5,
-            trail: [(1, 2); MAX_TRAIL],
+            trail,
             callsign: *b"TEST123\0",
             track_ddeg: 900,
             gs_dkt: 1234,
