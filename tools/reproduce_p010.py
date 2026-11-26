@@ -1821,7 +1821,8 @@ def _read_cross_capture_summary(path: Path) -> dict[str, Any]:
     bind_keys = {"driver_sha256", "manifest_sha256", "candidate_commit", "replication_commit", "replication_scorer_commit", "replication_scorer_patch_sha256", "build_binary_sha256", "public_archive_inventory_sha256", "public_clip_sha256", "public_oa_outputs", "compare_profiles", "health_eligibility", "disclosure_eligibility"}
     if not isinstance(bind, dict) or set(bind) != bind_keys:
         raise Refused("cross-capture input has an unexpected source/run binding field set")
-    if bind["driver_sha256"] != _sha(SCRIPT_PATH.read_bytes()):
+    driver_bytes = _read_guarded(SCRIPT_PATH, 2 * 1024 * 1024)
+    if bind["driver_sha256"] != _sha(driver_bytes):
         raise Refused("cross-capture driver source differs from this comparator")
     for key in ("driver_sha256", "manifest_sha256", "replication_scorer_patch_sha256", "public_archive_inventory_sha256", "public_clip_sha256"):
         if not isinstance(bind[key], str) or not HEX64.fullmatch(bind[key]):
@@ -1888,7 +1889,10 @@ def _read_cross_capture_summary(path: Path) -> dict[str, Any]:
                 raise Refused("cross-capture arm accounting contains a non-count or negative value")
         if not isinstance(arm["claims"], list) or len(arm["claims"]) != 3 or any(not isinstance(line, str) for line in arm["claims"]):
             raise Refused("cross-capture aggregate arm claims are malformed")
-        normalized = _approved_aggregate("\n".join(arm["claims"]))
+        try:
+            normalized = _approved_aggregate("\n".join(arm["claims"]))
+        except Incomplete as exc:
+            raise Refused(f"cross-capture aggregate claims fail validation: {exc}") from exc
         if normalized != arm["claims"]:
             raise Refused("cross-capture claims are not canonical approved aggregate lines")
     if bind["compare_profiles"] != expected_profiles:
