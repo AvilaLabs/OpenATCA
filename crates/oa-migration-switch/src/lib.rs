@@ -641,6 +641,7 @@ const OPTION_HANDOFF_STATE_BYTES: usize = 152;
 const OPTION_ALERT_STATE_BYTES: usize = 144;
 const OPTION_TRACE_RECORD_BYTES: usize = 64;
 const OPTION_DIFF_BYTES: usize = 64;
+const COORDINATION_RECORD_BYTES: usize = 48;
 const _: () = assert!(core::mem::size_of::<Option<TrackState>>() == OPTION_TRACK_STATE_BYTES);
 const _: () = assert!(core::mem::size_of::<Option<FlightState>>() == OPTION_FLIGHT_STATE_BYTES);
 const _: () = assert!(core::mem::size_of::<Option<HandoffState>>() == OPTION_HANDOFF_STATE_BYTES);
@@ -813,9 +814,7 @@ pub fn capacity_storage_budget_bytes(profile: CapacityProfile) -> Result<usize, 
         })
         .and_then(|n| {
             n.checked_add(
-                profile
-                    .coordination_records
-                    .checked_mul(core::mem::size_of::<CoordinationRecord>())?,
+                profile.coordination_records.checked_mul(COORDINATION_RECORD_BYTES)?,
             )
         })
         .ok_or(Refusal::InvalidUnit)
