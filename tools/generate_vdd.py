@@ -35,6 +35,7 @@ MAX_SBOM_BYTES = 16 * 1024 * 1024  # Matches the supply-chain generator's bounde
 MAX_TEXT_SOURCE_BYTES = 2 * 1024 * 1024  # Public status registers only; each is independently capped.
 VERSION_RE = re.compile(r"v([0-9]+\.[0-9]+\.[0-9]+)\Z")
 REQ_RE = re.compile(r"\bOA-[A-Z0-9]+-[0-9]{3}\b")
+LOCAL_PATH_RE = re.compile(r"/(?:home|tmp)/[^\s`]+")
 
 
 class VddError(Exception):
@@ -207,6 +208,8 @@ def _changes(root: Path, baseline: str | None, commit: str) -> str:
         if not re.fullmatch(r"[0-9a-f]{40,64}", commit_hash):
             raise VddError("git change record is malformed")
         subject = body.splitlines()[0] if body.splitlines() else "(empty commit message)"
+        subject = subject.replace("openatca-private", "[private path omitted]")
+        subject = LOCAL_PATH_RE.sub("[local path omitted]", subject)
         ids = sorted(set(REQ_RE.findall(body)))
         keys = ids or ["Unassigned requirement ID"]
         entry = f"`{commit_hash[:12]}` {subject[:240]}"
