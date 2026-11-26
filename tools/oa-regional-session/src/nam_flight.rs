@@ -829,6 +829,17 @@ mod tests {
         model.points.region.push(StrIx::NONE);
         model.points.scope.push(StrIx::NONE);
         model.points.name.push(StrIx::NONE);
+        for bits in [
+            &mut model.points.src_nasr,
+            &mut model.points.src_cifp,
+            &mut model.points.in_area,
+            &mut model.points.cls_b,
+            &mut model.points.cls_c,
+            &mut model.points.cls_d,
+            &mut model.points.cls_e,
+        ] {
+            air_model::bit_push(bits, false);
+        }
     }
 
     fn preferred_route(
