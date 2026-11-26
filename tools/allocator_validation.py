@@ -56,7 +56,7 @@ TRACKER_FIELDS = {
     "ended": 1, "rows": 1,
 }
 TRACKER_VECTOR_FIELDS = (
-    "held", "key", "state", "first_ns", "confirmed_ns", "last_ns", "disagree_until_ns",
+    "held", "key", "ident", "ident_ns", "ident_conflict", "state", "first_ns", "confirmed_ns", "last_ns", "disagree_until_ns",
     "expected_ns", "updates", "hits", "cur", "ring_len", "ring_head", "cat", "anchor",
     "ring_m", "mv_on", "mv_start_ns", "mv_first_ns", "mv_first_sens", "mv_old_vote_ns",
     "mv_resync_until_ns", "mv_snap", "snaps", "snap_free", "free", "index",
@@ -311,12 +311,12 @@ def allocation_route_ledger_errors(repo: Path) -> list[str]:
         if declared_log_vectors != set(TRACK_LOG_VECTOR_FIELDS):
             errors.append("tracker capacity inventory does not match every TrackLog Vec field")
     helper = re.search(
-        r"#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]\s*fn\s+tracker_buffer_capacities\s*\([^)]*\)\s*->\s*\[usize;\s*33\]\s*\{(.*?)\n\}",
+        r"#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]\s*fn\s+tracker_buffer_capacities\s*\([^)]*\)\s*->\s*\[usize;\s*36\]\s*\{(.*?)\n\}",
         tracker_source,
         re.S,
     )
     if helper is None:
-        errors.append("all 33 Tracker and TrackLog Vec capacities must remain in an exact cfg(test) helper")
+        errors.append("all 36 Tracker and TrackLog Vec capacities must remain in an exact cfg(test) helper")
     else:
         tracker_calls = re.findall(r"\bt\.(?!log\.)(\w+)\.capacity\(\)", helper.group(1))
         log_calls = re.findall(r"\bt\.log\.(\w+)\.capacity\(\)", helper.group(1))
@@ -325,8 +325,8 @@ def allocation_route_ledger_errors(repo: Path) -> list[str]:
                 or set(tracker_calls) != set(TRACKER_VECTOR_FIELDS)
                 or len(set(log_calls)) != len(TRACK_LOG_VECTOR_FIELDS)
                 or set(log_calls) != set(TRACK_LOG_VECTOR_FIELDS)
-                or helper.group(1).count(".capacity()") != 33):
-            errors.append("tracker capacity helper must probe all 33 Tracker and TrackLog vectors exactly once")
+                or helper.group(1).count(".capacity()") != 36):
+            errors.append("tracker capacity helper must probe all 36 Tracker and TrackLog vectors exactly once")
     unit_probe = re.search(
         r"//\s*REQ:\s*OA-TRK-017\s*#\s*\[\s*test\s*\]\s*fn\s+all_tracker_buffer_capacities_stay_fixed_through_bounded_updates_and_flush\s*\([^)]*\)\s*\{(.*?)//\s*REQ:\s*OA-TRK-355",
         tracker_source,

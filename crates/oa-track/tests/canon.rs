@@ -25,6 +25,9 @@ fn row(t_ns: i64, addr: u32, k: f32) -> OutRow {
     OutRow {
         t_ns,
         addr,
+        ident: u16::MAX,
+        ident_ns: i64::MIN,
+        ident_conflict: 0,
         lat_e7: 419_000_000 + addr as i32,
         lon_e7: -883_000_000,
         vel_east_mps: k,
@@ -44,6 +47,9 @@ fn row(t_ns: i64, addr: u32, k: f32) -> OutRow {
 fn push(o: &mut TrackOutput, r: &OutRow) {
     o.t_ns.push(r.t_ns);
     o.addr.push(r.addr);
+    o.ident.push(r.ident);
+    o.ident_ns.push(r.ident_ns);
+    o.ident_conflict.push(r.ident_conflict);
     o.lat_e7.push(r.lat_e7);
     o.lon_e7.push(r.lon_e7);
     o.vel_east_mps.push(r.vel_east_mps);
@@ -109,9 +115,12 @@ fn a_row_encodes_to_fixed_width_little_endian_fields_at_fixed_offsets() {
         0.2f32.to_bits().to_le_bytes()
     );
     assert_eq!(b[OFF_FLAGS], O_TICK);
+    assert_eq!(b[OFF_IDENT..OFF_IDENT + 2], u16::MAX.to_le_bytes());
+    assert_eq!(b[OFF_IDENT_NS..OFF_IDENT_NS + 8], i64::MIN.to_le_bytes());
+    assert_eq!(b[OFF_IDENT_CONFLICT], 0);
     assert_eq!(canon_row(&r), b, "stable across calls");
     // The fields are packed with nothing between them.
-    assert_eq!(OFF_FLAGS + 1, ROW_BYTES);
+    assert_eq!(OFF_IDENT_CONFLICT + 1, ROW_BYTES);
     assert_eq!(OFF_MU_V + 8, OFF_FLAGS);
 }
 
@@ -338,6 +347,14 @@ fn a_second_or_a_run_past_its_limit_is_an_error_and_is_not_counted() {
 #[test]
 fn a_rows_header_is_checked_in_full_and_hash_rows_equals_the_digester() {
     assert_eq!(parse_rows_header(&rows_header(7)), Ok(7));
+    assert_eq!(parse_rows_header_info(&rows_header(7)).unwrap().version, 2);
+    let mut v1 = [0u8; ROWS_HEADER_BYTES];
+    v1[..8].copy_from_slice(ROWS_MAGIC);
+    v1[8..12].copy_from_slice(&1u32.to_le_bytes());
+    v1[12..16].copy_from_slice(&85u32.to_le_bytes());
+    v1[16..24].copy_from_slice(&7u64.to_le_bytes());
+    let old = parse_rows_header_info(&v1).unwrap();
+    assert_eq!((old.version, old.row_bytes, old.rows), (1, 85, 7));
     let good = rows_header(7);
     assert!(parse_rows_header(&good[..23])
         .unwrap_err()

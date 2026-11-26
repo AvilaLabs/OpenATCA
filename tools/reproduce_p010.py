@@ -1053,7 +1053,8 @@ def _validate_canon_rows(path: Path) -> int:
     version = int.from_bytes(header[8:12], "little")
     row_bytes = int.from_bytes(header[12:16], "little")
     rows = int.from_bytes(header[16:24], "little")
-    if version != 1 or row_bytes != 85 or rows > LIMITS["max_output_rows"] or st.st_size != 24 + rows * row_bytes:
+    expected_bytes = {1: 85, 2: 96}.get(version)
+    if expected_bytes != row_bytes or rows > LIMITS["max_output_rows"] or st.st_size != 24 + rows * row_bytes:
         raise Incomplete("canonical rows file version, count, or exact byte length is invalid")
     return rows
 

@@ -30,6 +30,9 @@ fn plain(lat: i32, lon: i32) -> Target {
         gs_dkt: NO_U16,
         alt_ft: NO_ALT,
         addr: 0xA1B2C3,
+        ident: NO_IDENT,
+        ident_age_s: u32::MAX,
+        ident_state: IDENT_UNKNOWN,
         callsign: [0; 8],
         flags: 0,
         reacq_age_s: NO_REACQ,
@@ -37,6 +40,28 @@ fn plain(lat: i32, lon: i32) -> Target {
         trail: [(0, 0); MAX_TRAIL],
         trail_len: 0,
     }
+}
+
+#[test]
+fn mode_a_data_block_distinguishes_observed_zero_unknown_conflict_and_age() {
+    let mut target = plain(ORD.0, ORD.1);
+    target.ident = 0;
+    target.ident_age_s = 18;
+    target.ident_state = IDENT_OBSERVED;
+    let texts = texts_of(&draw(&[target], &DEFAULT_STYLE).0);
+    assert!(texts
+        .iter()
+        .any(|(text, _, _)| text == "MODE A 0000 AGE 18s"));
+
+    target.ident = NO_IDENT;
+    target.ident_age_s = u32::MAX;
+    target.ident_state = IDENT_CONFLICT;
+    let texts = texts_of(&draw(&[target], &DEFAULT_STYLE).0);
+    assert!(texts.iter().any(|(text, _, _)| text == "MODE A CONFLICT"));
+
+    target.ident_state = IDENT_UNKNOWN;
+    let texts = texts_of(&draw(&[target], &DEFAULT_STYLE).0);
+    assert!(texts.iter().all(|(text, _, _)| !text.starts_with("MODE A")));
 }
 
 fn callsign(s: &str) -> [u8; 8] {

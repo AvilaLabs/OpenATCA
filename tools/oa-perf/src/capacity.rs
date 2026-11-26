@@ -740,6 +740,7 @@ pub fn loss_counters(f: &FusionStats, t: &TrackerStats, out_overflow: u64) -> Ve
 pub fn tracker_counters(s: &TrackerStats) -> Vec<(String, u64)> {
     let mut v: Vec<(String, u64)> = vec![
         ("offered".into(), s.offered),
+        ("ident_conflicts".into(), s.ident_conflicts),
         ("applied".into(), s.applied),
         ("duplicates".into(), s.duplicates),
         ("late_window".into(), s.late_window),

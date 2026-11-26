@@ -457,6 +457,10 @@ fn copy_row(src: &TrackOutput, i: usize, dst: &mut TrackOutput, addr: Option<u32
     let row = OutRow {
         t_ns: src.t_ns.get(i).copied().unwrap_or(0),
         addr: addr.unwrap_or_else(|| src.addr.get(i).copied().unwrap_or(0)),
+        ident: src.ident.get(i).copied().unwrap_or(u16::MAX),
+        ident_ns: src.ident_ns.get(i).copied().unwrap_or(i64::MIN),
+        ident_conflict: src.ident_conflict.get(i).copied().unwrap_or(0),
+
         lat_e7: src.lat_e7.get(i).copied().unwrap_or(0),
         lon_e7: src.lon_e7.get(i).copied().unwrap_or(0),
         vel_east_mps: g(&src.vel_east_mps),

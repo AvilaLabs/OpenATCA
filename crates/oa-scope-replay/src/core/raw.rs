@@ -10,7 +10,7 @@
 use oa_display::core::project::Projection;
 use oa_display::core::traffic::{
     map_position, targets_clear, targets_malformed, targets_push, targets_refused, MapPos, Target,
-    TargetSet, MAX_TRAIL, NO_REACQ, T_UNCERTAIN,
+    TargetSet, IDENT_UNKNOWN, MAX_TRAIL, NO_IDENT, NO_REACQ, T_UNCERTAIN,
 };
 use std::fmt;
 
@@ -295,6 +295,9 @@ pub(crate) fn raw_targets_at_with_source_stale(
                     lon_e7,
                     alt_ft,
                     addr,
+                    ident: NO_IDENT,
+                    ident_age_s: u32::MAX,
+                    ident_state: IDENT_UNKNOWN,
                     r95_m: f32::NAN,
                     trail: [(0, 0); MAX_TRAIL],
                     callsign: [0; 8],

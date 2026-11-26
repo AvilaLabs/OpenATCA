@@ -10,6 +10,9 @@ fn any_row() -> OutRow {
     OutRow {
         t_ns: kani::any(),
         addr: kani::any(),
+        ident: kani::any(),
+        ident_ns: kani::any(),
+        ident_conflict: kani::any(),
         lat_e7: kani::any(),
         lon_e7: kani::any(),
         vel_east_mps: kani::any(),
@@ -29,6 +32,9 @@ fn any_row() -> OutRow {
 fn assert_row_at(o: &TrackOutput, i: usize, r: &OutRow) {
     assert_eq!(o.t_ns[i], r.t_ns);
     assert_eq!(o.addr[i], r.addr);
+    assert_eq!(o.ident[i], r.ident);
+    assert_eq!(o.ident_ns[i], r.ident_ns);
+    assert_eq!(o.ident_conflict[i], r.ident_conflict);
     assert_eq!(o.lat_e7[i], r.lat_e7);
     assert_eq!(o.lon_e7[i], r.lon_e7);
     assert_eq!(o.vel_east_mps[i].to_bits(), r.vel_east_mps.to_bits());
@@ -52,6 +58,9 @@ fn assert_aligned(o: &TrackOutput, expected: usize) {
     assert_eq!(output_len(o), expected);
     assert_eq!(o.t_ns.len(), expected);
     assert_eq!(o.addr.len(), expected);
+    assert_eq!(o.ident.len(), expected);
+    assert_eq!(o.ident_ns.len(), expected);
+    assert_eq!(o.ident_conflict.len(), expected);
     assert_eq!(o.lat_e7.len(), expected);
     assert_eq!(o.lon_e7.len(), expected);
     assert_eq!(o.vel_east_mps.len(), expected);
@@ -67,10 +76,13 @@ fn assert_aligned(o: &TrackOutput, expected: usize) {
     assert_eq!(o.flags.len(), expected);
 }
 
-fn storage_capacities(o: &TrackOutput) -> [usize; 15] {
+fn storage_capacities(o: &TrackOutput) -> [usize; 18] {
     [
         o.t_ns.capacity(),
         o.addr.capacity(),
+        o.ident.capacity(),
+        o.ident_ns.capacity(),
+        o.ident_conflict.capacity(),
         o.lat_e7.capacity(),
         o.lon_e7.capacity(),
         o.vel_east_mps.capacity(),
@@ -87,10 +99,10 @@ fn storage_capacities(o: &TrackOutput) -> [usize; 15] {
     ]
 }
 
-fn assert_storage_capacities(o: &TrackOutput, expected: &[usize; 15]) {
+fn assert_storage_capacities(o: &TrackOutput, expected: &[usize; 18]) {
     let actual = storage_capacities(o);
     // Elementwise checks avoid lowering array equality into a 120-byte memcmp loop.
-    for i in 0..15 {
+    for i in 0..18 {
         assert_eq!(actual[i], expected[i]);
     }
 }

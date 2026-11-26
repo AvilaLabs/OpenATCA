@@ -632,6 +632,9 @@ pub(crate) fn filter_output_checked(f: &Filter, t_ns: i64) -> Result<OutRow, Pre
     Ok(OutRow {
         t_ns,
         addr: 0,
+        ident: crate::types::NO_IDENT,
+        ident_ns: crate::types::NO_IDENT_NS,
+        ident_conflict: 0,
         lat_e7,
         lon_e7,
         vel_east_mps: ve as f32,
@@ -688,6 +691,9 @@ pub(crate) fn filter_association_output_checked(
     Ok(OutRow {
         t_ns,
         addr: 0,
+        ident: crate::types::NO_IDENT,
+        ident_ns: crate::types::NO_IDENT_NS,
+        ident_conflict: 0,
         lat_e7,
         lon_e7,
         vel_east_mps: 0.0,

@@ -171,6 +171,9 @@ pub fn row_columns<'a>(out: &'a TrackOutput, buf: &'a mut ColumnBuf) -> RowColum
     RowColumns {
         t_ns: &out.t_ns,
         addr: &out.addr,
+        ident: &out.ident,
+        ident_ns: &out.ident_ns,
+        ident_conflict: &out.ident_conflict,
         lat_e7: &out.lat_e7,
         lon_e7: &out.lon_e7,
         vel_east_mps: &out.vel_east_mps,

@@ -570,6 +570,9 @@ fn output_row(o: &TrackOutput, i: usize) -> Result<OutRow, String> {
     Ok(OutRow {
         t_ns: required(&o.t_ns, i)?,
         addr: required(&o.addr, i)?,
+        ident: required(&o.ident, i)?,
+        ident_ns: required(&o.ident_ns, i)?,
+        ident_conflict: required(&o.ident_conflict, i)?,
         lat_e7: required(&o.lat_e7, i)?,
         lon_e7: required(&o.lon_e7, i)?,
         vel_east_mps: required(&o.vel_east_mps, i)?,
@@ -592,6 +595,9 @@ fn append(o: &mut TrackOutput, r: OutRow) -> Result<(), String> {
     }
     o.t_ns.push(r.t_ns);
     o.addr.push(r.addr);
+    o.ident.push(r.ident);
+    o.ident_ns.push(r.ident_ns);
+    o.ident_conflict.push(r.ident_conflict);
     o.lat_e7.push(r.lat_e7);
     o.lon_e7.push(r.lon_e7);
     o.vel_east_mps.push(r.vel_east_mps);

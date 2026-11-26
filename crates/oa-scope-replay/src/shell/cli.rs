@@ -1198,7 +1198,7 @@ pub fn run(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
     let s = &tr.store;
     let _ = writeln!(
         out,
-        "rows     of {} tracker rows: {} kept, {} before the window; refused {} (address table {}, rows per address {}, missing column {}); clamped: altitude {}, speed {}; altitude not a number {}; velocity not a number {}; 95% radius unknown {}",
+        "rows     of {} tracker rows: {} kept, {} before the window; refused {} (address table {}, rows per address {}, missing column {}, invalid Mode 3/A {}); clamped: altitude {}, speed {}; altitude not a number {}; velocity not a number {}; 95% radius unknown {}",
         s.rows_in,
         s.kept,
         s.before_window,
@@ -1206,6 +1206,7 @@ pub fn run(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
         s.address_table_full,
         s.address_rows_full,
         s.missing_column,
+        s.invalid_identity,
         s.alt_clamped,
         s.speed_clamped,
         s.alt_not_finite,
@@ -1272,6 +1273,10 @@ pub fn run(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
         (
             "rows refused by the store: missing column",
             tr.store.missing_column,
+        ),
+        (
+            "rows refused by the store: invalid Mode 3/A identity",
+            tr.store.invalid_identity,
         ),
         ("addresses whose rows could not be ordered", tr.sort_failed),
         ("targets refused, display full (target-frames)", tot.refused),

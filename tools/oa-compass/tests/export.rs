@@ -635,6 +635,9 @@ fn tracker_output_exports_ticks_only_and_counts_the_update_rows() {
     let mut push = |flags: u8, t_s: i64, addr: u32| {
         o.t_ns.push(DAY_S * 1_000_000_000 + t_s * 1_000_000_000);
         o.addr.push(addr);
+        o.ident.push(u16::MAX);
+        o.ident_ns.push(i64::MIN);
+        o.ident_conflict.push(0);
         o.lat_e7.push(410_000_000);
         o.lon_e7.push(-880_000_000);
         o.vel_east_mps.push(100.0);

@@ -111,6 +111,9 @@ fn output_row(at_ns: i64) -> OutRow {
     OutRow {
         t_ns: at_ns,
         addr: 0,
+        ident: crate::types::NO_IDENT,
+        ident_ns: crate::types::NO_IDENT_NS,
+        ident_conflict: 0,
         lat_e7: 0,
         lon_e7: 0,
         vel_east_mps: 0.0,
@@ -207,8 +210,10 @@ fn arbitrary_category_state() -> CategoryState {
 fn arbitrary_stats() -> TrackerStats {
     TrackerStats {
         offered: kani::any(),
+        ident_conflicts: kani::any(),
         applied: kani::any(),
         refused: [
+            kani::any(),
             kani::any(),
             kani::any(),
             kani::any(),
@@ -410,6 +415,7 @@ fn assert_same_track_txn(a: &TrackTxn, b: &TrackTxn) {
 
 fn assert_stats_eq(a: &TrackerStats, b: &TrackerStats) {
     assert_eq!(a.offered, b.offered);
+    assert_eq!(a.ident_conflicts, b.ident_conflicts);
     assert_eq!(a.applied, b.applied);
     for i in 0..crate::types::REFUSE_KINDS {
         assert_eq!(a.refused[i], b.refused[i]);
@@ -550,6 +556,9 @@ fn assert_measurement_bits(a: &Measurement, b: &Measurement) {
 fn assert_output_row(out: &TrackOutput, i: usize, row: &OutRow) {
     assert_eq!(out.t_ns[i], row.t_ns);
     assert_eq!(out.addr[i], row.addr);
+    assert_eq!(out.ident[i], row.ident);
+    assert_eq!(out.ident_ns[i], row.ident_ns);
+    assert_eq!(out.ident_conflict[i], row.ident_conflict);
     assert_eq!(out.lat_e7[i], row.lat_e7);
     assert_eq!(out.lon_e7[i], row.lon_e7);
     assert_f32_bits(out.vel_east_mps[i], row.vel_east_mps);
@@ -571,7 +580,7 @@ fn assert_output_row(out: &TrackOutput, i: usize, row: &OutRow) {
 
 fn assert_output_txn_eq(a: &OutputTxn, b: &OutputTxn) {
     assert_eq!(a.overflow, b.overflow);
-    for i in 0..15 {
+    for i in 0..18 {
         assert_eq!(a.lens[i], b.lens[i]);
     }
 }
@@ -579,6 +588,9 @@ fn assert_output_txn_eq(a: &OutputTxn, b: &OutputTxn) {
 fn assert_output_len(out: &TrackOutput, n: usize) {
     assert_eq!(out.t_ns.len(), n);
     assert_eq!(out.addr.len(), n);
+    assert_eq!(out.ident.len(), n);
+    assert_eq!(out.ident_ns.len(), n);
+    assert_eq!(out.ident_conflict.len(), n);
     assert_eq!(out.lat_e7.len(), n);
     assert_eq!(out.lon_e7.len(), n);
     assert_eq!(out.vel_east_mps.len(), n);

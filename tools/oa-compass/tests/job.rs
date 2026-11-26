@@ -458,6 +458,9 @@ fn track_output(rows: &[(u8, i64, u32)]) -> oa_track::TrackOutput {
     for &(flags, t_s, addr) in rows {
         o.t_ns.push(DAY_NS + t_s * 1_000_000_000);
         o.addr.push(addr);
+        o.ident.push(u16::MAX);
+        o.ident_ns.push(i64::MIN);
+        o.ident_conflict.push(0);
         o.lat_e7.push(410_000_000);
         o.lon_e7.push(-880_000_000);
         o.vel_east_mps.push(100.0);

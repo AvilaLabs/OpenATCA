@@ -9,6 +9,10 @@ fn base() -> OutRow {
     OutRow {
         t_ns: 0,
         addr: 1,
+        ident: u16::MAX,
+        ident_ns: i64::MIN,
+        ident_conflict: 0,
+
         lat_e7: 0,
         lon_e7: 0,
         vel_east_mps: 0.0,

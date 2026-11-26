@@ -13,6 +13,7 @@ use crate::core::rows::{
     RF_HAS_ALT, RF_REACQUIRED,
 };
 use oa_display::core::traffic::{NO_ALT, NO_U16};
+use oa_track::{NO_IDENT, NO_IDENT_NS};
 
 /// The capacities of the store: addresses, rows of one address, rows in all.
 // A7.2: cold struct, size guard waived (one per run).
@@ -59,6 +60,9 @@ pub fn store_add_with(
 ) -> Result<StoreStats, RowsError> {
     let n = cols.t_ns.len();
     check_len("addr", cols.addr.len(), n)?;
+    check_len("ident", cols.ident.len(), n)?;
+    check_len("ident_ns", cols.ident_ns.len(), n)?;
+    check_len("ident_conflict", cols.ident_conflict.len(), n)?;
     check_len("lat_e7", cols.lat_e7.len(), n)?;
     check_len("lon_e7", cols.lon_e7.len(), n)?;
     check_len("vel_east_mps", cols.vel_east_mps.len(), n)?;
@@ -83,6 +87,9 @@ pub fn store_add_with(
         let (
             Some(&t_ns),
             Some(&addr),
+            Some(&ident),
+            Some(&ident_ns),
+            Some(&ident_conflict),
             Some(&lat_e7),
             Some(&lon_e7),
             Some(&ve),
@@ -93,6 +100,9 @@ pub fn store_add_with(
         ) = (
             cols.t_ns.get(i),
             cols.addr.get(i),
+            cols.ident.get(i),
+            cols.ident_ns.get(i),
+            cols.ident_conflict.get(i),
             cols.lat_e7.get(i),
             cols.lon_e7.get(i),
             cols.vel_east_mps.get(i),
@@ -107,6 +117,13 @@ pub fn store_add_with(
         };
         if t_ns < keep_from_ns {
             st.before_window += 1;
+            continue;
+        }
+        let unavailable = ident == NO_IDENT && ident_ns == NO_IDENT_NS && ident_conflict == 0;
+        let conflicted = ident == NO_IDENT && ident_ns != NO_IDENT_NS && ident_conflict == 1;
+        let observed = ident <= 0o7777 && ident_ns != NO_IDENT_NS && ident_conflict == 0;
+        if !(unavailable || conflicted || observed) {
+            st.invalid_identity = st.invalid_identity.saturating_add(1);
             continue;
         }
         st.velocity_not_finite += u64::from(!ve.is_finite() || !vn.is_finite());
@@ -134,6 +151,9 @@ pub fn store_add_with(
         };
         let row = Row {
             t_ns,
+            ident,
+            ident_ns,
+            ident_conflict,
             lat_e7,
             lon_e7,
             alt_ft,
@@ -153,6 +173,9 @@ pub fn store_add_with(
             continue;
         }
         v.t_ns.push(row.t_ns);
+        v.ident.push(row.ident);
+        v.ident_ns.push(row.ident_ns);
+        v.ident_conflict.push(row.ident_conflict);
         v.lat_e7.push(row.lat_e7);
         v.lon_e7.push(row.lon_e7);
         v.alt_ft.push(row.alt_ft);
@@ -195,6 +218,9 @@ pub fn store_finish(store: &mut RowStore) -> u64 {
         let mut order: Vec<(i64, u32)> = v.t_ns.iter().copied().zip(0u32..).collect();
         order.sort_by_key(|k| k.0);
         let ok = gather(&mut v.t_ns, &order)
+            && gather(&mut v.ident, &order)
+            && gather(&mut v.ident_ns, &order)
+            && gather(&mut v.ident_conflict, &order)
             && gather(&mut v.lat_e7, &order)
             && gather(&mut v.lon_e7, &order)
             && gather(&mut v.alt_ft, &order)

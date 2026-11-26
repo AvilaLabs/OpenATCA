@@ -27,9 +27,25 @@ use oa_sha256::{to_hex, Sha256};
 use crate::types::{TrackLog, TrackOutput, TrackerStats, OUTPUT_HASH_TAG, O_HAS_ALT, O_TICK};
 
 /// The column files in the order the digest hashes them.
-pub(crate) const COLS: [&str; 15] = [
-    "t_ns", "addr", "lat", "lon", "ve", "vn", "turn", "alt", "altvar", "vrate", "poscov", "velcov",
-    "muh", "muv", "flags",
+pub(crate) const COLS: [&str; 18] = [
+    "t_ns",
+    "addr",
+    "lat",
+    "lon",
+    "ve",
+    "vn",
+    "turn",
+    "alt",
+    "altvar",
+    "vrate",
+    "poscov",
+    "velcov",
+    "muh",
+    "muv",
+    "flags",
+    "ident",
+    "ident_ns",
+    "ident_conflict",
 ];
 const T_NS: usize = 0;
 const ADDR: usize = 1;
@@ -40,7 +56,7 @@ const VN: usize = 5;
 const ALT: usize = 7;
 const FLAGS: usize = 14;
 /// Bytes per row of each column file, in [`COLS`] order.
-pub(crate) const WIDTHS: [u64; 15] = [8, 4, 4, 4, 4, 4, 4, 4, 4, 4, 12, 12, 8, 8, 1];
+pub(crate) const WIDTHS: [u64; 18] = [8, 4, 4, 4, 4, 4, 4, 4, 4, 4, 12, 12, 8, 8, 1, 2, 8, 1];
 /// Rows read per block when scoring reads the files back.
 const BLOCK_ROWS: usize = 1 << 13;
 
@@ -179,7 +195,7 @@ pub fn spill_append(w: &mut SpillWriter, o: &TrackOutput) -> io::Result<()> {
             })
             .collect()
     };
-    let cols: [Vec<u8>; 15] = [
+    let cols: [Vec<u8>; 18] = [
         o.t_ns.iter().flat_map(|x| x.to_le_bytes()).collect(),
         o.addr.iter().flat_map(|x| x.to_le_bytes()).collect(),
         o.lat_e7.iter().flat_map(|x| x.to_le_bytes()).collect(),
@@ -195,6 +211,9 @@ pub fn spill_append(w: &mut SpillWriter, o: &TrackOutput) -> io::Result<()> {
         arr2(&o.mu_h),
         arr2(&o.mu_v),
         o.flags.clone(),
+        o.ident.iter().flat_map(|x| x.to_le_bytes()).collect(),
+        o.ident_ns.iter().flat_map(|x| x.to_le_bytes()).collect(),
+        o.ident_conflict.clone(),
     ];
     for (f, c) in w.files.iter_mut().zip(cols.iter()) {
         f.write_all(c)?;

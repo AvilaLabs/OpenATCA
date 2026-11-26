@@ -27,8 +27,9 @@
 
 use oa_display::core::project::Projection;
 use oa_display::core::traffic::{
-    map_position, position_valid, targets_push, MapPos, Target, TargetSet, MAX_REACQ_AGE_S,
-    MAX_TRAIL, NO_ALT, NO_REACQ, NO_U16, T_COAST, T_CS_CONFLICT, T_UNCERTAIN,
+    map_position, position_valid, targets_push, MapPos, Target, TargetSet, IDENT_CONFLICT,
+    IDENT_OBSERVED, IDENT_UNKNOWN, MAX_REACQ_AGE_S, MAX_TRAIL, NO_ALT, NO_IDENT, NO_IDENT_NS,
+    NO_REACQ, NO_U16, T_COAST, T_CS_CONFLICT, T_UNCERTAIN,
 };
 use std::collections::BTreeMap;
 use std::fmt;
@@ -56,7 +57,7 @@ pub const MAX_STORE_ADDRESSES: usize = 1 << 17;
 /// under 2^18 = 262 144.
 pub const MAX_ROWS_PER_ADDRESS: usize = 1 << 18;
 /// Most rows the store holds in all. Analysis: 4096 simultaneous tracks at one row a second for
-/// about 4096 s is 2^24 = 16.7 million rows (about 0.5 GB at 29 bytes a row) which is the largest
+/// about 4096 s is 2^24 = 16.7 million rows (about 0.625 GiB at 40 bytes a row) which is the largest
 /// window this tool is sized for.
 pub const MAX_STORE_ROWS: usize = 1 << 24;
 // Work per frame (C7), in terms of the capacities above. `targets_at` visits every address once:
@@ -118,6 +119,9 @@ impl std::error::Error for RowsError {}
 pub struct RowColumns<'a> {
     pub t_ns: &'a [i64],
     pub addr: &'a [u32],
+    pub ident: &'a [u16],
+    pub ident_ns: &'a [i64],
+    pub ident_conflict: &'a [u8],
     pub lat_e7: &'a [i32],
     pub lon_e7: &'a [i32],
     pub vel_east_mps: &'a [f32],
@@ -135,26 +139,30 @@ pub struct RowColumns<'a> {
 /// A9 exception: `r95_m` is an `f32`, the tracker's own output precision, used only to size a
 /// drawn circle; every other column is fixed point.
 // Budget: one per kept tracker row, built per row on the way into the columns of an address
-// (the store itself is struct-of-arrays, A3). 29 bytes packed (8+4+4+4+4+2+2+1); the 3 bytes of
-// tail padding are the cost of the 8-byte alignment of `t_ns`.
+// (the store itself is struct-of-arrays, A3). 40 bytes packed with no padding after field
+// reordering. A7.1: +8 bytes over the former 32-byte record carries the code, source time, and
+// conflict state so the display shows the observation age without claiming it is current.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[repr(C)]
 pub struct Row {
     pub t_ns: i64,
+    pub ident_ns: i64,
     pub lat_e7: i32,
     pub lon_e7: i32,
     /// Feet, or [`NO_ALT`]; a real altitude is never `NO_ALT`.
     pub alt_ft: i32,
     /// 95% radius, metres; NaN when it could not be computed.
     pub r95_m: f32,
+    pub ident: u16,
     /// Ground speed 0.1 kt, or [`NO_U16`].
     pub gs_dkt: u16,
     /// Track 0.1 degree, or [`NO_U16`].
     pub track_ddeg: u16,
     /// `RF_*` bits.
     pub flags: u8,
+    pub ident_conflict: u8,
 }
-const _: () = assert!(core::mem::size_of::<Row>() == 32);
+const _: () = assert!(core::mem::size_of::<Row>() == 40);
 
 /// The rows of one address in columns (A3), sharing an index; in time order once `store_finish`
 /// (shell) has run. Visible to this crate only, for the shell's builder (A4, A5).
@@ -162,6 +170,9 @@ const _: () = assert!(core::mem::size_of::<Row>() == 32);
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct AddrRows {
     pub(crate) t_ns: Vec<i64>,
+    pub(crate) ident: Vec<u16>,
+    pub(crate) ident_ns: Vec<i64>,
+    pub(crate) ident_conflict: Vec<u8>,
     pub(crate) lat_e7: Vec<i32>,
     pub(crate) lon_e7: Vec<i32>,
     pub(crate) alt_ft: Vec<i32>,
@@ -206,6 +217,8 @@ pub struct StoreStats {
     /// LOSS: rows refused because a column they need was missing (cannot happen once the lengths
     /// are checked, and counted so that it cannot be silent).
     pub missing_column: u64,
+    /// LOSS: rows with an invalid Mode 3/A code, observation time, or conflict-state combination.
+    pub invalid_identity: u64,
     /// LOSS: rows refused because the store already held [`MAX_STORE_ADDRESSES`] addresses.
     pub address_table_full: u64,
     /// LOSS: rows refused because their address already held [`MAX_ROWS_PER_ADDRESS`] rows.
@@ -229,6 +242,7 @@ pub fn store_stats_add(a: &mut StoreStats, b: &StoreStats) {
     a.before_window = a.before_window.saturating_add(b.before_window);
     a.kept = a.kept.saturating_add(b.kept);
     a.missing_column = a.missing_column.saturating_add(b.missing_column);
+    a.invalid_identity = a.invalid_identity.saturating_add(b.invalid_identity);
     a.address_table_full = a.address_table_full.saturating_add(b.address_table_full);
     a.address_rows_full = a.address_rows_full.saturating_add(b.address_rows_full);
     a.alt_clamped = a.alt_clamped.saturating_add(b.alt_clamped);
@@ -241,6 +255,7 @@ pub fn store_stats_add(a: &mut StoreStats, b: &StoreStats) {
 /// The rows of `store_stats` that are work lost: refused for want of room or of a column.
 pub fn store_loss(s: &StoreStats) -> u64 {
     s.missing_column
+        .saturating_add(s.invalid_identity)
         .saturating_add(s.address_table_full)
         .saturating_add(s.address_rows_full)
 }
@@ -419,6 +434,9 @@ pub fn velocity_of(east_mps: f32, north_mps: f32) -> (u16, u16) {
 fn row_at(v: &AddrRows, i: usize) -> Option<Row> {
     Some(Row {
         t_ns: *v.t_ns.get(i)?,
+        ident: *v.ident.get(i)?,
+        ident_ns: *v.ident_ns.get(i)?,
+        ident_conflict: *v.ident_conflict.get(i)?,
         lat_e7: *v.lat_e7.get(i)?,
         lon_e7: *v.lon_e7.get(i)?,
         alt_ft: *v.alt_ft.get(i)?,
@@ -494,11 +512,25 @@ fn target_of(
             }
         }
     }
+    let (ident, ident_age_s, ident_state) = if row.ident_ns > t_ns || row.ident_ns == NO_IDENT_NS {
+        (NO_IDENT, u32::MAX, IDENT_UNKNOWN)
+    } else if row.ident_conflict != 0 {
+        (NO_IDENT, u32::MAX, IDENT_CONFLICT)
+    } else if row.ident == NO_IDENT {
+        (NO_IDENT, u32::MAX, IDENT_UNKNOWN)
+    } else {
+        let age_ns = t_ns.checked_sub(row.ident_ns).unwrap_or(i64::MAX);
+        let age_s = u32::try_from(age_ns / NS_PER_S).unwrap_or(u32::MAX);
+        (row.ident, age_s, IDENT_OBSERVED)
+    };
     Target {
         lat_e7: row.lat_e7,
         lon_e7: row.lon_e7,
         alt_ft: row.alt_ft,
         addr,
+        ident,
+        ident_age_s,
+        ident_state,
         r95_m: row.r95_m,
         trail,
         callsign: call.callsign,

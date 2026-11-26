@@ -20,6 +20,8 @@ pub const RADAR_KEY_BASE: u32 = 0x4000_0000;
 const _: () = assert!(RADAR_KEY_BASE > MAX_AIRCRAFT_ADDRESS);
 /// Absent identity (Mode A) code.
 pub const NO_IDENT: u16 = u16::MAX;
+/// No source time for an observed Mode 3/A code.
+pub const NO_IDENT_NS: i64 = i64::MIN;
 
 /// [`Measurement::flags`]: the velocity fields are present.
 pub const M_HAS_VEL: u8 = 1;
@@ -84,15 +86,17 @@ pub const REFUSE_NAMES: [&str; REFUSE_KINDS] = [
     "bad_altitude",
     "no_address",
     "time_out_of_range",
+    "mode_a_out_of_range",
 ];
 /// Number of refusal reasons.
-pub const REFUSE_KINDS: usize = 6;
+pub const REFUSE_KINDS: usize = 7;
 pub const REF_POSITION: usize = 0;
 pub const REF_POS_COV: usize = 1;
 pub const REF_VELOCITY: usize = 2;
 pub const REF_ALTITUDE: usize = 3;
 pub const REF_NO_ADDRESS: usize = 4;
 pub const REF_TIME: usize = 5;
+pub const REF_IDENTITY: usize = 6;
 /// A time of applicability, or a time the caller advances to, must be within this of the Unix
 /// epoch, ns (a little over 146 years either side): further out is refused, so rounding to a tick
 /// and stepping from tick to tick cannot overflow.
@@ -378,6 +382,12 @@ pub struct TrackOutput {
     /// Time of the state, Unix ns.
     pub t_ns: Vec<i64>,
     pub addr: Vec<u32>,
+    /// Last observed Mode 3/A code; `NO_IDENT` means no code has been observed.
+    pub ident: Vec<u16>,
+    /// Applicability time of `ident`; `NO_IDENT_NS` when `ident` is absent.
+    pub ident_ns: Vec<i64>,
+    /// Same-time source reports with different codes; one byte per row.
+    pub ident_conflict: Vec<u8>,
     pub lat_e7: Vec<i32>,
     pub lon_e7: Vec<i32>,
     /// True east and north velocity, m/s.
@@ -408,6 +418,12 @@ pub struct TrackOutput {
 pub struct OutRow {
     pub t_ns: i64,
     pub addr: u32,
+    /// Last observed Mode 3/A code, or `NO_IDENT`.
+    pub ident: u16,
+    /// Applicability time of `ident`, or `NO_IDENT_NS`.
+    pub ident_ns: i64,
+    /// 1 when same-time sources reported different codes for this track.
+    pub ident_conflict: u8,
     pub lat_e7: i32,
     pub lon_e7: i32,
     pub vel_east_mps: f32,
@@ -430,6 +446,9 @@ pub fn output_new(capacity: usize) -> TrackOutput {
         overflow: 0,
         t_ns: Vec::with_capacity(capacity),
         addr: Vec::with_capacity(capacity),
+        ident: Vec::with_capacity(capacity),
+        ident_ns: Vec::with_capacity(capacity),
+        ident_conflict: Vec::with_capacity(capacity),
         lat_e7: Vec::with_capacity(capacity),
         lon_e7: Vec::with_capacity(capacity),
         vel_east_mps: Vec::with_capacity(capacity),
@@ -455,6 +474,9 @@ pub fn output_len(o: &TrackOutput) -> usize {
 pub fn output_clear(o: &mut TrackOutput) {
     o.t_ns.clear();
     o.addr.clear();
+    o.ident.clear();
+    o.ident_ns.clear();
+    o.ident_conflict.clear();
     o.lat_e7.clear();
     o.lon_e7.clear();
     o.vel_east_mps.clear();
@@ -484,6 +506,9 @@ pub fn output_push(o: &mut TrackOutput, r: &OutRow) {
     }
     o.t_ns.push(r.t_ns);
     o.addr.push(r.addr);
+    o.ident.push(r.ident);
+    o.ident_ns.push(r.ident_ns);
+    o.ident_conflict.push(r.ident_conflict);
     o.lat_e7.push(r.lat_e7);
     o.lon_e7.push(r.lon_e7);
     o.vel_east_mps.push(r.vel_east_mps);
@@ -549,6 +574,8 @@ pub enum PredictError {
 pub struct TrackerStats {
     /// Measurements offered.
     pub offered: u64,
+    /// Same-time source Mode 3/A reports that disagreed for a track; neither code was chosen.
+    pub ident_conflicts: u64,
     /// Measurements applied to a filter (including those by re-filtering).
     pub applied: u64,
     /// Refused by validation, by reason ([`REFUSE_NAMES`]).

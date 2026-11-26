@@ -92,7 +92,7 @@ pub fn measure(
         addr,
         alt_quant_ft: 0,
         sensor: 1,
-        ident: NO_IDENT,
+        ident: u16::MAX,
         flags: 0,
         category: 0,
         vel_lag_s: 0.0,

@@ -672,7 +672,7 @@ class AllocatorLayoutTests(unittest.TestCase):
             tracker_core.write_text(
                 tracker_core.read_text(encoding="utf-8")
                 + f"\npub struct Tracker {{\n{tracker_fields}\n    log: TrackLog,\n}}\n"
-                + f"#[cfg(test)] fn tracker_buffer_capacities(t: &Tracker) -> [usize; 33] {{\n    [{probe_calls}]\n}}\n"
+                + f"#[cfg(test)] fn tracker_buffer_capacities(t: &Tracker) -> [usize; 36] {{\n    [{probe_calls}]\n}}\n"
                 + "// REQ: OA-TRK-017\n#[test] fn all_tracker_buffer_capacities_stay_fixed_through_bounded_updates_and_flush() { let before = tracker_buffer_capacities(&t); tracker_advance(); tracker_flush(); capacity_refused(); assert_eq!(before, tracker_buffer_capacities(&t)); }\n// REQ: OA-TRK-355\n",
                 encoding="utf-8",
             )

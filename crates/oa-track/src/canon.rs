@@ -36,7 +36,7 @@ use crate::spill::WIDTHS;
 use crate::types::{OutRow, TrackOutput};
 
 /// Bytes of one canonical row.
-pub const ROW_BYTES: usize = 85;
+pub const ROW_BYTES: usize = 96;
 /// Field layout of a canonical row: byte offsets and widths.
 pub const OFF_ADDR: usize = 0;
 pub const OFF_T_NS: usize = 4;
@@ -57,6 +57,9 @@ pub const OFF_MU_H: usize = 68;
 /// Vertical model probabilities, two `f32`.
 pub const OFF_MU_V: usize = 76;
 pub const OFF_FLAGS: usize = 84;
+pub const OFF_IDENT: usize = 85;
+pub const OFF_IDENT_NS: usize = 87;
+pub const OFF_IDENT_CONFLICT: usize = 95;
 
 /// One canonical row.
 pub type CanonRow = [u8; ROW_BYTES];
@@ -67,7 +70,8 @@ pub const DIGEST_HEADER: &str =
     "# oa-track digest v2: second chain_hash second_hash rows; last line: end seconds rows chain";
 /// Magic of a rows file; then `u32` version, `u32` row size, `u64` row count (little-endian).
 pub const ROWS_MAGIC: &[u8; 8] = b"OATKROWS";
-pub const ROWS_VERSION: u32 = 1;
+pub const ROWS_VERSION: u32 = 2;
+const ROWS_V1_BYTES: usize = 85;
 pub const ROWS_HEADER_BYTES: usize = 24;
 /// Most rows one Unix second may hold (C2): about 89 MB of canonical rows, three orders of
 /// magnitude above the busiest second of the national airspace. A reader holds one second whole.
@@ -76,7 +80,7 @@ pub const MAX_ROWS_PER_SECOND: u64 = 1 << 20;
 pub const MAX_SECONDS: usize = 1 << 20;
 
 /// Number of fields of the spill column table that make up a canonical row.
-pub const CANON_FIELDS: usize = 15;
+pub const CANON_FIELDS: usize = 18;
 
 /// `(spill column, offset in the canonical row)` of every field, in column order.
 pub(crate) const FIELDS: [(usize, usize); CANON_FIELDS] = [
@@ -95,6 +99,9 @@ pub(crate) const FIELDS: [(usize, usize); CANON_FIELDS] = [
     (12, OFF_MU_H),
     (13, OFF_MU_V),
     (14, OFF_FLAGS),
+    (15, OFF_IDENT),
+    (16, OFF_IDENT_NS),
+    (17, OFF_IDENT_CONFLICT),
 ];
 
 // D4/F18: the layout is stated here and in the spill column table; these tie them together at
@@ -206,6 +213,9 @@ pub fn canon_row(r: &OutRow) -> CanonRow {
     put_f32s::<OFF_MU_H, 2>(&mut b, r.mu_h);
     put_f32s::<OFF_MU_V, 2>(&mut b, r.mu_v);
     put::<OFF_FLAGS, 1>(&mut b, [r.flags]);
+    put::<OFF_IDENT, 2>(&mut b, r.ident.to_le_bytes());
+    put::<OFF_IDENT_NS, 8>(&mut b, r.ident_ns.to_le_bytes());
+    put::<OFF_IDENT_CONFLICT, 1>(&mut b, [r.ident_conflict]);
     b
 }
 
@@ -214,6 +224,9 @@ pub fn canon_row_at(o: &TrackOutput, i: usize) -> Option<CanonRow> {
     Some(canon_row(&OutRow {
         t_ns: *o.t_ns.get(i)?,
         addr: *o.addr.get(i)?,
+        ident: *o.ident.get(i)?,
+        ident_ns: *o.ident_ns.get(i)?,
+        ident_conflict: *o.ident_conflict.get(i)?,
         lat_e7: *o.lat_e7.get(i)?,
         lon_e7: *o.lon_e7.get(i)?,
         vel_east_mps: *o.vel_east_mps.get(i)?,
@@ -415,6 +428,22 @@ const _: () = assert!(8 + 4 + 4 + 8 == ROWS_HEADER_BYTES);
 /// Checks the header of a rows file in full (magic, version, row size, exact length) and returns
 /// the row count it declares.
 pub fn parse_rows_header(h: &[u8]) -> Result<u64, String> {
+    Ok(parse_rows_header_info(h)?.rows)
+}
+
+/// Header facts needed by a reader to adapt historical v1 rows without inventing a code.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RowsHeaderInfo {
+    /// File schema version: 1 is the legacy 85-byte row without identity fields; 2 is current.
+    pub version: u32,
+    /// Width declared by the header and checked for that schema version.
+    pub row_bytes: usize,
+    /// Number of rows in the file.
+    pub rows: u64,
+}
+
+/// Checks a rows header and returns its supported version and exact row width.
+pub fn parse_rows_header_info(h: &[u8]) -> Result<RowsHeaderInfo, String> {
     let Ok(h) = <[u8; ROWS_HEADER_BYTES]>::try_from(h) else {
         return Err(format!(
             "rows file header is {} bytes, expected {ROWS_HEADER_BYTES}",
@@ -431,18 +460,27 @@ pub fn parse_rows_header(h: &[u8]) -> Result<u64, String> {
         return Err("not a rows file (bad magic)".to_string());
     }
     let ver = le_u32(&take(4));
-    if ver != ROWS_VERSION {
-        return Err(format!("rows file version {ver}, expected {ROWS_VERSION}"));
+    if ver != 1 && ver != ROWS_VERSION {
+        return Err(format!(
+            "rows file version {ver}, expected 1 or {ROWS_VERSION}"
+        ));
     }
     let size = le_u32(&take(4));
-    if usize::try_from(size).ok() != Some(ROW_BYTES) {
-        return Err(format!("rows file row size {size}, expected {ROW_BYTES}"));
+    let expected = if ver == 1 { ROWS_V1_BYTES } else { ROW_BYTES };
+    if usize::try_from(size).ok() != Some(expected) {
+        return Err(format!(
+            "rows file row size {size}, expected {expected} for version {ver}"
+        ));
     }
     let mut c = [0u8; 8];
     for (d, s) in c.iter_mut().zip(take(8)) {
         *d = s;
     }
-    Ok(u64::from_le_bytes(c))
+    Ok(RowsHeaderInfo {
+        version: ver,
+        row_bytes: expected,
+        rows: u64::from_le_bytes(c),
+    })
 }
 
 fn le_u32(b: &[u8]) -> u32 {

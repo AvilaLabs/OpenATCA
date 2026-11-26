@@ -146,6 +146,10 @@ fn a_copy_of_truth_scores_zero_and_a_shifted_copy_scores_its_shift() {
             let row = |lat: f64, lon: f64| OutRow {
                 t_ns: ms * 1_000_000,
                 addr: t.addr,
+                ident: u16::MAX,
+                ident_ns: i64::MIN,
+                ident_conflict: 0,
+
                 lat_e7: (lat * 1e7).round() as i32,
                 lon_e7: (lon * 1e7).round() as i32,
                 vel_east_mps: q.vel_east_mps as f32,
@@ -231,6 +235,10 @@ fn identity_accounting_counts_swaps_wrong_plots_false_and_duplicate_tracks() {
         let row = OutRow {
             t_ns: 0,
             addr: k,
+            ident: u16::MAX,
+            ident_ns: i64::MIN,
+            ident_conflict: 0,
+
             lat_e7: 0,
             lon_e7: 0,
             vel_east_mps: 0.0,

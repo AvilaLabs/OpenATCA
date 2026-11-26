@@ -104,7 +104,8 @@ use crate::tracker::{
 };
 use crate::types::{
     output_clear, output_new, output_push, Measurement, OutRow, PredictError, TrackError,
-    TrackOutput, TrackerConfig, TrackerStats, NONE_I32, NO_ADDR, O_HAS_ALT, TIME_LIMIT_NS,
+    TrackOutput, TrackerConfig, TrackerStats, NONE_I32, NO_ADDR, NO_IDENT, NO_IDENT_NS, O_HAS_ALT,
+    TIME_LIMIT_NS,
 };
 
 /// Association rule of the run: exact global nearest neighbour, or the plain nearest neighbour
@@ -3969,6 +3970,9 @@ fn copy_rows_from(src: &TrackOutput, from_ns: i64, except_key: Option<u32>, dst:
             &OutRow {
                 t_ns: t,
                 addr,
+                ident: src.ident.get(i).copied().unwrap_or(NO_IDENT),
+                ident_ns: src.ident_ns.get(i).copied().unwrap_or(NO_IDENT_NS),
+                ident_conflict: src.ident_conflict.get(i).copied().unwrap_or(0),
                 lat_e7: src.lat_e7.get(i).copied().unwrap_or(0),
                 lon_e7: src.lon_e7.get(i).copied().unwrap_or(0),
                 vel_east_mps: g(&src.vel_east_mps),
@@ -6303,6 +6307,10 @@ mod tests {
         let row = OutRow {
             t_ns: 0,
             addr: 1,
+            ident: u16::MAX,
+            ident_ns: i64::MIN,
+            ident_conflict: 0,
+
             lat_e7: 0,
             lon_e7: 0,
             vel_east_mps: 0.0,

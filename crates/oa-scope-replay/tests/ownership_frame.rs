@@ -51,6 +51,9 @@ fn output() -> TrackOutput {
     let mut out = output_new(4);
     out.t_ns.push(T0);
     out.addr.push(ADDR);
+    out.ident.push(u16::MAX);
+    out.ident_ns.push(i64::MIN);
+    out.ident_conflict.push(0);
     out.lat_e7.push(419_786_000);
     out.lon_e7.push(-879_048_000);
     out.vel_east_mps.push(40.0);
