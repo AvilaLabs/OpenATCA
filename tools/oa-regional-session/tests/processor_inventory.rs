@@ -5,9 +5,7 @@
     clippy::indexing_slicing
 )]
 
-use oa_adapt::local_inventory::{
-    verify_local_inventory_at, verify_local_startup, LocalInventoryStatus,
-};
+use oa_adapt::local_inventory::{verify_local_startup, LocalInventoryStatus};
 use oa_adapt::manifest::{issue_new_package, verify_current, write_new_package, ChangeClass};
 use oa_airspace::model::{empty_model, Meta};
 use oa_airspace::snapshot::encode;
