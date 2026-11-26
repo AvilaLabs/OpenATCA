@@ -61,7 +61,7 @@ class VddFixture(unittest.TestCase):
         self._write("change.txt", "updated\n")
         subprocess.run(["git", "-C", str(self.repo), "add", "."], check=True)
         subprocess.run(["git", "-C", str(self.repo), "commit", "-qm",
-                        "OA-GEN-001: bounded VDD test /home/example/openatca-private/note"], check=True)
+                        "OA-GEN-001: bounded VDD test /home/example/private/note"], check=True)
         subprocess.run(["git", "-C", str(self.repo), "tag", "v1.2.4"], check=True)
 
     def tearDown(self):
@@ -100,7 +100,6 @@ class VddFixture(unittest.TestCase):
         self.assertIn("**OA-GEN-001**", text)
         self.assertIn("bounded VDD test", text)
         self.assertNotIn("/home/example", text)
-        self.assertNotIn("openatca-private", text)
 
     def test_section_4_trace_summary_and_digest(self):
         text = self.render()
