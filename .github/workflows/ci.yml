@@ -30,6 +30,13 @@ jobs:
         run: python3 tools/test_prepare_rust_proof_controls.py
       - name: Allocation harness
         run: python3 tools/check_allocations.py --target-dir "$RUNNER_TEMP/oa-allocator-target" --out "$RUNNER_TEMP/oa-allocator-evidence"
+      - name: Attach allocation qualification diagnostics
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: allocation-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/oa-allocator-evidence/
+          if-no-files-found: warn
       - name: Feed reader work check (release)
         run: cargo +1.89.0 run --release --locked --manifest-path validation/oa-feed-work-check/Cargo.toml --target-dir "$RUNNER_TEMP/oa-feed-work-check-target"
       - name: Format standalone conformance-vector checker
