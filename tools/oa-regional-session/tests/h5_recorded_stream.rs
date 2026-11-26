@@ -173,19 +173,19 @@ fn write_synthetic_sfdps(path: &Path) {
 }
 
 fn write_tracker_smoke_inputs(adsb_path: &Path, sfdps_path: &Path) {
-    // These follow the existing tracker-confirmation fixture's encoding at a coherent 120 kt
-    // and 0.003-degree eastward step per four-second interval. The reports are synthetic; the
-    // OAF/FIXM parsers, adapters, and runtime are production paths.
+    // Match recording_import_cli's tracker-confirmation row values and pack its ordered reports
+    // into one OAF message, exercising the same decoded receipt batch in the production runtime.
     let mut adsb_file = OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(adsb_path)
         .expect("create tracker smoke ADS-B fixture");
+    let mut reports = oa_adsb::Reports::default();
     for sequence in 0..12u64 {
         let source_ns = H5_CAPTURE_START_NS
-            .checked_add(i64::try_from(sequence).expect("smoke index") * SYNTHETIC_STEP_NS)
+            .checked_add(i64::try_from(sequence).expect("smoke index") * 1_000_000_000)
             .expect("smoke ADS-B time");
-        let lon_e7 = i32::try_from(-883_000_000i64 + i64::try_from(sequence).unwrap() * 30_000)
+        let lon_e7 = i32::try_from(-883_000_000i64 + i64::try_from(sequence).unwrap() * 27_900)
             .expect("smoke longitude");
         let row = oa_adsb::Row {
             time_ns: source_ns,
@@ -193,7 +193,7 @@ fn write_tracker_smoke_inputs(adsb_path: &Path, sfdps_path: &Path) {
             lat_e7: 419_000_000,
             lon_e7,
             baro_alt_ft: 35_000,
-            gs_dkt: 1_200,
+            gs_dkt: 4_500,
             track_ddeg: 900,
             nic: 8,
             nac_p: 9,
@@ -203,25 +203,25 @@ fn write_tracker_smoke_inputs(adsb_path: &Path, sfdps_path: &Path) {
             source: 0,
             ..oa_adsb::ROW_EMPTY
         };
-        let mut reports = oa_adsb::Reports::default();
         oa_adsb::reports_push(&mut reports, &row);
-        let mut payload = Vec::new();
-        oa_adsb::encode_payload(&mut payload, &reports, 0, 1).expect("encode smoke ADS-B payload");
-        let mut frame = vec![0; oa_feed::HEADER_LEN + payload.len() + oa_feed::TRAILER_LEN];
-        let bytes = oa_feed::encode_frame(
-            &mut frame,
-            oa_feed::Kind::Message as u8,
-            0,
-            sequence + 1,
-            source_ns,
-            source_ns / 1_000_000,
-            &payload,
-        )
-        .expect("encode smoke ADS-B OAF frame");
-        adsb_file
-            .write_all(frame.get(..bytes).expect("smoke ADS-B frame slice"))
-            .expect("write smoke ADS-B frame");
     }
+    let mut payload = Vec::new();
+    oa_adsb::encode_payload(&mut payload, &reports, 0, 12).expect("encode smoke ADS-B payload");
+    let receipt_ns = H5_CAPTURE_START_NS + 11_000_000_000;
+    let mut frame = vec![0; oa_feed::HEADER_LEN + payload.len() + oa_feed::TRAILER_LEN];
+    let bytes = oa_feed::encode_frame(
+        &mut frame,
+        oa_feed::Kind::Message as u8,
+        0,
+        1,
+        receipt_ns,
+        receipt_ns / 1_000_000,
+        &payload,
+    )
+    .expect("encode smoke ADS-B OAF frame");
+    adsb_file
+        .write_all(frame.get(..bytes).expect("smoke ADS-B frame slice"))
+        .expect("write smoke ADS-B frame");
     adsb_file.sync_all().expect("sync smoke ADS-B file");
 
     let mut sfdps_file = OpenOptions::new()
