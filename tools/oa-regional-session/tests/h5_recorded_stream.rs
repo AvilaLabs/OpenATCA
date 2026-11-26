@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(1);
-const SYNTHETIC_STEP_NS: i64 = 4_000_000_000;
+const SYNTHETIC_STEP_NS: i64 = 1_000_000_000;
 const SYNTHETIC_BIN_NS: i64 = 36_000_000_000;
 
 struct FixtureFile(PathBuf);
@@ -75,9 +75,9 @@ fn write_synthetic_adsb(path: &Path) {
         sequence += 1;
         let lon_delta = i64::try_from(sequence - 1)
             .expect("synthetic row index")
-            .checked_mul(30_000)
+            .checked_mul(22_000)
             .expect("synthetic longitude progression");
-        let lon_e7 = i32::try_from(i64::from(-873_000_000) + lon_delta)
+        let lon_e7 = i32::try_from(i64::from(-934_000_000) + lon_delta)
             .expect("synthetic longitude coordinate");
         let row = oa_adsb::Row {
             time_ns: receive_ns,
@@ -85,7 +85,7 @@ fn write_synthetic_adsb(path: &Path) {
             lat_e7: 419_000_000,
             lon_e7,
             baro_alt_ft: 35_000,
-            gs_dkt: 1_200,
+            gs_dkt: 3_500,
             track_ddeg: 900,
             nic: 8,
             nac_p: 9,
@@ -185,7 +185,7 @@ fn write_tracker_smoke_inputs(adsb_path: &Path, sfdps_path: &Path) {
         let source_ns = H5_CAPTURE_START_NS
             .checked_add(i64::try_from(sequence).expect("smoke index") * 1_000_000_000)
             .expect("smoke ADS-B time");
-        let lon_e7 = i32::try_from(-883_000_000i64 + i64::try_from(sequence).unwrap() * 27_900)
+        let lon_e7 = i32::try_from(-883_000_000i64 + i64::try_from(sequence).unwrap() * 22_000)
             .expect("smoke longitude");
         let row = oa_adsb::Row {
             time_ns: source_ns,
@@ -193,7 +193,7 @@ fn write_tracker_smoke_inputs(adsb_path: &Path, sfdps_path: &Path) {
             lat_e7: 419_000_000,
             lon_e7,
             baro_alt_ft: 35_000,
-            gs_dkt: 4_500,
+            gs_dkt: 3_500,
             track_ddeg: 900,
             nic: 8,
             nac_p: 9,
@@ -275,7 +275,7 @@ fn known_good_adsb_and_fixm_smoke_reaches_runtime_and_rendered_snapshot() {
     let mut replay = regional_replay_new_with_warmup(
         &model_bytes,
         oa_sha256::sha256(&model_bytes),
-        200.0,
+        300.0,
         H5_CAPTURE_START_NS,
         H5_CAPTURE_START_NS,
         H5_CAPTURE_START_NS + 48_000_000_000,
@@ -364,7 +364,7 @@ fn recorded_stream_runs_100_paired_m2_flip_rollback_bins_and_consumer_applies_ea
         *b"ZAU1",
         EndpointClass::Terminal,
         &model_bytes,
-        200.0,
+        300.0,
         RecordedRunOptions {
             worker_executable: worker,
             local_authority_fixture: true,
@@ -372,12 +372,12 @@ fn recorded_stream_runs_100_paired_m2_flip_rollback_bins_and_consumer_applies_ea
     )
     .expect("paired synthetic recorded stream completes");
 
-    // `gs_dkt=1,200` is 120 knots and the 30,000 e-7-degree eastward step is about 247 m
-    // at this latitude per four-second ADS-B interval.
+    // `gs_dkt=3,500` is 350 knots and the 22,000 e-7-degree eastward step is about 181 m
+    // at this latitude per one-second ADS-B interval.
     let latitude_rad = 41.9_f64.to_radians();
     let measured_step_m =
-        30_000.0 / 10_000_000.0 * std::f64::consts::PI / 180.0 * 6_371_000.0 * latitude_rad.cos();
-    let expected_step_m = 120.0 * 1_852.0 / 3_600.0 * 4.0;
+        22_000.0 / 10_000_000.0 * std::f64::consts::PI / 180.0 * 6_371_000.0 * latitude_rad.cos();
+    let expected_step_m = 350.0 * 1_852.0 / 3_600.0;
     assert!((measured_step_m - expected_step_m).abs() < 1.0);
     let m2_refusals = report
         .cycles
