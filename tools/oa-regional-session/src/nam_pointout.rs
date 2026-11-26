@@ -1072,6 +1072,11 @@ mod tests {
         poa.header.kind = Kind::Poa;
         poa.header.reference = Some(sent.view.point_out_id);
         poa.f32 = None;
+        poa.f31 = Some(Field31 {
+            facility: PEER,
+            sector: Some(*b"2A"),
+            text: None,
+        });
         let accepted = nam_pointout_receive(
             &mut runtime,
             &mut flights,
