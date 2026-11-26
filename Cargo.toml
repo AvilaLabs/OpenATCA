@@ -71,6 +71,7 @@ members = [
 
     "crates/oa-migration-switch",
     "tools/oa-build-info",
+    "tools/oa-certification",
     "tools/oa-regional-session",
     "tools/oa-encounter",
     "tools/oa-legacy-traj",

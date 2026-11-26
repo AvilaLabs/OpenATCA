@@ -1,0 +1,30 @@
+[package]
+name = "oa-certification"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+# F1 / steer33L12: run the requested synthetic check through the production tracker API.
+oa-track = { path = "../../crates/oa-track" }
+# F1 / steer33L12: verify G2 processor adaptation packages and retain their content identity.
+oa-adapt = { path = "../oa-adapt" }
+# F1 / steer33L12: SHA-256 identities for the external synthetic catalog and artifact comparisons.
+oa-sha256 = { path = "../../crates/oa-sha256" }
+# F1 / steer39L12: use only the dependency-free audit event and receipt value contract here.
+oa-audit-core = { path = "../../crates/oa-audit-core" }
+# F1 / steer33L13: durable append-only certification audit record and report verification.
+oa-audit-log = { path = "../../crates/oa-audit-log" }
+# F1 / steer33L12: bounded local artifact digest observation from each processor artifact path.
+oa-build-info = { path = "../oa-build-info" }
+# F1 / OA-SEAL-006: guard certification audit paths through the production sealed-data policy.
+oa-sealed = { path = "../../crates/oa-sealed" }
+
+[package.metadata.openatca]
+class = "shell"

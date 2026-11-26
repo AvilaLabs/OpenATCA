@@ -164,6 +164,16 @@
     "OA-CA-034",
     "OA-CA-035",
     "OA-CA-036",
+    "OA-CERT-001",
+    "OA-CERT-002",
+    "OA-CERT-003",
+    "OA-CERT-004",
+    "OA-CERT-005",
+    "OA-CERT-006",
+    "OA-CERT-007",
+    "OA-CERT-008",
+    "OA-CERT-009",
+    "OA-CERT-010",
     "OA-CORE-006",
     "OA-CORE-007",
     "OA-CSV-001",
@@ -10819,8 +10829,8 @@
     {
       "id": "HZ-EVIDENCE-001",
       "function": "migration_comparison_and_safety_evidence",
-      "cause": "A shadow difference, missing coverage, quarantine, loss, or drill result is omitted or misclassified in an evidence package.",
-      "effect": "A reviewer may receive an incomplete basis for a migration decision.",
+      "cause": "A shadow comparison, software or artifact identity, processor qualification result, missing coverage, quarantine, loss, or drill evidence is omitted or misclassified in an evidence package.",
+      "effect": "A reviewer may receive an incomplete or misleading basis for a staged migration or software certification decision.",
       "severity_class": "Hazardous",
       "severity_status": "engineering_candidate",
       "severity_rationale": "Incomplete evidence can weaken a staged decision gate; the generator does not grant authority or external approval.",
@@ -10849,7 +10859,17 @@
         "OA-ENC-022",
         "OA-L23-003",
         "OA-L23-004",
-        "OA-L23-005"
+        "OA-L23-005",
+        "OA-CERT-001",
+        "OA-CERT-002",
+        "OA-CERT-003",
+        "OA-CERT-004",
+        "OA-CERT-005",
+        "OA-CERT-006",
+        "OA-CERT-007",
+        "OA-CERT-008",
+        "OA-CERT-009",
+        "OA-CERT-010"
       ],
       "source_refs": [
         {
@@ -10879,6 +10899,10 @@
         {
           "document": "REQUIREMENTS.md",
           "locator": "OA-L23-005"
+        },
+        {
+          "document": "REQUIREMENTS.md",
+          "locator": "OA-CERT-007 through OA-CERT-010"
         }
       ],
       "verification_refs": [
@@ -11246,6 +11270,146 @@
           "requirement_id": "OA-L23-005",
           "file": "crates/oa-techops/src/monitor.rs",
           "test_name": "resource_and_alarm_capacity_limits_are_enforced"
+        },
+        {
+          "requirement_id": "OA-CERT-001",
+          "file": "tools/oa-certification/src/lib.rs",
+          "test_name": "fixed_catalog_is_content_pinned_and_abbreviated_is_exact_three_target_subset"
+        },
+        {
+          "requirement_id": "OA-CERT-002",
+          "file": "tools/oa-certification/src/lib.rs",
+          "test_name": "pver_thresholds_use_rounded_micro_units_at_the_boundary"
+        },
+        {
+          "requirement_id": "OA-CERT-002",
+          "file": "tools/oa-certification/src/lib.rs",
+          "test_name": "full_and_abbreviated_pver_measure_real_tracker_position_and_velocity_outputs"
+        },
+        {
+          "requirement_id": "OA-CERT-002",
+          "file": "tools/oa-certification/src/lib.rs",
+          "test_name": "actual_tracker_output_outside_tolerance_fails_pver"
+        },
+        {
+          "requirement_id": "OA-CERT-003",
+          "file": "tools/oa-certification/src/main.rs",
+          "test_name": "expected_roster_is_independent_from_observations_and_both_are_bounded"
+        },
+        {
+          "requirement_id": "OA-CERT-004",
+          "file": "tools/oa-certification/src/lib.rs",
+          "test_name": "all_three_outcomes_are_defined_and_any_processor_digest_mismatch_denies_certification"
+        },
+        {
+          "requirement_id": "OA-CERT-005",
+          "file": "tools/oa-certification/src/lib.rs",
+          "test_name": "certification_records_are_audited_and_report_is_generated_from_verified_log"
+        },
+        {
+          "requirement_id": "OA-CERT-005",
+          "file": "tools/oa-certification/src/lib.rs",
+          "test_name": "audit_append_failure_returns_no_success_checkpoint"
+        },
+        {
+          "requirement_id": "OA-CERT-006",
+          "file": "tools/oa-certification/src/lib.rs",
+          "test_name": "certification_records_are_audited_and_report_is_generated_from_verified_log"
+        },
+        {
+          "requirement_id": "OA-CERT-007",
+          "file": "tools/oa-build-info/src/lib.rs",
+          "test_name": "artifact_digest_is_exact_and_oversize_is_refused"
+        },
+        {
+          "requirement_id": "OA-CERT-008",
+          "file": "tools/oa-certification/src/lib.rs",
+          "test_name": "local_registry_claim_requires_unique_configure_row_and_binds_exact_bytes"
+        },
+        {
+          "requirement_id": "OA-CERT-008",
+          "file": "tools/oa-certification/src/lib.rs",
+          "test_name": "request_caps_are_refused_before_any_processor_path_is_opened"
+        },
+        {
+          "requirement_id": "OA-CERT-008",
+          "file": "tools/oa-certification/src/main.rs",
+          "test_name": "expected_roster_is_independent_from_observations_and_both_are_bounded"
+        },
+        {
+          "requirement_id": "OA-CERT-009",
+          "file": "tools/oa-certification/src/lib.rs",
+          "test_name": "full_and_abbreviated_pver_measure_real_tracker_position_and_velocity_outputs"
+        },
+        {
+          "requirement_id": "OA-CERT-010",
+          "file": "tools/oa-certification/src/lib.rs",
+          "test_name": "certification_records_are_audited_and_report_is_generated_from_verified_log"
+        },
+        {
+          "requirement_id": "OA-CERT-010",
+          "file": "tools/oa-certification/src/lib.rs",
+          "test_name": "audit_append_failure_returns_no_success_checkpoint"
+        },
+        {
+          "requirement_id": "OA-CERT-008",
+          "file": "tools/oa-certification/src/lib.rs",
+          "test_name": "omitted_expected_processor_is_retained_as_missing_and_forces_not_certified"
+        },
+        {
+          "requirement_id": "OA-CERT-008",
+          "file": "tools/oa-certification/src/lib.rs",
+          "test_name": "duplicate_observation_is_named_and_forces_not_certified"
+        },
+        {
+          "requirement_id": "OA-CERT-001",
+          "file": "tools/oa-certification/tests/certify_cli.rs",
+          "test_name": "certify_cli_commits_all_three_outcomes_from_real_tracker_and_local_digest_inputs"
+        },
+        {
+          "requirement_id": "OA-CERT-002",
+          "file": "tools/oa-certification/tests/certify_cli.rs",
+          "test_name": "certify_cli_commits_all_three_outcomes_from_real_tracker_and_local_digest_inputs"
+        },
+        {
+          "requirement_id": "OA-CERT-003",
+          "file": "tools/oa-certification/tests/certify_cli.rs",
+          "test_name": "certify_cli_commits_all_three_outcomes_from_real_tracker_and_local_digest_inputs"
+        },
+        {
+          "requirement_id": "OA-CERT-004",
+          "file": "tools/oa-certification/tests/certify_cli.rs",
+          "test_name": "certify_cli_commits_all_three_outcomes_from_real_tracker_and_local_digest_inputs"
+        },
+        {
+          "requirement_id": "OA-CERT-005",
+          "file": "tools/oa-certification/tests/certify_cli.rs",
+          "test_name": "certify_cli_commits_all_three_outcomes_from_real_tracker_and_local_digest_inputs"
+        },
+        {
+          "requirement_id": "OA-CERT-006",
+          "file": "tools/oa-certification/tests/certify_cli.rs",
+          "test_name": "certify_cli_commits_all_three_outcomes_from_real_tracker_and_local_digest_inputs"
+        },
+        {
+          "requirement_id": "OA-CERT-007",
+          "file": "tools/oa-certification/tests/certify_cli.rs",
+          "test_name": "certify_cli_commits_all_three_outcomes_from_real_tracker_and_local_digest_inputs"
+        },
+        {
+          "requirement_id": "OA-CERT-008",
+          "file": "tools/oa-certification/tests/certify_cli.rs",
+          "test_name": "certify_cli_commits_all_three_outcomes_from_real_tracker_and_local_digest_inputs"
+        },
+        {
+          "requirement_id": "OA-CERT-009",
+          "file": "tools/oa-certification/tests/certify_cli.rs",
+          "test_name": "certify_cli_commits_all_three_outcomes_from_real_tracker_and_local_digest_inputs"
+        },
+        {
+          "requirement_id": "OA-CERT-010",
+          "file": "tools/oa-certification/tests/certify_cli.rs",
+          "test_name": "certify_cli_commits_all_three_outcomes_from_real_tracker_and_local_digest_inputs"
         }
       ],
       "proof_refs": []
@@ -23132,6 +23296,66 @@
       "function": "migration_selector_and_rollback",
       "hazard_id": "HZ-CUTOVER-001",
       "rationale": "Engineering safety candidate: a log read or append directed through an unverified path could invalidate the audit gate used for a migration change. Synthetic path-refusal, descriptor, rename, and symlink tests exercise fail-closed shell behavior; no protected recording is read and no authenticated-origin claim is made."
+    },
+    {
+      "id": "OA-CERT-001",
+      "function": "migration_comparison_and_safety_evidence",
+      "hazard_id": "HZ-EVIDENCE-001",
+      "rationale": "Engineering safety candidate: a damaged, substituted, or mis-scoped PVER catalog could make synthetic qualification evidence incomplete or misleading. The catalog is versioned, bounded, content-pinned and explicitly synthetic; it is not recorded truth or an authority-provided operational target set."
+    },
+    {
+      "id": "OA-CERT-002",
+      "function": "migration_comparison_and_safety_evidence",
+      "hazard_id": "HZ-EVIDENCE-001",
+      "rationale": "Engineering safety candidate: omitted tracker loss, tolerance rounding, or a partial target run could overstate the evidence supporting a software decision. The PVER records emitted target results and fails on loss, refusal, missing rows, overflow or tolerance failure; its trajectories and thresholds are synthetic development evidence."
+    },
+    {
+      "id": "OA-CERT-003",
+      "function": "migration_comparison_and_safety_evidence",
+      "hazard_id": "HZ-EVIDENCE-001",
+      "rationale": "Engineering safety candidate: conflating the expected processor roster with observed reports could hide missing or unexpected equipment evidence. The roster and observations are separately bounded and hashed, while local artifact and adaptation checks remain unauthenticated observations rather than loaded-image or deployment proof."
+    },
+    {
+      "id": "OA-CERT-004",
+      "function": "migration_comparison_and_safety_evidence",
+      "hazard_id": "HZ-EVIDENCE-001",
+      "rationale": "Engineering safety candidate: a certification outcome that ignored failed PVER, missing evidence, or a processor mismatch could mislead a staged decision. The decision recomputes the outcome from PVER and the complete expected inventory; caller principal and time remain claims and the result is not operational certification."
+    },
+    {
+      "id": "OA-CERT-005",
+      "function": "migration_comparison_and_safety_evidence",
+      "hazard_id": "HZ-EVIDENCE-001",
+      "rationale": "Engineering safety candidate: emitting success before durable audit append, or accepting altered findings, could leave an incomplete certification record. Append revalidation derives findings from the retained roster, observed IDs and evidence, and failure prevents success; the hash chain does not authenticate the caller."
+    },
+    {
+      "id": "OA-CERT-006",
+      "function": "migration_comparison_and_safety_evidence",
+      "hazard_id": "HZ-EVIDENCE-001",
+      "rationale": "Engineering safety candidate: a report detached from verified audit history could present stale or altered evidence as committed. Report generation verifies the supplied checkpoint and chain; principal and UTC claims remain caller supplied and the report does not establish operational qualification."
+    },
+    {
+      "id": "OA-CERT-007",
+      "function": "migration_comparison_and_safety_evidence",
+      "hazard_id": "HZ-EVIDENCE-001",
+      "rationale": "Engineering safety candidate: an incorrect or unstable local artifact digest can misstate processor evidence used in a certification decision. The API bounds hashing and detects descriptor changes during reads, but this observes file bytes only; it does not prove a loaded image, processor identity, or deployment state."
+    },
+    {
+      "id": "OA-CERT-008",
+      "function": "migration_comparison_and_safety_evidence",
+      "hazard_id": "HZ-EVIDENCE-001",
+      "rationale": "Engineering safety candidate: oversized or malformed certification inputs could produce incomplete evidence or excessive resource use, while a misleading role claim could be mistaken for authority. Preflight limits and unique local registry claims are explicit, but the registry is caller-provided policy data and does not authenticate identity or authorize an external action."
+    },
+    {
+      "id": "OA-CERT-009",
+      "function": "migration_comparison_and_safety_evidence",
+      "hazard_id": "HZ-EVIDENCE-001",
+      "rationale": "Engineering safety candidate: PVER output detached from its tracker configuration, runner claim, artifact digest, or target-level result could be misread as stronger certification evidence. These records bind the local synthetic run inputs and results; they do not attest remote deployment or runtime identity."
+    },
+    {
+      "id": "OA-CERT-010",
+      "function": "migration_comparison_and_safety_evidence",
+      "hazard_id": "HZ-EVIDENCE-001",
+      "rationale": "Engineering safety candidate: reporting an outcome before durable audit commit, or omitting a failed append, could leave a reviewer with an uncommitted or incomplete certification record. The CLI requires the append receipt after file and directory sync and emits no committed result on failure; this does not authenticate principal or timestamp claims or establish operational certification."
     }
   ],
   "unresolved_requirement_assessments": []

@@ -110,6 +110,10 @@ dependencies = [
 [[package]]
 name = "oa-build-info"
 version = "0.0.1"
+dependencies = [
+ "oa-sealed",
+ "oa-sha256",
+]
 
 [[package]]
 name = "oa-ca"
@@ -119,6 +123,19 @@ dependencies = [
  "oa-ieee",
  "oa-math",
  "oa-safety",
+]
+
+[[package]]
+name = "oa-certification"
+version = "0.0.1"
+dependencies = [
+ "oa-adapt",
+ "oa-audit-core",
+ "oa-audit-log",
+ "oa-build-info",
+ "oa-sealed",
+ "oa-sha256",
+ "oa-track",
 ]
 
 [[package]]

@@ -1,0 +1,11 @@
+# OpenATCA synthetic performance verification catalog v1; non-operational fixtures
+# schema,mode,target_id,lat_e7,lon_e7,east_mps,north_mps,position_tolerance_m,velocity_tolerance_mps
+synthetic-pver-v1,full,TGT-01,400000000,-750000000,42.0,12.0,1500,35
+synthetic-pver-v1,full,TGT-02,401000000,-751000000,-18.0,65.0,1500,35
+synthetic-pver-v1,full,TGT-03,399000000,-749000000,80.0,-15.0,1500,35
+synthetic-pver-v1,full,TGT-04,402000000,-752000000,25.0,40.0,1500,35
+synthetic-pver-v1,full,TGT-05,398000000,-748000000,-55.0,20.0,1500,35
+synthetic-pver-v1,full,TGT-06,403000000,-753000000,10.0,-72.0,1500,35
+synthetic-pver-v1,abbreviated,TGT-01,400000000,-750000000,42.0,12.0,1500,35
+synthetic-pver-v1,abbreviated,TGT-03,399000000,-749000000,80.0,-15.0,1500,35
+synthetic-pver-v1,abbreviated,TGT-05,398000000,-748000000,-55.0,20.0,1500,35
