@@ -313,7 +313,7 @@ fn evaluate_assigned_atpa(
     scratch.severity.resize(pair_count, AtpaSeverity::Clear);
     scratch.current_distance_milli_nm.resize(pair_count, 0);
     scratch.seconds_to_loss_milli.resize(pair_count, 0);
-    let result = terminal_aids::evaluate_atpa_pairs(
+    let _result = terminal_aids::evaluate_atpa_pairs(
         scan_ns,
         AtpaPairs {
             lead_runway_id: &scratch.runway_id,
@@ -670,7 +670,7 @@ fn runway_aid_packets(
 
 #[cfg(test)]
 mod runway_aid_packet_tests {
-    use super::runway_aid_packets;
+    use super::{runway_aid_packets, AtpaScratch};
     use oa_display::core::runway_aids::Availability;
 
     // REQ: OA-RWY-022
