@@ -1583,8 +1583,8 @@ pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
     if cfg.init_diagnostics && measure_done > 0 {
         for ((delta, now), before) in init_radar
             .iter_mut()
-            .zip(fusion_stats(&f).init_radar)
-            .zip(warm.0.init_radar)
+            .zip(fusion_stats(&f).init_radar.0)
+            .zip(warm.0.init_radar.0)
         {
             *delta = RadarInitStats {
                 batches: now.batches.saturating_sub(before.batches),
@@ -1607,8 +1607,8 @@ pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
     if cfg.association_diagnostics && measure_done > 0 {
         for ((delta, now), before) in association_radar
             .iter_mut()
-            .zip(fusion_stats(&f).association_radar)
-            .zip(warm.0.association_radar)
+            .zip(fusion_stats(&f).association_radar.0)
+            .zip(warm.0.association_radar.0)
         {
             *delta = RadarAssociationStats {
                 anonymous_offered: now
