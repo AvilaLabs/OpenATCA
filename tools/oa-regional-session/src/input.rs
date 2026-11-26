@@ -266,6 +266,19 @@ fn fixed_field<const N: usize>(text: &str) -> Result<[u8; N], InputError> {
     Ok(out)
 }
 
+fn centre_field(text: &str) -> Result<[u8; 4], InputError> {
+    if text.is_empty()
+        || text.len() > 4
+        || !text.is_ascii()
+        || !text.bytes().all(|byte| byte.is_ascii_alphanumeric())
+    {
+        return Err(InputError::InvalidLabel);
+    }
+    let mut out = [0u8; 4];
+    out[..text.len()].copy_from_slice(text.as_bytes());
+    Ok(out)
+}
+
 fn option_i32(text: &str) -> Result<Option<i32>, InputError> {
     if text == "-" {
         Ok(None)
@@ -458,7 +471,7 @@ pub fn parse_event_line(line: &str) -> Result<NormalizedEvent, InputError> {
     let source = parse_source(part(&parts, 4)?)?;
     let flight_gufi = parse_hex_u128(part(&parts, 5)?)?;
     let aircraft_address = parse_hex_u32(part(&parts, 6)?)?;
-    let centre = fixed_field::<4>(part(&parts, 7)?)?;
+    let centre = centre_field(part(&parts, 7)?)?;
     let kind_name = part(&parts, 8)?;
     // ADS-B carries an aircraft address, not a GUFI. Preserve explicit absence instead of
     // requiring a normalizer to manufacture a flight identity for raw surveillance.

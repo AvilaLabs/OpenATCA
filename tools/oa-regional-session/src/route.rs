@@ -129,8 +129,21 @@ pub fn icao_route_revision(
 fn valid_refusal_key(key: t::FlightKey) -> bool {
     key.gufi.iter().any(|&byte| byte != 0)
         && (1..=0x00ff_ffff).contains(&key.aircraft_address)
-        && key.centre.iter().all(u8::is_ascii_alphanumeric)
+        && valid_padded_centre(&key.centre)
         && key.plan_id.iter().any(|&byte| byte != 0)
+}
+
+fn valid_padded_centre(bytes: &[u8; 4]) -> bool {
+    if !bytes.is_ascii() {
+        return false;
+    }
+    let end = bytes
+        .iter()
+        .position(|&byte| byte == 0)
+        .unwrap_or(bytes.len());
+    end > 0
+        && bytes[..end].iter().all(u8::is_ascii_alphanumeric)
+        && bytes[end..].iter().all(|&byte| byte == 0)
 }
 
 fn refusal_fence(

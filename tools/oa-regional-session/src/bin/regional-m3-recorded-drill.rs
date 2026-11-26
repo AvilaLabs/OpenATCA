@@ -280,7 +280,7 @@ fn emit(report: &RecordedDrillReport) {
         region.admitted_events
     );
     println!(
-        "ADAPTER_LOSSES\tnormalized_surveillance_events={}\tnormalized_flight_events={}\tnormalized_other_events={}\tadsb_frames={}\tadsb_payload_refused={}\tadsb_rows_in={}\tadsb_rows_over_capacity={}\tadsb_rows_dropped={}\tadsb_ground_excluded={}\tadsb_unknown_ground_refused={}\tadsb_quality_removed_oa_truth_REMOVE_NAMES_order={}\tadsb_unknown_gufi_positions={}\tadsb_velocity_unavailable={}\tadsb_invalid_position_rows={}\tadsb_output_capacity_refusals={}\tsfdps_frames={}\tsfdps_payload_refused={}\tsfdps_timestamp_precision_refused={}\tsfdps_rows_decoded={}\tsfdps_rows_not_decoded_capacity={}\tsfdps_rows_refused={}\tsfdps_rows_no_operations={}\tsfdps_no_status={}\tsfdps_operations_unusable={}\tsfdps_unsupported_operations_total={}\tsfdps_field_errors={}\tsfdps_rejected_messages={}\tsfdps_unknown_elements={}\tsfdps_unknown_attributes={}\tsfdps_unbound_flight_updates={}\tsfdps_invalid_operation_time={}\tsfdps_source_after_receipt={}\tsfdps_invalid_operation_identity={}\tsfdps_invalid_operation_centre={}\tsfdps_invalid_operation_address={}\tsfdps_output_capacity_refusals={}\tadapter_events_emitted={}",
+        "ADAPTER_LOSSES\tnormalized_surveillance_events={}\tnormalized_flight_events={}\tnormalized_other_events={}\tadsb_frames={}\tadsb_payload_refused={}\tadsb_rows_in={}\tadsb_rows_over_capacity={}\tadsb_rows_dropped={}\tadsb_ground_excluded={}\tadsb_unknown_ground_refused={}\tadsb_quality_removed_oa_truth_REMOVE_NAMES_order={}\tadsb_unknown_gufi_positions={}\tadsb_velocity_unavailable={}\tadsb_invalid_position_rows={}\tadsb_source_after_receipt={}\tadsb_output_capacity_refusals={}\tsfdps_frames={}\tsfdps_payload_refused={}\tsfdps_timestamp_precision_refused={}\tsfdps_rows_decoded={}\tsfdps_rows_not_decoded_capacity={}\tsfdps_rows_refused={}\tsfdps_rows_no_operations={}\tsfdps_no_status={}\tsfdps_operations_unusable={}\tsfdps_unsupported_operations_total={}\tsfdps_field_errors={}\tsfdps_rejected_messages={}\tsfdps_unknown_elements={}\tsfdps_unknown_attributes={}\tsfdps_unbound_flight_updates={}\tsfdps_invalid_operation_time={}\tsfdps_source_after_receipt={}\tsfdps_invalid_operation_identity={}\tsfdps_invalid_operation_centre={}\tsfdps_invalid_operation_address={}\tsfdps_output_capacity_refusals={}\tadapter_events_emitted={}",
         normalized_surveillance,
         normalized_flight,
         normalized_other,
@@ -295,6 +295,7 @@ fn emit(report: &RecordedDrillReport) {
         adapter.adsb_unknown_gufi_positions,
         adapter.adsb_velocity_unavailable,
         adapter.adsb_invalid_position_rows,
+        adapter.adsb_source_after_receipt,
         adapter.adsb_output_capacity_refusals,
         adapter.sfdps_frames,
         adapter.sfdps_payload_refused,

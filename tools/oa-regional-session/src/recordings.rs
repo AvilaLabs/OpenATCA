@@ -216,6 +216,8 @@ pub struct RecordedAdapterCounts {
     pub unsupported_operations: [u64; OP_COUNT],
     pub invalid_operation_time: u64,
     pub source_after_receipt: u64,
+    pub adsb_source_after_receipt: u64,
+    pub sfdps_source_after_receipt: u64,
     pub invalid_operation_identity: u64,
     pub invalid_operation_centre: u64,
     pub invalid_operation_address: u64,
@@ -281,6 +283,8 @@ pub(crate) fn zero_recorded_adapter_counts() -> RecordedAdapterCounts {
         unsupported_operations: [0; OP_COUNT],
         invalid_operation_time: 0,
         source_after_receipt: 0,
+        adsb_source_after_receipt: 0,
+        sfdps_source_after_receipt: 0,
         invalid_operation_identity: 0,
         invalid_operation_centre: 0,
         invalid_operation_address: 0,
@@ -1156,6 +1160,8 @@ fn adapt_adsb_frame(
         }
         if measurement.toa_ns > frame.receipt_ns {
             out.counts.source_after_receipt = out.counts.source_after_receipt.saturating_add(1);
+            out.counts.adsb_source_after_receipt =
+                out.counts.adsb_source_after_receipt.saturating_add(1);
             out.counts.invalid_position_rows = out.counts.invalid_position_rows.saturating_add(1);
             quarantine_item(
                 quarantine_queue,
@@ -1925,6 +1931,8 @@ fn adapt_sfdps_frame(
                     if source_ns > frame.receipt_ns {
                         out.counts.source_after_receipt =
                             out.counts.source_after_receipt.saturating_add(1);
+                        out.counts.sfdps_source_after_receipt =
+                            out.counts.sfdps_source_after_receipt.saturating_add(1);
                         unsupported = true;
                         refusal_reasons |= REASON_INPUT_INVALID;
                         continue;
@@ -1936,7 +1944,7 @@ fn adapt_sfdps_frame(
                         refusal_reasons |= REASON_IDENTITY_OR_LOCATION_CONFLICT;
                         continue;
                     }
-                    if !op.centre.iter().all(u8::is_ascii_alphanumeric) {
+                    if !valid_padded_ascii(&op.centre) {
                         out.counts.invalid_operation_centre =
                             out.counts.invalid_operation_centre.saturating_add(1);
                         unsupported = true;
@@ -2139,6 +2147,17 @@ fn valid_padded_ascii(bytes: &[u8]) -> bool {
             .is_some_and(|tail| tail.iter().all(|&b| b == 0))
 }
 
+fn padded_ascii_text(bytes: &[u8]) -> Result<&str, AdapterError> {
+    if !valid_padded_ascii(bytes) {
+        return Err(AdapterError::InvalidCentre);
+    }
+    let end = bytes
+        .iter()
+        .position(|&byte| byte == 0)
+        .unwrap_or(bytes.len());
+    core::str::from_utf8(&bytes[..end]).map_err(|_| AdapterError::InvalidCentre)
+}
+
 /// Converts a bounded prefix of decoded ADS-B positions. Oversize input emits no prefix: the
 /// whole recording batch is refused and `over_capacity` records its size. Missing GUFI is emitted
 /// as explicit zero for raw positions; ambiguous identity is refused. GUFI is never inferred.
@@ -2206,7 +2225,7 @@ pub fn adapt_positions(
             counts.invalid_altitude += 1;
             continue;
         }
-        if !row.centre.iter().all(u8::is_ascii_alphanumeric) {
+        if !valid_padded_ascii(&row.centre) {
             counts.invalid_record += 1;
             counts.invalid_centre += 1;
             continue;
@@ -2254,7 +2273,7 @@ pub fn serialize_positions(events: &[NormalizedEvent]) -> Result<String, Adapter
         if event.source != SourceKind::Surveillance {
             return Err(AdapterError::UnsupportedEvent);
         }
-        if !event.centre.iter().all(u8::is_ascii_alphanumeric) {
+        if !valid_padded_ascii(&event.centre) {
             return Err(AdapterError::InvalidCentre);
         }
         use core::fmt::Write;
@@ -2266,7 +2285,7 @@ pub fn serialize_positions(events: &[NormalizedEvent]) -> Result<String, Adapter
             event.sequence,
             event.identity.flight_gufi,
             event.identity.aircraft_address,
-            core::str::from_utf8(&event.centre).map_err(|_| AdapterError::InvalidCentre)?,
+            padded_ascii_text(&event.centre)?,
             latitude_e7,
             longitude_e7,
             altitude_ft.map_or_else(|| "-".to_owned(), |v| v.to_string()),
@@ -2291,9 +2310,7 @@ pub fn serialize_recorded_events(events: &[NormalizedEvent]) -> Result<String, A
             SourceKind::Flight => ("FLIGHT", "FLIGHT"),
             _ => return Err(AdapterError::UnsupportedEvent),
         };
-        if !event.centre.iter().all(u8::is_ascii_alphanumeric)
-            || event.identity.aircraft_address > 0x01ff_ffff
-        {
+        if !valid_padded_ascii(&event.centre) || event.identity.aircraft_address > 0x01ff_ffff {
             return Err(AdapterError::InvalidCentre);
         }
         write!(
@@ -2305,7 +2322,7 @@ pub fn serialize_recorded_events(events: &[NormalizedEvent]) -> Result<String, A
             source_name,
             event.identity.flight_gufi,
             event.identity.aircraft_address,
-            core::str::from_utf8(&event.centre).map_err(|_| AdapterError::InvalidCentre)?,
+            padded_ascii_text(&event.centre)?,
             kind
         )
         .map_err(|_| AdapterError::CountOverflow)?;
@@ -2668,6 +2685,47 @@ mod tests {
         assert_eq!(got.quarantine_stats[0].queued, 1);
         assert_eq!(got.quarantine_stats[1].queued, 1);
         assert_eq!(got.quarantine_stats[2].accepted, 0);
+    }
+
+    #[test]
+    fn sfdps_three_character_artcc_is_preserved_as_zero_padded_identity() {
+        const XML: &str = r#"<ns5:MessageCollection xmlns:ns5="http://www.faa.aero/nas/3.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><message xsi:type="ns5:FlightMessageType"><flight xsi:type="ns5:NasFlightType" centre="ZAU" source="TH" system="SLC" timestamp="2030-01-02T03:04:05.000Z"><gufi codeSpace="urn:uuid">11111111-2222-3333-4444-555555555555</gufi><flightStatus xsi:type="ns5:NasFlightStatusType" fdpsFlightStatus="ACTIVE"/><assignedAltitude><simple uom="FEET">12000.0</simple></assignedAltitude></flight></message></ns5:MessageCollection>"#;
+        let receipt_ms = oa_fixm::parse_iso_ms(b"2030-01-02T03:04:05.000Z").unwrap();
+        let payload = XML.as_bytes().to_vec();
+        let frame = RecordedFrame {
+            source: RecordingSource::Sfdps,
+            stream_index: 0,
+            receipt_ns: receipt_ms.checked_mul(1_000_000).unwrap(),
+            sequence: 1,
+            jms_timestamp_ms: receipt_ms,
+            mono_ns: None,
+            oaf_flags: 0,
+            byte_offset: 0,
+            skipped_before: 0,
+            kind: oa_feed::Kind::Message,
+            payload: payload.clone(),
+        };
+        let got = adapt_recorded_frames(
+            &[frame],
+            RecordingCounts {
+                total_decoded_bytes: payload.len() as u64,
+                ..RecordingCounts::default()
+            },
+            8,
+            *b"ZAU1",
+        )
+        .unwrap();
+
+        assert_eq!(got.counts.sfdps_rows_decoded, 1);
+        assert_eq!(got.counts.invalid_operation_centre, 0);
+        assert_eq!(got.counts.sfdps_rows_refused, 0);
+        assert_eq!(got.events.len(), 1);
+        assert_eq!(got.events[0].centre, *b"ZAU\0");
+        let serialized = serialize_recorded_events(&got.events).unwrap();
+        assert!(serialized.contains("\tZAU\tFLIGHT\tASSIGNED\t12000\n"));
+        let line = serialized.lines().nth(1).unwrap();
+        let round_trip = crate::input::parse_event_line(line).unwrap();
+        assert_eq!(round_trip.centre, *b"ZAU\0");
     }
 
     // REQ: OA-REG-017
