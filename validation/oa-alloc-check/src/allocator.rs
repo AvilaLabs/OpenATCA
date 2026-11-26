@@ -9,6 +9,8 @@ static ALLOC: AtomicU64 = AtomicU64::new(0);
 static ZEROED: AtomicU64 = AtomicU64::new(0);
 static REALLOC: AtomicU64 = AtomicU64::new(0);
 static COUNTER_OVERFLOW: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+static TEST_MEASUREMENT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 struct CountingSystem;
 
@@ -97,6 +99,14 @@ pub fn stop() -> Option<Counts> {
     })
 }
 
+#[cfg(test)]
+pub fn lock_test_measurements() -> std::sync::MutexGuard<'static, ()> {
+    match TEST_MEASUREMENT_LOCK.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
 /// Positive control through the standard global allocator API, while measurement is armed.
 pub fn control_alloc() -> bool {
     let Some(layout) = test_layout() else {
@@ -177,6 +187,7 @@ pub fn inject_core_allocation() -> bool {
 // REQ: OA-TRK-327
 #[test]
 fn standard_global_allocation_controls_are_observed() {
+    let _guard = lock_test_measurements();
     assert!(start(), "allocator measurement did not arm");
     let alloc_ok = control_alloc();
     let zeroed_ok = control_zeroed();

@@ -120,7 +120,6 @@ pub struct WindowEvidence {
     pub injected: bool,
 }
 
-// REQ: OA-TRK-327
 /// Exercise CA cycle and shared-predictor probe. All vectors/configuration are built before arm.
 pub fn ca_window(inject: bool) -> Result<WindowEvidence, &'static str> {
     use oa_ca::{
@@ -314,7 +313,6 @@ pub fn ca_window(inject: bool) -> Result<WindowEvidence, &'static str> {
     })
 }
 
-// REQ: OA-TRK-327
 /// Exercise the real active SUA query over a synthetic polygon and bounded-input refusal.
 pub fn sua_window(inject: bool) -> Result<WindowEvidence, &'static str> {
     use oa_airspace::core::conflict_probe::{probe_sua, SuaStatus, SuaTrajectoryKnots, SUA_KNOTS};
@@ -372,7 +370,6 @@ pub fn sua_window(inject: bool) -> Result<WindowEvidence, &'static str> {
     })
 }
 
-// REQ: OA-TRK-327
 /// Exercise final-monitor and ARV production APIs with caller-owned buffers.
 pub fn runway_window(inject: bool) -> Result<WindowEvidence, &'static str> {
     use oa_runway::arv::{self, AlertKind};
@@ -617,4 +614,52 @@ pub fn runway_window(inject: bool) -> Result<WindowEvidence, &'static str> {
         overload: overload_count,
         injected: inject,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_zero_counts(evidence: WindowEvidence) {
+        assert_eq!(evidence.counts.alloc, 0);
+        assert_eq!(evidence.counts.zeroed, 0);
+        assert_eq!(evidence.counts.realloc, 0);
+        assert!(!evidence.counts.overflow);
+        assert!(!evidence.injected);
+    }
+
+    // REQ: OA-TRK-327
+    #[test]
+    fn advanced_core_allocation_windows_cover_outcomes_without_allocating() {
+        let _guard = allocator::lock_test_measurements();
+
+        let ca = ca_window(false);
+        assert!(ca.is_ok(), "CA fixture must complete its measured windows");
+        if let Ok(evidence) = ca {
+            assert!(evidence.normal > 0 && evidence.degraded > 0 && evidence.overload > 0);
+            assert_zero_counts(evidence);
+        }
+
+        let sua = sua_window(false);
+        assert!(
+            sua.is_ok(),
+            "SUA fixture must complete its measured windows"
+        );
+        if let Ok(evidence) = sua {
+            assert!(evidence.normal > 0 && evidence.degraded > 0 && evidence.overload > 0);
+            assert_zero_counts(evidence);
+        }
+
+        let runway = runway_window(false);
+        assert!(
+            runway.is_ok(),
+            "runway fixture must complete its measured windows"
+        );
+        if let Ok(evidence) = runway {
+            assert_eq!(evidence.normal, 2);
+            assert!(evidence.degraded > 0);
+            assert_eq!(evidence.overload, 2);
+            assert_zero_counts(evidence);
+        }
+    }
 }
