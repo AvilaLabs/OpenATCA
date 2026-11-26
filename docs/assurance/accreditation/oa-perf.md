@@ -1,6 +1,7 @@
 # Performance harness capability
 
 **Status:** Proposal, under review.
+**Accreditation authority:** External; independent accreditation is pending.
 
 ## Intended use and boundary
 
@@ -38,6 +39,33 @@ complete identity-bound evidence. Refuse or retain a negative result for incompl
 limits, missing instrumentation, observer effects, incomplete logs, or unbound source/build/input.
 Any rerun after a failed criterion needs an approved prospective procedure; do not adjust thresholds
 to fit observed outcomes.
+
+### Source-backed checks and known-answer evidence
+
+- Test: `tools/oa-perf/src/capacity.rs::a_small_run_processes_all_traffic_and_reports_every_figure`
+  exercises complete synthetic work accounting (OA-PRF-003; introduced by
+  `4c5653354519fb1d4941c873e799ebfe5b5ae320`).
+- Test: `tools/oa-perf/src/capacity.rs::every_loss_counter_fails_a_run_and_a_clean_run_passes`
+  checks that loss counters prevent a pass (OA-PRF-009).
+- Test: `tools/oa-perf/src/capacity.rs::one_slow_second_in_a_hundred_is_not_a_pass` checks the
+  per-second latency criterion.
+- Test: `tools/oa-perf/src/capacity.rs::two_runs_of_one_configuration_count_the_same_things`
+  checks repeatable accounting for one synthetic configuration.
+- Test: `tools/oa-perf/src/capacity.rs::a_small_run_processes_all_traffic_and_reports_every_figure`
+  pins the timing-independent vector, in order: measured seconds, expected and represented
+  aircraft, expected and generated ADS-B reports, ADS-B and plot input counts, processed count,
+  late and refused plot counts, tracker applied count, output overflow, and confirmed tracks.
+  The values are `[20, 100, 100, 0, 0, 1470, 1489, 2959, 0, 0, 2698, 0, 114]`. Its canonical
+  digest input is ASCII `OA-PERF-ACCOUNTING-V1`, NUL, then those 13 unsigned 64-bit values in
+  little-endian order. The exact 126-byte input is
+  `4f412d504552462d4143434f554e54494e472d56310014000000000000006400000000000000640000000000000000000000000000000000000000000000be05000000000000d1050000000000008f0b000000000000000000000000000000000000000000008a0a00000000000000000000000000007200000000000000`.
+  SHA-256 is `8475f8cf3e812357b4175f494b915875a9798394ef73a99a819fec8ae68d294b`. It was recorded
+  by guarded request `openatca-L1-D1-accreditation-20261126-233932-1b42fd` using
+  `oa-perf test:--lib -- --nocapture`. This is a work-accounting golden, not a host-timing golden.
+  The output was introduced in source commit `8c4a196d826be9cf6b2a14d2e1c7365c7f44e503`.
+
+The repository does not pin host timing values; they are host- and run-specific. The documented
+synthetic radar stress qualification remains a failed qualification, not an accredited result.
 
 ## Limits and open questions
 

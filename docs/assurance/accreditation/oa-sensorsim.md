@@ -1,6 +1,7 @@
 # Sensor simulator capability
 
 **Status:** Proposal, under review.
+**Accreditation authority:** External; independent accreditation is pending.
 
 ## Intended use and boundary
 
@@ -37,6 +38,27 @@ Refuse admission if the truth coverage, sensor profile, seed, source/build closu
 identity is unbound; an acceptance criterion is missing or post hoc; a required comparison is absent;
 or outputs are incomplete. A failed bound or unresolved discrepancy stays visible and cannot be
 reclassified by changing model settings after observing results.
+
+### Source-backed checks and known-answer evidence
+
+- Test: `crates/oa-sensorsim/tests/sim.rs::same_seed_same_bytes_and_streams_are_per_aircraft`
+  (OA-SIM-009), introduced by `43c5657fa77239e981d2a1a49775fb4b80259759`, checks deterministic
+  output for a fixed seed, changed output for a different seed, and per-aircraft stream independence.
+- Test: `crates/oa-sensorsim/tests/adsb_error.rs::the_output_depends_only_on_the_arguments`
+  (OA-SIM-039), introduced by `540210e4084a4208fdf2fe89dd748acc0bb6fe25`, checks repeatability
+  from the supplied truth, reports, and error parameters.
+- Test: `crates/oa-sensorsim/tests/sim.rs::cat048_decodes_back_to_the_plots` checks a synthetic
+  encoder/decoder round trip for simulated plots.
+- Test: `crates/oa-sensorsim/tests/sim.rs::same_seed_same_bytes_and_streams_are_per_aircraft`
+  emits the complete deterministic CAT048 payload for its fixed synthetic input when test output
+  is enabled. Guarded request `openatca-L1-D1-accreditation-20261126-233909-9fc8a8` recorded
+  7,491 bytes with SHA-256
+  `dd4e138b932e1484bb2eeb3fe3ef29d6710b4e5dcefa56de31e1d516e5c1d5a6` over the full payload.
+  The command was `oa-sensorsim test:--test=sim -- --nocapture`; 19 synthetic tests passed. The
+  producer is source commit `8c4a196d826be9cf6b2a14d2e1c7365c7f44e503`. This golden is distinct
+  from the same-seed comparison and the separate round-trip test.
+
+The cited cases validate only the encoded synthetic model behavior, not physical sensor fidelity.
 
 ## Limits and open questions
 

@@ -1,6 +1,7 @@
 # Offline replay capability
 
 **Status:** Proposal, under review.
+**Accreditation authority:** External; independent accreditation is pending.
 
 ## Intended use and boundary
 
@@ -36,6 +37,20 @@ Refuse admission if any source/build/input/reference binding is missing, target 
 closure cannot be shown, input completeness is unknown, expected outcomes or limits were set after
 execution, outputs are incomplete, or a material discrepancy remains unresolved. Preserve the
 failed or refused run as evidence; do not relabel it as a pass.
+
+### Source-backed checks and known-answer evidence
+
+- Test: `crates/oa-replay/tests/table.rs::canonical_serialisation_has_a_pinned_golden_hash`
+  (OA-RPL-026) pins the canonical table-state serialization digest to
+  `5ba94b361871858c42cfc9c6bb86b2c63db90dd192c7d834517fd44ba0eff530`. The test was introduced
+  by `4c5653354519fb1d4941c873e799ebfe5b5ae320`; the golden was most recently re-pinned by
+  `e6b4e659fce99a581b64a8d900adcc8ce8d018b8`.
+- Test: `crates/oa-replay/tests/cli.rs::verify_prefix_gates_stdout_on_both_digests_and_complete_suffix`
+  checks the CLI's two-digest and complete-suffix gate (OA-RPL-277).
+
+The pinned value is a canonical state-serialization known answer. It is not a digest of a recorded
+feed, nor evidence of a completed admitted replay run. No recorded-feed golden digest is established
+by these source tests.
 
 ## Limits and open questions
 

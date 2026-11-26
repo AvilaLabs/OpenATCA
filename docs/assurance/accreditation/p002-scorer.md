@@ -1,6 +1,7 @@
 # Retrospective scoring capability
 
 **Status:** Proposal, under review.
+**Accreditation authority:** External; independent accreditation is pending.
 
 ## Intended use and boundary
 
@@ -37,6 +38,29 @@ Refuse admission if source, binary/build closure, protocol, inputs, reference, o
 cannot be bound; the cohort or exclusions changed after results; expected behavior is not specified;
 or outputs are incomplete. Preserve every discrepancy and failed criterion. A method or claim
 change requires a reviewed prospective amendment and a new decision.
+
+### Source-backed checks and known-answer evidence
+
+- Test: `crates/oa-track-tools/examples/p002.rs::the_hold_out_gate_counts_only_openatca_rows_matched_to_a_grid_sample`
+  (OA-TRK-373) checks that hold-out scoring counts only rows matched to the defined grid sample.
+- Test: `crates/oa-track-tools/examples/p002.rs::the_cross_day_rule_is_met_only_on_a_and_b_in_openatcas_favour_and_c_not_against`
+  (OA-TRK-393) checks the stated cross-day rule and pins the generated synthetic report SHA-256
+  to `cd54b9880a95154f58dc5316b377eb06c69659af398b38bda23ef54572afc288`. The producer is source
+  commit `8c4a196d826be9cf6b2a14d2e1c7365c7f44e503`; the input rows and three-day rule evaluation
+  in this test are synthetic. Guarded request `openatca-L1-D1-accreditation-20261126-234048-168744`
+  ran the example's 58 tests, all passed.
+- Test: `crates/oa-track-tools/examples/p002.rs::the_reports_the_tool_prints_are_read_exactly`
+  checks exact report parsing.
+- Test: `crates/oa-track-tools/examples/p002.rs::export_requires_sidecar_and_checks_its_digest`
+  checks export binding to its required sidecar digest.
+- Test: `crates/oa-track-tools/tests/score.rs::the_real_clip_tracker_run_has_the_pinned_digest`
+  (OA-TRK-171, OA-TRK-330) conditionally pins an upstream tracker output digest to
+  `8892186a0d06e90ebbbf2545c6f2af286a46949c255bedf68b1072fff2607e22`. It returns without
+  scoring if `OPENATCA_ADSB_CLIP` is unset and is not evidence of a P-002 score/report golden.
+
+The scorer's operational run outputs are configuration- and cohort-specific. The pinned P-002
+digest is for a synthetic cross-day-rule report, not an operational cohort. The upstream tracker
+digest is distinct from a scorer-result golden.
 
 ## Limits and open questions
 
