@@ -832,7 +832,9 @@ mod tests {
 
     use super::*;
     use crate::nam_handoff::nam_session_ingress_state;
-    use oa_nam::{Aerodrome, Facility, Field13, Field16};
+    use oa_nam::{
+        Aerodrome, Angle, Facility, Field13, Field16, Field32, GroundSpeed, Heading, Level, Time32,
+    };
 
     const LOCAL: Facility = Facility(*b"KZMP");
     const PEER: Facility = Facility(*b"CZWG");
@@ -900,6 +902,29 @@ mod tests {
             aerodrome: Aerodrome(*b"KBBB"),
             eet: None,
             alternates: Vec::new(),
+        });
+        message.f32 = Some(Field32 {
+            time: Time32 {
+                hour: 12,
+                minute: 0,
+                second: 0,
+                hundredths: 0,
+            },
+            latitude: Angle {
+                degrees: 41,
+                minutes: 0,
+                seconds: 0,
+                hemisphere: b'N',
+            },
+            longitude: Angle {
+                degrees: 87,
+                minutes: 0,
+                seconds: 0,
+                hemisphere: b'W',
+            },
+            speed: GroundSpeed::Knots(250),
+            heading: Heading::Hundredths(9_000),
+            altitude: Level::FlightLevel(350),
         });
         message.f31 = Some(Field31 {
             facility: receiver,
