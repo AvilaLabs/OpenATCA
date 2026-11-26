@@ -263,7 +263,6 @@ fn recording_identity(recording: &Path) -> io::Result<Option<FileIdentity>> {
         Ok(opened) => opened,
         Err(_) => return Ok(None),
     };
-    // seal-allow: verifies the same guarded descriptor's inode metadata without reading contents.
     let descriptor_metadata = file.metadata()?;
     if !descriptor_metadata.is_file()
         || identity_from_metadata(&descriptor_metadata) != Some(path_identity)
@@ -1435,6 +1434,7 @@ fn remove_expired_owned(
         return Ok(0);
     };
     let mut removed_bytes = 0u64;
+    // seal-allow: enumerates only the checked recorder directory for bounded retention selection.
     for (entries, entry) in fs::read_dir(dir)?.enumerate() {
         if entries >= DEFAULT_MAX_DIRECTORY_ENTRIES {
             return Err(io::Error::new(
@@ -1450,6 +1450,7 @@ fn remove_expired_owned(
         if stamp >= cutoff_stamp {
             continue;
         }
+        // seal-allow: probes no-follow type/size for a canonical segment from the checked directory.
         let metadata = match fs::symlink_metadata(&path) {
             Ok(value) if value.file_type().is_file() => value,
             _ => continue,
@@ -1532,6 +1533,7 @@ pub fn recordings_overlapping(
     }
     oa_sealed::refuse_io_embedded(dir)?;
     let mut found = Vec::new();
+    // seal-allow: enumerates only the checked recorder directory for a bounded technician query.
     for (entries, entry) in fs::read_dir(dir)?.enumerate() {
         if entries >= DEFAULT_MAX_DIRECTORY_ENTRIES {
             return Err(io::Error::new(
@@ -1589,9 +1591,13 @@ fn marker_is_open(recording: &Path) -> io::Result<bool> {
         return Ok(false);
     }
     let closed = closed_marker_path(recording)?;
-    Ok(
-        matches!(fs::symlink_metadata(closed), Err(error) if error.kind() == io::ErrorKind::NotFound),
-    )
+    oa_sealed::refuse_io_embedded(&closed)?;
+    // seal-allow: no-follow existence probe distinguishes absent close receipt from dangling link.
+    let closed_metadata = fs::symlink_metadata(&closed);
+    Ok(matches!(
+        closed_metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound
+    ))
 }
 
 fn stamp_to_unix_secs(stamp: &str) -> Option<i64> {
@@ -2035,7 +2041,7 @@ mod closed_segment_sync_tests {
             assert!(!closed_marker_path(&path).unwrap().exists());
             assert!(rec.finish().is_err());
             assert_eq!(marker_confirms_ownership(&path).unwrap(), None);
-            assert_eq!(fs::read(&path).unwrap(), b"preserve accepted bytes");
+            assert_eq!(oa_sealed::read(&path).unwrap(), b"preserve accepted bytes");
             assert_eq!(
                 *events.lock().unwrap(),
                 if fail_at == FailAt::File {
