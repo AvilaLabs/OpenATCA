@@ -3469,6 +3469,18 @@ struct LocalFixtureCandidate {
     m1_fixture_ns: u128,
 }
 
+fn initial_local_selector_view(view: SnapshotView<'_>) -> SnapshotView<'_> {
+    // Each H5 bin constructs a fresh M2 selector. Its first ingested snapshot is therefore the
+    // selector's initial sequence/state version, while source epoch, source/observed times and
+    // every row retain the actual replay projection. Cross-frame continuity is measured by the
+    // paired stream before this per-selector baseline is formed.
+    SnapshotView {
+        sequence: 1,
+        state_version: 1,
+        ..view
+    }
+}
+
 fn prepare_local_fixture_candidate(
     unit: SwapUnitKey,
     policy: UnitPolicy,
@@ -3487,9 +3499,19 @@ fn prepare_local_fixture_candidate(
         CapacityProfile::REPLAY_4096,
     )
     .map_err(|error| format!("local fixture selector: {error:?}"))?;
-    ingest_view(&mut selector, legacy, at_ns, policy.max_snapshot_age_ns)
+    ingest_view(
+        &mut selector,
+        initial_local_selector_view(legacy),
+        at_ns,
+        policy.max_snapshot_age_ns,
+    )
         .map_err(|error| format!("local fixture legacy snapshot: {error:?}"))?;
-    ingest_view(&mut selector, candidate, at_ns, policy.max_snapshot_age_ns)
+    ingest_view(
+        &mut selector,
+        initial_local_selector_view(candidate),
+        at_ns,
+        policy.max_snapshot_age_ns,
+    )
         .map_err(|error| format!("local fixture candidate snapshot: {error:?}"))?;
     let mut diffs = Vec::new();
     let diff_capacity = CapacityProfile::REPLAY_4096.tracks * 8;
