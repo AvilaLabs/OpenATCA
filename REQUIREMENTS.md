@@ -1685,10 +1685,11 @@ deterministic flight state comes out.
 - **OA-RPL-006** A TBFM row with no `gufi` links through the `(centre, tmaId)` pair, held in a
   second fixed-size index; a row that matches nothing is counted as unlinked and applies
   nothing. The same `tmaId` from another centre is another key.
-- **OA-RPL-007** TBFM rows set the metering columns: meter fix, ETA at the meter fix, STA (the
-  scheduling-fix time where the feed has no meter-fix time), runway and the frozen flag (`sfz`).
-  A TBFM row older than the flight's last TBFM message time is refused whole and counted as out
-  of order.
+- **OA-RPL-007** TBFM rows set the metering columns from their named source points: meter fix,
+  ETA at the meter fix, an STA only when an STA at that same meter fix is present, runway and the
+  frozen flag (`sfz`). An STA at the scheduling fix is not substituted for a missing meter-fix
+  STA. A TBFM row older than the flight's last TBFM message time is refused whole and counted as
+  out of order.
 - **OA-RPL-008** A TBFM `DEL` change type, on the `air` or on the `mrp` section, clears the
   metering columns and the frozen flag. It does not delete the flight, and metering can start
   again.

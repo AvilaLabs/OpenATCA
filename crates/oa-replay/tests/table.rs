@@ -286,8 +286,8 @@ fn tbfm_metering_columns_and_frozen_flag() {
     assert_eq!(name(&t.meter_fix[s]), "MFXA1");
     assert_eq!(name(&t.runway[s]), "09L");
     assert_eq!(t.eta_ms[s], DAY + 60_000);
-    // The feed has no sta_mfx; the scheduling-fix time stands in.
-    assert_eq!(t.sta_ms[s], DAY + 90_000);
+    // The message's STA is at SFX. Do not substitute it for the absent MFX STA.
+    assert_eq!(t.sta_ms[s], NO_TIME);
     assert_ne!(t.flags[s] & FROZEN, 0);
     assert_eq!(t.tbfm_msg_ms[s], DAY + 1000);
     // sfz NO unfreezes.

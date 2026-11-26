@@ -434,12 +434,10 @@ pub fn apply_tbfm(t: &mut FlightTable, rows: &Rows, i: usize, now_ns: i64) -> Ap
                     }
                 }
                 section::STA => {
-                    // The feed has no `sta_mfx`; the scheduling-fix time stands in for it.
-                    let v = [pt::MFX, pt::SFX]
-                        .iter()
-                        .filter_map(|&p| row.sta_ms.get(p).copied())
-                        .find(|&v| v != NO_TIME);
-                    if let Some(v) = v {
+                    // Preserve the source point: an STA for SFX is not an MFX STA. The public
+                    // FAA example documents this distinction, and no substitution is made when
+                    // the MFX value is absent.
+                    if let Some(&v) = row.sta_ms.get(pt::MFX).filter(|&&v| v != NO_TIME) {
                         *c.sta_ms = v;
                         metering = true;
                     }
