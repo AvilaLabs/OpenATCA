@@ -36,7 +36,7 @@ MAX_TEXT_SOURCE_BYTES = 2 * 1024 * 1024  # Public status registers only; each is
 VERSION_RE = re.compile(r"v([0-9]+\.[0-9]+\.[0-9]+)\Z")
 REQ_RE = re.compile(r"\bOA-[A-Z0-9]+-[0-9]{3}\b")
 LOCAL_PATH_RE = re.compile(r"/(?:home|tmp)/[^\s`]+")
-PRIVATE_SEGMENT_PATH_RE = re.compile(r"(?:^|[\s`])(?:[A-Za-z0-9_.-]+/)*private(?:/[A-Za-z0-9_.-]+)+")
+PRIVATE_SEGMENT_PATH_RE = re.compile(r"(?<![A-Za-z0-9_.-])(?:[A-Za-z0-9_.-]+/)*private(?:/[A-Za-z0-9_.-]+)+")
 
 
 class VddError(Exception):
