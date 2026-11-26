@@ -1018,6 +1018,30 @@ pub fn flight_view_for_gufi(
     Ok(view)
 }
 
+/// Looks up one explicitly known full flight key without requiring an observed surveillance
+/// address. This keeps flight-plan and handoff awareness available during sensor outages.
+pub fn flight_view_for_key(
+    driver: &mut FlightDriver,
+    key: oa_flight::FlightKey,
+    centre: [u8; 4],
+    cutoff_ms: i64,
+) -> Result<SharedFlightView, FlightViewStatus> {
+    let Some(flight) = flight_get(&driver.table, &key) else {
+        driver.stats.unknown_flight_queries = driver.stats.unknown_flight_queries.saturating_add(1);
+        return Err(FlightViewStatus::UnknownFlight);
+    };
+    let Some(view) = view_for_flight(&flight, centre) else {
+        driver.stats.unknown_centre_queries = driver.stats.unknown_centre_queries.saturating_add(1);
+        return Err(FlightViewStatus::UnknownCentre);
+    };
+    if !stamps_within_cutoff(&view, cutoff_ms) {
+        driver.stats.future_snapshot_refusals =
+            driver.stats.future_snapshot_refusals.saturating_add(1);
+        return Err(FlightViewStatus::FutureSnapshot);
+    }
+    Ok(view)
+}
+
 fn view_for_flight(flight: &Flight, centre: [u8; 4]) -> Option<SharedFlightView> {
     let view = flight
         .views

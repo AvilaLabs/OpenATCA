@@ -198,6 +198,12 @@ pub struct SurveillanceFrame {
     pub tracker_stats: TrackerStats,
     pub track_transport_seen_ns: Option<i64>,
     pub track_measurement_seen_ns: Option<i64>,
+    /// Source health shared by the display and regional automation mode selector.
+    pub feeds: Vec<FeedStatus>,
+    /// True when the selected/effective regional mode intentionally withheld surveillance products.
+    pub surveillance_withheld: bool,
+    pub withheld_tracks: u32,
+    pub withheld_alerts: u32,
     pub measurement_rejections: u64,
     pub duplicate_rows_replaced: u32,
     pub displayed: u32,
@@ -673,6 +679,14 @@ pub fn surveillance_finish(
     s: &mut Surveillance,
     ownership: Option<&OwnershipStatus>,
 ) -> Result<SurveillanceFrame, String> {
+    surveillance_finish_with_visibility(s, ownership, true)
+}
+
+pub(crate) fn surveillance_finish_with_visibility(
+    s: &mut Surveillance,
+    ownership: Option<&OwnershipStatus>,
+    include_surveillance: bool,
+) -> Result<SurveillanceFrame, String> {
     if s.failed {
         return Err("surveillance failed; reconstruct from the admitted input prefix".into());
     }
@@ -860,52 +874,45 @@ pub fn surveillance_finish(
         &mut s.events,
         &mut s.states,
     );
-    let (ca_closed, ca_altitude_lost) = capture_ca_logs(s);
+    let (mut ca_closed, mut ca_altitude_lost) = capture_ca_logs(s);
+    let withheld_tracks = if include_surveillance {
+        0
+    } else {
+        u32::try_from(tracks.len()).map_err(|_| "withheld track count overflow")?
+    };
+    let withheld_alerts = if include_surveillance {
+        0
+    } else {
+        u32::try_from(
+            ca_open(&s.ca).len()
+                + ca_closed.len()
+                + ca_altitude_lost.len()
+                + msaw
+                    .as_ref()
+                    .map_or(0, |frame| frame.open.len() + frame.closed.len()),
+        )
+        .map_err(|_| "withheld alert count overflow")?
+    };
+    let feeds = feed_statuses(s, time_ns)?;
     let (msaw_markers, digest, displayed, off_map, warnings) = if !s.profile.render_scope {
-        let digest = offline_projection_digest(time_ns, &tracks, ca_open(&s.ca))?;
+        let digest = if include_surveillance {
+            offline_projection_digest(time_ns, &tracks, ca_open(&s.ca))?
+        } else {
+            offline_projection_digest(time_ns, &[], &[])?
+        };
         (None, digest, 0, 0, Vec::new())
     } else {
         let mut store = RowStore::default();
-        let stats = store_add(
-            &mut store,
-            &row_columns(&snapshot, &mut ColumnBuf::default()),
-            time_ns,
-        )
-        .map_err(err)?;
-        if stats.kept != stats.rows_in || store_finish(&mut store) != 0 {
-            return Err("scope input snapshot lost rows".into());
-        }
-        let mut feeds = Vec::with_capacity(5);
-        for (i, &name) in FEED_NAMES.iter().enumerate() {
-            let seen = if i == 0 {
-                s.track_measurement_seen_ns
-            } else {
-                required(&s.seen, i)?
-            };
-            let down = if i == 0 {
-                s.track_down
-            } else {
-                required(&s.down, i)?
-            };
-            let state = match seen {
-                None => FeedState::NoMessageSeen,
-                Some(at) => {
-                    let age = time_ns.checked_sub(at).ok_or("feed age overflow")?;
-                    if age < 0 {
-                        return Err("feed age is negative".into());
-                    }
-                    let age_ms = u32::try_from(age / 1_000_000)
-                        .map_err(|_| "feed age exceeds research envelope")?;
-                    if down || age >= 5 * SECOND_NS {
-                        FeedState::Lost { age_ms }
-                    } else if age >= 2 * SECOND_NS {
-                        FeedState::Slow { age_ms }
-                    } else {
-                        FeedState::Live
-                    }
-                }
-            };
-            feeds.push(FeedStatus { name, state });
+        if include_surveillance {
+            let stats = store_add(
+                &mut store,
+                &row_columns(&snapshot, &mut ColumnBuf::default()),
+                time_ns,
+            )
+            .map_err(err)?;
+            if stats.kept != stats.rows_in || store_finish(&mut store) != 0 {
+                return Err("scope input snapshot lost rows".into());
+            }
         }
         let newest_track = tracker_newest_update_ns(&s.tracker);
         let info = replay_build_with_overlays(
@@ -972,38 +979,42 @@ pub fn surveillance_finish(
             15,
         )
         .map_err(err)?;
-        let msaw_markers = if let Some(frame) = msaw.as_ref() {
-            use oa_display::core::alert_markers::{
-                append_alert_markers, AlertMarker, MarkerState, NO_POSITION_E7,
-            };
-            if frame.open.len() > s.profile.max_tracks {
-                return Err("MSAW alert marker capacity exceeded".into());
-            }
-            let mut markers = Vec::with_capacity(s.profile.max_tracks);
-            for alert in &frame.open {
-                let position = tracks.iter().find(|track| track.address == alert.addr);
-                let state = if frame.stats.is_none() || alert.end_reason != oa_msaw::END_CLEAR {
-                    MarkerState::ProtectionLost
-                } else {
-                    match alert.peak {
-                        oa_msaw::Grade::Caution => MarkerState::Caution,
-                        oa_msaw::Grade::Warning => MarkerState::Warning,
-                    }
+        let msaw_markers = if include_surveillance {
+            if let Some(frame) = msaw.as_ref() {
+                use oa_display::core::alert_markers::{
+                    append_alert_markers, AlertMarker, MarkerState, NO_POSITION_E7,
                 };
-                markers.push(AlertMarker {
-                    address: alert.addr,
-                    lat_e7: position.map_or(NO_POSITION_E7, |track| track.lat_e7),
-                    lon_e7: position.map_or(NO_POSITION_E7, |track| track.lon_e7),
-                    state,
-                    position_known: u8::from(position.is_some()),
-                    reserved: [0; 2],
-                });
+                if frame.open.len() > s.profile.max_tracks {
+                    return Err("MSAW alert marker capacity exceeded".into());
+                }
+                let mut markers = Vec::with_capacity(s.profile.max_tracks);
+                for alert in &frame.open {
+                    let position = tracks.iter().find(|track| track.address == alert.addr);
+                    let state = if frame.stats.is_none() || alert.end_reason != oa_msaw::END_CLEAR {
+                        MarkerState::ProtectionLost
+                    } else {
+                        match alert.peak {
+                            oa_msaw::Grade::Caution => MarkerState::Caution,
+                            oa_msaw::Grade::Warning => MarkerState::Warning,
+                        }
+                    };
+                    markers.push(AlertMarker {
+                        address: alert.addr,
+                        lat_e7: position.map_or(NO_POSITION_E7, |track| track.lat_e7),
+                        lon_e7: position.map_or(NO_POSITION_E7, |track| track.lon_e7),
+                        state,
+                        position_known: u8::from(position.is_some()),
+                        reserved: [0; 2],
+                    });
+                }
+                markers.sort_by_key(|marker| marker.address);
+                Some(
+                    append_alert_markers(&mut s.scope.list, &s.scope.view.proj, &markers)
+                        .map_err(err)?,
+                )
+            } else {
+                None
             }
-            markers.sort_by_key(|marker| marker.address);
-            Some(
-                append_alert_markers(&mut s.scope.list, &s.scope.view.proj, &markers)
-                    .map_err(err)?,
-            )
         } else {
             None
         };
@@ -1045,16 +1056,26 @@ pub fn surveillance_finish(
     let track_transport_seen_ns = s.seen.first().copied().flatten();
     s.completed = true;
     s.failed = false;
+    if !include_surveillance {
+        tracks.clear();
+        flags.clear();
+        ca_closed.clear();
+        ca_altitude_lost.clear();
+    }
     Ok(SurveillanceFrame {
         time_ns,
         raster_rendered: s.profile.render_scope,
         tracks,
         flags,
         frame_sha256: digest,
-        ca_open: ca_open(&s.ca).to_vec(),
+        ca_open: if include_surveillance {
+            ca_open(&s.ca).to_vec()
+        } else {
+            Vec::new()
+        },
         ca_closed,
         ca_altitude_lost,
-        msaw,
+        msaw: if include_surveillance { msaw } else { None },
         msaw_markers,
         msaw_altitude_source_unknown,
         ca_stats: ca.stats,
@@ -1063,12 +1084,52 @@ pub fn surveillance_finish(
         tracker_stats: *tracker_stats(&s.tracker),
         track_transport_seen_ns,
         track_measurement_seen_ns: s.track_measurement_seen_ns,
+        feeds,
+        surveillance_withheld: !include_surveillance,
+        withheld_tracks,
+        withheld_alerts,
         measurement_rejections: s.measurement_rejections,
         duplicate_rows_replaced,
         displayed,
         off_map,
         warnings,
     })
+}
+
+pub(crate) fn feed_statuses(s: &Surveillance, time_ns: i64) -> Result<Vec<FeedStatus>, String> {
+    let mut feeds = Vec::with_capacity(FEED_NAMES.len());
+    for (i, &name) in FEED_NAMES.iter().enumerate() {
+        let seen = if i == 0 {
+            s.track_measurement_seen_ns
+        } else {
+            required(&s.seen, i)?
+        };
+        let down = if i == 0 {
+            s.track_down
+        } else {
+            required(&s.down, i)?
+        };
+        let state = match seen {
+            None => FeedState::NoMessageSeen,
+            Some(at) => {
+                let age = time_ns.checked_sub(at).ok_or("feed age overflow")?;
+                if age < 0 {
+                    return Err("feed age is negative".into());
+                }
+                let age_ms = u32::try_from(age / 1_000_000)
+                    .map_err(|_| "feed age exceeds research envelope")?;
+                if down || age >= 5 * SECOND_NS {
+                    FeedState::Lost { age_ms }
+                } else if age >= 2 * SECOND_NS {
+                    FeedState::Slow { age_ms }
+                } else {
+                    FeedState::Live
+                }
+            }
+        };
+        feeds.push(FeedStatus { name, state });
+    }
+    Ok(feeds)
 }
 
 /// Pixels are borrowed only while the completed immutable frame is being published by the shell.
@@ -1101,8 +1162,8 @@ pub fn surveillance_present_controls(
     if s.failed || !s.completed || s.frames == 0 {
         return Err("control overlay requires a completed frame".into());
     }
-    if console.len() > 128 || !console.bytes().all(|byte| (32..=126).contains(&byte)) {
-        return Err("console text must be at most 128 printable ASCII bytes".into());
+    if console.len() > 192 || !console.bytes().all(|byte| (32..=126).contains(&byte)) {
+        return Err("console and mode status must be at most 192 printable ASCII bytes".into());
     }
     if s.presentation_updates >= s.profile.max_presentation_updates {
         return Err("regional presentation update budget exhausted".into());
@@ -1151,7 +1212,7 @@ pub fn surveillance_present_controls(
     .map_err(err)?;
     for (index, line) in console.as_bytes().chunks(64).enumerate() {
         let text = std::str::from_utf8(line).map_err(|_| "console encoding")?;
-        let y = 132 + i32::try_from(index).map_err(|_| "console row")? * 12;
+        let y = 120 + i32::try_from(index).map_err(|_| "console row")? * 12;
         oa_display::list::push_text(
             &mut s.scope.list,
             (8 * 16, y * 16),

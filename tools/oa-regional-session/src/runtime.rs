@@ -31,6 +31,42 @@ const QUARANTINE_CLOCK_DOMAIN_ID: u32 = 1;
 const MAX_RUNTIME_ITEM_WORK: u32 =
     oa_airspace::core::route::MAX_ROUTE_WORK + crate::input::MAX_FILED_ROUTE_BYTES as u32 + 16;
 
+/// OpenATCA functional selection. These names describe this runtime and do not claim a legacy
+/// FSL/EFSL flag mapping.
+/// Functional basis: FAA JO 7110.65 Chapter 13, §1 allows electronic flight data to support
+/// situational awareness during surveillance/flight-data outages; JO 7210.3EE §§3-6-4 and 3-6-8
+/// require facility contingency procedures for degraded Fusion and discuss single-sensor use.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RegionalAutomationMode {
+    FlightDataOnly,
+    Surveillance,
+    Fusion,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EffectiveAutomationMode {
+    FlightDataOnly,
+    Surveillance,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AutomationDegradation {
+    None,
+    OperatorSelectedFlightDataOnly,
+    SurveillanceUnavailable,
+    FusionUnavailable,
+}
+
+/// Selected/effective mode and explicit fusion-off indication published on every frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RegionalAutomationStatus {
+    pub selected: RegionalAutomationMode,
+    pub effective: EffectiveAutomationMode,
+    pub degradation: AutomationDegradation,
+    /// Fusion is currently not implemented by this one-surveillance-source runtime.
+    pub fusion_off: bool,
+}
+
 // A7.2: cold subsystem composition. All core memory belongs to its originating subsystem.
 pub struct RegionalRuntime {
     model: Model,
@@ -50,6 +86,9 @@ pub struct RegionalRuntime {
     next_generation: u32,
     console_text: String,
     profile: RegionalRunProfile,
+    selected_mode: RegionalAutomationMode,
+    last_automation: RegionalAutomationStatus,
+    known_flights: Vec<oa_flight::FlightKey>,
 }
 
 /// Versioned capacities for a single offline replay. Defaults reproduce the historic small
@@ -110,6 +149,81 @@ pub const DEFAULT_REGIONAL_RUN_PROFILE: RegionalRunProfile = RegionalRunProfile 
     max_total_events: crate::session::MAX_SESSION_EVENTS,
 };
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AutomationModeError {
+    FusionUnavailable,
+}
+
+/// Set the requested OpenATCA mode. Fusion is refused until the runtime has multiple qualified
+/// surveillance inputs; a single-source tracker cannot claim fusion. Rejection leaves selection
+/// unchanged, and every published frame still reports fusion off.
+pub fn regional_select_automation_mode(
+    runtime: &mut RegionalRuntime,
+    selected: RegionalAutomationMode,
+) -> Result<(), AutomationModeError> {
+    if selected == RegionalAutomationMode::Fusion {
+        return Err(AutomationModeError::FusionUnavailable);
+    }
+    runtime.selected_mode = selected;
+    Ok(())
+}
+
+fn automation_status(
+    selected: RegionalAutomationMode,
+    feeds: &[oa_display::core::safety::FeedStatus],
+) -> RegionalAutomationStatus {
+    use oa_display::core::safety::FeedState;
+    let surveillance_live = feeds
+        .iter()
+        .find(|feed| feed.name == *b"TRACK\0\0\0")
+        .is_some_and(|feed| feed.state == FeedState::Live);
+    let (effective, degradation) = match selected {
+        RegionalAutomationMode::FlightDataOnly => (
+            EffectiveAutomationMode::FlightDataOnly,
+            AutomationDegradation::OperatorSelectedFlightDataOnly,
+        ),
+        RegionalAutomationMode::Surveillance if surveillance_live => (
+            EffectiveAutomationMode::Surveillance,
+            AutomationDegradation::None,
+        ),
+        RegionalAutomationMode::Surveillance => (
+            EffectiveAutomationMode::FlightDataOnly,
+            AutomationDegradation::SurveillanceUnavailable,
+        ),
+        RegionalAutomationMode::Fusion => (
+            EffectiveAutomationMode::FlightDataOnly,
+            AutomationDegradation::FusionUnavailable,
+        ),
+    };
+    RegionalAutomationStatus {
+        selected,
+        effective,
+        degradation,
+        fusion_off: true,
+    }
+}
+
+fn automation_status_label(status: RegionalAutomationStatus) -> &'static str {
+    match (status.effective, status.degradation) {
+        (
+            EffectiveAutomationMode::FlightDataOnly,
+            AutomationDegradation::SurveillanceUnavailable,
+        ) => "MODE FLIGHT DATA ONLY | SURVEILLANCE LOST | FUSION OFF",
+        (EffectiveAutomationMode::FlightDataOnly, _) => "MODE FLIGHT DATA ONLY | FUSION OFF",
+        (EffectiveAutomationMode::Surveillance, _) => "MODE SURVEILLANCE | FUSION OFF",
+    }
+}
+
+fn automation_console_text(console: &str, status: RegionalAutomationStatus) -> String {
+    let mut text = String::with_capacity(192);
+    if !console.is_empty() {
+        text.push_str(console);
+        text.push_str(" | ");
+    }
+    text.push_str(automation_status_label(status));
+    text
+}
+
 // A3/C6: cold offline evidence rows/frame are bounded by the selected flight profile capacity
 // (32 by default, 8192 in recorded_peak); snapshots are copied, never aliased. Optional vertical
 // outputs remain limited by MAX_PERFORMANCE_ENVELOPES and fixed point profile capacity.
@@ -128,8 +242,13 @@ pub struct RegionalFrame {
     pub sequence: u64,
     pub input: FrameEvidence,
     pub surveillance: SurveillanceFrame,
+    pub automation: RegionalAutomationStatus,
     pub flight_operations: Vec<FlightApplyOutcome>,
     pub flights: Vec<FlightEvidence>,
+    /// Bounded full-key plan/owner/handoff views, including flights with no surveillance target.
+    pub flight_data: Vec<flight::SharedFlightView>,
+    /// Known keys without a current view for this centre; never silently folded into the list.
+    pub flight_data_unavailable: u32,
     /// Current admitted NAM point-outs. These remain coordination state, never flight ownership.
     pub point_outs: Vec<PointOutView>,
     pub flight_report: FlightDriverReport,
@@ -205,6 +324,46 @@ fn runtime_item_id(batch_ordinal: u64, item_index: usize) -> Result<u64, String>
         .and_then(|base| base.checked_add(index))
         .filter(|value| *value != 0)
         .ok_or_else(|| "quarantine item identity overflow".into())
+}
+
+fn event_flight_key(event: &crate::input::NormalizedEvent) -> Option<oa_flight::FlightKey> {
+    use crate::input::FlightOperation;
+    match event.kind {
+        crate::input::EventKind::Flight(
+            FlightOperation::SetPlanByKey { key, .. }
+            | FlightOperation::CancelPlanByKey { key, .. }
+            | FlightOperation::SetOwnerByKey { key, .. }
+            | FlightOperation::HandoffByKey { key, .. },
+        ) => Some(key),
+        crate::input::EventKind::Flight(_) if event.identity.flight_gufi != 0 => {
+            Some(oa_flight::key_gufi(event.identity.flight_gufi))
+        }
+        _ => None,
+    }
+}
+
+fn remember_flight_key(
+    runtime: &mut RegionalRuntime,
+    event: &crate::input::NormalizedEvent,
+    outcome: flight::FlightApplyOutcome,
+) -> Result<(), String> {
+    if !matches!(
+        outcome.operation,
+        Some(oa_flight::Outcome::Applied | oa_flight::Outcome::Unchanged)
+    ) {
+        return Ok(());
+    }
+    let Some(key) = event_flight_key(event) else {
+        return Ok(());
+    };
+    if runtime.known_flights.contains(&key) {
+        return Ok(());
+    }
+    if runtime.known_flights.len() >= runtime.profile.max_flights {
+        return Err("known flight view capacity exhausted".into());
+    }
+    runtime.known_flights.push(key);
+    Ok(())
 }
 
 fn runtime_item_outcome(
@@ -620,6 +779,14 @@ fn regional_new_with_profile_and_namespace(
         next_generation: 0,
         console_text: String::with_capacity(128),
         profile,
+        selected_mode: RegionalAutomationMode::Surveillance,
+        last_automation: RegionalAutomationStatus {
+            selected: RegionalAutomationMode::Surveillance,
+            effective: EffectiveAutomationMode::FlightDataOnly,
+            degradation: AutomationDegradation::SurveillanceUnavailable,
+            fusion_off: true,
+        },
+        known_flights: Vec::with_capacity(profile.max_flights),
     })
 }
 
@@ -779,10 +946,10 @@ fn execute(
             processing_started,
             item_started,
         )?;
-        flight_operations.push(
-            flight::flight_apply_event(&mut runtime.flights, event)
-                .map_err(|error| format!("accepted flight commit invariant: {error:?}"))?,
-        );
+        let flight_outcome = flight::flight_apply_event(&mut runtime.flights, event)
+            .map_err(|error| format!("accepted flight commit invariant: {error:?}"))?;
+        remember_flight_key(runtime, event, flight_outcome)?;
+        flight_operations.push(flight_outcome);
         route::route_commit_stage(&mut runtime.routes, route_stage);
         surveillance::surveillance_event(&mut runtime.surveillance, event)
             .map_err(|error| format!("accepted surveillance commit invariant: {error}"))?;
@@ -790,12 +957,19 @@ fn execute(
     }
     // Flight ownership presentation currently requires an explicitly selected flight. Per-flight
     // snapshots below preserve every owner; no arbitrary 'first' flight is promoted to selection.
-    let mut surveillance = surveillance::surveillance_finish(&mut runtime.surveillance, None)?;
+    let current_feeds = surveillance::feed_statuses(&runtime.surveillance, batch.receipt_ns)?;
+    let automation = automation_status(runtime.selected_mode, &current_feeds);
+    runtime.last_automation = automation;
+    let mut surveillance = surveillance::surveillance_finish_with_visibility(
+        &mut runtime.surveillance,
+        None,
+        automation.effective == EffectiveAutomationMode::Surveillance,
+    )?;
     if runtime.profile.surveillance.render_scope {
         surveillance.frame_sha256 = surveillance::surveillance_present_controls(
             &mut runtime.surveillance,
             &runtime.interaction,
-            &runtime.console_text,
+            &automation_console_text(&runtime.console_text, automation),
         )?;
     }
     runtime.frame_sequence = next_frame_sequence;
@@ -904,12 +1078,41 @@ fn execute(
         runtime.profile.max_flights,
     )?;
     runtime.observed.clone_from(&surveillance.tracks);
+    let flight_cutoff_ms = route::receipt_cutoff_ms(batch.receipt_ns)?;
+    let mut flight_data = Vec::with_capacity(runtime.known_flights.len());
+    let mut flight_data_unavailable = 0u32;
+    for key in &runtime.known_flights {
+        match flight::flight_view_for_key(
+            &mut runtime.flights,
+            *key,
+            runtime.centre,
+            flight_cutoff_ms,
+        ) {
+            Ok(view) => flight_data.push(view),
+            Err(
+                flight::FlightViewStatus::UnknownFlight | flight::FlightViewStatus::UnknownCentre,
+            ) => {
+                flight_data_unavailable = flight_data_unavailable.saturating_add(1);
+            }
+            Err(flight::FlightViewStatus::FutureSnapshot) => {
+                return Err("future flight snapshot refused in regional flight-data view".into())
+            }
+            Err(
+                flight::FlightViewStatus::Found
+                | flight::FlightViewStatus::AmbiguousAddress
+                | flight::FlightViewStatus::OutputCapacity,
+            ) => return Err("unexpected full-key flight view status".into()),
+        }
+    }
     Ok(RegionalFrame {
         sequence: runtime.frame_sequence,
         input,
         surveillance,
+        automation,
         flight_operations,
         flights,
+        flight_data,
+        flight_data_unavailable,
         point_outs: nam_pointout::nam_pointout_views(&runtime.nam_pointouts)
             .copied()
             .collect(),
@@ -1010,7 +1213,7 @@ pub fn regional_select(
     let digest = match surveillance::surveillance_present_controls(
         &mut runtime.surveillance,
         &runtime.interaction,
-        &runtime.console_text,
+        &automation_console_text(&runtime.console_text, runtime.last_automation),
     ) {
         Ok(digest) => digest,
         Err(reason) => {
@@ -1041,7 +1244,7 @@ pub fn regional_console_overlay(
     match surveillance::surveillance_present_controls(
         &mut runtime.surveillance,
         &runtime.interaction,
-        &runtime.console_text,
+        &automation_console_text(&runtime.console_text, runtime.last_automation),
     ) {
         Ok(digest) => Ok(digest),
         Err(reason) => {
@@ -1060,7 +1263,7 @@ pub fn regional_clear_selection(runtime: &mut RegionalRuntime) -> Result<[u8; 32
     match surveillance::surveillance_present_controls(
         &mut runtime.surveillance,
         &runtime.interaction,
-        &runtime.console_text,
+        &automation_console_text(&runtime.console_text, runtime.last_automation),
     ) {
         Ok(digest) => Ok(digest),
         Err(reason) => {

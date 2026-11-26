@@ -5,7 +5,9 @@ use oa_legacy_traj::core::trajectory::{
 };
 use oa_regional_session::cli::synthetic_model;
 use oa_regional_session::runtime::{
-    regional_new, regional_step, regional_step_with_performance, MAX_PERFORMANCE_ENVELOPES,
+    regional_new, regional_select_automation_mode, regional_step, regional_step_with_performance,
+    AutomationDegradation, AutomationModeError, EffectiveAutomationMode, RegionalAutomationMode,
+    MAX_PERFORMANCE_ENVELOPES,
 };
 use oa_regional_session::surveillance::SurveillanceConfig;
 use oa_regional_session::{parse_event_line, ReceiptBatch};
@@ -47,6 +49,213 @@ fn raw_surveillance_needs_no_invented_flight_identity() {
     assert!(frame.flights[0].trajectory.is_none());
     assert!(frame.flights[0].refusal.contains("UnknownFlight"));
     assert_eq!(frame.flight_report.flights, 0);
+}
+
+#[test]
+fn outage_mode_preserves_flight_data_and_recovers_on_a_fresh_surveillance_measurement() {
+    let mut engine = runtime();
+    let first = regional_step(
+        &mut engine,
+        &ReceiptBatch {
+            receipt_ns: SECOND,
+            source_clock_regressions: 0,
+            events: vec![
+                row(
+                    SECOND,
+                    1,
+                    "SURVEILLANCE",
+                    0,
+                    0xabc101,
+                    "POS\t410000000\t-870000000\t10000\t0\t0\t0",
+                ),
+                row(SECOND, 1, "FLIGHT", 1, 0xabc101, "PLAN\tPLAN00000001\t2"),
+                row(SECOND, 2, "FLIGHT", 1, 0xabc101, "OWNER\tSECTOR1"),
+            ],
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        first.automation.effective,
+        EffectiveAutomationMode::Surveillance
+    );
+    assert!(first.automation.fusion_off);
+    assert_eq!(first.flight_report.flights, 1);
+
+    let current = regional_step(
+        &mut engine,
+        &ReceiptBatch {
+            receipt_ns: 2 * SECOND,
+            source_clock_regressions: 0,
+            events: vec![row(
+                2 * SECOND,
+                2,
+                "SURVEILLANCE",
+                0,
+                0xabc101,
+                "POS\t410000000\t-870000000\t10000\t0\t0\t0",
+            )],
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        current.automation.effective,
+        EffectiveAutomationMode::Surveillance
+    );
+    assert!(!current.surveillance.tracks.is_empty());
+
+    let outage = regional_step(
+        &mut engine,
+        &ReceiptBatch {
+            receipt_ns: 3 * SECOND,
+            source_clock_regressions: 0,
+            events: vec![
+                row(3 * SECOND, 3, "SURVEILLANCE", 0, 0, "FEED\tDOWN\t0"),
+                row(3 * SECOND, 3, "FLIGHT", 1, 0xabc101, "HO_OFFER\tSECTOR2"),
+            ],
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        outage.automation.effective,
+        EffectiveAutomationMode::FlightDataOnly
+    );
+    assert_eq!(
+        outage.automation.degradation,
+        AutomationDegradation::SurveillanceUnavailable
+    );
+    assert!(outage.surveillance.surveillance_withheld);
+    assert!(outage.surveillance.tracks.is_empty());
+    assert!(outage.surveillance.withheld_tracks > 0);
+    assert_eq!(outage.flight_report.flights, 1);
+    assert!(outage.flight_operations[1].operation.is_some());
+    assert_eq!(outage.flight_data.len(), 1);
+    assert_eq!(outage.flight_data_unavailable, 0);
+    assert_eq!(outage.flight_data[0].handoff_to, *b"SECTOR2\0");
+
+    let recovered = regional_step(
+        &mut engine,
+        &ReceiptBatch {
+            receipt_ns: 4 * SECOND,
+            source_clock_regressions: 0,
+            events: vec![row(
+                4 * SECOND,
+                4,
+                "SURVEILLANCE",
+                0,
+                0xabc101,
+                "POS\t410000000\t-870000000\t10000\t0\t0\t0",
+            )],
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        recovered.automation.effective,
+        EffectiveAutomationMode::Surveillance
+    );
+    assert_eq!(
+        recovered.automation.degradation,
+        AutomationDegradation::None
+    );
+    assert!(!recovered.surveillance.surveillance_withheld);
+    assert_eq!(recovered.flight_report.flights, 1);
+}
+
+#[test]
+fn unsupported_fusion_selection_is_refused_and_reported_off() {
+    let mut engine = runtime();
+    assert_eq!(
+        regional_select_automation_mode(&mut engine, RegionalAutomationMode::Fusion),
+        Err(AutomationModeError::FusionUnavailable)
+    );
+    let frame = regional_step(
+        &mut engine,
+        &ReceiptBatch {
+            receipt_ns: SECOND,
+            source_clock_regressions: 0,
+            events: Vec::new(),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        frame.automation.selected,
+        RegionalAutomationMode::Surveillance
+    );
+    assert!(frame.automation.fusion_off);
+}
+
+#[test]
+fn explicit_flight_data_only_selection_remains_selected_without_sensor_health() {
+    let mut engine = runtime();
+    regional_select_automation_mode(&mut engine, RegionalAutomationMode::FlightDataOnly).unwrap();
+    let first = regional_step(
+        &mut engine,
+        &ReceiptBatch {
+            receipt_ns: SECOND,
+            source_clock_regressions: 0,
+            events: vec![row(
+                SECOND,
+                1,
+                "SURVEILLANCE",
+                0,
+                0xabc101,
+                "POS\t410000000\t-870000000\t10000\t0\t0\t0",
+            )],
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        first.automation.selected,
+        RegionalAutomationMode::FlightDataOnly
+    );
+    assert_eq!(
+        first.automation.effective,
+        EffectiveAutomationMode::FlightDataOnly
+    );
+    assert_eq!(
+        first.automation.degradation,
+        AutomationDegradation::OperatorSelectedFlightDataOnly
+    );
+    let frame = regional_step(
+        &mut engine,
+        &ReceiptBatch {
+            receipt_ns: 2 * SECOND,
+            source_clock_regressions: 0,
+            events: vec![row(
+                2 * SECOND,
+                2,
+                "SURVEILLANCE",
+                0,
+                0xabc101,
+                "POS\t410000000\t-870000000\t10000\t0\t0\t0",
+            )],
+        },
+    )
+    .unwrap();
+    assert!(frame.surveillance.surveillance_withheld);
+    assert!(frame.surveillance.tracks.is_empty());
+    assert!(frame.surveillance.withheld_tracks > 0);
+    regional_select_automation_mode(&mut engine, RegionalAutomationMode::Surveillance).unwrap();
+    let surveillance_unavailable = regional_step(
+        &mut engine,
+        &ReceiptBatch {
+            receipt_ns: 8 * SECOND,
+            source_clock_regressions: 0,
+            events: Vec::new(),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        surveillance_unavailable.automation.selected,
+        RegionalAutomationMode::Surveillance
+    );
+    assert_eq!(
+        surveillance_unavailable.automation.effective,
+        EffectiveAutomationMode::FlightDataOnly
+    );
+    assert_eq!(
+        surveillance_unavailable.automation.degradation,
+        AutomationDegradation::SurveillanceUnavailable
+    );
 }
 
 fn row(
