@@ -220,6 +220,7 @@ fn open_log_append_at(path: &Path, parent: &File) -> io::Result<File> {
 
 /// Returns the Linux UAPI `O_NOFOLLOW` value for the target architecture.
 /// The asm-generic value is overridden by several architecture-specific UAPI headers.
+/// Rust reports the x32 ABI with `target_arch = "x86_64"`.
 #[cfg(target_os = "linux")]
 fn linux_o_nofollow_flag() -> io::Result<i32> {
     #[cfg(any(
@@ -246,7 +247,6 @@ fn linux_o_nofollow_flag() -> io::Result<i32> {
         target_arch = "s390x",
         target_arch = "sparc",
         target_arch = "sparc64",
-        target_arch = "x32",
         target_arch = "x86",
         target_arch = "x86_64"
     ))]
@@ -272,7 +272,6 @@ fn linux_o_nofollow_flag() -> io::Result<i32> {
         target_arch = "s390x",
         target_arch = "sparc",
         target_arch = "sparc64",
-        target_arch = "x32",
         target_arch = "x86",
         target_arch = "x86_64"
     )))]
