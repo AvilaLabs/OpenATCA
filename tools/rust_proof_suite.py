@@ -22,7 +22,7 @@ from kani_validation import LOOP_UNWIND_PRESETS
 REGISTRY_VERSION = 1
 MAX_PROOFS = 128
 ALLOWED_PACKAGES = {
-    "oa-track", "oa-replay", "oa-safety", "oa-ca", "oa-math", "oa-runway", "oa-asterix", "oa-adsb",
+    "oa-track", "oa-track-core", "oa-replay", "oa-safety", "oa-ca", "oa-math", "oa-runway", "oa-asterix", "oa-adsb",
     "oa-feed", "oa-truth", "oa-msaw",
 }
 ALLOWED_CFGS = {"kani_full_capacity", "kani_late_replay_covers"}

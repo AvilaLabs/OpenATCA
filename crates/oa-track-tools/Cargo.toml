@@ -33,6 +33,3 @@ path = "src/fusion_main.rs"
 
 [package.metadata.openatca]
 class = "shell"
-
-[features]
-gate-trace = ["oa-track/gate-trace"]

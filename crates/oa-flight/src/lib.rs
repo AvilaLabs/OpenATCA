@@ -34,10 +34,19 @@
 //! order give the same record bit for bit ([`flights_digest`], [`flights_check`] audits every
 //! invariant).
 
-// The width of `usize` is fixed by construction: this crate does not build for a target whose
-// pointers are not 64 bits (RULESET B10).
-#[cfg(not(target_pointer_width = "64"))]
-compile_error!("the core crates support 64-bit targets only, so that usize is 64 bits everywhere");
+// B10: 64-bit native targets and the audited wasm32-unknown-unknown target are supported.
+#[cfg(not(any(
+    target_pointer_width = "64",
+    all(
+        target_arch = "wasm32",
+        target_pointer_width = "32",
+        target_os = "unknown",
+        target_vendor = "unknown"
+    )
+)))]
+compile_error!(
+    "this crate supports 64-bit targets and the audited wasm32-unknown-unknown target only"
+);
 
 extern crate alloc;
 

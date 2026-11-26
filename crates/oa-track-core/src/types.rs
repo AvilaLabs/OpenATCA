@@ -1,7 +1,8 @@
 //! Plain data of the tracker interface: the measurement, the configuration, the output tables
 //! and the counters. Core (pure). Hot structs carry exact size guards (A7).
 
-use std::fmt;
+use alloc::vec::Vec;
+use core::fmt;
 
 use crate::params::{
     CLOCK_STEP_LIMIT_NS, COAST_AFTER_INTERVALS, DROP_AFTER_NS, EXPECTED_INTERVAL_NS, INIT_M,
@@ -60,7 +61,7 @@ pub struct Measurement {
     /// [`M_HAS_VEL`] and [`M_ALT_GEOMETRIC`].
     pub flags: u8,
     /// ADS-B emitter category byte (`"A3"` is 0xA3), 0 if not known or not ADS-B. The tracker
-    /// trusts a cap-raising one only after it persists (`oa_adsb::category_observe`).
+    /// trusts a cap-raising one only after it persists (`oa_adsb_model::category_observe`).
     pub category: u8,
     /// How far the reported velocity lags the aircraft's, seconds: the velocity is the aircraft's
     /// as of this long before the time of applicability. Zero (the velocity is current) unless the
@@ -234,7 +235,7 @@ impl fmt::Display for TrackError {
     }
 }
 
-impl std::error::Error for TrackError {}
+impl core::error::Error for TrackError {}
 
 /// Largest output or log table a configuration may ask for, rows.
 pub const MAX_TABLE_ROWS: usize = 1 << 24;
@@ -305,12 +306,14 @@ pub fn check_config(c: &TrackerConfig) -> Result<(), TrackError> {
         return bad("clock_step_limit_ns below ooo_window_ns or not below drop_after_ns");
     }
     // Times are compared in ns; keep the products far from overflow.
-    if c.drop_after_ns
-        .max(c.ooo_window_ns)
-        .max(c.expected_interval_ns)
-        .max(c.init_interval_ns)
-        > 86_400 * 1_000_000_000
-    {
+    let max_interval = i64::max(
+        i64::max(
+            i64::max(c.drop_after_ns, c.ooo_window_ns),
+            c.expected_interval_ns,
+        ),
+        c.init_interval_ns,
+    );
+    if max_interval > 86_400 * 1_000_000_000 {
         return bad("a time over one day");
     }
     if c.h_mode > 3 {
@@ -322,10 +325,10 @@ pub fn check_config(c: &TrackerConfig) -> Result<(), TrackError> {
     Ok(())
 }
 
-/// A coordinate in degrees as 1e-7 degree, or `None` if it is not a number or does not fit an
-/// `i32`: an unusable position is refused, never a saturated or zero coordinate.
-pub(crate) fn to_e7(d: f64) -> Option<i32> {
-    let v = (d * 1.0e7).round();
+/// Convert degrees to 1e-7-degree units, returning `None` for non-finite values or values outside
+/// the `i32` range. Callers must refuse an unusable coordinate rather than saturating it to zero.
+pub fn to_e7(d: f64) -> Option<i32> {
+    let v = oa_ieee::round(d * 1.0e7);
     // Both bounds are exactly representable; the range test also fails for NaN.
     (v >= f64::from(i32::MIN) && v <= f64::from(i32::MAX)).then_some(v as i32)
 }
@@ -472,7 +475,8 @@ pub fn output_clear(o: &mut TrackOutput) {
 /// The row count is `t_ns.len()`. On success, every output column receives exactly one value;
 /// when full, no column changes and `overflow` is saturating-incremented. Callers that need the
 /// table's columns allocated once should construct it with [`output_new`]; this function assumes
-/// the column lengths have remained aligned through `output_new`, `output_push` and `output_clear`.
+/// the column lengths have remained aligned through `output_new`, `output_push` and
+/// [`output_clear`].
 pub fn output_push(o: &mut TrackOutput, r: &OutRow) {
     if o.t_ns.len() >= o.capacity {
         o.overflow = o.overflow.saturating_add(1);
@@ -673,66 +677,5 @@ pub struct TrackerStats {
     pub nis_n: u64,
 }
 
-/// Tag and version of [`output_hash_into`].
-pub const OUTPUT_HASH_TAG: &[u8; 5] = b"OATK1";
-
-fn put(h: &mut oa_sha256::Sha256, b: &[u8]) {
-    // Hashing a few megabytes cannot exceed the hasher's length limit; a failure would only
-    // change the digest, which the determinism checks would then show.
-    let _ = h.update(b);
-}
-
-/// Writes the canonical serialisation of the output rows to the hasher: the tag, the count, the
-/// overflow count, then every column, integers little-endian and floats as their IEEE bits.
-/// Equal digests mean the outputs are bit-identical.
-pub fn output_hash_into(h: &mut oa_sha256::Sha256, o: &TrackOutput) {
-    put(h, OUTPUT_HASH_TAG);
-    put(h, &(o.t_ns.len() as u64).to_le_bytes());
-    put(h, &o.overflow.to_le_bytes());
-    for v in &o.t_ns {
-        put(h, &v.to_le_bytes());
-    }
-    for v in &o.addr {
-        put(h, &v.to_le_bytes());
-    }
-    for v in o.lat_e7.iter().chain(o.lon_e7.iter()) {
-        put(h, &v.to_le_bytes());
-    }
-    for v in o
-        .vel_east_mps
-        .iter()
-        .chain(o.vel_north_mps.iter())
-        .chain(o.turn_rate_rps.iter())
-    {
-        put(h, &oa_math::canon_nan_f32(*v).to_bits().to_le_bytes());
-    }
-    // The altitude columns of a row without an altitude are hashed as zero, which is what they
-    // held before absence was written as NaN: the flags (hashed below) already say "absent", and
-    // digests recorded earlier stay valid.
-    for col in [&o.alt_ft, &o.alt_var_ft2, &o.vrate_fpm] {
-        for (i, v) in col.iter().enumerate() {
-            let has = o.flags.get(i).is_some_and(|f| f & O_HAS_ALT != 0);
-            put(
-                h,
-                &oa_math::canon_nan_f32(if has { *v } else { 0.0 })
-                    .to_bits()
-                    .to_le_bytes(),
-            );
-        }
-    }
-    for c in o.pos_cov_m2.iter().chain(o.vel_cov_m2s2.iter()) {
-        for v in c {
-            put(h, &oa_math::canon_nan_f32(*v).to_bits().to_le_bytes());
-        }
-    }
-    for c in o.mu_h.iter().chain(o.mu_v.iter()) {
-        for v in c {
-            put(h, &oa_math::canon_nan_f32(*v).to_bits().to_le_bytes());
-        }
-    }
-    put(h, &o.flags);
-}
-
 #[cfg(kani)]
-#[path = "types_proofs.rs"]
 mod proofs;

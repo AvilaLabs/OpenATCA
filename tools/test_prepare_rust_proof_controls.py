@@ -17,7 +17,7 @@ class PrepareControlsTests(unittest.TestCase):
         source = root / "source"
         source.mkdir()
         files = {
-            "crates/oa-track/src/tracker.rs": (
+            "crates/oa-track-core/src/tracker.rs": (
                 "fn update_in_order() {\n"
                 "        Step::Resynced => {\n"
                 "            t.stats.applied += 1;\n"
@@ -38,15 +38,15 @@ class PrepareControlsTests(unittest.TestCase):
                 "            }\n"
                 "}\n"
             ),
-            "crates/oa-track/src/types.rs": "    o.flags.push(r.flags);\n",
-            "crates/oa-track/src/time_gate.rs": "                if ns < oldest_ns {\n                    oldest_ns = ns;\n                }\n",
+            "crates/oa-track-core/src/types.rs": "    o.flags.push(r.flags);\n",
+            "crates/oa-track-core/src/time_gate.rs": "                if ns < oldest_ns {\n                    oldest_ns = ns;\n                }\n",
             "crates/oa-replay/src/core/mono_split.rs": (
                 "    wall_ns\n"
                 "        .checked_sub(mono_ns)\n"
                 "        .map(|step_ns| (wall_ns, mono_ns, step_ns))\n"
             ),
-            "crates/oa-track/src/tracker_rollback_paths.rs": "// unchanged rollback harness\n",
-            "crates/oa-track/src/time_gate_proofs_full.rs": "// unchanged full sensor harness\n",
+            "crates/oa-track-core/src/tracker/proofs/rollback_paths.rs": "// unchanged rollback harness\n",
+            "crates/oa-track-core/src/time_gate/proofs_full.rs": "// unchanged full sensor harness\n",
         }
         for rel, content in files.items():
             path = source / rel
@@ -77,7 +77,7 @@ class PrepareControlsTests(unittest.TestCase):
 
             caller = json.loads((out / "manifests" / "caller-track-restore.json").read_text())
             expected_caller = caller["expected_proof"]
-            self.assertEqual(expected_caller["package"], "oa-track")
+            self.assertEqual(expected_caller["package"], "oa-track-core")
             self.assertEqual(expected_caller["harness"], "tracker::proofs::rollback_paths::in_order_refusal_restores_track_metadata_projection")
             self.assertEqual(expected_caller["configuration"], {
                 "cfgs": [],
@@ -92,7 +92,7 @@ class PrepareControlsTests(unittest.TestCase):
                 "memory_mib": 8192,
             })
             caller_checkout = Path(caller["checkout"])
-            self.assertEqual(caller["patch"]["path"], "crates/oa-track/src/tracker.rs")
+            self.assertEqual(caller["patch"]["path"], "crates/oa-track-core/src/tracker.rs")
             caller_patch = (out / "patches" / "caller-track-restore.patch").read_text()
             self.assertEqual(
                 [line for line in caller_patch.splitlines() if line.startswith("-") and not line.startswith("---")],
@@ -101,17 +101,17 @@ class PrepareControlsTests(unittest.TestCase):
             self.assertFalse(any(line.startswith("+") and not line.startswith("+++") for line in caller_patch.splitlines()))
             self.assertEqual(
                 subprocess.run(["git", "-C", str(caller_checkout), "diff", "--name-only", "HEAD"], check=True, capture_output=True, text=True).stdout.splitlines(),
-                ["crates/oa-track/src/tracker.rs"],
+                ["crates/oa-track-core/src/tracker.rs"],
             )
-            caller_proof_rel = "crates/oa-track/src/tracker_rollback_paths.rs"
+            caller_proof_rel = "crates/oa-track-core/src/tracker/proofs/rollback_paths.rs"
             self.assertEqual((caller_checkout / caller_proof_rel).read_bytes(), (source / caller_proof_rel).read_bytes())
-            caller_source_text = (caller_checkout / "crates/oa-track/src/tracker.rs").read_text()
+            caller_source_text = (caller_checkout / "crates/oa-track-core/src/tracker.rs").read_text()
             self.assertIn("restore_output_txn(out, output);", caller_source_text)
             self.assertNotIn("restore_track_txn(t, slot, snapshot);", caller_source_text)
 
             rollback = json.loads((out / "manifests" / "late-rollback.json").read_text())
             expected = rollback["expected_proof"]
-            self.assertEqual(expected["package"], "oa-track")
+            self.assertEqual(expected["package"], "oa-track-core")
             self.assertEqual(expected["harness"], "tracker::proofs::rollback_paths::late_overflow_output_projection")
             self.assertEqual(expected["configuration"], {
                 "cfgs": [],
@@ -126,7 +126,7 @@ class PrepareControlsTests(unittest.TestCase):
                 "memory_mib": 12288,
             })
             rollback_checkout = Path(rollback["checkout"])
-            self.assertEqual(rollback["patch"]["path"], "crates/oa-track/src/tracker.rs")
+            self.assertEqual(rollback["patch"]["path"], "crates/oa-track-core/src/tracker.rs")
             rollback_patch = (out / "patches" / "late-rollback.patch").read_text()
             self.assertEqual(
                 [line for line in rollback_patch.splitlines() if line.startswith("-") and not line.startswith("---")],
@@ -135,17 +135,17 @@ class PrepareControlsTests(unittest.TestCase):
             self.assertFalse(any(line.startswith("+") and not line.startswith("+++") for line in rollback_patch.splitlines()))
             self.assertEqual(
                 subprocess.run(["git", "-C", str(rollback_checkout), "diff", "--name-only", "HEAD"], check=True, capture_output=True, text=True).stdout.splitlines(),
-                ["crates/oa-track/src/tracker.rs"],
+                ["crates/oa-track-core/src/tracker.rs"],
             )
-            proof_rel = "crates/oa-track/src/tracker_rollback_paths.rs"
+            proof_rel = "crates/oa-track-core/src/tracker/proofs/rollback_paths.rs"
             self.assertEqual((rollback_checkout / proof_rel).read_bytes(), (source / proof_rel).read_bytes())
-            rollback_source_text = (rollback_checkout / "crates/oa-track/src/tracker.rs").read_text()
+            rollback_source_text = (rollback_checkout / "crates/oa-track-core/src/tracker.rs").read_text()
             self.assertIn("restore_track_txn(t, slot, transaction);", rollback_source_text)
             self.assertNotIn("restore_output_txn(out, output);", rollback_source_text.split("fn update_late() {", 1)[1])
 
             sensor = json.loads((out / "manifests" / "sensor-oldest-tie.json").read_text())
             expected_sensor = sensor["expected_proof"]
-            self.assertEqual(expected_sensor["package"], "oa-track")
+            self.assertEqual(expected_sensor["package"], "oa-track-core")
             self.assertEqual(expected_sensor["harness"], "time_gate::proofs_full::full_sensor_table_note_new_id_evicts_first_argmin")
             self.assertEqual(expected_sensor["configuration"], {
                 "cfgs": ["kani_full_capacity"],
@@ -163,7 +163,7 @@ class PrepareControlsTests(unittest.TestCase):
                 "memory_mib": 12288,
             })
             sensor_checkout = Path(sensor["checkout"])
-            self.assertEqual(sensor["patch"]["path"], "crates/oa-track/src/time_gate.rs")
+            self.assertEqual(sensor["patch"]["path"], "crates/oa-track-core/src/time_gate.rs")
             sensor_patch = (out / "patches" / "sensor-oldest-tie.patch").read_text()
             self.assertEqual(
                 [line for line in sensor_patch.splitlines() if line.startswith("-") and not line.startswith("---")],
@@ -175,12 +175,12 @@ class PrepareControlsTests(unittest.TestCase):
             )
             self.assertEqual(
                 subprocess.run(["git", "-C", str(sensor_checkout), "diff", "--name-only", "HEAD"], check=True, capture_output=True, text=True).stdout.splitlines(),
-                ["crates/oa-track/src/time_gate.rs"],
+                ["crates/oa-track-core/src/time_gate.rs"],
             )
-            sensor_proof_rel = "crates/oa-track/src/time_gate_proofs_full.rs"
+            sensor_proof_rel = "crates/oa-track-core/src/time_gate/proofs_full.rs"
             self.assertEqual((sensor_checkout / sensor_proof_rel).read_bytes(), (source / sensor_proof_rel).read_bytes())
-            self.assertIn("if ns <= oldest_ns {", (sensor_checkout / "crates/oa-track/src/time_gate.rs").read_text())
-            self.assertNotIn("if ns < oldest_ns {", (sensor_checkout / "crates/oa-track/src/time_gate.rs").read_text())
+            self.assertIn("if ns <= oldest_ns {", (sensor_checkout / "crates/oa-track-core/src/time_gate.rs").read_text())
+            self.assertNotIn("if ns < oldest_ns {", (sensor_checkout / "crates/oa-track-core/src/time_gate.rs").read_text())
 
 
 if __name__ == "__main__":

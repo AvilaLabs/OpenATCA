@@ -14,6 +14,7 @@ oa-sealed = { path = "../oa-sealed" }
 oa-time-window = { path = "../oa-time-window" }
 # Workspace crates; not outside dependencies (RULESET F1).
 oa-adsb = { path = "../oa-adsb" }
+oa-adsb-model = { path = "../oa-adsb-model" }
 oa-feed = { path = "../oa-feed" }
 oa-geo = { path = "../oa-geo" }
 oa-sha256 = { path = "../oa-sha256" }

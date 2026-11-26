@@ -611,7 +611,7 @@ fn preflight_text_room(list: &DisplayList, rows: usize, bytes: usize) -> Result<
     let rows_needed = used.checked_add(rows).ok_or(DisplayError::TooLarge {
         what: "interaction text rows",
         requested: u128::MAX,
-        limit: list.caps.texts,
+        limit: list.caps.texts as u128,
     })?;
     if rows_needed > list.caps.texts {
         return Err(DisplayError::Full {
@@ -628,7 +628,7 @@ fn preflight_text_room(list: &DisplayList, rows: usize, bytes: usize) -> Result<
         .ok_or(DisplayError::TooLarge {
             what: "interaction text bytes",
             requested: u128::MAX,
-            limit: list.caps.text_bytes,
+            limit: list.caps.text_bytes as u128,
         })?;
     if bytes_needed > list.caps.text_bytes {
         return Err(DisplayError::Full {
@@ -769,7 +769,7 @@ pub fn present_interaction(
         .ok_or(DisplayError::TooLarge {
             what: "interaction text bytes",
             requested: u128::MAX,
-            limit: list.caps.text_bytes,
+            limit: list.caps.text_bytes as u128,
         })?;
     preflight_text_room(list, rows, rows_bytes)?;
 

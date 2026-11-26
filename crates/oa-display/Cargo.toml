@@ -10,13 +10,18 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
-oa-sealed = { path = "../oa-sealed" }
 oa-geo = { path = "../oa-geo" }
 oa-math = { path = "../oa-math" }
 oa-ieee = { path = "../oa-ieee" }
 oa-sha256 = { path = "../oa-sha256" }
 oa-airspace = { path = "../oa-airspace" }
 oa-safety = { path = "../oa-safety" }
+# F1: Connor approved this core-only dependency for the shared OpenATCA workstation position model.
+oa-workstation = { path = "../oa-workstation" }
+
+[target.'cfg(not(all(target_arch = "wasm32", target_pointer_width = "32", target_os = "unknown", target_vendor = "unknown")))'.dependencies]
+# The browser engine uses only `core`; the file-backed CLI is not compiled for wasm.
+oa-sealed = { path = "../oa-sealed" }
 
 [package.metadata.openatca]
 class = "split"

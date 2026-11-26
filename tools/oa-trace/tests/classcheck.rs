@@ -8,7 +8,7 @@
 
 use oa_trace::classcheck::{
     check, check_with, ieee_api_problems, lib_rs_problems, mask, parse_manifest, parse_members,
-    render_text, scan_source, Class, Ctx, FloatFacts, UNSPLIT_ALLOWED,
+    render_text, scan_source, Class, Ctx, FloatFacts, UNSPLIT_ALLOWED, WASM32_PACKAGE_ALLOWLIST,
 };
 use oa_trace::classcheck::{float_method_advice, FFI_UNSAFE_BLOCKS, FLOAT_METHODS};
 use std::collections::{BTreeMap, BTreeSet};
@@ -128,6 +128,15 @@ fn scan(src: &str) -> oa_trace::classcheck::FileScan {
 
 /// [`scan`] with the float facts of the other core files (`facts`) and `oa-math`'s exemption.
 fn scan_with(src: &str, math: bool, facts: &FloatFacts) -> oa_trace::classcheck::FileScan {
+    scan_with_target_guard(src, math, facts, false)
+}
+
+fn scan_with_target_guard(
+    src: &str,
+    math: bool,
+    facts: &FloatFacts,
+    wasm32_guard_allowed: bool,
+) -> oa_trace::classcheck::FileScan {
     let classes: BTreeMap<String, Class> = [
         ("fx-core".to_string(), Class::Core),
         ("fx-shell".to_string(), Class::Shell),
@@ -145,6 +154,7 @@ fn scan_with(src: &str, math: bool, facts: &FloatFacts) -> oa_trace::classcheck:
         &Ctx {
             split: false,
             ieee: false,
+            wasm32_guard_allowed,
             math,
             modules: &BTreeSet::new(),
             floats: facts,
@@ -158,6 +168,27 @@ fn scan_with(src: &str, math: bool, facts: &FloatFacts) -> oa_trace::classcheck:
             aliases: &aliases,
         },
     )
+}
+
+// REQ: OA-TRC-264
+#[test]
+fn b8_only_allows_the_exact_wasm32_width_guard_for_allowlisted_contexts() {
+    let wasm_guard = "#[cfg(not(any(target_pointer_width = \"64\", all(target_arch = \"wasm32\", target_pointer_width = \"32\", target_os = \"unknown\", target_vendor = \"unknown\"))))]\ncompile_error!(\"unsupported\");\n";
+    let unlisted = scan(wasm_guard);
+    assert!(unlisted
+        .hits
+        .iter()
+        .any(|hit| hit.token == "target_pointer_width"));
+
+    let allowed = scan_with_target_guard(wasm_guard, false, &FloatFacts::default(), true);
+    assert!(allowed.hits.is_empty(), "{:?}", allowed.hits);
+
+    let broader_guard = wasm_guard.replace("target_os = \"unknown\", ", "");
+    let still_refused = scan_with_target_guard(&broader_guard, false, &FloatFacts::default(), true);
+    assert!(still_refused
+        .hits
+        .iter()
+        .any(|hit| hit.token == "target_pointer_width"));
 }
 
 fn tokens(src: &str) -> Vec<String> {
@@ -255,6 +286,85 @@ fn a_split_crate_needs_both_modules_and_a_lib_rs_declaring_exactly_them() {
     ] {
         assert!(!lib_rs_problems(bad).is_empty(), "{bad}");
     }
+}
+
+// REQ: OA-TRC-263
+#[test]
+fn only_oa_display_may_omit_shell_and_oa_sealed_on_exact_wasm_target() {
+    const WASM: &str = "target_arch = \"wasm32\", target_pointer_width = \"32\", target_os = \"unknown\", target_vendor = \"unknown\"";
+    const WIDTH_GUARD: &str = "#[cfg(not(any(target_pointer_width = \"64\", all(target_arch = \"wasm32\", target_pointer_width = \"32\", target_os = \"unknown\", target_vendor = \"unknown\"))))]\ncompile_error!(\"64-bit or wasm32-unknown-unknown only\");\n";
+    let lib = format!(
+        "#![forbid(unsafe_code)]\n{WIDTH_GUARD}pub mod core;\n#[cfg(not(all({WASM})))]\npub mod shell;\npub use crate::core::{{a, b}};\n#[cfg(not(all({WASM})))]\npub use crate::shell::{{cli, ppm}};\n"
+    );
+    let ws = Ws::named(
+        "display-wasm-shell-gate",
+        "oa-display",
+        "split",
+        &[
+            ("src/lib.rs", &lib),
+            ("src/core/mod.rs", "pub fn core_api() {}\n"),
+            ("src/shell/mod.rs", "pub fn shell_api() {}\n"),
+        ],
+    );
+    ws.put(
+        "Cargo.toml",
+        "[workspace]\nmembers = [\"crates/fx-a\", \"crates/fx-b\", \"crates/oa-sealed\"]\n",
+    );
+    ws.put(
+        "crates/fx-a/Cargo.toml",
+        &format!(
+            "[package]\nname = \"oa-display\"\n\n[lints]\nworkspace = true\n\n[package.metadata.openatca]\nclass = \"split\"\n\n[target.'cfg(not(all({WASM})))'.dependencies]\noa-sealed = {{ path = \"../oa-sealed\" }}\n"
+        ),
+    );
+    ws.put(
+        "crates/oa-sealed/Cargo.toml",
+        "[package]\nname = \"oa-sealed\"\n\n[package.metadata.openatca]\nclass = \"shell\"\n",
+    );
+    ws.put("crates/oa-sealed/src/lib.rs", "pub fn guarded_shell() {}\n");
+    assert!(ws.failures().is_empty(), "{:#?}", ws.failures());
+
+    let wrong_module_cfg = lib.replace(
+        &format!("not(all({WASM}))"),
+        "not(all(target_arch = \"wasi\"))",
+    );
+    ws.put("crates/fx-a/src/lib.rs", &wrong_module_cfg);
+    assert!(has(&ws.failures(), "B7: lib.rs of a split crate"));
+    let unguarded_export = lib.replace(
+        &format!("#[cfg(not(all({WASM})))]\npub use crate::shell"),
+        "pub use crate::shell",
+    );
+    ws.put("crates/fx-a/src/lib.rs", &unguarded_export);
+    assert!(has(
+        &ws.failures(),
+        "gate its shell module and every shell re-export"
+    ));
+    ws.put("crates/fx-a/src/lib.rs", &lib);
+    let wrong_dep_target = "[package]\nname = \"oa-display\"\n\n[lints]\nworkspace = true\n\n[package.metadata.openatca]\nclass = \"split\"\n\n[target.'cfg(not(all(target_arch = \"wasi\", target_pointer_width = \"32\", target_os = \"unknown\", target_vendor = \"unknown\")))'.dependencies]\noa-sealed = { path = \"../oa-sealed\" }\n";
+    ws.put("crates/fx-a/Cargo.toml", wrong_dep_target);
+    assert!(has(
+        &ws.failures(),
+        "oa-sealed must be declared exactly once"
+    ));
+    ws.put(
+        "crates/fx-a/Cargo.toml",
+        "[package]\nname = \"oa-display\"\n\n[lints]\nworkspace = true\n\n[package.metadata.openatca]\nclass = \"split\"\n\n[dependencies]\noa-sealed = { path = \"../fx-b\" }\n",
+    );
+    assert!(has(
+        &ws.failures(),
+        "oa-sealed must be declared exactly once"
+    ));
+
+    let unlisted = Ws::named(
+        "other-split-shell-gate",
+        "fx-a",
+        "split",
+        &[
+            ("src/lib.rs", &lib),
+            ("src/core/mod.rs", "pub fn core_api() {}\n"),
+            ("src/shell/mod.rs", "pub fn shell_api() {}\n"),
+        ],
+    );
+    assert!(has(&unlisted.failures(), "B7: lib.rs of a split crate"));
 }
 
 // REQ: OA-TRC-207
@@ -415,6 +525,37 @@ impl Ws {
         ws
     }
 
+    fn wasm_abi(tag: &str, build: &str) -> Ws {
+        Self::wasm_abi_source(tag, include_str!("../../oa-demo-wasm/src/abi.rs"), build)
+    }
+
+    fn wasm_abi_source(tag: &str, abi: &str, build: &str) -> Ws {
+        let ws = Ws::named(tag, "oa-demo-wasm", "shell", &[]);
+        ws.put(
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"tools/oa-demo-wasm\", \"crates/oa-demo-engine\", \"crates/oa-sealed\", \"crates/oa-sha256\"]\nexclude = [\"crates/fx-a\", \"crates/fx-b\"]\n",
+        );
+        for name in ["oa-demo-engine", "oa-sealed", "oa-sha256"] {
+            ws.put(
+                &format!("crates/{name}/Cargo.toml"),
+                &format!(
+                    "[package]\nname = \"{name}\"\n\n[package.metadata.openatca]\nclass = \"shell\"\n"
+                ),
+            );
+        }
+        ws.put(
+            "tools/oa-demo-wasm/Cargo.toml",
+            include_str!("../../oa-demo-wasm/Cargo.toml"),
+        );
+        ws.put(
+            "tools/oa-demo-wasm/src/lib.rs",
+            include_str!("../../oa-demo-wasm/src/lib.rs"),
+        );
+        ws.put("tools/oa-demo-wasm/src/abi.rs", abi);
+        ws.put("tools/oa-demo-wasm/build.rs", build);
+        ws
+    }
+
     fn put(&self, rel: &str, content: &str) {
         let p = self.root.join(rel);
         fs::create_dir_all(p.parent().unwrap()).unwrap();
@@ -424,6 +565,57 @@ impl Ws {
     fn failures(&self) -> Vec<String> {
         check_with(&self.root, &[]).failures
     }
+}
+
+// REQ: OA-TRC-265
+#[test]
+fn wasm_build_script_rejects_unreviewed_filesystem_and_process_effects() {
+    let approved = include_str!("../../oa-demo-wasm/build.rs");
+    let approved_abi = include_str!("../../oa-demo-wasm/src/abi.rs");
+    let approved_failures =
+        Ws::wasm_abi_source("wasm-build-approved", approved_abi, approved).failures();
+    assert!(approved_failures.is_empty(), "{approved_failures:#?}");
+
+    let unsafe_abi = approved_abi.replace(
+        "pub extern \"C\" fn f2_reset",
+        "pub unsafe extern \"C\" fn f2_reset",
+    );
+    assert_ne!(
+        unsafe_abi, approved_abi,
+        "unsafe ABI mutation did not apply"
+    );
+    let unsafe_failures = Ws::wasm_abi_source("wasm-abi-unsafe", &unsafe_abi, approved).failures();
+    assert!(has(&unsafe_failures, "A0: abi.rs"), "{unsafe_failures:#?}");
+
+    let added_export =
+        format!("{approved_abi}\n#[no_mangle]\npub extern \"C\" fn f2_extra() -> i32 {{ 0 }}\n");
+    let export_failures =
+        Ws::wasm_abi_source("wasm-abi-export", &added_export, approved).failures();
+    assert!(has(&export_failures, "A0: abi.rs"), "{export_failures:#?}");
+
+    let deletion = approved.replace(
+        "let generated = format!(",
+        "let _ = fs::remove_file(&embedded);\n    let generated = format!(",
+    );
+    assert_ne!(deletion, approved, "delete fixture mutation did not apply");
+    let deletion_failures = Ws::wasm_abi("wasm-build-delete", &deletion).failures();
+    assert!(
+        has(&deletion_failures, "A0: build.rs"),
+        "{deletion_failures:#?}"
+    );
+
+    let subprocess = approved.replace(
+        "let generated = format!(",
+        "let _ = std::process::Command::new(\"tool\").status();\n    let generated = format!(",
+    );
+    assert_ne!(
+        subprocess, approved,
+        "process fixture mutation did not apply"
+    );
+    assert!(has(
+        &Ws::wasm_abi("wasm-build-process", &subprocess).failures(),
+        "A0: build.rs"
+    ));
 }
 
 fn ffi_fixture_source() -> String {
@@ -696,6 +888,19 @@ fn aliases_globs_extern_crate_and_includes_are_rejected() {
         let ws = core_ws(tag, src);
         assert!(!ws.failures().is_empty(), "{tag}: {src}");
     }
+}
+
+// REQ: OA-TRC-251
+#[test]
+fn only_test_or_kani_proof_modules_may_use_path_attributes() {
+    let proof = scan("#[cfg(kani)]\n#[path = \"../proofs/engine.rs\"]\nmod proofs;\n");
+    assert!(proof.hits.is_empty(), "{:#?}", proof.hits);
+    let product = scan("#[path = \"../shell/engine.rs\"]\nmod engine;\n");
+    assert!(
+        product.hits.iter().any(|h| h.token == "#[path]"),
+        "{:#?}",
+        product.hits
+    );
 }
 
 // REQ: OA-TRC-213
@@ -1953,10 +2158,7 @@ fn the_provisional_ffi_source_inventory_rejects_symlinks() {
     fs::write(&target, "#![allow(unsafe_code)]\n").unwrap();
     symlink(&target, &ffi).unwrap();
     assert!(
-        has(
-            &ws.failures(),
-            "source inventory contains a non-file or symlink"
-        ),
+        has(&ws.failures(), "symlink (cargo follows it"),
         "{:#?}",
         ws.failures()
     );
@@ -2975,15 +3177,68 @@ fn a_core_crate_refuses_a_non_64_bit_target_in_its_lib_rs() {
         );
         ws.failures()
     };
-    const WHY: &str =
-        "fx-a: B10: src/lib.rs of a core crate must have `#[cfg(not(target_pointer_width";
+    const WHY: &str = "fx-a: B10: src/lib.rs of a core crate must have the 64-bit guard";
     // clean
-    assert!(planted("w0", &format!("{GUARD}pub fn f() {{}}\n")).is_empty());
+    let clean_failures = planted("w0", &format!("{GUARD}pub fn f() {{}}\n"));
+    assert!(clean_failures.is_empty(), "{clean_failures:#?}");
     assert!(planted(
         "w1",
         "pub fn f() {}\n#[cfg( not ( target_pointer_width = \"64\" ) )]\ncompile_error!(\"x\");\n"
     )
     .is_empty());
+
+    const WASM32_GUARD: &str = "#[cfg(not(any(target_pointer_width = \"64\", all(target_arch = \"wasm32\", target_pointer_width = \"32\", target_os = \"unknown\", target_vendor = \"unknown\"))))]\ncompile_error!(\"core supports native 64-bit targets and wasm32-unknown-unknown only\");\n";
+    let allowed = Ws::named(
+        "wasm32-allowlisted-core",
+        "oa-track-core",
+        "core",
+        &[("src/lib.rs", WASM32_GUARD)],
+    );
+    assert!(allowed.failures().is_empty(), "{:#?}", allowed.failures());
+    let unlisted = Ws::named(
+        "wasm32-unlisted-core",
+        "fx-a",
+        "core",
+        &[("src/lib.rs", WASM32_GUARD)],
+    );
+    assert!(has(&unlisted.failures(), "B10: src/lib.rs of a core crate"));
+
+    for (tag, guard) in [
+        (
+            "wasm32-wrong-arch",
+            WASM32_GUARD.replace("target_arch = \"wasm32\"", "target_arch = \"x86\""),
+        ),
+        (
+            "wasm32-wrong-width",
+            WASM32_GUARD.replace(
+                "target_pointer_width = \"32\"",
+                "target_pointer_width = \"16\"",
+            ),
+        ),
+        (
+            "wasm32-wrong-os",
+            WASM32_GUARD.replace("target_os = \"unknown\"", "target_os = \"wasi\""),
+        ),
+        (
+            "wasm32-wrong-vendor",
+            WASM32_GUARD.replace("target_vendor = \"unknown\"", "target_vendor = \"acme\""),
+        ),
+        (
+            "wasm32-stacked-guard",
+            format!("#[cfg(target_feature = \"simd128\")]\n{WASM32_GUARD}"),
+        ),
+    ] {
+        let bad = Ws::named(
+            tag,
+            "oa-track-core",
+            "core",
+            &[("src/lib.rs", guard.as_str())],
+        );
+        assert!(
+            has(&bad.failures(), "B10: src/lib.rs of a core crate"),
+            "{tag}"
+        );
+    }
     // missing, wrong width, wrong cfg, no compile_error, inside a module, test-only, in a comment
     for (tag, lib) in [
         ("w2", "pub fn f() {}\n"),
@@ -3025,13 +3280,37 @@ fn a_core_crate_refuses_a_non_64_bit_target_in_its_lib_rs() {
         ws.failures()
     );
     // the checker reads the real ones
-    for c in ["oa-geo", "oa-math", "oa-ieee"] {
+    for c in WASM32_PACKAGE_ALLOWLIST {
         let p = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("../../crates/{c}/src/lib.rs"));
         assert!(
-            oa_trace::classcheck::has_pointer_width_guard(&fs::read_to_string(p).unwrap()),
+            oa_trace::classcheck::has_wasm32_pointer_width_guard(&fs::read_to_string(p).unwrap()),
             "{c}"
         );
     }
+}
+
+// REQ: OA-TRC-264
+#[test]
+fn wasm32_package_allowlist_is_the_explicit_f2_runtime_closure() {
+    assert_eq!(
+        WASM32_PACKAGE_ALLOWLIST,
+        [
+            "oa-adsb-model",
+            "oa-airspace",
+            "oa-ca",
+            "oa-demo-engine",
+            "oa-demo-scenario",
+            "oa-display",
+            "oa-flight",
+            "oa-geo",
+            "oa-ieee",
+            "oa-math",
+            "oa-safety",
+            "oa-sha256",
+            "oa-track-core",
+            "oa-workstation",
+        ]
+    );
 }
 
 // REQ: OA-TRC-251

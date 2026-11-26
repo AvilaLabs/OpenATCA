@@ -8,3 +8,6 @@ DEFECTS.md
 *.oaf
 !/crates/openatca-core/tests/fixtures/synthetic-adsb.oaf
 /.claude/
+
+# Locally generated browser engine artifacts.
+/demo/site/engine/

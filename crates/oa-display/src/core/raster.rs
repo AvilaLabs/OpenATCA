@@ -31,6 +31,9 @@ const LIMIT: i64 = 1 << 30;
 /// Maximum visible pixels accepted by display scene construction and software rendering.
 /// The 64-megapixel profile preserves the supported 8192 by 8192 display size.
 pub const MAX_DISPLAY_PIXELS: u64 = 1 << 26;
+/// Fixed target-independent frame buffer profile limit (2^31-1 bytes). This stays within the
+/// common safe-slice length domain on wasm32 and 64-bit hosts without a target-dependent branch.
+pub const MAX_FRAME_BYTES: u64 = i32::MAX as u64;
 
 /// Accepted display API profile: [`crate::MAX_DISPLAY_PIXELS`] pixels and at most 2^34
 /// conservative work units per render. Work is capped separately from the 8192-square profile.
@@ -48,7 +51,15 @@ pub struct FrameSpec {
 
 /// Bytes a buffer of this geometry must hold.
 pub fn frame_len(spec: &FrameSpec) -> usize {
-    (spec.stride as usize).saturating_mul(spec.height as usize)
+    // Valid frame geometry is checked against this fixed bound before allocation; it fits the
+    // supported native64 and wasm32 address spaces. Saturate invalid oversized requests to the
+    // same fixed limit so the API never exposes a platform-width-dependent sentinel.
+    usize::try_from(frame_len_bytes(spec).min(MAX_FRAME_BYTES)).unwrap_or(0)
+}
+
+/// Exact required frame bytes in the fixed-width geometry domain.
+pub fn frame_len_bytes(spec: &FrameSpec) -> u64 {
+    u64::from(spec.stride) * u64::from(spec.height)
 }
 
 /// Why a frame could not be drawn.
@@ -106,6 +117,13 @@ pub fn check_frame(spec: &FrameSpec, buf_len: usize) -> Result<(), RenderError> 
         return Err(RenderError::BadFrame(
             "stride must be a multiple of 4 and at least width * 4",
         ));
+    }
+    let required = frame_len_bytes(spec);
+    if required > MAX_FRAME_BYTES {
+        return Err(RenderError::WorkLimit {
+            requested: u128::from(required),
+            limit: u128::from(MAX_FRAME_BYTES),
+        });
     }
     if buf_len < frame_len(spec) {
         return Err(RenderError::BadFrame(
@@ -1753,5 +1771,31 @@ mod tests {
                 if requested == MAX_RENDER_WORK + 1 && limit == MAX_RENDER_WORK
         ));
         assert_eq!(MAX_RENDER_WORK, 1 << 34);
+    }
+
+    // REQ: OA-DSP-053
+    #[test]
+    fn frame_byte_bound_is_fixed_width_and_target_independent() {
+        let just_below = FrameSpec {
+            width: 1,
+            height: 2,
+            stride: (MAX_FRAME_BYTES as u32 / 8) * 4,
+        };
+        let below_len = frame_len_bytes(&just_below);
+        assert_eq!(below_len, MAX_FRAME_BYTES - 7);
+        assert!(check_frame(&just_below, below_len as usize).is_ok());
+
+        let just_above = FrameSpec {
+            width: 1,
+            height: 2,
+            stride: (MAX_FRAME_BYTES as u32 / 2) + 1,
+        };
+        let above_len = frame_len_bytes(&just_above);
+        assert!(matches!(
+            check_frame(&just_above, usize::MAX),
+            Err(RenderError::WorkLimit { requested, limit })
+                if requested == u128::from(above_len)
+                    && limit == u128::from(MAX_FRAME_BYTES)
+        ));
     }
 }

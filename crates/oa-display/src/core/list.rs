@@ -55,7 +55,8 @@ pub enum DisplayError {
         what: &'static str,
         /// The size asked for (saturated at `u128::MAX`).
         requested: u128,
-        limit: usize,
+        /// Fixed-width so the displayed/returned bound does not vary with pointer width.
+        limit: u128,
     },
 }
 
@@ -192,7 +193,7 @@ pub fn check_limit(
         _ => Err(DisplayError::TooLarge {
             what,
             requested,
-            limit,
+            limit: limit as u128,
         }),
     }
 }

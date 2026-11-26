@@ -49,6 +49,13 @@ fn fnv(h: u64, bytes: &[u8]) -> u64 {
 
 const FNV_SEED: u64 = 0xcbf2_9ce4_8422_2325;
 
+/// Reduces in the fixed-width hash domain before conversion to the target's native index width.
+/// `mask` is bounded by the flight-table capacity (at most 2^23 - 1), so it is exactly
+/// representable as `u64` on every supported target.
+fn bucket(hash: u64, mask: usize) -> usize {
+    (hash & (mask as u64)) as usize
+}
+
 /// Hash of a flight key.
 pub(crate) fn hash_key(k: &FlightKey) -> u64 {
     if k.kind == KEY_GUFI {
@@ -69,7 +76,7 @@ pub(crate) fn hash_addr(a: u32) -> u64 {
 
 /// The slot whose key satisfies `eq`, starting the probe at `hash`.
 pub(crate) fn index_find(idx: &Index, hash: u64, eq: impl Fn(u32) -> bool) -> Option<u32> {
-    let mut i = (hash as usize) & idx.mask;
+    let mut i = bucket(hash, idx.mask);
     for _ in 0..idx.cells.len() {
         let c = *idx.cells.get(i)?;
         if c == 0 {
@@ -90,7 +97,7 @@ pub(crate) fn index_insert(idx: &mut Index, hash: u64, slot: u32) -> bool {
     if idx.used >= idx.cells.len() / 2 {
         return false;
     }
-    let mut i = (hash as usize) & idx.mask;
+    let mut i = bucket(hash, idx.mask);
     for _ in 0..idx.cells.len() {
         match idx.cells.get_mut(i) {
             Some(c) if *c == 0 => {
@@ -113,7 +120,7 @@ pub(crate) fn index_remove(
     slot: u32,
     home: impl Fn(u32) -> u64,
 ) -> bool {
-    let mut i = (hash as usize) & idx.mask;
+    let mut i = bucket(hash, idx.mask);
     let mut found = false;
     for _ in 0..idx.cells.len() {
         match idx.cells.get(i) {
@@ -136,7 +143,7 @@ pub(crate) fn index_remove(
         if c == 0 {
             break;
         }
-        let k = (home(c - 1) as usize) & idx.mask;
+        let k = bucket(home(c - 1), idx.mask);
         // The entry at `j` may move into the hole unless its home cell lies cyclically in
         // (hole, j], where it would end up before its own probe start.
         let in_range = if hole <= j {
@@ -161,7 +168,7 @@ pub(crate) fn index_remove(
 /// Points the entry that holds `old` at `new` instead, found by probing from `hash`. The key is
 /// the same, so no entry moves. False if `old` is not in the index.
 pub(crate) fn index_replace(idx: &mut Index, hash: u64, old: u32, new: u32) -> bool {
-    let mut i = (hash as usize) & idx.mask;
+    let mut i = bucket(hash, idx.mask);
     for _ in 0..idx.cells.len() {
         match idx.cells.get_mut(i) {
             Some(0) | None => return false,

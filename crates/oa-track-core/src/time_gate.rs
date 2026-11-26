@@ -654,7 +654,6 @@ mod proofs {
 }
 
 #[cfg(all(kani, kani_full_capacity))]
-#[path = "time_gate_proofs_full.rs"]
 mod proofs_full;
 
 #[cfg(test)]

@@ -613,7 +613,7 @@ fn build_inner(
         return Err(DisplayError::TooLarge {
             what: "safety work",
             requested: charge,
-            limit: MAX_SAFETY_WORK,
+            limit: MAX_SAFETY_WORK as u128,
         });
     }
     let mut tb = text_new();

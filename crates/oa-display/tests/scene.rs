@@ -1783,8 +1783,8 @@ fn a_boundary_that_asks_for_a_huge_list_is_refused_before_anything_is_allocated(
             limit,
         }) => {
             assert_eq!(what, "boundary polyline vertices");
-            assert_eq!(limit, MAX_LIST_ROWS);
-            assert!(requested > limit as u128, "{requested}");
+            assert_eq!(limit, MAX_LIST_ROWS as u128);
+            assert!(requested > limit, "{requested}");
         }
         other => panic!("{other:?}"),
     }

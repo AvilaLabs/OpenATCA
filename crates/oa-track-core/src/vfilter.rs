@@ -187,7 +187,10 @@ pub(crate) fn v_update(
     }
     let mut mu = imm_weights(pred.mu, fit);
     let s = mu[0] + mu[1];
-    mu = [(mu[0] / s).max(MU_FLOOR), (mu[1] / s).max(MU_FLOOR)];
+    mu = [
+        oa_math::max_f64(mu[0] / s, MU_FLOOR),
+        oa_math::max_f64(mu[1] / s, MU_FLOOR),
+    ];
     let s = mu[0] + mu[1];
     out.mu = [mu[0] / s, mu[1] / s];
     out

@@ -1,0 +1,28 @@
+[package]
+name = "oa-demo-scenario-prep"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+oa-adsb = { path = "../../crates/oa-adsb" }
+oa-asterix = { path = "../../crates/oa-asterix" }
+oa-arinc424 = { path = "../../crates/oa-arinc424" }
+oa-demo-scenario = { path = "../../crates/oa-demo-scenario" }
+oa-sealed = { path = "../../crates/oa-sealed" }
+oa-sha256 = { path = "../../crates/oa-sha256" }
+oa-sensorsim = { path = "../../crates/oa-sensorsim" }
+oa-truth = { path = "../../crates/oa-truth" }
+oa-zip = { path = "../../crates/oa-zip" }
+
+[[bin]]
+name = "oa-demo-scenario-prep"
+path = "src/main.rs"
+
+[package.metadata.openatca]
+class = "shell"

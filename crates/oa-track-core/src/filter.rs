@@ -19,7 +19,7 @@
 //! The vertical filter keeps barometric altitude only; it is advanced to every update time
 //! whether or not the update carries an altitude.
 
-use oa_adsb::{jump_verdict, JumpPair, JumpVerdict, CAP_ORDINARY_KT, NONE_U16};
+use oa_adsb_model::{jump_verdict, JumpPair, JumpVerdict, CAP_ORDINARY_KT, NONE_U16};
 #[cfg(test)]
 use oa_geo::aeqd::unproject;
 use oa_geo::aeqd::{
@@ -29,7 +29,6 @@ use oa_geo::aeqd::{
 };
 
 use crate::confirm::move_is_large;
-use crate::gate_trace::{gate_trace_push, GateTraceRow};
 use crate::hfilter::{
     dwell_decay, h_change_frame, h_combine, h_gate_d2, h_init, h_pos_moments, h_pos_nis, h_predict,
     h_predict_pos_moments, h_update, h_vel_gate_d2, HFilter, VelMeas,
@@ -150,7 +149,7 @@ fn alt_var_quant(quant_ft: u16) -> f64 {
 /// Squared displacement tolerance: four standard deviations or one barometric quantum.
 fn baro_tolerance_sq(variance_ft2: f64) -> f64 {
     let quantum_ft = f64::from(crate::params::BARO_QUANT_FT);
-    (16.0 * variance_ft2).max(quantum_ft * quantum_ft)
+    oa_math::max_f64(16.0 * variance_ft2, quantum_ft * quantum_ft)
 }
 
 /// Rates beyond four unknown-state prior sigmas are held back until raw altitude movement
@@ -321,7 +320,7 @@ pub(crate) fn filter_replay(
 }
 
 /// Whether a displacement of `dist_m` in `dt_s` seconds ending at `m` is one the speed rule
-/// (`oa_adsb::jump_verdict`, no ground speed for the first end) allows.
+/// (`oa_adsb_model::jump_verdict`, no ground speed for the first end) allows.
 fn plausible_move(dist_m: f64, dt_s: f64, m: &Measurement) -> bool {
     let pair = JumpPair {
         dist_m,
@@ -342,7 +341,7 @@ fn gs_dkt(m: &Measurement) -> u16 {
         return NONE_U16;
     }
     let kt = oa_math::hypot(f64::from(m.vel_east_mps), f64::from(m.vel_north_mps)) / MPS_PER_KT;
-    (kt * 10.0).round().clamp(0.0, f64::from(NONE_U16 - 1)) as u16
+    oa_math::clamp_f64(oa_ieee::round(kt * 10.0), 0.0, f64::from(NONE_U16 - 1)) as u16
 }
 
 /// Adds `m` to the run of consistent rejected reports; true when the run is long enough to
@@ -354,7 +353,7 @@ fn consistent_run_resync(f: &mut Filter, m: &Measurement, k: u8) -> bool {
     let (bx, by) = at(m.lat_e7, m.lon_e7);
     let consistent = f.rej_c > 0 && {
         let (ax, ay) = at(f.rej_lat_e7, f.rej_lon_e7);
-        let dt = (m.toa_ns - f.rej_t_ns).max(0) as f64 / NS_PER_S as f64;
+        let dt = i64::max(m.toa_ns - f.rej_t_ns, 0) as f64 / NS_PER_S as f64;
         plausible_move(oa_math::hypot(bx - ax, by - ay), dt, m)
     };
     f.rej_c = if consistent {
@@ -366,7 +365,7 @@ fn consistent_run_resync(f: &mut Filter, m: &Measurement, k: u8) -> bool {
     f.rej_lat_e7 = m.lat_e7;
     f.rej_lon_e7 = m.lon_e7;
     // The frame's origin is the track's last applied position.
-    let since = (m.toa_ns - f.t_ns).max(0) as f64 / NS_PER_S as f64;
+    let since = i64::max(m.toa_ns - f.t_ns, 0) as f64 / NS_PER_S as f64;
     f.rej_c >= k && plausible_move(oa_math::hypot(bx, by), since, m)
 }
 
@@ -406,7 +405,7 @@ fn pred_miss_m(pred: &HFilter, zx: f64, zy: f64) -> f64 {
 /// How far `m` lies from the filter's predicted position at `m`'s time, metres; not a number if
 /// the prediction fails. Reads only.
 pub(crate) fn filter_miss_m(f: &Filter, m: &Measurement) -> f64 {
-    let dt = (m.toa_ns - f.t_ns).max(0) as f64 / NS_PER_S as f64;
+    let dt = i64::max(m.toa_ns - f.t_ns, 0) as f64 / NS_PER_S as f64;
     let frame = filter_frame(f);
     let Some(pred) = h_predict(&f.h, dt, dwell_decay(dt), f.h_mode) else {
         return f64::NAN;
@@ -429,7 +428,7 @@ fn apply(
     gated: bool,
     cfg: &TrackerConfig,
 ) -> Applied {
-    let dt = (m.toa_ns - f.t_ns).max(0) as f64 / NS_PER_S as f64;
+    let dt = i64::max(m.toa_ns - f.t_ns, 0) as f64 / NS_PER_S as f64;
     let t_before = f.t_ns;
     let frame = filter_frame(f);
     let u = dwell_decay(dt);
@@ -475,8 +474,6 @@ fn apply(
     // is kept. The replay takes the same decision from the same state (the count is the first
     // application's).
     let mut vel = vel_of(m, &from_true);
-    let mut trace_d2 = f64::NAN;
-    let mut trace_gated = false;
     if let Some((v, vr, lag)) = vel {
         // The baseline modes keep one model; the second slot is not a prediction.
         let one = HFilter {
@@ -484,22 +481,12 @@ fn apply(
             mu: pred.mu,
         };
         let d2 = h_vel_gate_d2(if f.h_mode == 0 { &pred } else { &one }, &v, &vr, lag);
-        trace_d2 = d2;
         if d2.is_nan() || d2 > cfg.vel_gate_chi2 {
             vel = None;
-            trace_gated = true;
             if gated {
                 stats.velocity_gated += 1;
             }
         }
-    }
-    if gated {
-        gate_trace_push(GateTraceRow {
-            addr: m.addr,
-            toa_ns: m.toa_ns,
-            d2: trace_d2,
-            gated: trace_gated,
-        });
     }
     let mut h = h_update(&pred, &[zx, zy], &r, vel, f.h_mode);
     // Re-centre on the filtered position.
@@ -566,7 +553,7 @@ fn apply(
             rej_v = 0;
         } else {
             let (y, s) = v_alt_innovation(&v, f64::from(m.alt_ft), var);
-            if y.abs() > ALT_GATE_SIGMAS * s.sqrt() {
+            if y.abs() > ALT_GATE_SIGMAS * oa_ieee::sqrt(s) {
                 stats.alt_rejected += 1;
                 rej_v = rej_v.saturating_add(1);
                 if rej_v >= RESYNC_AFTER {
@@ -721,7 +708,7 @@ fn filter_forecast_seconds(f: &Filter, t_ns: i64) -> Result<f64, PredictError> {
     let elapsed = t_ns
         .checked_sub(f.t_ns)
         .ok_or(PredictError::Unrepresentable)?;
-    Ok(elapsed.max(0) as f64 / NS_PER_S as f64)
+    Ok(i64::max(elapsed, 0) as f64 / NS_PER_S as f64)
 }
 
 /// Forecasts the output altitude and variance using the same vertical model and output
@@ -1111,6 +1098,8 @@ mod tests {
     fn a_coordinate_that_is_not_a_number_or_does_not_fit_is_refused() {
         assert_eq!(to_e7(41.9), Some(419_000_000));
         assert_eq!(to_e7(-180.0), Some(-1_800_000_000));
+        assert_eq!(to_e7(0.5e-7), Some(1));
+        assert_eq!(to_e7(-0.5e-7), Some(-1));
         for d in [
             f64::NAN,
             f64::INFINITY,

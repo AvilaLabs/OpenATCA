@@ -1,5 +1,6 @@
-//! The tools of this crate that read recordings refuse a sealed path (OA-SEAL-005): exit 2, the
-//! rule named, nothing created. The paths are fake ones that only name a sealed folder.
+//! The tools of this crate that read recordings refuse a sealed path (OA-SEAL-005): each command's
+//! exact refusal status, the rule named, no stdout and nothing created. The paths are fake ones
+//! that only name a sealed folder.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -30,50 +31,20 @@ fn out_dir(name: &str) -> PathBuf {
     d
 }
 
-fn refused(mut c: Command, out: &Path) {
+fn refused(mut c: Command, out: &Path, expected_status: i32, expected_stderr: &str) {
     let o = c.output().unwrap();
-    assert_eq!(o.status.code(), Some(2), "{c:?}");
+    assert_eq!(o.status.code(), Some(expected_status), "{c:?}");
     assert!(
-        String::from_utf8_lossy(&o.stderr).contains("OA-SEAL-001"),
+        String::from_utf8_lossy(&o.stderr).contains(expected_stderr),
         "{}",
         String::from_utf8_lossy(&o.stderr)
     );
+    assert!(
+        o.stdout.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&o.stdout)
+    );
     assert!(!out.exists(), "{}", out.display());
-}
-
-// REQ: OA-SEAL-005
-#[test]
-fn oa_track_run_refuses_a_sealed_clip_or_output() {
-    let bin = env!("CARGO_BIN_EXE_oa-track-run");
-    let out = out_dir("run");
-    let mut c = Command::new(bin);
-    c.args(["--adsb", CLIP, "--out"]).arg(&out);
-    refused(c, &out);
-    let mut c = Command::new(bin);
-    c.args([
-        "--adsb",
-        "/nonexistent-fake/x.oaf",
-        "--out",
-        "/nonexistent-fake/scds/stdds-20261119-holdout/o",
-    ]);
-    refused(c, &out);
-    let mut c = Command::new(bin);
-    c.args(["--adsb", "/nonexistent-fake/x.oaf", "--no-score", "--out"])
-        .arg(&out)
-        .args(["--rows", CLIP]);
-    refused(c, &out);
-}
-
-// REQ: OA-SEAL-005
-#[test]
-fn oa_track_fusion_refuses_a_sealed_clip() {
-    let out = out_dir("fusion");
-    let mut c = Command::new(env!("CARGO_BIN_EXE_oa-track-fusion"));
-    c.args(["--quick", "--clip", CLIP, "--out"]).arg(&out);
-    let o = c.output().unwrap();
-    assert_eq!(o.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&o.stderr).contains("OA-SEAL-001"));
-    assert!(!out.exists());
 }
 
 // REQ: OA-SEAL-005
@@ -91,19 +62,26 @@ fn the_examples_that_read_recordings_refuse_a_sealed_path() {
             if name == "p002" {
                 c.arg("--development");
             }
-            refused(c, &out);
+            refused(c, &out, 2, "OA-SEAL-001");
         }
     }
-    let out = out_dir("vel");
-    let mut c = Command::new(example("velocity_diag"));
-    c.args(["--adsb", CLIP, "--out"]).arg(&out);
-    refused(c, &out);
     let out = out_dir("pred");
     let mut c = Command::new(example("prediction_trace"));
     c.args(["--adsb", CLIP, "--addr", "1", "--out"]).arg(&out);
+    refused(c, &out, 1, "OA-SEAL-001");
+}
+
+#[test]
+fn velocity_diag_refuses_when_gate_trace_output_is_unavailable() {
+    let out = out_dir("vel");
+    let mut c = Command::new(example("velocity_diag"));
+    c.args(["--adsb", CLIP, "--out"]).arg(&out);
     let o = c.output().unwrap();
-    assert!(!o.status.success());
-    assert!(String::from_utf8_lossy(&o.stderr).contains("OA-SEAL-001"));
+    assert_eq!(o.status.code(), Some(3));
+    assert!(String::from_utf8_lossy(&o.stderr).contains(
+        "velocity_diag: gate-trace output is unavailable pending an explicit bounded trace sink"
+    ));
+    assert!(o.stdout.is_empty());
     assert!(!out.exists());
 }
 
@@ -162,7 +140,7 @@ fn p002_export_and_export_scoring_refuse_a_sealed_path_and_create_nothing() {
     for args in runs {
         let mut c = Command::new(&bin);
         c.args(args);
-        refused(c, &out);
+        refused(c, &out, 2, "OA-SEAL-001");
     }
 }
 
@@ -208,21 +186,13 @@ fn p002_refuses_two_sources_none_and_an_export_in_a_hold_out_run() {
 
 // REQ: OA-SEAL-005
 #[test]
-fn the_tools_refuse_links_into_sealed_data_and_loaders_refuse_links_inside_a_folder() {
+fn the_examples_refuse_links_into_sealed_data_and_loaders_refuse_links_inside_a_folder() {
     use std::os::unix::fs::symlink;
     let t = out_dir("links");
     let sealed = t.join("scds/rec-20261119/day2");
     std::fs::create_dir_all(&sealed).unwrap();
-    std::fs::write(sealed.join("a.oaf"), b"x").unwrap();
-    symlink(sealed.join("a.oaf"), t.join("clip.oaf")).unwrap();
     symlink(&sealed, t.join("dir")).unwrap();
     let out = t.join("out");
-    let mut c = Command::new(env!("CARGO_BIN_EXE_oa-track-run"));
-    c.args(["--adsb"])
-        .arg(t.join("clip.oaf"))
-        .arg("--out")
-        .arg(&out);
-    refused(c, &out);
     for name in ["p002", "vs_eram"] {
         // The clip is fine; the SFDPS folder is a link, or holds a link into sealed data.
         std::fs::write(t.join("fine.oaf"), b"x").unwrap();

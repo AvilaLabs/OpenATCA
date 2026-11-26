@@ -154,6 +154,7 @@
     "OA-CSV-003",
     "OA-CSV-004",
     "OA-CSV-005",
+    "OA-DEMO-001",
     "OA-DOF-001",
     "OA-DOF-002",
     "OA-DOF-003",
@@ -1014,6 +1015,10 @@
     "OA-TRK-411",
     "OA-TRK-412",
     "OA-TRK-413",
+    "OA-WS-001",
+    "OA-WS-002",
+    "OA-WS-003",
+    "OA-WS-004",
     "OA-XML-001",
     "OA-XML-002",
     "OA-XML-003",
@@ -8574,6 +8579,24 @@
       "function": "offline_encounter_and_migration_evaluation",
       "rationale": "This evaluates saved or synthetic evidence and has no direct runtime control effect.",
       "register_clause": "`oa-migration-switch` is a zero-dependency, recorded/synthetic-only core. Its swap unit is the exact function/scope/half-open-window tuple plus bound policy/source-epoch digests; it has no network, file, clock, or live-system interface."
+    },
+    {
+      "id": "OA-TRC-263",
+      "function": "workspace_static_boundary_verification",
+      "rationale": "This narrows a static source-checker exception for the WASM display shell; it does not change any runtime display or safety decision. Register clause: The WASM display-shell omission is accepted only for `oa-display`, with the exact inverse `wasm32-unknown-unknown` cfg on both `mod shell` and its shell re-export, and `oa-sealed` declared exactly once under the matching non-WASM Cargo target table. Wrong packages, targets, modules or unconditional dependencies fail closed; this exception does not permit shell code in `core`.",
+      "register_clause": "The WASM display-shell omission is accepted only for `oa-display`, with the exact inverse `wasm32-unknown-unknown` cfg on both `mod shell` and its shell re-export, and `oa-sealed` declared exactly once under the matching non-WASM Cargo target table. Wrong packages, targets, modules or unconditional dependencies fail closed; this exception does not permit shell code in `core`."
+    },
+    {
+      "id": "OA-TRC-264",
+      "function": "workspace_static_boundary_verification",
+      "rationale": "This pins the package allowlist for a static target-width check; it does not change runtime behavior. Register clause: The `wasm32-unknown-unknown` width-guard exception names exactly the reviewed F2 runtime closure packages in `WASM32_PACKAGE_ALLOWLIST`; every other core or split package remains 64-bit only.",
+      "register_clause": "The `wasm32-unknown-unknown` width-guard exception names exactly the reviewed F2 runtime closure packages in `WASM32_PACKAGE_ALLOWLIST`; every other core or split package remains 64-bit only."
+    },
+    {
+      "id": "OA-TRC-265",
+      "function": "workspace_static_boundary_verification",
+      "rationale": "This pins the shape checked for a build script; it does not alter the generated runtime logic. Register clause: `oa-demo-wasm/build.rs` matches the reviewed guarded-input and two-output source shape. No additional file or process effects are accepted; a changed build script requires a deliberate update to the checker\u2019s pinned source and negative regressions.",
+      "register_clause": "`oa-demo-wasm/build.rs` matches the reviewed guarded-input and two-output source shape. No additional file or process effects are accepted; a changed build script requires a deliberate update to the checker\u2019s pinned source and negative regressions."
     }
   ],
   "unclassified_requirement_policy": {
@@ -8679,6 +8702,7 @@
         "OA-ASP-078",
         "OA-CORE-006",
         "OA-CORE-007",
+        "OA-DEMO-001",
         "OA-NASR-001",
         "OA-NASR-002",
         "OA-NASR-003",
@@ -9135,6 +9159,11 @@
           "requirement_id": "OA-RTE-011",
           "file": "tools/oa-adapt/tests/route_cli.rs",
           "test_name": "parser_refusal_accounts_for_the_unexamined_suffix_and_byte_cap_is_unknown"
+        },
+        {
+          "requirement_id": "OA-DEMO-001",
+          "file": "crates/oa-demo-scenario/src/shell/resolve.rs",
+          "test_name": "approach_final_stops_at_explicit_map_and_requires_the_marker"
         }
       ],
       "proof_refs": []
@@ -9861,7 +9890,8 @@
         "OA-DSP-075",
         "OA-DSP-076",
         "OA-DSP-077",
-        "OA-DSP-078"
+        "OA-DSP-078",
+        "OA-WS-004"
       ],
       "source_refs": [
         {
@@ -10244,6 +10274,11 @@
           "requirement_id": "OA-DSP-078",
           "file": "crates/oa-display/tests/safety.rs",
           "test_name": "safety_banner_respects_additional_reserved_operator_header"
+        },
+        {
+          "requirement_id": "OA-WS-004",
+          "file": "crates/oa-workstation/tests/workstation.rs",
+          "test_name": "position_preferences_are_separate_while_annotations_are_shared"
         }
       ],
       "proof_refs": []
@@ -11677,7 +11712,10 @@
         "OA-TRAJ-023",
         "OA-TRAJ-024",
         "OA-TRAJ-025",
-        "OA-TRAJ-026"
+        "OA-TRAJ-026",
+        "OA-WS-001",
+        "OA-WS-002",
+        "OA-WS-003"
       ],
       "source_refs": [
         {
@@ -12125,6 +12163,21 @@
           "requirement_id": "OA-TRAJ-026",
           "file": "tools/oa-legacy-traj/tests/shared_trajectory.rs",
           "test_name": "assigned_exact_target_is_a_leveloff_target_and_route_constraints_remain_sequential"
+        },
+        {
+          "requirement_id": "OA-WS-001",
+          "file": "crates/oa-workstation/tests/workstation.rs",
+          "test_name": "bounded_grammar_refuses_unknown_ambiguous_and_malformed_commands"
+        },
+        {
+          "requirement_id": "OA-WS-002",
+          "file": "crates/oa-workstation/tests/workstation.rs",
+          "test_name": "shared_altitude_edits_require_ownership_and_preserve_interim_distinction"
+        },
+        {
+          "requirement_id": "OA-WS-003",
+          "file": "crates/oa-workstation/tests/workstation.rs",
+          "test_name": "handoff_and_pointout_have_distinct_shared_state"
         }
       ],
       "proof_refs": []
@@ -13208,7 +13261,6 @@
         "OA-TRK-014",
         "OA-TRK-015",
         "OA-TRK-016",
-        "OA-TRK-017",
         "OA-TRK-018",
         "OA-TRK-019",
         "OA-TRK-020",
@@ -13338,11 +13390,6 @@
           "test_name": "aircraft_crossing_close_together_keep_their_own_identity"
         },
         {
-          "requirement_id": "OA-TRK-017",
-          "file": "crates/oa-track/tests/core.rs",
-          "test_name": "nothing_allocates_after_the_tracker_is_built"
-        },
-        {
           "requirement_id": "OA-TRK-018",
           "file": "crates/oa-track/tests/adsb.rs",
           "test_name": "measurement_noise_comes_from_nacp_and_nacv"
@@ -13464,12 +13511,12 @@
         },
         {
           "requirement_id": "OA-TRK-294",
-          "file": "crates/oa-track/src/hfilter.rs",
+          "file": "crates/oa-track-core/src/hfilter.rs",
           "test_name": "the_model_probabilities_are_the_log_weight_softmax_in_every_regime"
         },
         {
           "requirement_id": "OA-TRK-295",
-          "file": "crates/oa-track/src/filter.rs",
+          "file": "crates/oa-track-core/src/filter.rs",
           "test_name": "the_carried_sines_follow_the_origin_through_many_updates"
         },
         {
@@ -13509,12 +13556,12 @@
         },
         {
           "requirement_id": "OA-TRK-312",
-          "file": "crates/oa-track/src/filter.rs",
+          "file": "crates/oa-track-core/src/filter.rs",
           "test_name": "a_coordinate_that_is_not_a_number_or_does_not_fit_is_refused"
         },
         {
           "requirement_id": "OA-TRK-313",
-          "file": "crates/oa-track/src/filter.rs",
+          "file": "crates/oa-track-core/src/filter.rs",
           "test_name": "a_plot_at_the_antipode_of_the_frame_is_a_counted_jump_and_never_a_nan_state"
         },
         {
@@ -13804,6 +13851,7 @@
       "severity_status": "engineering_candidate",
       "severity_rationale": "Corrupted or lost track state can contribute to loss of separation; this is not a facility system safety assessment.",
       "mitigation_requirement_ids": [
+        "OA-TRK-017",
         "OA-TRK-066",
         "OA-TRK-210",
         "OA-TRK-211",
@@ -13922,22 +13970,22 @@
         },
         {
           "requirement_id": "OA-TRK-260",
-          "file": "crates/oa-track/src/filter.rs",
+          "file": "crates/oa-track-core/src/filter.rs",
           "test_name": "the_gate_uses_the_plot_covariance_in_the_frame_of_the_projection"
         },
         {
           "requirement_id": "OA-TRK-261",
-          "file": "crates/oa-track/src/filter.rs",
+          "file": "crates/oa-track-core/src/filter.rs",
           "test_name": "a_known_ellipse_is_the_same_ellipse_after_recentring"
         },
         {
           "requirement_id": "OA-TRK-262",
-          "file": "crates/oa-track/src/hfilter.rs",
+          "file": "crates/oa-track-core/src/hfilter.rs",
           "test_name": "a_frame_change_transforms_the_whole_covariance_and_every_mean"
         },
         {
           "requirement_id": "OA-TRK-263",
-          "file": "crates/oa-track/src/filter.rs",
+          "file": "crates/oa-track-core/src/filter.rs",
           "test_name": "a_new_track_returns_its_covariance_and_velocity_in_east_and_north"
         },
         {
@@ -13952,7 +14000,7 @@
         },
         {
           "requirement_id": "OA-TRK-329",
-          "file": "crates/oa-track/src/hfilter.rs",
+          "file": "crates/oa-track-core/src/hfilter.rs",
           "test_name": "ct_prediction_integrates_the_turn_rate_spread_in_the_state_mean"
         },
         {
@@ -13962,7 +14010,7 @@
         },
         {
           "requirement_id": "OA-TRK-331",
-          "file": "crates/oa-track/src/tracker.rs",
+          "file": "crates/oa-track-core/src/tracker.rs",
           "test_name": "invalid_anchor_refuses_ring_full_update_without_partial_commit_and_recovers"
         },
         {
@@ -13972,7 +14020,7 @@
         },
         {
           "requirement_id": "OA-TRK-336",
-          "file": "crates/oa-track/src/time_gate.rs",
+          "file": "crates/oa-track-core/src/time_gate.rs",
           "test_name": "the_live_count_of_a_full_table_is_the_number_of_sensors_inside_the_drop_interval"
         },
         {
@@ -13982,7 +14030,7 @@
         },
         {
           "requirement_id": "OA-TRK-338",
-          "file": "crates/oa-track/src/tracker.rs",
+          "file": "crates/oa-track-core/src/tracker.rs",
           "test_name": "a_coasting_track_is_never_absent_and_says_when_it_is_uncertain"
         },
         {
@@ -13997,12 +14045,12 @@
         },
         {
           "requirement_id": "OA-TRK-341",
-          "file": "crates/oa-track/src/filter.rs",
+          "file": "crates/oa-track-core/src/filter.rs",
           "test_name": "the_manoeuvre_allowance_widens_the_gate_and_not_the_update"
         },
         {
           "requirement_id": "OA-TRK-342",
-          "file": "crates/oa-track/src/filter.rs",
+          "file": "crates/oa-track-core/src/filter.rs",
           "test_name": "consistent_rejected_reports_re_anchor_only_when_the_move_is_possible"
         },
         {
@@ -14017,7 +14065,7 @@
         },
         {
           "requirement_id": "OA-TRK-345",
-          "file": "crates/oa-track/src/tracker.rs",
+          "file": "crates/oa-track-core/src/tracker.rs",
           "test_name": "a_coasting_track_is_never_absent_and_says_when_it_is_uncertain"
         },
         {
@@ -14027,12 +14075,12 @@
         },
         {
           "requirement_id": "OA-TRK-347",
-          "file": "crates/oa-track/src/confirm.rs",
+          "file": "crates/oa-track-core/src/confirm.rs",
           "test_name": "the_window_and_the_limit_follow_the_rate_and_the_gap"
         },
         {
           "requirement_id": "OA-TRK-348",
-          "file": "crates/oa-track/src/confirm.rs",
+          "file": "crates/oa-track-core/src/confirm.rs",
           "test_name": "the_decision_table"
         },
         {
@@ -14057,17 +14105,17 @@
         },
         {
           "requirement_id": "OA-TRK-353",
-          "file": "crates/oa-track/src/tracker.rs",
+          "file": "crates/oa-track-core/src/tracker.rs",
           "test_name": "an_old_path_that_cannot_be_predicted_confirms_nothing_and_the_move_stays_marked"
         },
         {
           "requirement_id": "OA-TRK-354",
-          "file": "crates/oa-track/src/tracker.rs",
+          "file": "crates/oa-track-core/src/tracker.rs",
           "test_name": "the_snapshot_of_the_capture_equals_the_snapshot_taken_in_every_field"
         },
         {
           "requirement_id": "OA-TRK-355",
-          "file": "crates/oa-track/src/tracker.rs",
+          "file": "crates/oa-track-core/src/tracker.rs",
           "test_name": "contradictory_barometric_rate_is_discarded_without_losing_altitude"
         },
         {
@@ -14182,7 +14230,7 @@
         },
         {
           "requirement_id": "OA-TRK-401",
-          "file": "crates/oa-track/src/hfilter.rs",
+          "file": "crates/oa-track-core/src/hfilter.rs",
           "test_name": "a_lag_of_zero_is_the_plain_velocity_update_bit_for_bit"
         },
         {
@@ -14244,12 +14292,17 @@
           "requirement_id": "OA-TRK-413",
           "file": "tools/test_tracker_package_boundary.py",
           "test_name": "test_reusable_tracker_excludes_private_tool_packages_from_all_runtime_sections"
+        },
+        {
+          "requirement_id": "OA-TRK-017",
+          "file": "crates/oa-track-core/src/tracker.rs",
+          "test_name": "all_tracker_buffer_capacities_stay_fixed_through_bounded_updates_and_flush"
         }
       ],
       "proof_refs": [
         {
           "requirement_id": "OA-TRK-335",
-          "file": "crates/oa-track/src/tracker_proofs.rs",
+          "file": "crates/oa-track-core/src/tracker/proofs.rs",
           "proof_name": "numerical_refusal_dispatch_routes_and_accounts_once"
         }
       ]
@@ -14476,12 +14529,12 @@
         },
         {
           "requirement_id": "OA-TRK-230",
-          "file": "crates/oa-track/src/tracker.rs",
+          "file": "crates/oa-track-core/src/tracker.rs",
           "test_name": "a_late_report_gets_the_same_plausibility_check_as_one_in_order"
         },
         {
           "requirement_id": "OA-TRK-231",
-          "file": "crates/oa-track/src/tracker.rs",
+          "file": "crates/oa-track-core/src/tracker.rs",
           "test_name": "a_late_report_leaves_the_rejection_streak_chronological_arrival_gives"
         },
         {
@@ -14538,22 +14591,22 @@
       "proof_refs": [
         {
           "requirement_id": "OA-TRK-193",
-          "file": "crates/oa-track/src/time_gate.rs",
+          "file": "crates/oa-track-core/src/time_gate.rs",
           "proof_name": "gate_decide_is_total"
         },
         {
           "requirement_id": "OA-TRK-194",
-          "file": "crates/oa-track/src/time_gate.rs",
+          "file": "crates/oa-track-core/src/time_gate.rs",
           "proof_name": "gate_step_forward_needs_a_confirmed_run"
         },
         {
           "requirement_id": "OA-TRK-195",
-          "file": "crates/oa-track/src/time_gate.rs",
+          "file": "crates/oa-track-core/src/time_gate.rs",
           "proof_name": "gate_step_back_needs_span_count_and_spread"
         },
         {
           "requirement_id": "OA-TRK-198",
-          "file": "crates/oa-track/src/time_gate.rs",
+          "file": "crates/oa-track-core/src/time_gate.rs",
           "proof_name": "gate_accept_is_within_window_and_limit"
         }
       ]
@@ -18688,9 +18741,9 @@
     },
     {
       "id": "OA-TRK-017",
-      "function": "plot_to_track_association_and_identity",
-      "hazard_id": "HZ-SURV-ASSOC-001",
-      "rationale": "Engineering safety candidate: this register clause constrains plot_to_track_association_and_identity; failure can contribute to the stated hazard. Register clause: After the tracker is built no buffer it owns changes address or capacity through a run with confirmations, late measurements, drops, restarts and overflow of the output, the log and the track table (a counting allocator needs `unsafe`, which RULESET A0 forbids here, so the check is on the buffers)."
+      "function": "surveillance_track_state_and_numeric_integrity",
+      "hazard_id": "HZ-SURV-STATE-001",
+      "rationale": "Engineering safety candidate: fixed-capacity tracker state and the separate allocator gate constrain surveillance_track_state_and_numeric_integrity; a capacity change or allocation regression can undermine bounded track-state handling. The capacity-stability probe itself does not prove absence of same-capacity reallocations; the standalone C5 counting-allocator gate remains the allocation evidence. Register clause: After the tracker is built, every tracker-owned vector keeps its capacity through a run with confirmations, late measurements, drops, restarts and overflow of the output, the log and the track table. The fixed-capacity diagnostic checks capacities only; it does not prove that no same-capacity reallocation occurred. The standalone counting-allocator gate is the allocation proof required by C5."
     },
     {
       "id": "OA-TRK-018",
@@ -21589,6 +21642,36 @@
       "function": "surveillance_time_gates_and_track_lifecycle",
       "hazard_id": "HZ-SURV-TIME-001",
       "rationale": "Engineering safety candidate: incorrect leap conversion, stale or missing clock-reference handling, or false validity of a supplied receiver frame could undermine time evidence consumed by surveillance timing. This bounded offline core neither reads nor sets the host clock, authenticates the receiver, or proves live-source provenance; successful comparisons remain unverified claims. Register clause: UTC/GPS conversion uses the IERS positive-leap history, represents the 2016-12-31 leap second distinctly, and refuses invalid leap labels. Daily clock comparison takes processor UTC samples, GPS-derived reference samples, the UTC day and alarm limit as explicit inputs; it reports missing, duplicate, unexpected, unavailable and invalid evidence and never reads a host clock or treats missing reference data as zero offset. Caller-supplied reference age is checked against an explicit freshness bound. parse_ubx_nav_timegps accepts one bounded UBX-NAV-TIMEGPS frame, verifies checksum and validity fields, checks the reported leap value against the pinned IERS table, and returns a GPS reference for the same comparison API; it does not authenticate the receiver or prove live source provenance. Conversion refuses beyond the published leap table confirmed horizon. Results remain unverified claims about supplied sources."
+    },
+    {
+      "id": "OA-DEMO-001",
+      "function": "navigation_and_adaptation_data",
+      "hazard_id": "HZ-AIRSPACE-001",
+      "rationale": "Engineering safety candidate: A wrong MAP cutoff in a CIFP-derived approach final can misplace procedure geometry that the scenario renderer presents. The requirement is scoped to a synthetic demo scenario and does not claim operational route conversion or release. Register clause: A normal-landing approach final requires exactly one published MAP marker in CIFP description column 43, includes the MAP fix, and excludes later missed-approach legs from normal-landing geometry. Missing or ambiguous MAP markers refuse the final route. ### Traceability (oa-trace)"
+    },
+    {
+      "id": "OA-WS-001",
+      "function": "flight_state_updates_and_trajectory_presentation",
+      "hazard_id": "HZ-FLIGHTOPS-001",
+      "rationale": "Engineering safety candidate: Malformed or ambiguous prototype input accepted as a command could select an unintended flight-state operation. The grammar remains explicitly experimental and makes no deployed-system syntax claim. Register clause: The experimental parser accepts only the documented bounded prototype grammar; unknown commands, extra fields, malformed numbers and entries over 96 ASCII bytes are refused. Source test: `bounded_grammar_refuses_unknown_ambiguous_and_malformed_commands`."
+    },
+    {
+      "id": "OA-WS-002",
+      "function": "flight_state_updates_and_trajectory_presentation",
+      "hazard_id": "HZ-FLIGHTOPS-001",
+      "rationale": "Engineering safety candidate: An incorrect assigned/interim altitude edit or ownership check can alter the presented flight state. The requirement is a prototype interaction contract, not a certified controller interface. Register clause: Prototype altitude edits preserve assigned/interim distinction, enforce the current owning-sector check before shared flight-state mutation, and clear interim altitude with the existing nil form. These are OpenATCA model behaviors, not an ERAM procedure claim. Source test: `shared_altitude_edits_require_ownership_and_preserve_interim_distinction`."
+    },
+    {
+      "id": "OA-WS-003",
+      "function": "flight_state_updates_and_trajectory_presentation",
+      "hazard_id": "HZ-FLIGHTOPS-001",
+      "rationale": "Engineering safety candidate: Conflating point-out and handoff ownership state can misrepresent who controls a flight during coordination. The requirement tests the OpenATCA flight-state contract only; it does not claim ERAM/STARS behavior. Register clause: Prototype point-out request/acknowledgment and handoff offer/accept/control are distinct operations with recipient/owner checks; the tests exercise only the `oa-flight` coordination contract and do not assert operational-system parity. Source test: `handoff_and_pointout_have_distinct_shared_state`."
+    },
+    {
+      "id": "OA-WS-004",
+      "function": "traffic_and_safety_status_display",
+      "hazard_id": "HZ-DISPLAY-001",
+      "rationale": "Engineering safety candidate: Incorrectly shared position preferences or misleading shared annotations/voice status can produce an incomplete or misunderstood display. This is a prototype display-state contract, not a deployed workstation presentation claim. Register clause: Display range and per-position data-block preferences remain local to each position, while the prototype annotation and voice status use their shared coordination state. Position preference storage is fixed at 32 records. Source test: `position_preferences_are_separate_while_annotations_are_shared`. ## M5 \u2014 Minimum safe altitude warning (oa-msaw, tools/oa-msaw) Build order step 7 of docs/M5_DESIGN.md. `oa-msaw` is a core crate; the shell lookups of terrain, obstacles and charts cross as plain values. Every configured value is a development value, not an FAA value."
     }
   ],
   "unresolved_requirement_assessments": []

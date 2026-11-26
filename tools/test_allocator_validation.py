@@ -365,6 +365,33 @@ indexing_slicing = "deny"
         write(root / "crates" / dep / "Cargo.toml", f'[package]\nname = "{dep}"\nversion = "0.1.0"\n')
 
 
+def add_wasm_abi_exception(root, *, relative="tools/oa-demo-wasm",
+                           name="oa-demo-wasm", class_name="shell",
+                           rust_lint="deny", clippy_lint="deny"):
+    manifest = root / "Cargo.toml"
+    manifest.write_text(manifest.read_text(encoding="utf-8").replace(
+        'members = ["crates/oa-track"]',
+        f'members = ["crates/oa-track", "{relative}"]'), encoding="utf-8")
+    write(root / relative / "Cargo.toml", f'''
+[package]
+name = "{name}"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+[package.metadata.openatca]
+class = "{class_name}"
+[lints.rust]
+unsafe_code = "{rust_lint}"
+[lints.clippy]
+unwrap_used = "{clippy_lint}"
+expect_used = "{clippy_lint}"
+panic = "{clippy_lint}"
+indexing_slicing = "{clippy_lint}"
+''')
+
+
 class AllocatorResultTests(unittest.TestCase):
     # REQ: OA-RTE-005
     def test_route_budget_rejects_stale_limit_and_excess_work(self):
@@ -491,6 +518,35 @@ class AllocatorLayoutTests(unittest.TestCase):
                                 '\n[dev-dependencies]\nextra = "1"\n', encoding="utf-8")
             self.assertTrue(gate.allocation_layout_errors(root))
 
+    def test_exact_wasm_abi_lint_exception_is_accepted(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            layout_tree(root)
+            add_wasm_abi_exception(root)
+            self.assertEqual(gate.allocation_layout_errors(root), [])
+
+    def test_wasm_abi_lint_exception_is_exact_and_keeps_unknown_local_exceptions_closed(self):
+        cases = (
+            {"relative": "tools/oa-demo-wasm-copy", "name": "oa-demo-wasm"},
+            {"relative": "tools/oa-demo-wasm", "name": "oa-demo-wasm-copy"},
+            {"relative": "tools/oa-demo-wasm", "class_name": "core"},
+            {"relative": "tools/oa-demo-wasm", "rust_lint": "warn"},
+            {"relative": "tools/oa-demo-wasm", "clippy_lint": "allow"},
+        )
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                layout_tree(root)
+                add_wasm_abi_exception(root, **case)
+                self.assertTrue(gate.allocation_layout_errors(root))
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            layout_tree(root)
+            add_wasm_abi_exception(root, relative="tools/unreviewed-shell", name="unreviewed-shell")
+            self.assertTrue(any("must inherit workspace lints" in error
+                                for error in gate.allocation_layout_errors(root)))
+
     def test_presentation_exception_rejects_sibling_path_name_and_class_spoofs(self):
         cases = (
             {"relative": "crates/oa-display-present-copy", "name": "oa-display-present"},
@@ -568,8 +624,33 @@ class AllocatorLayoutTests(unittest.TestCase):
                 symbols_by_file.setdefault(relative, set()).add(gate.ROUTE_SYMBOLS[route_id])
             for relative, symbols in symbols_by_file.items():
                 write(root / relative, " ".join(f"fn {symbol}() {{}}" for symbol in sorted(symbols)))
+            tracker_core = root / "crates/oa-track-core/src/tracker.rs"
+            tracker_calls = [f"t.{name}.capacity()" for name in gate.TRACKER_VECTOR_FIELDS]
+            log_calls = [f"t.log.{name}.capacity()" for name in gate.TRACK_LOG_VECTOR_FIELDS]
+            probe_calls = ", ".join(tracker_calls + log_calls)
+            tracker_fields = "\n".join(f"    {name}: Vec<u8>," for name in gate.TRACKER_VECTOR_FIELDS)
+            log_fields = "\n".join(f"    pub {name}: Vec<u8>," for name in gate.TRACK_LOG_VECTOR_FIELDS)
+            tracker_core.write_text(
+                tracker_core.read_text(encoding="utf-8")
+                + f"\npub struct Tracker {{\n{tracker_fields}\n    log: TrackLog,\n}}\n"
+                + f"#[cfg(test)] fn tracker_buffer_capacities(t: &Tracker) -> [usize; 33] {{\n    [{probe_calls}]\n}}\n"
+                + "// REQ: OA-TRK-017\n#[test] fn all_tracker_buffer_capacities_stay_fixed_through_bounded_updates_and_flush() { let before = tracker_buffer_capacities(&t); tracker_advance(); tracker_flush(); capacity_refused(); assert_eq!(before, tracker_buffer_capacities(&t)); }\n// REQ: OA-TRK-355\n",
+                encoding="utf-8",
+            )
+            types_source = root / "crates/oa-track-core/src/types.rs"
+            types_source.write_text(
+                types_source.read_text(encoding="utf-8")
+                + f"\npub struct TrackLog {{\n{log_fields}\n}}\n",
+                encoding="utf-8",
+            )
             self.assertEqual(gate.allocation_route_ledger_errors(root), [])
-            tracker = root / "crates/oa-track/src/tracker.rs"
+            inventory_missing = tracker_core.read_text(encoding="utf-8").replace(
+                "pub struct Tracker {", "pub struct Tracker {\n    unprobed: Vec<u8>,", 1
+            )
+            tracker_core.write_text(inventory_missing, encoding="utf-8")
+            inventory_errors = gate.allocation_route_ledger_errors(root)
+            self.assertTrue(any("every Tracker Vec field" in error for error in inventory_errors))
+            tracker = root / "crates/oa-track-core/src/tracker.rs"
             tracker.write_text("fn tracker_predict() {}", encoding="utf-8")
             fusion = root / "crates/oa-track/src/fusion.rs"
             fusion.write_text(fusion.read_text(encoding="utf-8") + " fn tracker_update() {}", encoding="utf-8")

@@ -157,7 +157,7 @@ pub fn append_alert_markers(
         return Err(DisplayError::TooLarge {
             what: "MSAW alert marker records",
             requested: markers.len() as u128,
-            limit: MAX_ALERT_MARKERS,
+            limit: MAX_ALERT_MARKERS as u128,
         });
     }
 
@@ -168,7 +168,7 @@ pub fn append_alert_markers(
             return Err(DisplayError::TooLarge {
                 what: "MSAW alert marker count",
                 requested: markers.len() as u128,
-                limit: MAX_ALERT_MARKERS,
+                limit: MAX_ALERT_MARKERS as u128,
             })
         }
     };
@@ -234,7 +234,7 @@ pub fn append_alert_markers(
         .ok_or(DisplayError::TooLarge {
             what: "MSAW header width",
             requested: u128::MAX,
-            limit: projection.width as usize * 16,
+            limit: u128::from(projection.width) * 16,
         })?;
     if i64::from(ALERT_HEADER_X_PX) * 16 + header_width16 > i64::from(projection.width) * 16 {
         return Err(bad_alert("MSAW count header does not fit the view width"));
@@ -247,7 +247,7 @@ pub fn append_alert_markers(
             .ok_or(DisplayError::TooLarge {
                 what: "MSAW circle reservation",
                 requested: u128::MAX,
-                limit: list.caps.circles,
+                limit: list.caps.circles as u128,
             })?;
     let needed_texts = markers
         .len()
@@ -256,7 +256,7 @@ pub fn append_alert_markers(
         .ok_or(DisplayError::TooLarge {
             what: "MSAW text reservation",
             requested: u128::MAX,
-            limit: list.caps.texts,
+            limit: list.caps.texts as u128,
         })?;
     let needed_text_bytes = markers
         .len()
@@ -265,7 +265,7 @@ pub fn append_alert_markers(
         .ok_or(DisplayError::TooLarge {
             what: "MSAW text byte reservation",
             requested: u128::MAX,
-            limit: list.caps.text_bytes,
+            limit: list.caps.text_bytes as u128,
         })?;
     ensure_room(
         "circles",

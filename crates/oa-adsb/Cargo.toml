@@ -19,6 +19,8 @@ oa-zip = { path = "../oa-zip" }
 oa-feed = { path = "../oa-feed" }
 # Workspace crate, not an outside dependency (RULESET F1): digests the inputs named in the clip's .source sidecar.
 oa-sha256 = { path = "../oa-sha256" }
+# Pure classification and position-jump rules, shared by the tracker and truth selector.
+oa-adsb-model = { path = "../oa-adsb-model" }
 
 [[bin]]
 name = "oa-adsb-clip"

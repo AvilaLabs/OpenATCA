@@ -357,10 +357,10 @@ def _source_lineage(build, build_path):
     if sha256(diff_path)!=build.get("source_diff_sha256"): raise StudyError(f"{build_path}: source diff hash mismatch")
     diff=_read_text(diff_path)
     changed=re.findall(r"^diff --git a/(.+?) b/(.+?)$",diff,re.MULTILINE)
-    allowed_path="crates/oa-track/src/params.rs"
+    allowed_path="crates/oa-track-core/src/params.rs"
     if any(a!=allowed_path or b!=allowed_path for a,b in changed): raise StudyError(f"{build_path}: source diff changes files outside params.rs")
     status=build.get("source_status")
-    if status not in (""," M crates/oa-track/src/params.rs\n") or (status=="" and changed) or (status!="" and changed!=[(allowed_path,allowed_path)]):
+    if status not in (""," M crates/oa-track-core/src/params.rs\n") or (status=="" and changed) or (status!="" and changed!=[(allowed_path,allowed_path)]):
         raise StudyError(f"{build_path}: source status contradicts hash-bound diff")
     modifications=[line for line in diff.splitlines() if line.startswith(("+","-")) and not line.startswith(("+++","---"))]
     params=build.get("expected_motion_parameters")

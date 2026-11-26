@@ -97,7 +97,7 @@ pub struct JumpPair {
 pub fn category_hard_cap_kt(category: u8, ordinary_cap_kt: f64) -> f64 {
     match category {
         0xb7 => CAP_SPACE_KT,
-        0xa6 | 0xa0 | 0xb0 | 0xb6 | 0 => CAP_HIGH_KT.max(ordinary_cap_kt),
+        0xa6 | 0xa0 | 0xb0 | 0xb6 | 0 => oa_math::max_f64(CAP_HIGH_KT, ordinary_cap_kt),
         // Ordinary classes, and reserved codes (`A8`, `B5`, set D, ...), which say nothing and
         // never raise the cap.
         _ => ordinary_cap_kt,
@@ -128,7 +128,7 @@ pub fn category_ceiling_kt(category: u8) -> f64 {
 /// ([`CAP_ORDINARY_KT`] unless a caller configures it). A displacement within `slack_m` is
 /// always plausible; a pair with no time between them (`dt_s <= 0`) is plausible only then.
 pub fn jump_verdict(p: &JumpPair, ordinary_cap_kt: f64) -> JumpVerdict {
-    let within = |kt: f64| p.dist_m <= kt * MPS_PER_KT * p.dt_s.max(0.0) + p.slack_m;
+    let within = |kt: f64| p.dist_m <= kt * MPS_PER_KT * oa_math::max_f64(p.dt_s, 0.0) + p.slack_m;
     if p.dist_m <= p.slack_m {
         return JumpVerdict::Plausible;
     }
@@ -149,7 +149,7 @@ pub fn jump_verdict(p: &JumpPair, ordinary_cap_kt: f64) -> JumpVerdict {
             }
         }
         (a, b) => {
-            let g = a.unwrap_or(0.0).max(b.unwrap_or(0.0));
+            let g = oa_math::max_f64(a.unwrap_or(0.0), b.unwrap_or(0.0));
             let allowed =
                 CONSISTENCY_FACTOR * g + CONSISTENCY_BASE_KT + CONSISTENCY_ACCEL_KT_S * p.dt_s;
             if within(allowed) {
@@ -169,8 +169,8 @@ pub fn is_jump(p: &JumpPair, ordinary_cap_kt: f64) -> bool {
 /// True for the addresses a misconfigured transponder sends: 0x000000 and 0xFFFFFF are not
 /// assigned to any aircraft (all-zeros and all-ones are reserved), so many unrelated aircraft
 /// share them. Takes the
-/// address word of [`crate::Reports::icao`]: a non-ICAO address ([`crate::NON_ICAO`] set, a
-/// readsb pseudo-address) is a trackfile identifier and is not reserved.
+/// address word in the normalized observation: a non-ICAO address bit marks a readsb
+/// pseudo-address and is not reserved.
 pub fn is_reserved_address(addr: u32) -> bool {
     addr == 0 || addr == 0x00ff_ffff
 }

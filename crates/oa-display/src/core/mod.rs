@@ -15,3 +15,4 @@ pub mod safety;
 pub mod scene;
 pub mod text;
 pub mod traffic;
+pub mod workstation;

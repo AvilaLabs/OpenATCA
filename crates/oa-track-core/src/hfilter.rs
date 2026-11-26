@@ -188,7 +188,7 @@ fn ct_map(x: &V5, dt: f64) -> Option<V5> {
         return None;
     }
     let (px, py, vx, vy) = (x[0], x[1], x[2], x[3]);
-    let w = x[4].clamp(-OMEGA_MAX, OMEGA_MAX);
+    let w = oa_math::clamp_f64(x[4], -OMEGA_MAX, OMEGA_MAX);
     let theta = w * dt;
     if !theta.is_finite() {
         return None;
@@ -254,11 +254,11 @@ fn cholesky_diagonal(residual: f64) -> Option<f64> {
     if residual < 0.0 {
         return None;
     }
-    Some(residual.sqrt())
+    Some(oa_ieee::sqrt(residual))
 }
 
 fn cubature_radius() -> f64 {
-    (N as f64).sqrt()
+    oa_ieee::sqrt(N as f64)
 }
 
 /// Cholesky factor after increasing only the turn-rate variance. Rows zero through three and
@@ -294,7 +294,7 @@ fn ct_predict(m: &HModel, dt: f64) -> Option<HModel> {
     let mut floored_p = m.p;
     let floor = omega_var_floor();
     let floor_changes_covariance = floored_p[4][4] < floor;
-    floored_p[4][4] = floored_p[4][4].max(floor);
+    floored_p[4][4] = oa_math::max_f64(floored_p[4][4], floor);
     let floored_l = if floor_changes_covariance {
         cholesky_with_omega_variance(&original_l, floored_p[4][4])?
     } else {
@@ -426,7 +426,7 @@ fn ct_predict_pos(m: &HModel, dt: f64) -> Option<HPosModel> {
     let mut floored_p = m.p;
     let floor = omega_var_floor();
     let floor_changes_covariance = floored_p[4][4] < floor;
-    floored_p[4][4] = floored_p[4][4].max(floor);
+    floored_p[4][4] = oa_math::max_f64(floored_p[4][4], floor);
     let floored_l = if floor_changes_covariance {
         cholesky_with_omega_variance(&original_l, floored_p[4][4])?
     } else {
@@ -683,7 +683,7 @@ pub(crate) fn h_gate_d2(pred: &HFilter, z: &[f64; 2], r: &[f64; 3]) -> f64 {
         }
         let (y0, y1) = (z[0] - m.x[0], z[1] - m.x[1]);
         let d2 = (y0 * (s11 * y0 - s01 * y1) + y1 * (s00 * y1 - s01 * y0)) / det;
-        best = best.min(d2);
+        best = oa_math::min_f64(best, d2);
     }
     best
 }
@@ -698,7 +698,7 @@ pub(crate) type VelMeas = ([f64; 2], [f64; 3], f64);
 /// column 4. At `lag` 0 these are the state's velocity and the plain selection (callers take the
 /// plain path then).
 fn lagged_expectation(x: &V5, lag: f64) -> ([f64; 2], [[f64; 5]; 2]) {
-    let w = x[4].clamp(-OMEGA_MAX, OMEGA_MAX);
+    let w = oa_math::clamp_f64(x[4], -OMEGA_MAX, OMEGA_MAX);
     let (s, c) = sin_cos_near_zero(w * lag);
     let zh = [c * x[2] + s * x[3], -s * x[2] + c * x[3]];
     let hm = [
@@ -736,7 +736,7 @@ pub(crate) fn h_vel_gate_d2(pred: &HFilter, v: &[f64; 2], vr: &[f64; 3], lag: f6
             continue;
         }
         let d2 = (y0 * (s11 * y0 - s01 * y1) + y1 * (s00 * y1 - s01 * y0)) / det;
-        best = best.min(d2);
+        best = oa_math::min_f64(best, d2);
     }
     best
 }
@@ -862,9 +862,12 @@ fn update_vel_lagged(
 /// an infinite quadratic form) takes the log weights themselves, as does a singular model.
 /// A prior is floored at 1e-300 first. If no log weight is finite the prior comes back.
 pub(crate) fn imm_weights(prior: [f64; 2], fit: [Option<(f64, f64)>; 2]) -> [f64; 2] {
-    let p = [prior[0].max(1.0e-300), prior[1].max(1.0e-300)];
+    let p = [
+        oa_math::max_f64(prior[0], 1.0e-300),
+        oa_math::max_f64(prior[1], 1.0e-300),
+    ];
     if let [Some((q0, d0)), Some((q1, d1))] = fit {
-        let ratio = p[1] / p[0] * (d0 / d1).sqrt();
+        let ratio = p[1] / p[0] * oa_ieee::sqrt(d0 / d1);
         if ratio.is_finite() && ratio > 0.0 {
             let t = oa_math::ln(ratio) - 0.5 * (q1 - q0);
             if t.is_finite() {
@@ -880,7 +883,7 @@ pub(crate) fn imm_weights(prior: [f64; 2], fit: [Option<(f64, f64)>; 2]) -> [f64
         let ll = fit[j].map_or(f64::NEG_INFINITY, |(q, d)| -0.5 * q - 0.5 * oa_math::ln(d));
         oa_math::ln(p[j]) + ll
     });
-    let mx = lw[0].max(lw[1]);
+    let mx = oa_math::max_f64(lw[0], lw[1]);
     if mx.is_finite() {
         [oa_math::exp(lw[0] - mx), oa_math::exp(lw[1] - mx)]
     } else {
@@ -918,7 +921,7 @@ pub(crate) fn h_update(
         }
         fit[j] = f;
         if let Some(w) = m.x.get_mut(4) {
-            *w = w.clamp(-OMEGA_MAX, OMEGA_MAX);
+            *w = oa_math::clamp_f64(*w, -OMEGA_MAX, OMEGA_MAX);
         }
         if j == 0 {
             // The straight model keeps its turn rate at zero by construction.
@@ -930,7 +933,10 @@ pub(crate) fn h_update(
     let mut mu = imm_weights(pred.mu, fit);
     let s = mu[0] + mu[1];
     mu = [mu[0] / s, mu[1] / s];
-    mu = [mu[0].max(MU_FLOOR), mu[1].max(MU_FLOOR)];
+    mu = [
+        oa_math::max_f64(mu[0], MU_FLOOR),
+        oa_math::max_f64(mu[1], MU_FLOOR),
+    ];
     let s = mu[0] + mu[1];
     out.mu = [mu[0] / s, mu[1] / s];
     out

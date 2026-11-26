@@ -1,0 +1,32 @@
+[package]
+name = "oa-demo-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+publish = false
+build = "build.rs"
+
+[package.metadata.openatca]
+class = "shell"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+oa-demo-engine = { path = "../../crates/oa-demo-engine" }
+
+[build-dependencies]
+# F1: build-time only guarded input access; no oa-sealed dependency enters the WASM/runtime graph.
+oa-sealed = { path = "../../crates/oa-sealed" }
+oa-sha256 = { path = "../../crates/oa-sha256" }
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+indexing_slicing = "deny"

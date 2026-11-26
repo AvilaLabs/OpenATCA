@@ -10,8 +10,8 @@
 //! `--bound-table` uses the NACv-bound velocity noise table (the behaviour before calibration),
 //! `--vel-sigma` overrides the table for NACv 1 to 4 (m/s per axis), `--vel-scale` multiplies it,
 //! `--no-vel-gate` turns the tracker's velocity gate off, `--vel-gate-chi2` sets its limit.
-//! Build with `--features gate-trace` for the tail breakdown by time since the last update and
-//! track age and for the gated velocities by flight condition. The output also gives the east and north
+//! The tail breakdown by time since last update, track age and gated velocity is unavailable until
+//! a bounded explicit trace sink is restored. The output also gives the east and north
 //! component errors of the raw velocity by NACv (the calibration of `NACV_VEL_SIGMA_MPS`) and
 //! the tracker's horizontal position error.
 //!
@@ -59,6 +59,10 @@ const ACCEL_MPS2: f64 = 0.5;
 const CONDS: [&str; 5] = ["steady", "turning", "accel", "other", "no-ref"];
 
 fn main() -> ExitCode {
+    if !oa_track::gate_trace::gate_trace_available() {
+        eprintln!("velocity_diag: gate-trace output is unavailable pending an explicit bounded trace sink");
+        return ExitCode::from(3);
+    }
     let mut args = std::env::args().skip(1);
     let (mut adsb, mut out) = (None, None);
     let mut opts = Opts::default();
@@ -558,7 +562,7 @@ fn run(clip_path: &Path, out_dir: &Path, opts: &Opts) -> Result<String, String> 
     let velocity_gated = run.stats.velocity_gated;
     let (jump_rejected, resyncs) = (run.stats.jump_rejected, run.stats.resyncs);
     let (rows_uncertain, nan_covariance) = (run.stats.rows_uncertain, run.stats.nan_covariance);
-    let trace = oa_track::gate_trace::gate_trace_take();
+    let trace: Vec<oa_track::gate_trace::GateTraceRow> = Vec::new();
     let drop_after_ns = cfg.drop_after_ns;
     eprintln!("tracker done");
 
@@ -819,7 +823,7 @@ fn run(clip_path: &Path, out_dir: &Path, opts: &Opts) -> Result<String, String> 
         if trace.is_empty() {
             let _ = writeln!(
                 brk,
-                "   (gate trace empty: build with --features gate-trace)"
+                "   (gate trace unavailable: no trace metrics were computed)"
             );
         }
         for (title, m) in [

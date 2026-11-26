@@ -48,6 +48,19 @@ the rule unless an exception is recorded at the site as a comment naming the rul
   non-overlap are caller preconditions; the ABI does not claim it can validate arbitrary C
   addresses. The module contains
   only pointer adaptation and calls to existing safe core APIs; it implements no aviation logic.
+  `tools/oa-demo-wasm` (`oa-demo-wasm`) is a narrower shell exception for the five fixed scalar
+  `f2_*` C ABI exports used by the browser. Its manifest explicitly denies `unsafe_code` and all
+  four workspace runtime Clippy lints. The crate root uses `#![deny(unsafe_code)]`; only
+  `src/abi.rs` may locally use `#![allow(unsafe_code)]`, solely for the five fixed
+  `#[no_mangle] pub extern "C"` export attributes. This module contains no `unsafe` block,
+  unsafe function/trait, raw-pointer type, or raw-pointer dereference. The frame address crosses
+  the ABI as a checked integer WASM linear-memory offset and length; a native 64-bit address that
+  does not fit is unavailable rather than truncated. No other ABI/export attribute is allowed.
+  `build.rs` has `#![forbid(unsafe_code)]`. The class checker pins this package's exact
+  manifest/dependency list, Rust source inventory (`build.rs`, `src/lib.rs`, `src/abi.rs`), export
+  signatures, generated-asset includes, and forbidden include/path/export forms. Any expansion
+  requires a specific A0 and checker review; there is no generic FFI allowance.
+  Every other product package inherits workspace lints and the workspace forbids `unsafe_code`.
   The standalone `validation/oa-alloc-check` C5 harness is the only other
   exception: its single allocator module may implement `GlobalAlloc` to count allocations in the
   real-time tracker/fusion tests. It is excluded from the product workspace, has no product use,
@@ -55,7 +68,7 @@ the rule unless an exception is recorded at the site as a comment naming the rul
   module, carries a `// SAFETY:` comment, and is reviewed line by line. No other crate may gain an
   exception without amending this rule. The gate checks these exceptions mechanically by exact
   package/path/source inventories, with no glob or derived module accepted. The gate also checks
-  (amended 2026-11-19 and 2026-11-24):
+  (amended 2026-11-19, 2026-11-24, and 2026-11-25):
   every other product crate, including all core and split crates, declares `[lints] workspace = true`
   (the workspace forbids `unsafe_code`) and has `#![forbid(unsafe_code)]` as an inner attribute at
   the top of `src/lib.rs`, `oa-ieee` included; core code contains none of the tokens `unsafe`,
@@ -173,8 +186,8 @@ the rule unless an exception is recorded at the site as a comment naming the rul
   declares `[package.metadata.openatca] class = "core"`, `"shell"` or `"split"`. In a split
   crate, core code lives under `src/core/` and shell code under `src/shell/`, and `lib.rs`
   declares exactly those two modules plus re-exports, doc comments and the attributes
-  `#![forbid(unsafe_code)]` and `doc`, and the one 64-bit guard of B10 (the attribute
-  `#[cfg(not(target_pointer_width = "64"))]` followed by `compile_error!(..);`, exactly that and
+  `#![forbid(unsafe_code)]` and `doc`, and the B10 width guard (the 64-bit-only form, or the exact
+  allowlisted wasm32 form, followed by `compile_error!(..);`, exactly that and
   nothing else): any other attribute, on `mod shell`, `mod core` or the crate
   (`#[macro_use]`, `#[allow]`, `cfg_attr`), could carry shell code into the core and fails. Shell
   code does not export a macro (`#[macro_export]`) and does not `impl` a type or trait that the
@@ -219,7 +232,7 @@ the rule unless an exception is recorded at the site as a comment naming the rul
   - defines no `macro_rules!` macro and uses no raw identifier (`r#name`), so every name the
     scan reads is the name the compiler resolves;
   - has no target-dependent code: no `cfg!(target_…)`, no `#[cfg(target_…)]` and no
-    `cfg_attr` on a target (the one exception is the 64-bit guard of B10), no raw pointer type, and no `{:p}` formatting, so core behaves the
+    `cfg_attr` on a target (the only exception is the exact B10 width guard), no raw pointer type, and no `{:p}` formatting, so core behaves the
     same on every machine (B6);
   - keeps no address or platform fact (amended 2026-11-19): no `as_ptr`, `as_mut_ptr`, `as_ptr_range`,
     `as_mut_ptr_range`, `into_raw`, `into_raw_parts`, `from_raw`, `leak`, `addr_of`, `addr_of_mut`, `.addr(`,
@@ -354,15 +367,25 @@ the rule unless an exception is recorded at the site as a comment naming the rul
   or `rustc` step in a workflow names its toolchain with `+toolchain`, so the root file does not
   choose for it; `fuzz/` pins the fuzz nightly and `validation/oa-creusot-check/` the Creusot
   nightly (`nightly-2026-08-03`, Creusot v0.14.0's own pin) in their own files. The width of `usize` is fixed
-  by construction (amended 2026-11-19): the `src/lib.rs` of every core and split crate, `oa-ieee` included, has
-  `#[cfg(not(target_pointer_width = "64"))]` followed by `compile_error!(..)`, so no core or split crate builds for
-  a target whose `usize` is not 64 bits, and the gate reads it (the string too: a guard for another width,
-  or one inside a module or test code, or stacked directly on another outer attribute, fails; the
-  attribute stands at the start of the file or after the `]` of an inner attribute, a `;` or a `}`).
-  That is the one target cfg core code may have, and any other `target_pointer_width` cfg fails.
+  by construction: every core and split `src/lib.rs` has a fail-closed guard. The default guard is
+  `#[cfg(not(target_pointer_width = "64"))]` followed by `compile_error!(..)`, so that crate is
+  64-bit only. A deliberately narrow F2-demo exception allows exactly `oa-adsb-model`,
+  `oa-airspace`, `oa-ca`, `oa-demo-engine`, `oa-demo-scenario`, `oa-display`, `oa-flight`, `oa-geo`,
+  `oa-ieee`, `oa-math`, `oa-safety`, `oa-sha256`, `oa-track-core` and `oa-workstation` to also build when the target is
+  `wasm32-unknown-unknown` (32-bit pointer width, wasm32 architecture, unknown OS and vendor). Their guard
+  rejects every other non-64-bit target, including native 32-bit. This is a demo portability
+  exception, not general 32-bit or stable-target support. The checker requires the exact predicate,
+  compile-error placement and package allowlist; a different width, target, module location, test
+  guard or stacked outer attribute fails. No core algorithm or serialized layout may branch on the
+  target. The exact guard is the only target cfg permitted in core source; any other target cfg
+  fails.
   A split
   crate cannot be `no_std` as a whole, so its core module relies on the B8 scan; core code that
-  grows large is moved into its own core crate.
+  grows large is moved into its own core crate. For the F2 demo only, B7 permits `oa-display` to
+  omit `mod shell`, the `crate::shell` re-export and its `oa-sealed` dependency when the target is
+  exactly `wasm32-unknown-unknown`; the checker requires the matching exact inverse cfg on both
+  Rust items and the matching non-WASM Cargo target table. Native builds retain the shell. This
+  exception does not permit shell items or target-dependent algorithms in the display core.
 - **B9 [MUST]** A crate not yet migrated to B7 declares `class = "unsplit"`. The gate lists every
   unsplit crate and fails if one appears that is not in the fixed list of the twelve crates
   unsplit on 2026-11-19, held in the checker's source. This class exists only until the

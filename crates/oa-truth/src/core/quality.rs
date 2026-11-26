@@ -14,43 +14,9 @@ use super::types::{
     REM_SIL, REM_SOURCE, REM_STALE, REM_VERSION,
 };
 
+pub use oa_adsb_model::{nacp_epu_m, nacv_epu_mps};
+
 const NS_PER_MS: i64 = 1_000_000;
-
-/// 95 % radius in metres for NACp 0 to 11 (DO-260B table 2-14); NACp 0 is "unknown".
-const NACP_EPU_M: [f64; 12] = [
-    f64::INFINITY,
-    18_520.0,
-    7_408.0,
-    3_704.0,
-    1_852.0,
-    926.0,
-    555.6,
-    185.2,
-    92.6,
-    30.0,
-    10.0,
-    3.0,
-];
-
-/// 95 % horizontal velocity error bound in m/s for NACv 0 to 4 (DO-260B table 2-22); NACv 0 is
-/// "unknown or 10 m/s or more".
-const NACV_EPU_MPS: [f64; 5] = [f64::INFINITY, 10.0, 3.0, 1.0, 0.3];
-
-/// The 95 % horizontal position radius of a NACp, metres; infinite for 0 and above 11.
-pub fn nacp_epu_m(nacp: u8) -> f64 {
-    NACP_EPU_M
-        .get(usize::from(nacp))
-        .copied()
-        .unwrap_or(f64::INFINITY)
-}
-
-/// The 95 % horizontal velocity bound of a NACv, m/s; infinite for 0 and above 4.
-pub fn nacv_epu_mps(nacv: u8) -> f64 {
-    NACV_EPU_MPS
-        .get(usize::from(nacv))
-        .copied()
-        .unwrap_or(f64::INFINITY)
-}
 
 /// A quality value and when it was last seen. Plain data (A1); A7.2: cold struct.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

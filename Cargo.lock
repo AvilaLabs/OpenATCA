@@ -17,12 +17,20 @@ dependencies = [
 name = "oa-adsb"
 version = "0.0.1"
 dependencies = [
+ "oa-adsb-model",
  "oa-feed",
  "oa-json",
  "oa-sealed",
  "oa-sha256",
  "oa-tar",
  "oa-zip",
+]
+
+[[package]]
+name = "oa-adsb-model"
+version = "0.0.1"
+dependencies = [
+ "oa-math",
 ]
 
 [[package]]
@@ -144,6 +152,58 @@ dependencies = [
 ]
 
 [[package]]
+name = "oa-demo-engine"
+version = "0.0.1"
+dependencies = [
+ "oa-ca",
+ "oa-demo-scenario",
+ "oa-display",
+ "oa-flight",
+ "oa-geo",
+ "oa-math",
+ "oa-safety",
+ "oa-sealed",
+ "oa-sha256",
+ "oa-track-core",
+ "oa-workstation",
+]
+
+[[package]]
+name = "oa-demo-scenario"
+version = "0.0.1"
+dependencies = [
+ "oa-arinc424",
+ "oa-geo",
+ "oa-ieee",
+ "oa-math",
+ "oa-sha256",
+]
+
+[[package]]
+name = "oa-demo-scenario-prep"
+version = "0.0.1"
+dependencies = [
+ "oa-adsb",
+ "oa-arinc424",
+ "oa-asterix",
+ "oa-demo-scenario",
+ "oa-sealed",
+ "oa-sensorsim",
+ "oa-sha256",
+ "oa-truth",
+ "oa-zip",
+]
+
+[[package]]
+name = "oa-demo-wasm"
+version = "0.0.1"
+dependencies = [
+ "oa-demo-engine",
+ "oa-sealed",
+ "oa-sha256",
+]
+
+[[package]]
 name = "oa-display"
 version = "0.0.1"
 dependencies = [
@@ -154,6 +214,7 @@ dependencies = [
  "oa-safety",
  "oa-sealed",
  "oa-sha256",
+ "oa-workstation",
 ]
 
 [[package]]
@@ -640,11 +701,23 @@ name = "oa-track"
 version = "0.0.1"
 dependencies = [
  "oa-adsb",
+ "oa-adsb-model",
  "oa-geo",
  "oa-math",
  "oa-sensorsim",
  "oa-sha256",
+ "oa-track-core",
  "oa-truth",
+]
+
+[[package]]
+name = "oa-track-core"
+version = "0.0.1"
+dependencies = [
+ "oa-adsb-model",
+ "oa-geo",
+ "oa-ieee",
+ "oa-math",
 ]
 
 [[package]]
@@ -669,6 +742,7 @@ name = "oa-truth"
 version = "0.0.1"
 dependencies = [
  "oa-adsb",
+ "oa-adsb-model",
  "oa-feed",
  "oa-geo",
  "oa-ieee",
@@ -687,6 +761,13 @@ dependencies = [
  "oa-grib2",
  "oa-math",
  "oa-sealed",
+]
+
+[[package]]
+name = "oa-workstation"
+version = "0.0.1"
+dependencies = [
+ "oa-flight",
 ]
 
 [[package]]

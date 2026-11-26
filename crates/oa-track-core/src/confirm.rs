@@ -28,10 +28,13 @@ pub(crate) fn confirm_window_ns(cfg: &TrackerConfig, expected_ns: i64) -> i64 {
     } else {
         cfg.expected_interval_ns
     };
-    interval
-        .saturating_mul(CONFIRM_WINDOW_INTERVALS)
-        .min(cfg.drop_after_ns)
-        .max(cfg.confirm_window_ns)
+    i64::max(
+        i64::min(
+            interval.saturating_mul(CONFIRM_WINDOW_INTERVALS),
+            cfg.drop_after_ns,
+        ),
+        cfg.confirm_window_ns,
+    )
 }
 
 /// How closely a deciding report `sep_ns` after the move must agree with a path, metres:
@@ -39,8 +42,11 @@ pub(crate) fn confirm_window_ns(cfg: &TrackerConfig, expected_ns: i64) -> i64 {
 /// (`0.5 a t^2`), never over `confirm_move_m`. Only the agreement of two reports loosens with
 /// time; the move that starts the rule is a fixed distance.
 pub(crate) fn agree_limit_m(cfg: &TrackerConfig, sep_ns: i64) -> f64 {
-    let s = sep_ns.max(0) as f64 / 1.0e9;
-    (cfg.confirm_agree_m + 0.5 * cfg.gate_manoeuvre_mps2 * s * s).min(cfg.confirm_move_m)
+    let s = i64::max(sep_ns, 0) as f64 / 1.0e9;
+    oa_math::min_f64(
+        cfg.confirm_agree_m + 0.5 * cfg.gate_manoeuvre_mps2 * s * s,
+        cfg.confirm_move_m,
+    )
 }
 
 /// A sentinel, not a time: the value of the old-path vote column while the move has no vote yet

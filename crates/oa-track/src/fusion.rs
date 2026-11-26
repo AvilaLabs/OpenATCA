@@ -97,11 +97,10 @@ use crate::registration::{
 #[cfg(test)]
 use crate::tracker::tracker_predict_if_altitude;
 use crate::tracker::{
-    check_advance_time, tracker_advance, tracker_buffers, tracker_flush, tracker_has_key,
-    tracker_is_confirmed, tracker_live_iter, tracker_new, tracker_note_radar_disagreement,
-    tracker_predict_checked, tracker_predict_for_association,
-    tracker_predict_for_association_if_altitude, tracker_set_expected_interval, tracker_stats,
-    tracker_update, Tracker,
+    check_advance_time, tracker_advance, tracker_flush, tracker_has_key, tracker_is_confirmed,
+    tracker_live_iter, tracker_new, tracker_note_radar_disagreement, tracker_predict_checked,
+    tracker_predict_for_association, tracker_predict_for_association_if_altitude,
+    tracker_set_expected_interval, tracker_stats, tracker_update, Tracker,
 };
 use crate::types::{
     output_clear, output_new, output_push, Measurement, OutRow, PredictError, TrackError,
@@ -973,18 +972,16 @@ pub fn fusion_assoc_buffers(f: &Fusion) -> Vec<(usize, usize)> {
     v
 }
 
-/// The address and capacity of every buffer the processing path owns (the association's, the
-/// tracker's, the queues, the scratch and the histories), in a fixed order. A test compares it
-/// before and after a run: equal means no buffer was reallocated. It does not see a temporary
-/// allocation that is freed within a call (RULESET C5 needs a counting allocator, which A0
-/// forbids here).
+/// The address and capacity of buffers owned by the fusion shell (queues, scratch, histories and
+/// indexes), in a fixed order. Tracker buffer-capacity stability is probed by a core unit test;
+/// this shell snapshot is not an allocation proof. The counting-allocator gate provides separate
+/// route-scoped allocation evidence.
 #[doc(hidden)]
 pub fn fusion_buffers(f: &Fusion) -> Vec<(usize, usize)> {
     fn of<T>(v: &Vec<T>) -> (usize, usize) {
         (v.as_ptr() as usize, v.capacity())
     }
     let mut v = fusion_assoc_buffers(f);
-    v.extend(tracker_buffers(&f.tracker));
     v.extend([
         of(&f.pend_adsb),
         of(&f.pend_plots),

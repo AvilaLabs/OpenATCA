@@ -188,19 +188,19 @@ def main() -> int:
     harnesses = {
         "baseline": {"purpose": "same current source overlay without a mutation"},
         "output-column": {
-            "package": "oa-track",
+            "package": "oa-track-core",
             "harness": "output_push_appends_every_column_bit_exactly_and_preserves_prefix",
             "expected_assertion": "assert_aligned / column-length invariant (the omitted flags column)",
             "failure_kind": "counterexample to a Kani property assertion",
         },
         "resync-emit": {
-            "package": "oa-track",
+            "package": "oa-track-core",
             "harness": "confirmed_applied_or_resynced_attempts_one_current_report_row",
             "expected_assertion": "assert_eq!(out.t_ns.len(), 1) on the Resynced path",
             "failure_kind": "counterexample to a Kani property assertion",
         },
         "caller-track-restore": {
-            "package": "oa-track",
+            "package": "oa-track-core",
             "harness": "tracker::proofs::rollback_paths::in_order_refusal_restores_track_metadata_projection",
             "expected_assertion": "assert_eq!(t.first_ns[PROOF_SLOT], first)",
             "failure_kind": "counterexample to a Kani property assertion",
@@ -218,7 +218,7 @@ def main() -> int:
             },
         },
         "late-rollback": {
-            "package": "oa-track",
+            "package": "oa-track-core",
             "harness": "tracker::proofs::rollback_paths::late_overflow_output_projection",
             "expected_assertion": "assert_output_txn_eq(&case.before_output, &output_txn(&case.output))",
             "failure_kind": "counterexample to a Kani property assertion",
@@ -236,7 +236,7 @@ def main() -> int:
             },
         },
         "sensor-oldest-tie": {
-            "package": "oa-track",
+            "package": "oa-track-core",
             "harness": "time_gate::proofs_full::full_sensor_table_note_new_id_evicts_first_argmin",
             "expected_assertion": "assert_eq!(g.sensor_id[i], SENSOR_TABLE as u16)",
             "failure_kind": "counterexample to a Kani property assertion",
@@ -291,19 +291,19 @@ def main() -> int:
     controls: dict[str, tuple[str, str, str] | None] = {
         "baseline": None,
         "output-column": (
-            "crates/oa-track/src/types.rs",
+            "crates/oa-track-core/src/types.rs",
             "    o.flags.push(r.flags);\n",
             "",
         ),
-        "resync-emit": ("crates/oa-track/src/tracker.rs", resync_old, resync_new),
+        "resync-emit": ("crates/oa-track-core/src/tracker.rs", resync_old, resync_new),
         "caller-track-restore": (
-            "crates/oa-track/src/tracker.rs",
+            "crates/oa-track-core/src/tracker.rs",
             caller_track_restore_old,
             caller_track_restore_new,
         ),
-        "late-rollback": ("crates/oa-track/src/tracker.rs", rollback_old, rollback_new),
+        "late-rollback": ("crates/oa-track-core/src/tracker.rs", rollback_old, rollback_new),
         "sensor-oldest-tie": (
-            "crates/oa-track/src/time_gate.rs",
+            "crates/oa-track-core/src/time_gate.rs",
             "                if ns < oldest_ns {\n",
             "                if ns <= oldest_ns {\n",
         ),

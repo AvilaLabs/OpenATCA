@@ -12,6 +12,7 @@ import tomllib
 
 HARNESS = Path("validation/oa-alloc-check")
 PRESENTATION = Path("crates/oa-display-present")
+WASM_ABI = Path("tools/oa-demo-wasm")
 PRESENTATION_SOURCES = {"src/lib.rs", "src/linux.rs"}
 CORE_FFI = Path("crates/openatca-core-ffi")
 CORE_FFI_DEPS = {
@@ -51,6 +52,15 @@ TRACKER_FIELDS = {
     "full_capacity": 8, "recovery_applied": 1, "predictions": 1, "advance_rows": 1, "flush_rows": 1,
     "ended": 1, "rows": 1,
 }
+TRACKER_VECTOR_FIELDS = (
+    "held", "key", "state", "first_ns", "confirmed_ns", "last_ns", "disagree_until_ns",
+    "expected_ns", "updates", "hits", "cur", "ring_len", "ring_head", "cat", "anchor",
+    "ring_m", "mv_on", "mv_start_ns", "mv_first_ns", "mv_first_sens", "mv_old_vote_ns",
+    "mv_resync_until_ns", "mv_snap", "snaps", "snap_free", "free", "index",
+)
+TRACK_LOG_VECTOR_FIELDS = (
+    "addr", "first_ns", "confirmed_ns", "last_ns", "updates", "reason",
+)
 FUSION_FIELDS = {
     "plots": 40, "hard_applied": 1, "candidates_confirmed": 2, "refused": 1,
     "rows": 1, "radar_tracks": 2, "registration_used": 1,
@@ -63,27 +73,27 @@ FUSION_FIELDS = {
 # is intentionally scoped to deterministic fixtures; it does not imply that
 # every input through these APIs has been measured.
 ROUTE_LEDGER = {
-    "tracker_update": ("crates/oa-track/src/tracker.rs", "applied"),
-    "tracker_out_of_order_refilter": ("crates/oa-track/src/tracker.rs", "refiltered"),
-    "tracker_invalid_input_refusal": ("crates/oa-track/src/tracker.rs", "refused"),
-    "tracker_capacity_refusal": ("crates/oa-track/src/tracker.rs", "capacity_refused"),
-    "tracker_capacity_recovery": ("crates/oa-track/src/tracker.rs", "recovery_applied"),
-    "tracker_default_capacity": ("crates/oa-track/src/tracker.rs", "default_capacity.occupied"),
-    "tracker_default_confirmed_capacity": ("crates/oa-track/src/tracker.rs", "default_capacity.confirmed"),
-    "tracker_history_wrap_refilter": ("crates/oa-track/src/tracker.rs", "default_capacity.history_refiltered"),
-    "tracker_history_wrap_replay": ("crates/oa-track/src/tracker.rs", "default_capacity.history_replayed"),
-    "tracker_history_retention_refusal": ("crates/oa-track/src/tracker.rs", "default_capacity.late_ring"),
-    "tracker_output_overflow": ("crates/oa-track/src/tracker.rs", "output_log.output_overflow"),
-    "tracker_log_overflow": ("crates/oa-track/src/tracker.rs", "output_log.log_overflow"),
-    "tracker_output_reuse": ("crates/oa-track/src/types.rs", "output_log.output_rows_after_reuse"),
-    "tracker_output_payload_stability": ("crates/oa-track/src/tracker.rs", "output_log.output_payload_unchanged"),
-    "tracker_clock_hold": ("crates/oa-track/src/tracker.rs", "clock_gate.held"),
-    "tracker_clock_forward_recovery": ("crates/oa-track/src/tracker.rs", "clock_gate.held_applied"),
-    "tracker_clock_backstep": ("crates/oa-track/src/tracker.rs", "clock_gate.step_back"),
-    "tracker_clock_recovery": ("crates/oa-track/src/tracker.rs", "clock_gate.recovered"),
-    "tracker_prediction": ("crates/oa-track/src/tracker.rs", "predictions"),
-    "tracker_advance": ("crates/oa-track/src/tracker.rs", "advance_rows"),
-    "tracker_flush": ("crates/oa-track/src/tracker.rs", "flush_rows"),
+    "tracker_update": ("crates/oa-track-core/src/tracker.rs", "applied"),
+    "tracker_out_of_order_refilter": ("crates/oa-track-core/src/tracker.rs", "refiltered"),
+    "tracker_invalid_input_refusal": ("crates/oa-track-core/src/tracker.rs", "refused"),
+    "tracker_capacity_refusal": ("crates/oa-track-core/src/tracker.rs", "capacity_refused"),
+    "tracker_capacity_recovery": ("crates/oa-track-core/src/tracker.rs", "recovery_applied"),
+    "tracker_default_capacity": ("crates/oa-track-core/src/tracker.rs", "default_capacity.occupied"),
+    "tracker_default_confirmed_capacity": ("crates/oa-track-core/src/tracker.rs", "default_capacity.confirmed"),
+    "tracker_history_wrap_refilter": ("crates/oa-track-core/src/tracker.rs", "default_capacity.history_refiltered"),
+    "tracker_history_wrap_replay": ("crates/oa-track-core/src/tracker.rs", "default_capacity.history_replayed"),
+    "tracker_history_retention_refusal": ("crates/oa-track-core/src/tracker.rs", "default_capacity.late_ring"),
+    "tracker_output_overflow": ("crates/oa-track-core/src/tracker.rs", "output_log.output_overflow"),
+    "tracker_log_overflow": ("crates/oa-track-core/src/tracker.rs", "output_log.log_overflow"),
+    "tracker_output_reuse": ("crates/oa-track-core/src/types.rs", "output_log.output_rows_after_reuse"),
+    "tracker_output_payload_stability": ("crates/oa-track-core/src/tracker.rs", "output_log.output_payload_unchanged"),
+    "tracker_clock_hold": ("crates/oa-track-core/src/tracker.rs", "clock_gate.held"),
+    "tracker_clock_forward_recovery": ("crates/oa-track-core/src/tracker.rs", "clock_gate.held_applied"),
+    "tracker_clock_backstep": ("crates/oa-track-core/src/tracker.rs", "clock_gate.step_back"),
+    "tracker_clock_recovery": ("crates/oa-track-core/src/tracker.rs", "clock_gate.recovered"),
+    "tracker_prediction": ("crates/oa-track-core/src/tracker.rs", "predictions"),
+    "tracker_advance": ("crates/oa-track-core/src/tracker.rs", "advance_rows"),
+    "tracker_flush": ("crates/oa-track-core/src/tracker.rs", "flush_rows"),
     "fusion_adsb_ingest": ("crates/oa-track/src/fusion.rs", "hard_applied"),
     "fusion_plot_ingest": ("crates/oa-track/src/fusion.rs", "plots"),
     "fusion_advance": ("crates/oa-track/src/fusion.rs", "quiet_advance_rows"),
@@ -274,6 +284,60 @@ def allocation_route_ledger_errors(repo: Path) -> list[str]:
             errors.append(f"route ledger production symbol missing for {route_id}: {symbol}")
         if not field:
             errors.append(f"route ledger has no expected evidence field for {route_id}")
+    tracker_path = repo / "crates/oa-track-core/src/tracker.rs"
+    try:
+        tracker_source = tracker_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        return errors + [f"tracker capacity probes unavailable: {exc}"]
+    tracker_decl = re.search(r"pub struct Tracker\s*\{(.*?)\n\}", tracker_source, re.S)
+    if tracker_decl is None:
+        errors.append("Tracker vector field inventory is unavailable")
+    else:
+        declared_tracker_vectors = set(re.findall(r"(?m)^\s*(\w+)\s*:\s*Vec\s*<", tracker_decl.group(1)))
+        if declared_tracker_vectors != set(TRACKER_VECTOR_FIELDS):
+            errors.append("tracker capacity inventory does not match every Tracker Vec field")
+    try:
+        types_source = (repo / "crates/oa-track-core/src/types.rs").read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        return errors + [f"TrackLog vector inventory unavailable: {exc}"]
+    log_decl = re.search(r"pub struct TrackLog\s*\{(.*?)\n\}", types_source, re.S)
+    if log_decl is None:
+        errors.append("TrackLog vector field inventory is unavailable")
+    else:
+        declared_log_vectors = set(re.findall(r"(?m)^\s*pub\s+(\w+)\s*:\s*Vec\s*<", log_decl.group(1)))
+        if declared_log_vectors != set(TRACK_LOG_VECTOR_FIELDS):
+            errors.append("tracker capacity inventory does not match every TrackLog Vec field")
+    helper = re.search(
+        r"#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]\s*fn\s+tracker_buffer_capacities\s*\([^)]*\)\s*->\s*\[usize;\s*33\]\s*\{(.*?)\n\}",
+        tracker_source,
+        re.S,
+    )
+    if helper is None:
+        errors.append("all 33 Tracker and TrackLog Vec capacities must remain in an exact cfg(test) helper")
+    else:
+        tracker_calls = re.findall(r"\bt\.(?!log\.)(\w+)\.capacity\(\)", helper.group(1))
+        log_calls = re.findall(r"\bt\.log\.(\w+)\.capacity\(\)", helper.group(1))
+        if (len(tracker_calls) + len(log_calls) != len(TRACKER_VECTOR_FIELDS) + len(TRACK_LOG_VECTOR_FIELDS)
+                or len(set(tracker_calls)) != len(TRACKER_VECTOR_FIELDS)
+                or set(tracker_calls) != set(TRACKER_VECTOR_FIELDS)
+                or len(set(log_calls)) != len(TRACK_LOG_VECTOR_FIELDS)
+                or set(log_calls) != set(TRACK_LOG_VECTOR_FIELDS)
+                or helper.group(1).count(".capacity()") != 33):
+            errors.append("tracker capacity helper must probe all 33 Tracker and TrackLog vectors exactly once")
+    unit_probe = re.search(
+        r"//\s*REQ:\s*OA-TRK-017\s*#\s*\[\s*test\s*\]\s*fn\s+all_tracker_buffer_capacities_stay_fixed_through_bounded_updates_and_flush\s*\([^)]*\)\s*\{(.*?)//\s*REQ:\s*OA-TRK-355",
+        tracker_source,
+        re.S,
+    )
+    if unit_probe is None:
+        errors.append("the OA-TRK-017 core capacity-stability test is required alongside the C5 harness")
+    else:
+        probe = unit_probe.group(1)
+        if ("let before = tracker_buffer_capacities(&t);" not in probe
+                or "assert_eq!(before, tracker_buffer_capacities(&t));" not in probe
+                or "tracker_advance(" not in probe or "tracker_flush(" not in probe
+                or "capacity_refused" not in probe):
+            errors.append("the OA-TRK-017 test must compare all capacity probes across warm/exhaustion/flush paths")
     return errors
 
 
@@ -511,6 +575,68 @@ def _core_ffi_exception_errors(root: Path, members: list[Path]) -> list[str]:
     return errors
 
 
+def _wasm_abi_exception_errors(root: Path, members: list[Path]) -> list[str]:
+    """Mirror only the reviewed shell lint exception for the fixed scalar WASM ABI package."""
+    errors: list[str] = []
+    declared_dir = root / WASM_ABI
+    expected_dir = declared_dir.resolve()
+    declared_manifest = declared_dir / "Cargo.toml"
+    expected_manifest = declared_manifest.resolve()
+    if (declared_dir.is_symlink() or expected_dir != declared_dir
+            or not _inside(expected_dir, root) or declared_manifest.is_symlink()):
+        errors.append("oa-demo-wasm package path may not use symlinks")
+        return errors
+
+    named_members: list[Path] = []
+    for manifest in members:
+        data, problem = _read_toml(manifest)
+        if problem:
+            continue
+        package = data.get("package", {})
+        if isinstance(package, dict) and package.get("name") == "oa-demo-wasm":
+            named_members.append(manifest)
+    if not expected_manifest.exists():
+        if named_members:
+            errors.append("oa-demo-wasm may exist only at tools/oa-demo-wasm/Cargo.toml")
+        return errors
+    if expected_manifest not in members:
+        errors.append("tools/oa-demo-wasm must be an explicit product workspace member")
+    if any(manifest != expected_manifest for manifest in named_members):
+        errors.append("oa-demo-wasm may exist only at tools/oa-demo-wasm/Cargo.toml")
+
+    data, problem = _read_toml(expected_manifest)
+    if problem:
+        return errors + [problem]
+    package = data.get("package", {})
+    if not isinstance(package, dict) or package.get("name") != "oa-demo-wasm":
+        errors.append("the exact WASM ABI path must declare name = oa-demo-wasm")
+        package = {}
+    for key in ("version", "edition", "license", "rust-version", "authors"):
+        package_value = package.get(key)
+        if not isinstance(package_value, dict) or package_value.get("workspace") is not True:
+            errors.append(f"oa-demo-wasm package.{key} must inherit workspace.package")
+    metadata = package.get("metadata", {}) if isinstance(package, dict) else {}
+    openatca = metadata.get("openatca", {}) if isinstance(metadata, dict) else {}
+    if not isinstance(openatca, dict) or openatca.get("class") != "shell":
+        errors.append("oa-demo-wasm must have package.metadata.openatca.class = shell")
+
+    lint_tables = data.get("lints", {})
+    if not isinstance(lint_tables, dict):
+        lint_tables = {}
+    if lint_tables.get("workspace") is True:
+        errors.append("oa-demo-wasm must not inherit workspace lints (its exact ABI exception is locally denied)")
+    rust_lints = lint_tables.get("rust", {})
+    if (not isinstance(rust_lints, dict) or set(rust_lints) != {"unsafe_code"}
+            or rust_lints.get("unsafe_code") != "deny"):
+        errors.append("oa-demo-wasm must locally deny only the unsafe_code Rust lint")
+    clippy_lints = lint_tables.get("clippy", {})
+    if (not isinstance(clippy_lints, dict)
+            or set(clippy_lints) != set(STRICT_RUNTIME_CLIPPY_LINTS)
+            or any(clippy_lints.get(name) != "deny" for name in STRICT_RUNTIME_CLIPPY_LINTS)):
+        errors.append("oa-demo-wasm must locally deny exactly the four strict workspace Clippy lints")
+    return errors
+
+
 def _product_global_allocator_errors(members: list[Path]) -> list[str]:
     """The allocator harness is excluded; product source may never name GlobalAlloc."""
     errors: list[str] = []
@@ -725,8 +851,10 @@ def allocation_layout_errors(repo: Path) -> list[str]:
     errors.extend(_product_global_allocator_errors(members))
     errors.extend(_presentation_exception_errors(root, members))
     errors.extend(_core_ffi_exception_errors(root, members))
+    errors.extend(_wasm_abi_exception_errors(root, members))
     presentation_manifest = (root / PRESENTATION / "Cargo.toml").resolve()
     core_ffi_manifest = (root / CORE_FFI / "Cargo.toml").resolve()
+    wasm_abi_manifest = (root / WASM_ABI / "Cargo.toml").resolve()
     for member in members:
         if not _inside(member, root):
             errors.append(f"workspace member manifest escapes repository: {member}")
@@ -734,7 +862,7 @@ def allocation_layout_errors(repo: Path) -> list[str]:
         member_data, member_problem = _read_toml(member)
         if member_problem:
             errors.append(member_problem)
-        elif member not in (presentation_manifest, core_ffi_manifest) and member_data.get("lints", {}).get("workspace") is not True:
+        elif member not in {presentation_manifest, core_ffi_manifest, wasm_abi_manifest} and member_data.get("lints", {}).get("workspace") is not True:
             errors.append(f"product workspace member must inherit workspace lints: {member}")
     harness_dir = (root / HARNESS).resolve()
     if not _inside(harness_dir, root):

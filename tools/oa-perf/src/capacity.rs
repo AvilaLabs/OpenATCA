@@ -20,8 +20,8 @@ use oa_track::fusion::{
 };
 use oa_track::fusion_params::{ASSIGN_LOG_MAX, ASSOC_FORENSICS_MAX, KEY_RADAR_BASE, MAX_RADARS};
 use oa_track::{
-    output_clear, output_new, tracker_bytes, tracker_counts, tracker_live_iter, Measurement,
-    TrackerConfig, TrackerStats, DEFAULT_CONFIG, O_COAST, O_TICK, REFUSE_NAMES,
+    output_clear, output_new, tracker_counts, tracker_live_iter, Measurement, TrackerConfig,
+    TrackerStats, DEFAULT_CONFIG, O_COAST, O_TICK, REFUSE_NAMES,
 };
 use oa_track_tools::fusion_score::{identify_tracks, Kind, EPOCH_NS};
 
@@ -225,7 +225,6 @@ pub struct CapResult {
     pub radar_track_recs_taken: u64,
     pub bookkeeping: (usize, usize),
     pub buffers_stable: bool,
-    pub tracker_table_mb: f64,
     /// Resident memory, kB: before the layer is made, after, and the run's peak (`VmHWM`).
     pub rss_before_kb: u64,
     pub rss_after_new_kb: u64,
@@ -1443,7 +1442,6 @@ pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
     if seconds_done < cfg.warmup_s {
         warm = (*fusion_stats(&f), *fusion_tracker_stats(&f), out.overflow);
     }
-    let tracker_table_mb = tracker_bytes(fusion_tracker(&f)) as f64 / (1024.0 * 1024.0);
     let adsb_expected_reports = if cfg.radar_only {
         u64::try_from(traffic.adsb_count())
             .ok()
@@ -1634,7 +1632,6 @@ pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
         radar_track_recs_taken: recs_taken,
         bookkeeping: fusion_bookkeeping_len(&f),
         buffers_stable: fusion_buffers(&f) == buffers0,
-        tracker_table_mb,
         rss_before_kb,
         rss_after_new_kb,
         rss_end_kb: status_kb("VmRSS").unwrap_or(0),
@@ -1932,7 +1929,6 @@ pub fn cap_kv(r: &CapResult) -> Kv {
     kv.put("keyinfo_len", r.bookkeeping.0);
     kv.put("radar_track_recs_held", r.bookkeeping.1);
     kv.put("buffers_stable", u8::from(r.buffers_stable));
-    kv.put("tracker_table_mb", fmt_f(r.tracker_table_mb));
     kv.put("rss_before_kb", r.rss_before_kb);
     kv.put("rss_after_new_kb", r.rss_after_new_kb);
     kv.put("rss_end_kb", r.rss_end_kb);
@@ -2369,10 +2365,9 @@ pub fn cap_text(r: &CapResult) -> String {
         r.buffers_stable, r.radar_track_recs_taken
     ));
     s.push_str(&format!(
-        "  memory: RSS {:.0} MB before the layer, {:.0} MB after it is made (tracker tables {:.0} MB), {:.0} MB at the end of the warm-up, {:.0} MB at the end; peak VmHWM {:.0} MB\n",
+        "  memory: RSS {:.0} MB before the layer, {:.0} MB after it is made, {:.0} MB at the end of the warm-up, {:.0} MB at the end; peak VmHWM {:.0} MB\n",
         r.rss_before_kb as f64 / 1024.0,
         r.rss_after_new_kb as f64 / 1024.0,
-        r.tracker_table_mb,
         r.rss_warm_kb as f64 / 1024.0,
         r.rss_end_kb as f64 / 1024.0,
         r.hwm_kb as f64 / 1024.0

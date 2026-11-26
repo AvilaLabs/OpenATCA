@@ -352,7 +352,10 @@ const ALLOW: &str = "seal-allow:";
 // B1: one locally guarded write-only create_new output opener in COMPASS output_fs.
 // P-010: two reviewed seal-checked metadata/output sites; no unguarded data reads.
 // CORE: two generic caller-policy path helpers; old ZIP fixture path waiver removed: net +1.
-const ALLOW_COUNT: usize = 207;
+// I3: ten reviewed ownership, durability, retention, query and fixture sites, carried from main.
+// F2: five scenario-prep provenance/output sites, one guarded runner output, and one generated
+// seal-checked OASD asset include; none authorizes unguarded external input reads.
+const ALLOW_COUNT: usize = 214;
 
 /// Text that names the real data root: a file that holds one must read through `oa_sealed`.
 /// Written in two pieces so this file does not name the root itself.

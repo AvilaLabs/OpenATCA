@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <title>OpenATCA · R-side preview</title>
+    <link rel="stylesheet" href="./host.css">
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="topbar" data-fidelity-id="OA-F2-APP-IDENTITY">
+        <div class="brand-title">
+          <img src="./assets/openatca-mark.svg" width="32" height="32" alt="OpenATCA mark">
+          <div>
+            <p class="eyebrow">OPENATCA · SYNTHETIC DEVELOPMENT PREVIEW</p>
+            <h1>R-side · Scenario 1</h1>
+          </div>
+        </div>
+        <p class="notice" data-fidelity-id="OA-F2-APP-IDENTITY">Not an ERAM/STARS interface. Not yet reviewed by working controllers.</p>
+      </header>
+
+      <section class="playback-bar" data-fidelity-id="OA-F2-PLAYBACK-BAR" aria-label="Demo playback controls">
+        <div class="playback-title">Demo playback <span>outside the controller display</span></div>
+        <button id="play-pause" type="button" data-fidelity-id="OA-F2-PLAY-PAUSE" disabled>Play</button>
+        <label for="speed" data-fidelity-id="OA-F2-PLAYBACK-SPEED">Speed</label>
+        <select id="speed" data-fidelity-id="OA-F2-PLAYBACK-SPEED" disabled>
+          <option value="1">1×</option>
+          <option value="2">2×</option>
+          <option value="4">4×</option>
+          <option value="8">8×</option>
+        </select>
+        <button id="advance" type="button" data-fidelity-id="OA-F2-STEP-TIME" disabled>Step 5 s</button>
+        <button id="jump-minute" type="button" data-fidelity-id="OA-F2-SKIP-ONE-MINUTE" disabled>Skip 1 min</button>
+        <button id="jump-five" type="button" data-fidelity-id="OA-F2-SKIP-FIVE-MINUTES" disabled>Skip 5 min</button>
+        <span id="virtual-time" class="virtual-time" data-fidelity-id="OA-F2-VIRTUAL-TIME">Demo time: 00:00</span>
+        <button id="save-transcript" type="button" data-fidelity-id="OA-F2-TRACE-SAVE" disabled>Save replay trace</button>
+      </section>
+
+      <div class="workspace">
+        <nav class="role-rail" aria-label="Preview role and scenario">
+          <section>
+            <h2>Role</h2>
+            <p class="nav-choice selected" data-fidelity-id="OA-F2-RSIDE-NAV" aria-current="page">R-side</p>
+            <button class="nav-choice" data-fidelity-id="OA-F2-DSIDE-NAV" type="button" disabled title="Not implemented in this preview">D-side</button>
+            <button class="nav-choice" data-fidelity-id="OA-F2-TCW-NAV" type="button" disabled title="Not implemented in this preview">STARS TCW</button>
+            <button class="nav-choice" data-fidelity-id="OA-F2-TDW-NAV" type="button" disabled title="Not implemented in this preview">STARS TDW</button>
+            <p class="nav-note">Other roles are not implemented.</p>
+          </section>
+          <section>
+            <h2>Scenario</h2>
+            <p class="nav-choice selected" data-fidelity-id="OA-F2-SCENARIO-1-NAV" aria-current="step">1 · ORD arrival push</p>
+            <button class="nav-choice" data-fidelity-id="OA-F2-SCENARIO-2-NAV" type="button" disabled title="Not implemented in this preview">2 · Conflict / MSAW</button>
+            <button class="nav-choice" data-fidelity-id="OA-F2-SCENARIO-3-NAV" type="button" disabled title="Not implemented in this preview">3 · Surveillance loss</button>
+            <p class="nav-note">Synthetic traffic on public-procedure geometry. No SWIM content.</p>
+          </section>
+        </nav>
+
+        <section class="display-panel" aria-label="Synthetic R-side display">
+          <div class="panel-heading" data-fidelity-id="OA-F2-DISPLAY-PANEL-HEADING">
+            <div>
+              <h2>R-side prototype view</h2>
+              <p>OpenATCA drawing and synthetic traffic; not facility adaptation.</p>
+            </div>
+            <span class="read-only">Preview</span>
+          </div>
+          <div class="viewport">
+            <canvas id="scope" width="1280" height="720" tabindex="0" data-fidelity-ids="OA-F2-SURVEILLANCE-PICTURE OA-F2-VIEW-RANGE-PAN OA-F2-MAP-FIX-5-IRK OA-F2-MAP-FIX-6-LOAMY OA-F2-MAP-FIX-7-KEOKK OA-F2-MAP-FIX-8-DRAMS OA-F2-MAP-FIX-9-RYELY OA-F2-MAP-FIX-10-BFORD OA-F2-MAP-FIX-11-BYLAW OA-F2-MAP-FIX-12-BENKY OA-F2-MAP-FIX-13-NEWRK OA-F2-MAP-FIX-14-AHSTN OA-F2-MAP-FIX-15-PETAH OA-F2-MAP-FIX-16-JORJO OA-F2-MAP-FIX-17-MONKZ OA-F2-MAP-FIX-18-TONIE OA-F2-MAP-FIX-19-VOGLR OA-F2-MAP-FIX-20-NRMAH OA-F2-MAP-FIX-21-JOEBO OA-F2-MAP-FIX-22-GRABL OA-F2-MAP-FIX-23-RIPPR OA-F2-MAP-FIX-24-BASHH OA-F2-MAP-FIX-25-EBENS OA-F2-MAP-FIX-26-JLOWW OA-F2-MAP-FIX-27-RW27L OA-F2-MAP-FIX-30-FWA OA-F2-MAP-FIX-31-PRONK OA-F2-MAP-FIX-32-DAIFE OA-F2-MAP-FIX-33-WATSN OA-F2-MAP-FIX-34-MKITA OA-F2-MAP-FIX-35-ESSPO OA-F2-MAP-FIX-36-LAACY OA-F2-MAP-FIX-37-IZARD OA-F2-MAP-FIX-38-CABIJ OA-F2-MAP-FIX-39-MONKZ OA-F2-MAP-FIX-40-JORJO OA-F2-MAP-FIX-41-POSSM OA-F2-MAP-FIX-42-VOGLR OA-F2-MAP-FIX-43-NRMAH OA-F2-MAP-FIX-44-JOEBO OA-F2-MAP-FIX-45-GRABL OA-F2-MAP-FIX-46-RIPPR OA-F2-MAP-FIX-47-BASHH OA-F2-MAP-FIX-48-EBENS OA-F2-MAP-FIX-49-JLOWW OA-F2-MAP-FIX-50-RW27L OA-F2-MAP-FIX-53-ZZIPR OA-F2-MAP-FIX-54-WELCM OA-F2-MAP-FIX-55-TEEOO OA-F2-MAP-FIX-56-MITEE OA-F2-MAP-FIX-57-BHAWK OA-F2-MAP-FIX-58-STNLE OA-F2-MAP-FIX-59-CUUPP OA-F2-MAP-FIX-60-CHMPN OA-F2-MAP-FIX-61-CLSBY OA-F2-MAP-FIX-62-FYTTE OA-F2-MAP-FIX-63-MOTRR OA-F2-MAP-FIX-64-COGSS OA-F2-MAP-FIX-65-MADII OA-F2-MAP-FIX-66-SOOLU OA-F2-MAP-FIX-67-JORJO OA-F2-MAP-FIX-68-MONKZ OA-F2-MAP-FIX-69-TONIE OA-F2-MAP-FIX-70-VOGLR OA-F2-MAP-FIX-71-LNDUH OA-F2-MAP-FIX-72-SNTOE OA-F2-MAP-FIX-73-KOENN OA-F2-MAP-FIX-74-MEMAW OA-F2-MAP-FIX-75-RZUKO OA-F2-MAP-FIX-76-HAZIL OA-F2-MAP-FIX-77-SEIKA OA-F2-MAP-FIX-78-RW28C OA-F2-MAP-FIX-81-FNT OA-F2-MAP-FIX-82-KAYYS OA-F2-MAP-FIX-83-LTOUR OA-F2-MAP-FIX-84-VIO OA-F2-MAP-FIX-85-DITCA OA-F2-MAP-FIX-86-WLTER OA-F2-MAP-FIX-87-RHIVR OA-F2-MAP-FIX-88-PAITN OA-F2-MAP-FIX-89-WYNDE OA-F2-MAP-FIX-90-FIYER OA-F2-MAP-FIX-91-ERNNY OA-F2-MAP-FIX-92-PAPPI OA-F2-MAP-FIX-93-TUBEZ OA-F2-MAP-FIX-94-VULCN OA-F2-MAP-FIX-95-KURKK OA-F2-MAP-FIX-96-BAMBB OA-F2-MAP-FIX-97-VOGLR OA-F2-MAP-FIX-98-MOTTT OA-F2-MAP-FIX-99-RICKV OA-F2-MAP-FIX-100-BLUTO OA-F2-MAP-FIX-101-ROCSE OA-F2-MAP-FIX-102-WAVIE OA-F2-MAP-FIX-103-ADAME OA-F2-MAP-FIX-104-WILLT OA-F2-MAP-FIX-105-RW28R OA-F2-MAP-27L OA-F2-MAP-28C OA-F2-MAP-28R OA-F2-MAP-KORD OA-F2-TRACK-SYMBOL OA-F2-COAST-MARKER OA-F2-UNCERTAINTY-MARKER OA-F2-REACQUISITION-MARKER OA-F2-CALLSIGN-CONFLICT OA-F2-TRAFFIC-IDENTITY-FIELD OA-F2-ALTITUDE-FIELD OA-F2-GROUNDSPEED-FIELD OA-F2-THREE-LINE-LABEL OA-F2-LABEL-PLACEMENT OA-F2-OPENATCA-PALETTE OA-F2-FOURTH-LINE-OMISSION OA-F2-CA-ACTIVE OA-F2-MSAW-UNAVAILABLE OA-F2-UNCONFIGURED-NETS OA-F2-SECTORS-ABSENT OA-F2-ENTRY-RECEIPT OA-F2-INTERACTION-STATUS" aria-label="OpenATCA synthetic Rust-rendered R-side preview"></canvas>
+          </div>
+          <p id="status" data-fidelity-id="OA-F2-HOST-STATUS" role="status" aria-live="polite">Waiting for a verified local demo WASM build.</p>
+          <p class="interaction-note" data-fidelity-id="OA-F2-COMMANDS-UNAVAILABLE">Prototype commands are unavailable in this preview. Click target selection is an OpenATCA interaction and is not an ERAM input method.</p>
+          <details class="diagnostics">
+            <summary>Build and replay diagnostics</summary>
+            <dl>
+              <dt>Build</dt><dd id="build-id" data-fidelity-id="OA-F2-BUILD-ID">Demo engine not loaded</dd>
+              <dt>Frame packet SHA-256</dt><dd id="frame-hash" data-fidelity-id="OA-F2-FRAME-HASH">—</dd>
+            </dl>
+            <p>Replay hashes establish determinism for this build and transcript only. They are not workstation-fidelity evidence.</p>
+          </details>
+        </section>
+
+        <aside class="fidelity-panel" aria-labelledby="fidelity-title">
+          <div class="panel-heading fidelity-heading">
+            <div>
+              <p class="eyebrow">SOURCE AND DIFFERENCES</p>
+              <h2 id="fidelity-title">What this preview shows</h2>
+            </div>
+            <span id="fidelity-count" class="fidelity-count">Loading…</span>
+          </div>
+          <p class="fidelity-intro">Each visible controller element and preview control has a trace ID. FAA task evidence does not establish current ERAM/STARS interface grammar or presentation.</p>
+          <div id="fidelity-list" class="fidelity-list" data-fidelity-id="OA-F2-DIFFERENCES-PANEL" aria-live="polite"></div>
+          <p id="fidelity-status" class="fidelity-status" role="status">Loading the fidelity registry.</p>
+        </aside>
+      </div>
+
+      <footer class="app-footer">
+        <span id="footer-status" data-fidelity-id="OA-F2-FOOTER-STATUS">Synthetic scenario · workstation commands unavailable</span>
+        <details data-fidelity-id="OA-F2-HOST-BOUNDARY">
+          <summary>Host boundary</summary>
+          <p>Rust owns scenario state, tracking, display-list construction and input processing. Browser code forwards bounded inputs and paints the Rust frame packet. Playback, navigation, diagnostics and this fidelity panel are OpenATCA application chrome.</p>
+        </details>
+      </footer>
+    </main>
+    <script type="module" src="./host.js"></script>
+  </body>
+</html>

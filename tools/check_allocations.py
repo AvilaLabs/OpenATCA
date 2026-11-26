@@ -69,6 +69,11 @@ def run(args):
             report["errors"].append("standalone lockfile missing or contains an external dependency")
         if not report["errors"]:
             operations = [
+                ("tracker-capacity-tests", [
+                    "test", "--manifest-path", str(repo / "Cargo.toml"), "-p", "oa-track-core",
+                    "--locked", "--offline", "--target-dir",
+                    str(target / "tracker-capacity-tests"), "--", "tracker::tests::",
+                ]),
                 ("format", ["fmt", "--manifest-path", str(manifest), "--", "--check"]),
                 ("lint", ["clippy", "--manifest-path", str(manifest), "--locked", "--all-targets",
                           "--target-dir", str(target), "--", "-D", "warnings"]),
@@ -110,7 +115,7 @@ def run(args):
             report["errors"].append("source changed during allocator check")
     except (OSError, ValueError, TypeError, subprocess.SubprocessError) as error:
         report["errors"].append(f"allocator check exception: {error}")
-    required = {"format", "lint", "build", "tests", "normal", "injected"}
+    required = {"tracker-capacity-tests", "format", "lint", "build", "tests", "normal", "injected"}
     commands = {item["name"]: item["status"] for item in report["commands"]}
     if any(commands.get(name) != "PASS" for name in required):
         report["errors"].append("required allocator checks did not all pass")

@@ -1,0 +1,22 @@
+[package]
+name = "oa-demo-scenario"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Workspace core dependencies (RULESET F1): navigation-free geometry and deterministic math.
+oa-geo = { path = "../oa-geo" }
+oa-ieee = { path = "../oa-ieee" }
+oa-math = { path = "../oa-math" }
+# Workspace shell dependencies (RULESET F1): portable CIFP source resolution and OASD digest validation.
+oa-arinc424 = { path = "../oa-arinc424" }
+oa-sha256 = { path = "../oa-sha256" }
+
+[package.metadata.openatca]
+class = "split"

@@ -73,12 +73,20 @@ dependencies = [
 name = "oa-adsb"
 version = "0.0.1"
 dependencies = [
+ "oa-adsb-model",
  "oa-feed",
  "oa-json",
  "oa-sealed",
  "oa-sha256",
  "oa-tar",
  "oa-zip",
+]
+
+[[package]]
+name = "oa-adsb-model"
+version = "0.0.1"
+dependencies = [
+ "oa-math",
 ]
 
 [[package]]

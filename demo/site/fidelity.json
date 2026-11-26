@@ -1,0 +1,2516 @@
+{
+  "schema": "openatca-demo-fidelity-v1",
+  "title": "R-side Scenario 1 preview fidelity registry",
+  "note": "This registry describes the current synthetic OpenATCA preview. A referenced FAA task or standard is not evidence of current ERAM/STARS interface parity.",
+  "groups": [
+    {
+      "id": "controller-view",
+      "title": "Controller view",
+      "entries": [
+        {
+          "id": "OA-F2-RSIDE-BANNER",
+          "label": "R-side prototype banner",
+          "confidence": "PRIMARY-FAA \u00b7 role context only",
+          "availability": "Visible \u00b7 OpenATCA difference",
+          "rows": [
+            "ERAM-R-01"
+          ],
+          "description": "The R-side role is documented in an FAA human-factors evaluation. This banner, role workflow and screen arrangement are OpenATCA content, not an ERAM specification.",
+          "sources": [
+            {
+              "label": "DOT/FAA/TC-12/62 \u00b7 SepMan 2 (role context)",
+              "confidence": "PRIMARY-FAA",
+              "href": "https://hf.tc.faa.gov/publications/2012-10-separation-management-sepman-2/"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-SURVEILLANCE-PICTURE",
+          "label": "Synthetic surveillance picture",
+          "confidence": "PRIMARY-FAA \u00b7 task requirements only",
+          "availability": "Visible \u00b7 OpenATCA drawing",
+          "rows": [
+            "ERAM-R-02"
+          ],
+          "description": "Shows a deterministic synthetic traffic scenario through the OpenATCA PVD-style drawing core. This is not a verified ERAM map, symbol set, or surveillance presentation.",
+          "sources": [
+            {
+              "label": "JO 7110.65BB \u00b7 radar identification and tracking procedures",
+              "confidence": "PRIMARY-FAA",
+              "href": "https://www.faa.gov/documentLibrary/media/Order/7110.65BB_Bsc_w_Chg_1_dtd_8-7-25.pdf"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-TRACK-SYMBOL",
+          "label": "Tracking target symbol",
+          "confidence": "OPENATCA-ONLY",
+          "availability": "Visible \u00b7 OpenATCA difference",
+          "rows": [],
+          "description": "Square outline and centre dot are OpenATCA symbols. No public source in the fidelity reference establishes this ERAM symbol shape.",
+          "sources": []
+        },
+        {
+          "id": "OA-F2-COAST-MARKER",
+          "label": "Coasting marker and CST tag",
+          "confidence": "OPENATCA-ONLY",
+          "availability": "Visible when synthetic track coasts \u00b7 OpenATCA difference",
+          "rows": [],
+          "description": "The X marker and CST text are OpenATCA encodings, not claimed ERAM status symbology.",
+          "sources": []
+        },
+        {
+          "id": "OA-F2-UNCERTAINTY-MARKER",
+          "label": "Uncertainty marker, radius and UNC/R95? tags",
+          "confidence": "OPENATCA-ONLY",
+          "availability": "Visible for synthetic uncertainty states \u00b7 OpenATCA difference",
+          "rows": [],
+          "description": "Diamond, radius circle, and tags describe OpenATCA tracker output. They do not claim the installed ERAM uncertainty display.",
+          "sources": []
+        },
+        {
+          "id": "OA-F2-REACQUISITION-MARKER",
+          "label": "Reacquisition ring and REACQ tag",
+          "confidence": "OPENATCA-ONLY",
+          "availability": "Visible for synthetic reacquisition states \u00b7 OpenATCA difference",
+          "rows": [],
+          "description": "The ring and tag are OpenATCA encodings; no current ERAM display source is asserted.",
+          "sources": []
+        },
+        {
+          "id": "OA-F2-CALLSIGN-CONFLICT",
+          "label": "Callsign conflict marker and CS? tag",
+          "confidence": "OPENATCA-ONLY",
+          "availability": "Visible for synthetic identity ambiguity \u00b7 OpenATCA difference",
+          "rows": [
+            "ERAM-R-02"
+          ],
+          "description": "Showing an address instead of choosing between two callsigns is OpenATCA behavior. ERAM responsibility for correct identity is relevant context, not evidence for this encoding.",
+          "sources": [
+            {
+              "label": "JO 7110.65BB \u00b7 aircraft identity responsibility",
+              "confidence": "PRIMARY-FAA",
+              "href": "https://www.faa.gov/documentLibrary/media/Order/7110.65BB_Bsc_w_Chg_1_dtd_8-7-25.pdf"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-TRAFFIC-IDENTITY-FIELD",
+          "label": "Synthetic callsign or hexadecimal address",
+          "confidence": "PRIMARY-FAA \u00b7 identity responsibility only",
+          "availability": "Visible \u00b7 synthetic values",
+          "rows": [
+            "ERAM-R-02",
+            "ERAM-R-07"
+          ],
+          "description": "All displayed identities are generated for the demo. The report does not contain real aircraft identifiers, and the selected target is not an ERAM identity-entry workflow.",
+          "sources": [
+            {
+              "label": "JO 7110.65BB \u00b7 aircraft identity responsibility",
+              "confidence": "PRIMARY-FAA",
+              "href": "https://www.faa.gov/documentLibrary/media/Order/7110.65BB_Bsc_w_Chg_1_dtd_8-7-25.pdf"
+            },
+            {
+              "label": "DOT/FAA/TC-TN06/04 \u00b7 legacy FLID task study",
+              "confidence": "PRIMARY-FAA \u00b7 historical",
+              "href": "https://hf.tc.faa.gov/publications/2006-en-route-air-traffic-controller-commands/full_text.pdf"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-ALTITUDE-FIELD",
+          "label": "Altitude label",
+          "confidence": "PRIMARY-FAA \u00b7 requirement only",
+          "availability": "Visible \u00b7 OpenATCA field format",
+          "rows": [
+            "ERAM-R-03",
+            "ERAM-R-04",
+            "ERAM-R-05"
+          ],
+          "description": "Altitude is shown in hundreds of feet as an OpenATCA label. No ERAM block field order, abbreviations, arrows, or assigned-state encoding is claimed.",
+          "sources": [
+            {
+              "label": "JO 7110.65BB \u00b7 data blocks and altitude status",
+              "confidence": "PRIMARY-FAA",
+              "href": "https://www.faa.gov/documentLibrary/media/Order/7110.65BB_Bsc_w_Chg_1_dtd_8-7-25.pdf"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-GROUNDSPEED-FIELD",
+          "label": "Ground-speed label",
+          "confidence": "PRIMARY-FAA \u00b7 task context only",
+          "availability": "Visible \u00b7 OpenATCA field format",
+          "rows": [
+            "ERAM-R-03",
+            "ERAM-R-04",
+            "ERAM-R-06"
+          ],
+          "description": "Ground speed is drawn in an OpenATCA three-line data label. ERAM fourth-line format and local authorization are not represented.",
+          "sources": [
+            {
+              "label": "JO 7110.65BB \u00b7 data block and fourth-line rules",
+              "confidence": "PRIMARY-FAA",
+              "href": "https://www.faa.gov/documentLibrary/media/Order/7110.65BB_Bsc_w_Chg_1_dtd_8-7-25.pdf"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-THREE-LINE-LABEL",
+          "label": "Three-line traffic label and state tags",
+          "confidence": "PRIMARY-FAA \u00b7 requirement context only",
+          "availability": "Visible \u00b7 OpenATCA difference",
+          "rows": [
+            "ERAM-R-03",
+            "ERAM-R-04",
+            "ERAM-R-05",
+            "ERAM-R-06",
+            "ERAM-R-11"
+          ],
+          "description": "The prototype label has three lines. FAA guidance requires a fourth line in the stated context, but public sources do not supply the local field layout. This preview does not implement that ERAM block format.",
+          "sources": [
+            {
+              "label": "JO 7110.65BB \u00b7 data block and fourth-line rules",
+              "confidence": "PRIMARY-FAA",
+              "href": "https://www.faa.gov/documentLibrary/media/Order/7110.65BB_Bsc_w_Chg_1_dtd_8-7-25.pdf"
+            },
+            {
+              "label": "vice ERAM overview \u00b7 community comparison only",
+              "confidence": "COMMUNITY",
+              "href": "https://pharr.org/vice"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-TARGET-SELECTION",
+          "label": "Pointer target selection and SELECT RAW/FLT label",
+          "confidence": "PRIMARY-FAA \u00b7 historical identity-task context only",
+          "availability": "Available \u00b7 OpenATCA pointer interaction",
+          "rows": [
+            "ERAM-R-07"
+          ],
+          "description": "Nearest-target selection within the prototype hit radius and its selection labels are OpenATCA behavior. Current ERAM selector controls and exact state transitions are not established by the referenced legacy study.",
+          "sources": [
+            {
+              "label": "DOT/FAA/TC-TN06/04 \u00b7 legacy FLID and selection study",
+              "confidence": "PRIMARY-FAA \u00b7 historical",
+              "href": "https://hf.tc.faa.gov/publications/2006-en-route-air-traffic-controller-commands/full_text.pdf"
+            },
+            {
+              "label": "vice TBP/TBE notes \u00b7 community only",
+              "confidence": "COMMUNITY",
+              "href": "https://pharr.org/vice"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-OPENATCA-PALETTE",
+          "label": "OpenATCA palette and alert color",
+          "confidence": "PRIMARY-FAA \u00b7 palette policy, not installed palette evidence",
+          "availability": "Visible \u00b7 OpenATCA palette",
+          "rows": [
+            "ERAM-R-20"
+          ],
+          "description": "FAA standards and policy provide color-use constraints. The prototype palette is not established as matching installed ERAM/STARS colors or field-by-field assignments.",
+          "sources": [
+            {
+              "label": "FAA-HF-STD-010A \u00b7 ATC display color standard",
+              "confidence": "PRIMARY-FAA",
+              "href": "https://rosap.ntl.bts.gov/view/dot/92012"
+            },
+            {
+              "label": "JO 7210.3EE Change 3 \u00b7 terminal color policy",
+              "confidence": "PRIMARY-FAA",
+              "href": "https://www.faa.gov/documentLibrary/media/Order/7210.3EE_Chg_3_dtd_7-9-26_Final.pdf"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-FOURTH-LINE-OMISSION",
+          "label": "Fourth-line ERAM data block content",
+          "confidence": "PRIMARY-FAA \u00b7 requirement only",
+          "availability": "Not implemented \u00b7 explicit difference",
+          "rows": [
+            "ERAM-R-06"
+          ],
+          "description": "This prototype uses a three-line label and does not show the required fourth-line content for the stated ERAM context. Do not infer a field or fill it with invented text.",
+          "sources": [
+            {
+              "label": "JO 7110.65BB \u00a75-4-10",
+              "confidence": "PRIMARY-FAA",
+              "href": "https://www.faa.gov/documentLibrary/media/Order/7110.65BB_Bsc_w_Chg_1_dtd_8-7-25.pdf"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-CA-ACTIVE",
+          "label": "Live Conflict Alert status",
+          "confidence": "PRIMARY-FAA \u00b7 procedure only",
+          "availability": "Active \u00b7 real OpenATCA CA",
+          "rows": [
+            "ERAM-R-13",
+            "STARS-04"
+          ],
+          "description": "The engine runs oa-ca at every5-second scan after reports at that timestamp. Its active pair count and running/degraded/unavailable state drive the status line. Preview adaptation:3NM/1000ft,60-second lookahead,5-second hysteresis,60tracks and1770pairs; these are explicit development values, not ERAM/STARS facility settings. Mode C Intruder is not configured.",
+          "sources": [
+            {
+              "label": "JO 7110.65BB \u00b7 CA/MCI procedures",
+              "confidence": "PRIMARY-FAA",
+              "href": "https://www.faa.gov/documentLibrary/media/Order/7110.65BB_Bsc_w_Chg_1_dtd_8-7-25.pdf"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MSAW-UNAVAILABLE",
+          "label": "Minimum Safe Altitude Warning",
+          "confidence": "PRIMARY-FAA \u00b7 procedure only",
+          "availability": "Not configured \u00b7 grey preview status",
+          "rows": [
+            "ERAM-R-14",
+            "STARS-05"
+          ],
+          "description": "Terrain/obstacle coverage and altimeter adaptation are not configured. Public Chicago MVA data alone is not an MSAW warning floor. The grey notice states this preview limit; it is not a failed running safety net.",
+          "sources": [
+            {
+              "label": "JO 7110.65BB \u00b7 MSAW procedures",
+              "confidence": "PRIMARY-FAA",
+              "href": "https://www.faa.gov/documentLibrary/media/Order/7110.65BB_Bsc_w_Chg_1_dtd_8-7-25.pdf"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-SECTORS-ABSENT",
+          "label": "Facility sectors and frequencies",
+          "confidence": "OPENATCA-ONLY \u00b7 no facility adaptation source",
+          "availability": "Not shown",
+          "rows": [],
+          "description": "No real ZAU/C90 sector names, frequencies, or facility adaptation are displayed. The scenario uses synthetic traffic and public procedure geometry only.",
+          "sources": []
+        },
+        {
+          "id": "OA-F2-VIEW-RANGE-PAN",
+          "label": "Engine-owned range and pan",
+          "confidence": "OPENATCA-ONLY",
+          "availability": "Active \u00b7 OpenATCA difference",
+          "rows": [
+            "F2-VIEW-01"
+          ],
+          "description": "Initial KORD-centered range fits scenario entry positions with a ten percent margin. Focus the scope: minus increases range, equals decreases range, arrows pan ten percent of range, Home centers KORD. The range shown in the Rust frame is engine state. These preview keys are not asserted to be ERAM controls.",
+          "sources": []
+        },
+        {
+          "id": "OA-F2-LABEL-PLACEMENT",
+          "label": "Deterministic data-block placement and leader",
+          "confidence": "OPENATCA-ONLY",
+          "availability": "Active \u00b7 OpenATCA difference",
+          "rows": [
+            "F2-LABEL-01"
+          ],
+          "description": "Rust greedily chooses one of eight label positions in stable target order, minimizing label/label and label/target overlap plus off-scope area. Equal scores retain the default upper-right position. Each label is linked to its target by a leader. Placement is not asserted to match deployed ERAM.",
+          "sources": []
+        },
+        {
+          "id": "OA-F2-UNCONFIGURED-NETS",
+          "label": "Approach-path and area-proximity preview limits",
+          "confidence": "OPENATCA-ONLY",
+          "availability": "Not configured \u00b7 grey preview status",
+          "rows": [
+            "F2-SAFETY-01"
+          ],
+          "description": "Approach-path monitoring and area proximity are not configured in this preview. These are grey configuration notices; real CA failures still appear as alerts.",
+          "sources": []
+        }
+      ]
+    },
+    {
+      "id": "command-availability",
+      "title": "Workstation actions \u00b7 unavailable in this preview",
+      "entries": [
+        {
+          "id": "OA-F2-ACT-READOUT",
+          "label": "Flight-plan readout",
+          "confidence": "COMMUNITY \u00b7 command example; FAA task priority is historical",
+          "availability": "Unavailable \u00b7 input syntax not verified",
+          "rows": [
+            "ERAM-CMD-10",
+            "ERAM-R-18",
+            "ERAM-R-19"
+          ],
+          "description": "No command is enabled in the initial preview. The row supports task priority or community context, not current ERAM grammar or response text.",
+          "sources": [
+            {
+              "label": "DOT/FAA/TC-TN06/04 \u00b7 historical task frequency",
+              "confidence": "PRIMARY-FAA \u00b7 historical",
+              "href": "https://hf.tc.faa.gov/publications/2006-en-route-air-traffic-controller-commands/full_text.pdf"
+            },
+            {
+              "label": "vice ERAM documentation \u00b7 community syntax",
+              "confidence": "COMMUNITY",
+              "href": "https://pharr.org/vice"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-ACT-ROUTE",
+          "label": "Route display or amendment",
+          "confidence": "COMMUNITY \u00b7 task mapping not exact",
+          "availability": "Unavailable \u00b7 input syntax and behavior not verified",
+          "rows": [
+            "ERAM-CMD-06",
+            "ERAM-CMD-30",
+            "ERAM-R-18",
+            "ERAM-R-19"
+          ],
+          "description": "The current prototype route toggle is not the same as every community-documented route display/amendment form.",
+          "sources": [
+            {
+              "label": "DOT/FAA/TC-TN06/04 \u00b7 historical task frequency",
+              "confidence": "PRIMARY-FAA \u00b7 historical",
+              "href": "https://hf.tc.faa.gov/publications/2006-en-route-air-traffic-controller-commands/full_text.pdf"
+            },
+            {
+              "label": "vNAS CRC ERAM manual \u00b7 community comparison",
+              "confidence": "COMMUNITY",
+              "href": "https://docs.virtualnas.net/crc/eram/"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-ACT-ALTITUDES",
+          "label": "Assigned and interim altitude entries",
+          "confidence": "PRIMARY-FAA \u00b7 task context; syntax is not verified",
+          "availability": "Unavailable \u00b7 input syntax not verified",
+          "rows": [
+            "ERAM-CMD-04",
+            "ERAM-CMD-16",
+            "ERAM-CMD-17",
+            "ERAM-R-05",
+            "ERAM-R-17"
+          ],
+          "description": "FAA material supports the operational concepts and legacy command study frequency, but not this prototype's text grammar or response. Assigning altitude in the prototype flight table is not a pilot clearance.",
+          "sources": [
+            {
+              "label": "JO 7110.65BB \u00b7 altitude assignment procedures",
+              "confidence": "PRIMARY-FAA",
+              "href": "https://www.faa.gov/documentLibrary/media/Order/7110.65BB_Bsc_w_Chg_1_dtd_8-7-25.pdf"
+            },
+            {
+              "label": "DOT/FAA/TC-TN06/04 \u00b7 historical task frequency",
+              "confidence": "PRIMARY-FAA \u00b7 historical",
+              "href": "https://hf.tc.faa.gov/publications/2006-en-route-air-traffic-controller-commands/full_text.pdf"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-ACT-ANNOTATION",
+          "label": "Data-block annotation / fourth-line amendment",
+          "confidence": "COMMUNITY \u00b7 syntax example; FAA context only",
+          "availability": "Unavailable \u00b7 local format not verified",
+          "rows": [
+            "ERAM-CMD-18",
+            "ERAM-R-06",
+            "ERAM-R-17",
+            "ERAM-R-28"
+          ],
+          "description": "No annotation command is enabled. Fourth-line content is subject to authorized messages, directives, and LOAs; the prototype annotation field is not an ERAM field layout.",
+          "sources": [
+            {
+              "label": "JO 7110.65BB \u00b7 fourth-line rules",
+              "confidence": "PRIMARY-FAA",
+              "href": "https://www.faa.gov/documentLibrary/media/Order/7110.65BB_Bsc_w_Chg_1_dtd_8-7-25.pdf"
+            },
+            {
+              "label": "vNAS CRC ERAM manual \u00b7 community comparison",
+              "confidence": "COMMUNITY",
+              "href": "https://docs.virtualnas.net/crc/eram/"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-ACT-HANDOFF",
+          "label": "Handoff offer, acceptance, control transfer or retraction",
+          "confidence": "PRIMARY-FAA \u00b7 procedure context only",
+          "availability": "Unavailable \u00b7 workflow and grammar not verified",
+          "rows": [
+            "ERAM-CMD-02",
+            "ERAM-CMD-03",
+            "ERAM-R-12"
+          ],
+          "description": "Transfer and handoff procedures are documented, but this prototype workflow, control-taking behavior, command forms, and display transitions are not an ERAM operator-manual specification.",
+          "sources": [
+            {
+              "label": "JO 7110.65BB \u00b7 transfer and coordination procedures",
+              "confidence": "PRIMARY-FAA",
+              "href": "https://www.faa.gov/documentLibrary/media/Order/7110.65BB_Bsc_w_Chg_1_dtd_8-7-25.pdf"
+            },
+            {
+              "label": "DOT/FAA/TC-TN06/04 \u00b7 historical task frequency",
+              "confidence": "PRIMARY-FAA \u00b7 historical",
+              "href": "https://hf.tc.faa.gov/publications/2006-en-route-air-traffic-controller-commands/full_text.pdf"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-ACT-POINT-OUT",
+          "label": "Point-out and acknowledgment",
+          "confidence": "PRIMARY-FAA \u00b7 procedure context only",
+          "availability": "Unavailable \u00b7 workflow and grammar not verified",
+          "rows": [
+            "ERAM-CMD-19",
+            "ERAM-R-12"
+          ],
+          "description": "Coordination procedures support the task, not the prototype command grammar, acknowledgment display, or response text.",
+          "sources": [
+            {
+              "label": "JO 7110.65BB \u00b7 point-out procedures",
+              "confidence": "PRIMARY-FAA",
+              "href": "https://www.faa.gov/documentLibrary/media/Order/7110.65BB_Bsc_w_Chg_1_dtd_8-7-25.pdf"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-ACT-VOICE",
+          "label": "Voice-status toggle",
+          "confidence": "OPENATCA-ONLY",
+          "availability": "Unavailable \u00b7 no fidelity row",
+          "rows": [],
+          "description": "This prototype action has no established ERAM equivalent in the reviewed sources. It is not sign-in, not a voice service, and not supported by ERAM-R-22.",
+          "sources": []
+        },
+        {
+          "id": "OA-F2-ACT-OFFSET",
+          "label": "Data-block offset",
+          "confidence": "PRIMARY-FAA historical task; COMMUNITY interaction example",
+          "availability": "Unavailable \u00b7 input mapping not verified",
+          "rows": [
+            "ERAM-CMD-01"
+          ],
+          "description": "The frequency study identifies an old task category and CRC describes related positioning controls. Neither establishes this prototype's exact action or deployed ERAM input mapping.",
+          "sources": [
+            {
+              "label": "DOT/FAA/TC-TN06/04 \u00b7 historical task frequency",
+              "confidence": "PRIMARY-FAA \u00b7 historical",
+              "href": "https://hf.tc.faa.gov/publications/2006-en-route-air-traffic-controller-commands/full_text.pdf"
+            },
+            {
+              "label": "vNAS CRC ERAM manual \u00b7 community comparison",
+              "confidence": "COMMUNITY",
+              "href": "https://docs.virtualnas.net/crc/eram/"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-ACT-RANGE",
+          "label": "Range adjustment",
+          "confidence": "PRIMARY-FAA \u00b7 historical task priority only",
+          "availability": "Unavailable \u00b7 control mapping not verified",
+          "rows": [
+            "ERAM-CMD-14"
+          ],
+          "description": "The legacy sample classifies range adjustment, but does not specify current ERAM controls, range steps, or response.",
+          "sources": [
+            {
+              "label": "DOT/FAA/TC-TN06/04 \u00b7 historical task frequency",
+              "confidence": "PRIMARY-FAA \u00b7 historical",
+              "href": "https://hf.tc.faa.gov/publications/2006-en-route-air-traffic-controller-commands/full_text.pdf"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-ACT-FILTER",
+          "label": "Altitude filter preference",
+          "confidence": "OPENATCA-ONLY \u00b7 not equivalent to the legacy combined filter task",
+          "availability": "Unavailable \u00b7 no matching fidelity row",
+          "rows": [
+            "ERAM-CMD-23"
+          ],
+          "description": "The prototype floor/ceiling preference is not asserted to match the legacy combined-toggle filter category.",
+          "sources": [
+            {
+              "label": "DOT/FAA/TC-TN06/04 \u00b7 legacy category only",
+              "confidence": "PRIMARY-FAA \u00b7 historical",
+              "href": "https://hf.tc.faa.gov/publications/2006-en-route-air-traffic-controller-commands/full_text.pdf"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-ACT-HISTORY",
+          "label": "History-trail length preference",
+          "confidence": "OPENATCA-ONLY",
+          "availability": "Unavailable \u00b7 no fidelity row",
+          "rows": [],
+          "description": "This local display preference has no claimed ERAM command or equivalent behavior.",
+          "sources": []
+        },
+        {
+          "id": "OA-F2-ACT-VECTOR",
+          "label": "Velocity-vector length preference",
+          "confidence": "COMMUNITY \u00b7 historical category equivalence is unverified",
+          "availability": "Unavailable \u00b7 unsupported in the default preview",
+          "rows": [
+            "ERAM-CMD-05",
+            "ERAM-R-34"
+          ],
+          "description": "The prototype vector preference is disabled. Community vector controls do not prove equivalence to the legacy frequency category or current ERAM controls.",
+          "sources": [
+            {
+              "label": "DOT/FAA/TC-TN06/04 \u00b7 historical task category",
+              "confidence": "PRIMARY-FAA \u00b7 historical",
+              "href": "https://hf.tc.faa.gov/publications/2006-en-route-air-traffic-controller-commands/full_text.pdf"
+            },
+            {
+              "label": "vNAS CRC ERAM manual \u00b7 community comparison",
+              "confidence": "COMMUNITY",
+              "href": "https://docs.virtualnas.net/crc/eram/"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "responses-and-controls",
+      "title": "Responses and application controls",
+      "entries": [
+        {
+          "id": "OA-F2-ENTRY-RECEIPT",
+          "label": "OPENATCA ENTRY APPLIED / UNCHANGED / REFUSED",
+          "confidence": "OPENATCA-ONLY",
+          "availability": "Visible only for existing prototype input",
+          "rows": [
+            "ERAM-R-09"
+          ],
+          "description": "These are OpenATCA entry outcomes. They are not ERAM response wording. The initial preview blocks prototype commands through the default-availability gate.",
+          "sources": [
+            {
+              "label": "JO 7110.65BB \u00b7 response procedure context",
+              "confidence": "PRIMARY-FAA \u00b7 not wording evidence",
+              "href": "https://www.faa.gov/documentLibrary/media/Order/7110.65BB_Bsc_w_Chg_1_dtd_8-7-25.pdf"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-INTERACTION-STATUS",
+          "label": "CMD PENDING / ACCEPTED / REFUSED / STALE and refusal reason labels",
+          "confidence": "OPENATCA-ONLY",
+          "availability": "Visible for engine interaction state",
+          "rows": [
+            "ERAM-R-09"
+          ],
+          "description": "Typed queue states and the refusal text are OpenATCA outcomes. The source does not establish ERAM wording, color, sound, or acknowledgment behavior.",
+          "sources": [
+            {
+              "label": "vice ERAM overview \u00b7 response-area comparison only",
+              "confidence": "COMMUNITY",
+              "href": "https://pharr.org/vice"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-PLAY-PAUSE",
+          "label": "Play / pause",
+          "confidence": "OPENATCA-ONLY",
+          "availability": "Available \u00b7 outside controller canvas",
+          "rows": [],
+          "description": "Paces the fixed synthetic scenario from browser monotonic time. This is application playback, not an ERAM control.",
+          "sources": []
+        },
+        {
+          "id": "OA-F2-PLAYBACK-SPEED",
+          "label": "Playback speed selector",
+          "confidence": "OPENATCA-ONLY",
+          "availability": "Available \u00b7 outside controller canvas",
+          "rows": [],
+          "description": "Selects 1\u00d7, 2\u00d7, 4\u00d7 or 8\u00d7 synthetic virtual-time pacing. This is application playback, not an ERAM control.",
+          "sources": []
+        },
+        {
+          "id": "OA-F2-STEP-TIME",
+          "label": "Step virtual time 5 seconds",
+          "confidence": "OPENATCA-ONLY",
+          "availability": "Available \u00b7 outside controller canvas",
+          "rows": [],
+          "description": "Advances the synthetic scenario clock by one report interval. This is application playback, not a controller time control.",
+          "sources": []
+        },
+        {
+          "id": "OA-F2-SKIP-ONE-MINUTE",
+          "label": "Skip demo time 1 minute",
+          "confidence": "OPENATCA-ONLY",
+          "availability": "Available \u00b7 outside controller canvas",
+          "rows": [],
+          "description": "Advances the synthetic scenario clock by one minute. This is application playback, not a controller time control.",
+          "sources": []
+        },
+        {
+          "id": "OA-F2-SKIP-FIVE-MINUTES",
+          "label": "Skip demo time 5 minutes",
+          "confidence": "OPENATCA-ONLY",
+          "availability": "Available \u00b7 outside controller canvas",
+          "rows": [],
+          "description": "Advances the synthetic scenario clock by five minutes. This is application playback, not a controller time control.",
+          "sources": []
+        },
+        {
+          "id": "OA-F2-PLAYBACK-BAR",
+          "label": "Demo playback bar and outside-display boundary",
+          "confidence": "OPENATCA-ONLY",
+          "availability": "Visible application chrome",
+          "rows": [],
+          "description": "Separates browser scenario controls from the synthetic controller-view canvas.",
+          "sources": []
+        },
+        {
+          "id": "OA-F2-VIRTUAL-TIME",
+          "label": "Demo virtual-time readout",
+          "confidence": "OPENATCA-ONLY",
+          "availability": "Visible \u00b7 outside controller canvas",
+          "rows": [],
+          "description": "Shows the scenario clock. It is not the ERAM Zulu/time view.",
+          "sources": []
+        },
+        {
+          "id": "OA-F2-TRACE-SAVE",
+          "label": "Save replay trace",
+          "confidence": "OPENATCA-ONLY",
+          "availability": "Available \u00b7 outside controller canvas",
+          "rows": [],
+          "description": "Saves bounded input, status, virtual-time and frame-hash records for developer replay. It is not an FAA operational record.",
+          "sources": []
+        },
+        {
+          "id": "OA-F2-BUILD-ID",
+          "label": "Build identity",
+          "confidence": "OPENATCA-ONLY",
+          "availability": "Available in collapsed diagnostics",
+          "rows": [],
+          "description": "Technical build metadata; not controller data shown by ERAM/STARS.",
+          "sources": []
+        },
+        {
+          "id": "OA-F2-FRAME-HASH",
+          "label": "Frame-packet hash",
+          "confidence": "OPENATCA-ONLY",
+          "availability": "Available in collapsed diagnostics",
+          "rows": [],
+          "description": "Raster determinism metadata; not an operational status or controller display field.",
+          "sources": []
+        },
+        {
+          "id": "OA-F2-HOST-STATUS",
+          "label": "Host load and playback status",
+          "confidence": "OPENATCA-ONLY",
+          "availability": "Visible application status",
+          "rows": [],
+          "description": "Reports local engine loading and demo playback state. It is not an ERAM response or system-status indicator.",
+          "sources": []
+        },
+        {
+          "id": "OA-F2-RSIDE-NAV",
+          "label": "R-side role selection",
+          "confidence": "OPENATCA-ONLY",
+          "availability": "Selected \u00b7 only implemented role",
+          "rows": [],
+          "description": "Selects the one implemented preview role.",
+          "sources": []
+        },
+        {
+          "id": "OA-F2-DSIDE-NAV",
+          "label": "D-side role selection",
+          "confidence": "OPENATCA-ONLY",
+          "availability": "Disabled \u00b7 not implemented",
+          "rows": [],
+          "description": "No D-side workstation or associate workflow is included in this preview.",
+          "sources": []
+        },
+        {
+          "id": "OA-F2-TCW-NAV",
+          "label": "STARS TCW role selection",
+          "confidence": "OPENATCA-ONLY",
+          "availability": "Disabled \u00b7 not implemented",
+          "rows": [],
+          "description": "No STARS terminal-control workstation is included in this preview.",
+          "sources": []
+        },
+        {
+          "id": "OA-F2-TDW-NAV",
+          "label": "STARS TDW role selection",
+          "confidence": "OPENATCA-ONLY",
+          "availability": "Disabled \u00b7 not implemented",
+          "rows": [],
+          "description": "No tower display workstation is included in this preview.",
+          "sources": []
+        },
+        {
+          "id": "OA-F2-SCENARIO-1-NAV",
+          "label": "Scenario 1 selection and source note",
+          "confidence": "OPENATCA-ONLY",
+          "availability": "Selected \u00b7 only implemented scenario",
+          "rows": [],
+          "description": "Selects the synthetic normal-push scenario for KORD/ORD public-procedure geometry. No SWIM content is included.",
+          "sources": []
+        },
+        {
+          "id": "OA-F2-SCENARIO-2-NAV",
+          "label": "Scenario 2 selection",
+          "confidence": "OPENATCA-ONLY",
+          "availability": "Disabled \u00b7 not implemented",
+          "rows": [],
+          "description": "No conflict/alert exercise is included in this preview.",
+          "sources": []
+        },
+        {
+          "id": "OA-F2-SCENARIO-3-NAV",
+          "label": "Scenario 3 selection",
+          "confidence": "OPENATCA-ONLY",
+          "availability": "Disabled \u00b7 not implemented",
+          "rows": [],
+          "description": "No surveillance-loss exercise is included in this preview.",
+          "sources": []
+        },
+        {
+          "id": "OA-F2-APP-IDENTITY",
+          "label": "OpenATCA title, mark and synthetic-preview disclosure",
+          "confidence": "OPENATCA-ONLY",
+          "availability": "Visible application chrome",
+          "rows": [],
+          "description": "Identifies this page as a synthetic OpenATCA preview and states that it is not an ERAM/STARS interface or operational display.",
+          "sources": []
+        },
+        {
+          "id": "OA-F2-DISPLAY-PANEL-HEADING",
+          "label": "R-side prototype panel heading and Preview badge",
+          "confidence": "OPENATCA-ONLY",
+          "availability": "Visible application chrome",
+          "rows": [],
+          "description": "Labels the synthetic canvas as an OpenATCA prototype view and not facility adaptation.",
+          "sources": []
+        },
+        {
+          "id": "OA-F2-COMMANDS-UNAVAILABLE",
+          "label": "Unavailable prototype command disclosure",
+          "confidence": "OPENATCA-ONLY",
+          "availability": "Visible \u00b7 command input refused at runtime",
+          "rows": [],
+          "description": "States that prototype commands are not available in this preview. The runtime gate refuses them before state mutation.",
+          "sources": []
+        },
+        {
+          "id": "OA-F2-HOST-BOUNDARY",
+          "label": "Host boundary disclosure",
+          "confidence": "OPENATCA-ONLY",
+          "availability": "Available in collapsed details",
+          "rows": [],
+          "description": "Describes the local Rust/WebAssembly and browser-host boundary; it is explanatory application text.",
+          "sources": []
+        },
+        {
+          "id": "OA-F2-FOOTER-STATUS",
+          "label": "Footer status",
+          "confidence": "OPENATCA-ONLY",
+          "availability": "Visible application chrome",
+          "rows": [],
+          "description": "Identifies the scenario as synthetic and workstation commands as unavailable.",
+          "sources": []
+        },
+        {
+          "id": "OA-F2-DIFFERENCES-PANEL",
+          "label": "Source and differences panel",
+          "confidence": "OPENATCA-ONLY \u00b7 app metadata linked to cited rows",
+          "availability": "Available \u00b7 application chrome",
+          "rows": [],
+          "description": "This panel is an OpenATCA disclosure list. Each row states confidence, source links and whether an element is unavailable or differs from the cited task-level evidence.",
+          "sources": []
+        }
+      ]
+    },
+    {
+      "title": "Public CIFP map",
+      "entries": [
+        {
+          "id": "OA-F2-MAP-FIX-5-IRK",
+          "label": "Public CIFP fix IRK",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 401350167, -925917139 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-6-LOAMY",
+          "label": "Public CIFP fix LOAMY",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 404245306, -917844000 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-7-KEOKK",
+          "label": "Public CIFP fix KEOKK",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 405534028, -914036667 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-8-DRAMS",
+          "label": "Public CIFP fix DRAMS",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 408258972, -905982722 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-9-RYELY",
+          "label": "Public CIFP fix RYELY",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 410333333, -899725000 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-10-BFORD",
+          "label": "Public CIFP fix BFORD",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 411600917, -895874111 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-11-BYLAW",
+          "label": "Public CIFP fix BYLAW",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 412863500, -892758444 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-12-BENKY",
+          "label": "Public CIFP fix BENKY",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 415118306, -887090167 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-13-NEWRK",
+          "label": "Public CIFP fix NEWRK",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 415661250, -885711194 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-14-AHSTN",
+          "label": "Public CIFP fix AHSTN",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 417126611, -883573361 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-15-PETAH",
+          "label": "Public CIFP fix PETAH",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 418855167, -881500583 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-16-JORJO",
+          "label": "Public CIFP fix JORJO",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 418844833, -879885500 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-17-MONKZ",
+          "label": "Public CIFP fix MONKZ",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 418843306, -878017972 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-18-TONIE",
+          "label": "Public CIFP fix TONIE",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 418837139, -874907639 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-19-VOGLR",
+          "label": "Public CIFP fix VOGLR",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 419450000, -869186111 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Incoming connection is a labelled synthetic DCT, drawn dashed.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-20-NRMAH",
+          "label": "Public CIFP fix NRMAH",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 419823833, -873016528 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-21-JOEBO",
+          "label": "Public CIFP fix JOEBO",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 419827222, -873718222 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-22-GRABL",
+          "label": "Public CIFP fix GRABL",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 419830194, -874419917 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-23-RIPPR",
+          "label": "Public CIFP fix RIPPR",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 419832722, -875121639 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-24-BASHH",
+          "label": "Public CIFP fix BASHH",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 419834833, -875823333 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-25-EBENS",
+          "label": "Public CIFP fix EBENS",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 419836528, -876525056 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-26-JLOWW",
+          "label": "Public CIFP fix JLOWW",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 419838528, -877853750 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-27-RW27L",
+          "label": "Public CIFP fix RW27L",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 419839000, -878901556 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-30-FWA",
+          "label": "Public CIFP fix FWA",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 409790639, -851880583 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-31-PRONK",
+          "label": "Public CIFP fix PRONK",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 411782667, -854773361 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-32-DAIFE",
+          "label": "Public CIFP fix DAIFE",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 412688889, -858552778 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-33-WATSN",
+          "label": "Public CIFP fix WATSN",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 412834528, -860353361 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-34-MKITA",
+          "label": "Public CIFP fix MKITA",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 414000000, -866927778 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-35-ESSPO",
+          "label": "Public CIFP fix ESSPO",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 415817361, -872440833 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-36-LAACY",
+          "label": "Public CIFP fix LAACY",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 416997278, -874001028 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-37-IZARD",
+          "label": "Public CIFP fix IZARD",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 417869611, -874976917 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-38-CABIJ",
+          "label": "Public CIFP fix CABIJ",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 418883417, -876102361 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-39-MONKZ",
+          "label": "Public CIFP fix MONKZ",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 418843306, -878017972 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-40-JORJO",
+          "label": "Public CIFP fix JORJO",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 418844833, -879885500 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-41-POSSM",
+          "label": "Public CIFP fix POSSM",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 418746611, -882751750 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-42-VOGLR",
+          "label": "Public CIFP fix VOGLR",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 419450000, -869186111 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Incoming connection is a labelled synthetic DCT, drawn dashed.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-43-NRMAH",
+          "label": "Public CIFP fix NRMAH",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 419823833, -873016528 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-44-JOEBO",
+          "label": "Public CIFP fix JOEBO",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 419827222, -873718222 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-45-GRABL",
+          "label": "Public CIFP fix GRABL",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 419830194, -874419917 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-46-RIPPR",
+          "label": "Public CIFP fix RIPPR",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 419832722, -875121639 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-47-BASHH",
+          "label": "Public CIFP fix BASHH",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 419834833, -875823333 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-48-EBENS",
+          "label": "Public CIFP fix EBENS",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 419836528, -876525056 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-49-JLOWW",
+          "label": "Public CIFP fix JLOWW",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 419838528, -877853750 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-50-RW27L",
+          "label": "Public CIFP fix RW27L",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 419839000, -878901556 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-53-ZZIPR",
+          "label": "Public CIFP fix ZZIPR",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 431858333, -916591667 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-54-WELCM",
+          "label": "Public CIFP fix WELCM",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 430513000, -912703806 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-55-TEEOO",
+          "label": "Public CIFP fix TEEOO",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 428576722, -907171778 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-56-MITEE",
+          "label": "Public CIFP fix MITEE",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 427015889, -902794417 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-57-BHAWK",
+          "label": "Public CIFP fix BHAWK",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 425184694, -897768917 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-58-STNLE",
+          "label": "Public CIFP fix STNLE",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 424727889, -894040389 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-59-CUUPP",
+          "label": "Public CIFP fix CUUPP",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 424379056, -891215056 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-60-CHMPN",
+          "label": "Public CIFP fix CHMPN",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 424298750, -890588028 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-61-CLSBY",
+          "label": "Public CIFP fix CLSBY",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 424091111, -888937417 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-62-FYTTE",
+          "label": "Public CIFP fix FYTTE",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 423800611, -886677917 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-63-MOTRR",
+          "label": "Public CIFP fix MOTRR",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 423584917, -885028750 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-64-COGSS",
+          "label": "Public CIFP fix COGSS",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 423442722, -883949028 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-65-MADII",
+          "label": "Public CIFP fix MADII",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 423009639, -883138139 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-66-SOOLU",
+          "label": "Public CIFP fix SOOLU",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 421963750, -881476944 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-67-JORJO",
+          "label": "Public CIFP fix JORJO",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 418844833, -879885500 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-68-MONKZ",
+          "label": "Public CIFP fix MONKZ",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 418843306, -878017972 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-69-TONIE",
+          "label": "Public CIFP fix TONIE",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 418837139, -874907639 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-70-VOGLR",
+          "label": "Public CIFP fix VOGLR",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 419450000, -869186111 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Incoming connection is a labelled synthetic DCT, drawn dashed.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-71-LNDUH",
+          "label": "Public CIFP fix LNDUH",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 419650972, -873016472 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-72-SNTOE",
+          "label": "Public CIFP fix SNTOE",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 419653361, -873717806 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-73-KOENN",
+          "label": "Public CIFP fix KOENN",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 419655306, -874419167 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-74-MEMAW",
+          "label": "Public CIFP fix MEMAW",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 419656833, -875120583 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-75-RZUKO",
+          "label": "Public CIFP fix RZUKO",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 419657944, -875822028 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-76-HAZIL",
+          "label": "Public CIFP fix HAZIL",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 419658611, -876523528 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-77-SEIKA",
+          "label": "Public CIFP fix SEIKA",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 419658722, -877799250 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-78-RW28C",
+          "label": "Public CIFP fix RW28C",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 419657667, -878918111 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-81-FNT",
+          "label": "Public CIFP fix FNT",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 429667667, -837469889 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-82-KAYYS",
+          "label": "Public CIFP fix KAYYS",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 428844333, -845806667 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-83-LTOUR",
+          "label": "Public CIFP fix LTOUR",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 428493583, -849183056 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-84-VIO",
+          "label": "Public CIFP fix VIO",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 427867167, -854970722 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-85-DITCA",
+          "label": "Public CIFP fix DITCA",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 427461583, -857232972 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-86-WLTER",
+          "label": "Public CIFP fix WLTER",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 426864972, -860510944 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-87-RHIVR",
+          "label": "Public CIFP fix RHIVR",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 426459556, -862705972 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-88-PAITN",
+          "label": "Public CIFP fix PAITN",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 425610306, -867226056 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-89-WYNDE",
+          "label": "Public CIFP fix WYNDE",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 424557583, -871101750 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-90-FIYER",
+          "label": "Public CIFP fix FIYER",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 423977694, -873211694 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-91-ERNNY",
+          "label": "Public CIFP fix ERNNY",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 423387194, -875341833 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-92-PAPPI",
+          "label": "Public CIFP fix PAPPI",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 422699722, -876072028 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-93-TUBEZ",
+          "label": "Public CIFP fix TUBEZ",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 421809194, -877008028 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-94-VULCN",
+          "label": "Public CIFP fix VULCN",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 420917611, -877941722 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-95-KURKK",
+          "label": "Public CIFP fix KURKK",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 420918361, -880272000 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-96-BAMBB",
+          "label": "Public CIFP fix BAMBB",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 420909722, -882753722 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-97-VOGLR",
+          "label": "Public CIFP fix VOGLR",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 419450000, -869186111 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Incoming connection is a labelled synthetic DCT, drawn dashed.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-98-MOTTT",
+          "label": "Public CIFP fix MOTTT",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 419683528, -873016556 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-99-RICKV",
+          "label": "Public CIFP fix RICKV",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 419685944, -873717889 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-100-BLUTO",
+          "label": "Public CIFP fix BLUTO",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 419687944, -874419250 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-101-ROCSE",
+          "label": "Public CIFP fix ROCSE",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 419689528, -875120667 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-102-WAVIE",
+          "label": "Public CIFP fix WAVIE",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 419690667, -875822111 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-103-ADAME",
+          "label": "Public CIFP fix ADAME",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 419691389, -876523611 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-104-WILLT",
+          "label": "Public CIFP fix WILLT",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 419691583, -877788333 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-FIX-105-RW28R",
+          "label": "Public CIFP fix RW28R",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Coordinate E7 419690694, -878837278 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-27L",
+          "label": "KORD 27L",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Public pinned CIFP airport reference point or line between reciprocal published runway landing thresholds. No SWIM, sector reconstruction or facility adaptation.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-28C",
+          "label": "KORD 28C",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Public pinned CIFP airport reference point or line between reciprocal published runway landing thresholds. No SWIM, sector reconstruction or facility adaptation.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-28R",
+          "label": "KORD 28R",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Public pinned CIFP airport reference point or line between reciprocal published runway landing thresholds. No SWIM, sector reconstruction or facility adaptation.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        },
+        {
+          "id": "OA-F2-MAP-KORD",
+          "label": "KORD KORD",
+          "confidence": "PRIMARY-FAA",
+          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "rows": [
+            "F2-MAP-01"
+          ],
+          "description": "Public pinned CIFP airport reference point or line between reciprocal published runway landing thresholds. No SWIM, sector reconstruction or facility adaptation.",
+          "sources": [
+            {
+              "label": "FAA CIFP 2026-10-29",
+              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
+              "confidence": "PRIMARY-FAA"
+            }
+          ]
+        }
+      ],
+      "id": "public-cifp-map"
+    }
+  ]
+}

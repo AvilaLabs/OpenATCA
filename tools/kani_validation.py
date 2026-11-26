@@ -43,15 +43,15 @@ PINNED_CARGO_TOOLCHAIN = "1.89.0"
 # dependency changes. Presets therefore register the id as a template; the run
 # discovers the concrete ids from the compiled goto program and binds them to
 # the registered source locations before any bound is passed to CBMC.
-_LATE_LOOP_ID_TEMPLATE = "_RNvNtC{disambiguator}_8oa_track7tracker11update_late."
+_LATE_LOOP_ID_TEMPLATE = "_RNvNtC{disambiguator}_13oa_track_core7tracker11update_late."
 _DISAMBIGUATOR_RE = r"s[0-9A-Za-z]+"
 # Source line of every loop of update_late, by loop index; discovery must find exactly these.
-_LATE_FUNCTION_LOOPS = [1573, 1592, 1630, 1660]
+_LATE_FUNCTION_LOOPS = [1592, 1611, 1649, 1679]
 # Closed CBMC loop-bound presets. Loop labels are tied to the pinned Kani/CBMC
 # build and the source location below; never accept arbitrary CBMC arguments.
 LOOP_UNWIND_PRESETS = {
     "late-replay-two-events": {
-        "package": "oa-track",
+        "package": "oa-track-core",
         "harnesses": frozenset({
             'tracker::proofs::late_replay_restores_transaction_after_current_row_then_later_refusal',
             'tracker::proofs::rollback_paths::late_replay_restores_transaction_after_overflow_before_refusal',
@@ -75,11 +75,11 @@ LOOP_UNWIND_PRESETS = {
         "bound": 3,
         "global_unwind": 16,
         "harness_source": {
-            'tracker::proofs::late_replay_restores_transaction_after_current_row_then_later_refusal': "crates/oa-track/src/tracker_proofs.rs",
+            'tracker::proofs::late_replay_restores_transaction_after_current_row_then_later_refusal': "crates/oa-track-core/src/tracker/proofs.rs",
         },
-        "default_harness_source": "crates/oa-track/src/tracker_rollback_paths.rs",
-        "source": "crates/oa-track/src/tracker.rs",
-        "line": 1660,
+        "default_harness_source": "crates/oa-track-core/src/tracker/proofs/rollback_paths.rs",
+        "source": "crates/oa-track-core/src/tracker.rs",
+        "line": 1679,
         "function": "update_late",
         "source_line": "while k < n_seq {",
     },
@@ -88,12 +88,12 @@ _late_base_preset = LOOP_UNWIND_PRESETS["late-replay-two-events"]
 LOOP_UNWIND_PRESETS["late-replay-two-events-all-loops"] = {
     **_late_base_preset,
     "loops": [
-        {"loop_id": _LATE_LOOP_ID_TEMPLATE + "0", "bound": 3, "line": 1573, "guard_line": 1573, "source_line": "for k in 0..len {", "log_mode": "completed_before_bound", "iterations": [1, 2]},
-        {"loop_id": _LATE_LOOP_ID_TEMPLATE + "1", "bound": 2, "line": 1592, "guard_line": 1592, "source_line": "for k in (e + 1)..len {"},
-        {"loop_id": _LATE_LOOP_ID_TEMPLATE + "2", "bound": 2, "line": 1630, "source_line": "for k in 0..=e {"},
-        {"loop_id": _LATE_LOOP_ID_TEMPLATE + "3", "bound": 3, "line": 1660, "source_line": "while k < n_seq {"},
+        {"loop_id": _LATE_LOOP_ID_TEMPLATE + "0", "bound": 3, "line": 1592, "guard_line": 1592, "source_line": "for k in 0..len {", "log_mode": "completed_before_bound", "iterations": [1, 2]},
+        {"loop_id": _LATE_LOOP_ID_TEMPLATE + "1", "bound": 2, "line": 1611, "guard_line": 1611, "source_line": "for k in (e + 1)..len {"},
+        {"loop_id": _LATE_LOOP_ID_TEMPLATE + "2", "bound": 2, "line": 1649, "source_line": "for k in 0..=e {"},
+        {"loop_id": _LATE_LOOP_ID_TEMPLATE + "3", "bound": 3, "line": 1679, "source_line": "while k < n_seq {"},
     ],
-    "fixture_source": "crates/oa-track/src/tracker_proofs.rs",
+    "fixture_source": "crates/oa-track-core/src/tracker/proofs.rs",
     "fixture_snippets": [
         "const LATE_BASE_NS: i64 = PROOF_TIME - 20;",
         "const LATE_INSERT_NS: i64 = PROOF_TIME - 10;",

@@ -104,8 +104,8 @@ jobs:
           out.mkdir()
           cases = [
               ("oa-replay", "core::mono_split::tests::exercises_each_refusal_class_and_signed_boundary_successes"),
-              ("oa-track", "tracker::tests::numerical_failure_after_partial_late_replay_rolls_back_track_stats_and_rows"),
-              ("oa-track", "tracker::tests::invalid_anchor_refuses_late_rebuild_without_mutation_and_recovers"),
+              ("oa-track-core", "tracker::tests::numerical_failure_after_partial_late_replay_rolls_back_track_stats_and_rows"),
+              ("oa-track-core", "tracker::tests::invalid_anchor_refuses_late_rebuild_without_mutation_and_recovers"),
           ]
           for index, (package, case) in enumerate(cases):
               command = ["cargo", "+nightly-2026-08-21", "miri", "test", "--locked", "--offline",

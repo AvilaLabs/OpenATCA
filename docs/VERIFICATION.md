@@ -31,7 +31,7 @@ Kani; the results are the table below.
 
 Python tests in `test_*.py` modules use `# REQ: OA-...` directly above `def test_*`. They link as tests, with malformed/non-test tags refused. Traceability records linkage; it does not execute Rust, Python or proof checks.
 
-The registered suite also uses `types_proofs.rs`, `tracker_proofs.rs`, `tracker_rollback_paths.rs` and `time_gate_proofs_full.rs` under `crates/oa-track/src`. Its caller, late-fixture and full-capacity sensor claim boundaries are stated in [Rust assurance](RUST_ASSURANCE.md).
+The registered `oa-track-core` suite also uses `types/proofs.rs`, `tracker/proofs.rs`, `tracker/proofs/rollback_paths.rs` and `time_gate/proofs_full.rs`, all reached only through their exact `cfg(kani)` module declarations. Its caller, late-fixture and full-capacity sensor claim boundaries are stated in [Rust assurance](RUST_ASSURANCE.md).
 
 ## Which method for which property
 

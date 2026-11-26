@@ -36,10 +36,17 @@
 //! to the cap ([`CycleStats::r95_clamped`]). Prediction is a straight line from the cycle's
 //! position and velocity; a turning aircraft is not yet predicted (build order step 6).
 
-// The width of `usize` is fixed by construction: this crate does not build for a target whose
-// pointers are not 64 bits (RULESET B10).
-#[cfg(not(target_pointer_width = "64"))]
-compile_error!("the core crates support 64-bit targets only, so that usize is 64 bits everywhere");
+// RULESET B10: fixed-layout CA core also supports the audited browser target.
+#[cfg(not(any(
+    target_pointer_width = "64",
+    all(
+        target_arch = "wasm32",
+        target_pointer_width = "32",
+        target_os = "unknown",
+        target_vendor = "unknown"
+    )
+)))]
+compile_error!("core supports native64 and audited wasm32-unknown-unknown only");
 
 extern crate alloc;
 

@@ -436,6 +436,12 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
 - **OA-RTE-012** The route command converts a supplied model snapshot and binds the report to the exact snapshot and instruction bytes with their SHA-256 hashes.
 - **OA-RTE-013** The route command refuses a sealed snapshot path before conversion output is written.
 
+### Synthetic demo scenarios (oa-demo-scenario)
+
+- **OA-DEMO-001** A normal-landing approach final requires exactly one published MAP marker in
+  CIFP description column 43, includes the MAP fix, and excludes later missed-approach legs from
+  normal-landing geometry. Missing or ambiguous MAP markers refuse the final route.
+
 
 ### Traceability (oa-trace)
 
@@ -668,6 +674,15 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
   module-level unsafe allowance, and each unsafe block has an immediately preceding `// SAFETY:` comment. The
   checker also pins the reviewed unsafe-block counts by owning function. A
   different package name/path/class, extra source file, dependency, allowance, or unexplained unsafe block fails.
+- **OA-TRC-263** The WASM display-shell omission is accepted only for `oa-display`, with the exact inverse
+  `wasm32-unknown-unknown` cfg on both `mod shell` and its shell re-export, and `oa-sealed` declared exactly once
+  under the matching non-WASM Cargo target table. Wrong packages, targets, modules or unconditional dependencies
+  fail closed; this exception does not permit shell code in `core`.
+- **OA-TRC-264** The `wasm32-unknown-unknown` width-guard exception names exactly the reviewed F2 runtime closure
+  packages in `WASM32_PACKAGE_ALLOWLIST`; every other core or split package remains 64-bit only.
+- **OA-TRC-265** `oa-demo-wasm/build.rs` matches the reviewed guarded-input and two-output source
+  shape. No additional file or process effects are accepted; a changed build script requires a
+  deliberate update to the checker’s pinned source and negative regressions.
 
 ### Hashing (oa-sha256)
 
@@ -3955,10 +3970,10 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   log entries past the log capacity are counted.
 - **OA-TRK-016** Two aircraft crossing 120 m apart keep their own addresses and each stays within 50 m
   of its own truth: identity is the address, never the kinematics.
-- **OA-TRK-017** After the tracker is built no buffer it owns changes address or capacity through a run with
+- **OA-TRK-017** After the tracker is built, every tracker-owned vector keeps its capacity through a run with
   confirmations, late measurements, drops, restarts and overflow of the output, the log and the track
-  table (a counting allocator needs `unsafe`, which RULESET A0 forbids here, so the check is on the
-  buffers).
+  table. The fixed-capacity diagnostic checks capacities only; it does not prove that no same-capacity
+  reallocation occurred. The standalone counting-allocator gate is the allocation proof required by C5.
 - **OA-TRK-018** The ADS-B adapter derives the position covariance from NACp (bound over 2.448, per axis;
   NACp 8 to 11 checked against the DO-260B bounds) and the velocity covariance from NACv, with velocity
   from ground speed and track and 25 ft altitude quantisation.
@@ -7127,6 +7142,28 @@ This is a bounded normalized-input composition, not facility, deadline or operat
 - **OA-UI-018** Selection/queue refusals and completion outcomes remain explicit and presentable.
 - **OA-UI-019** Interaction status uses the existing display list with bounded text and explicit viewport/capacity refusal.
 - **OA-UI-020** Display interaction does not mutate or depend on the flight subsystem; the regional bridge remains responsible for authoritative identity and authority validation.
+
+## Experimental workstation core (oa-workstation)
+
+These requirements describe only the recovered OpenATCA prototype grammar and its synthetic
+state model. They make no claim about current ERAM/STARS command syntax, response text, or
+operational procedure; see `crates/oa-workstation/README.md` and `docs/DEMO_FIDELITY.md`.
+
+- **OA-WS-001** The experimental parser accepts only the documented bounded prototype grammar;
+  unknown commands, extra fields, malformed numbers and entries over 96 ASCII bytes are refused.
+  Source test: `bounded_grammar_refuses_unknown_ambiguous_and_malformed_commands`.
+- **OA-WS-002** Prototype altitude edits preserve assigned/interim distinction, enforce the
+  current owning-sector check before shared flight-state mutation, and clear interim altitude
+  with the existing nil form. These are OpenATCA model behaviors, not an ERAM procedure claim.
+  Source test: `shared_altitude_edits_require_ownership_and_preserve_interim_distinction`.
+- **OA-WS-003** Prototype point-out request/acknowledgment and handoff offer/accept/control are
+  distinct operations with recipient/owner checks; the tests exercise only the `oa-flight`
+  coordination contract and do not assert operational-system parity. Source test:
+  `handoff_and_pointout_have_distinct_shared_state`.
+- **OA-WS-004** Display range and per-position data-block preferences remain local to each
+  position, while the prototype annotation and voice status use their shared coordination state.
+  Position preference storage is fixed at 32 records. Source test:
+  `position_preferences_are_separate_while_annotations_are_shared`.
 
 ## M5 — Minimum safe altitude warning (oa-msaw, tools/oa-msaw)
 

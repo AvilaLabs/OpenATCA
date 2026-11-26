@@ -56,9 +56,9 @@ use oa_track::realtime::{
 };
 use oa_track::spill::{spill_append, spill_finish, spill_new, SpilledRun};
 use oa_track::{
-    output_clear, output_len, output_new, tracker_advance, tracker_bytes, tracker_counts,
-    tracker_flush, tracker_log, tracker_new, tracker_stats, tracker_update, Measurement,
-    TrackOutput, TrackerConfig, DEFAULT_CONFIG, END_NAMES, REFUSE_NAMES,
+    output_clear, output_len, output_new, tracker_advance, tracker_counts, tracker_flush,
+    tracker_log, tracker_new, tracker_stats, tracker_update, Measurement, TrackOutput,
+    TrackerConfig, DEFAULT_CONFIG, END_NAMES, REFUSE_NAMES,
 };
 use oa_track_tools::score::{
     initiation_delays, interval_stats, run_tracker_spilled, score_source, scoring_config,
@@ -594,7 +594,6 @@ struct Perf {
     /// The scoring run: output written to the spill files, digest computed.
     spill_secs: f64,
     latency: Option<(LatencyLog, f64, bool, usize)>,
-    tracker_bytes: usize,
     phases: Phases,
 }
 
@@ -602,7 +601,7 @@ fn us(ns: i64) -> f64 {
     ns as f64 / 1e3
 }
 
-fn perf_text(o: &mut String, p: &Perf, offered: u64, rows: u64, cfg: &TrackerConfig) {
+fn perf_text(o: &mut String, p: &Perf, offered: u64, rows: u64) {
     let _ = writeln!(
         o,
         "\nPerformance (release build assumed; every number measured on this run, not estimated; wall clock of the shell)"
@@ -630,13 +629,6 @@ fn perf_text(o: &mut String, p: &Perf, offered: u64, rows: u64, cfg: &TrackerCon
         p.spill_secs,
         rate(offered, p.spill_secs),
         rows
-    );
-    let _ = writeln!(
-        o,
-        "  tracker tables: {:.1} MiB for {} tracks ({} stored measurements and one anchor filter state per track for re-filtering)",
-        p.tracker_bytes as f64 / (1024.0 * 1024.0),
-        cfg.max_tracks,
-        oa_track::params::RING_DEPTH
     );
     if let Some((log, secs, digest_ok, unmatched)) = &p.latency {
         let _ = writeln!(
@@ -883,7 +875,7 @@ fn tracker_section(
             o.push_str(&line(n, e, u));
         }
     }
-    perf_text(&mut o, perf, run.offered, run.rows, cfg);
+    perf_text(&mut o, perf, run.offered, run.rows);
     o
 }
 
@@ -1120,7 +1112,6 @@ fn run_realtime_inner(
     addrs.dedup();
     fs::create_dir_all(out_dir).map_err(|e| format!("{}: {e}", out_dir.display()))?;
     let mut t = tracker_new(&cfg).map_err(|e| e.to_string())?;
-    let tracker_mem = tracker_bytes(&t);
     let mut out = output_new(cfg.out_capacity);
     let mut w = if with_output {
         Some(spill_new(&spill_root.join("run")).map_err(|e| e.to_string())?)
@@ -1326,13 +1317,6 @@ fn run_realtime_inner(
     );
     let _ = writeln!(
         o,
-        "tracker tables: {} bytes ({:.1} MiB) for {} tracks",
-        tracker_mem,
-        tracker_mem as f64 / (1024.0 * 1024.0),
-        cfg.max_tracks
-    );
-    let _ = writeln!(
-        o,
         "counters: offered {}, applied {}, duplicates {}, late (window) {}, late (ring) {}, re-filtered {}, jump-rejected {}, numerical-refused {}, resyncs {}, altitude-rejected {}, geometric altitude skipped {}, capacity-refused {}",
         stats.offered, stats.applied, stats.duplicates, stats.late_window, stats.late_ring, stats.refiltered, stats.jump_rejected, stats.numerical_refused, stats.resyncs, stats.alt_rejected, stats.alt_geometric_skipped, stats.capacity_refused
     );
@@ -1370,7 +1354,7 @@ fn run_realtime_inner(
     );
     let _ = writeln!(
         o,
-        "memory (kB; peak is the process's VmHWM, including the clip held in memory while it is decoded; the tracker's own tables are {tracker_mem} bytes)"
+        "memory (kB; peak is the process's VmHWM, including the clip held in memory while it is decoded)"
     );
     phases.mark("end");
     for (n, r, h) in &phases.0 {
@@ -1710,7 +1694,6 @@ fn run(
     };
     let no_ticks = core_run(&meas, &upd_cfg)?;
     phases.mark("tracker core run (one-second output off)");
-    let tracker_mem = tracker_bytes(&tracker_new(&cfg).map_err(|e| e.to_string())?);
     fs::create_dir_all(out_dir).map_err(|e| format!("{}: {e}", out_dir.display()))?;
     let spill_root = out_dir.join(format!("spill-{}", std::process::id()));
     let started = Instant::now();
@@ -1747,7 +1730,6 @@ fn run(
             no_ticks,
             spill_secs,
             latency,
-            tracker_bytes: tracker_mem,
             phases,
         };
         perf.phases.mark("end");
@@ -1755,7 +1737,7 @@ fn run(
             "oa-track-run --no-score: {} measurements, {} tracks, output digest {}\n",
             run.offered, run.stats.started, run.digest
         );
-        perf_text(&mut text, &perf, run.offered, run.rows, &cfg);
+        perf_text(&mut text, &perf, run.offered, run.rows);
         print!("{text}");
         fs::write(out_dir.join("core.txt"), text)
             .map_err(|e| format!("{}: {e}", out_dir.join("core.txt").display()))?;
@@ -1837,7 +1819,6 @@ fn run(
         no_ticks,
         spill_secs,
         latency,
-        tracker_bytes: tracker_mem,
         phases,
     };
     let with_ticks_secs = perf.with_ticks.secs;

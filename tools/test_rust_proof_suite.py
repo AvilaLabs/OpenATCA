@@ -60,6 +60,12 @@ class SuiteConfigurationTests(unittest.TestCase):
         # proofs before it have run (a harness registered under a name that did not exist, 2026-11-20); this finds it locally in a second.
         registry, errors = load_registry(REGISTRY_PATH)
         self.assertEqual(errors, [])
+        moved = [
+            proof for proof in registry["proofs"]
+            if proof["harness"].startswith(("tracker::proofs::", "time_gate::proofs_full::", "types::proofs::"))
+        ]
+        self.assertTrue(moved)
+        self.assertEqual({proof["package"] for proof in moved}, {"oa-track-core"})
         root = REGISTRY_PATH.parent.parent
         sources = {}
         for proof in registry["proofs"]:
@@ -176,7 +182,7 @@ class SuiteConfigurationTests(unittest.TestCase):
             self.assertEqual(actual, expected)
             for proof_id in expected:
                 proof = enabled[proof_id]
-                self.assertEqual(proof["package"], "oa-track")
+                self.assertEqual(proof["package"], "oa-track-core")
                 self.assertTrue(proof["stubbing"])
                 self.assertEqual(proof["stub_summaries"], common_stubs)
                 self.assertEqual(proof["loop_unwind_overrides"], ["late-replay-two-events-pinned-cargo"])
@@ -270,6 +276,7 @@ class SuiteConfigurationTests(unittest.TestCase):
 
     def test_closed_loop_unwind_preset_is_optional_and_restricted(self):
         proof = proof_entry()
+        proof["package"] = "oa-track-core"
         proof["harness"] = sorted(LOOP_UNWIND_PRESETS["late-replay-two-events"]["harnesses"])[0]
         proof["loop_unwind_overrides"] = ["late-replay-two-events"]
         self.assertEqual(validate_registry(registry_with(proof)), [])
@@ -508,6 +515,7 @@ print("fake runner stdout")
             root = Path(temp)
             repo, registry, out, target, _ = self.fake_workspace(root, proof_count=1)
             proof = proof_entry()
+            proof["package"] = "oa-track-core"
             proof["harness"] = sorted(LOOP_UNWIND_PRESETS["late-replay-two-events"]["harnesses"])[0]
             proof["loop_unwind_overrides"] = ["late-replay-two-events"]
             registry.write_text(json.dumps(registry_with(proof), indent=2) + "\n")
@@ -586,19 +594,22 @@ class PushSelectionTests(unittest.TestCase):
     def test_the_real_workspace_graph_ties_the_tracker_to_its_dependencies(self):
         graph = package_graph(REPO)
         self.assertIn("oa-math", graph["oa-track"]["deps"])
+        self.assertIn("oa-math", graph["oa-track-core"]["deps"])
         registry, errors = load_registry(REGISTRY_PATH)
         self.assertEqual(errors, [])
         self.assertEqual(registry_packages_missing(registry["proofs"], graph), [])
         self.assertEqual(graph["oa-track"]["dir"], "crates/oa-track/")
+        self.assertEqual(graph["oa-track-core"]["dir"], "crates/oa-track-core/")
         registry, _ = load_registry(REGISTRY_PATH)
         proofs = registry["proofs"]
         math_change = {p["package"] for p in select_proofs(
             proofs, affected_packages(graph, ["crates/oa-math/src/trig.rs"]), True)}
         self.assertIn("oa-math", math_change)
-        self.assertIn("oa-track", math_change)
+        self.assertIn("oa-track-core", math_change)
         tracker_change = {p["package"] for p in select_proofs(
-            proofs, affected_packages(graph, ["crates/oa-track/src/tracker.rs"]), True)}
-        self.assertIn("oa-track", tracker_change)
+            proofs, affected_packages(graph, ["crates/oa-track-core/src/tracker.rs"]), True)}
+        self.assertIn("oa-track-core", tracker_change)
+        self.assertNotIn("oa-track", tracker_change)
         self.assertNotIn("oa-asterix", tracker_change)
 
 

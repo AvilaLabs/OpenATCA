@@ -551,7 +551,7 @@ pub fn scratch_for(m: &Model, v: &View) -> Result<Scratch, DisplayError> {
         return Err(DisplayError::TooLarge {
             what: "scene pixels",
             requested: pixels,
-            limit: MAX_SCENE_PIXELS as usize,
+            limit: MAX_SCENE_PIXELS,
         });
     }
     Ok(Scratch {
@@ -992,7 +992,7 @@ pub fn build_scene(
         return Err(DisplayError::TooLarge {
             what: "scene pixels",
             requested: u128::from(v.proj.width) * u128::from(v.proj.height),
-            limit: MAX_SCENE_PIXELS as usize,
+            limit: MAX_SCENE_PIXELS,
         });
     }
     if sc.cols != cols
@@ -1009,7 +1009,7 @@ pub fn build_scene(
         return Err(DisplayError::TooLarge {
             what: "scene point rows",
             requested: point_rows as u128,
-            limit: MAX_LIST_ROWS,
+            limit: MAX_LIST_ROWS as u128,
         });
     }
     if sc.cap < point_rows
@@ -1034,7 +1034,7 @@ pub fn build_scene(
         return Err(DisplayError::TooLarge {
             what: "scene boundary rows",
             requested: boundary_rows as u128,
-            limit: MAX_LIST_ROWS,
+            limit: MAX_LIST_ROWS as u128,
         });
     }
     let boundary_vertex_visits = m
@@ -1079,7 +1079,7 @@ fn check_scene_work(work: u128) -> Result<(), DisplayError> {
         return Err(DisplayError::TooLarge {
             what: "scene work units",
             requested: work,
-            limit: MAX_SCENE_WORK as usize,
+            limit: MAX_SCENE_WORK,
         });
     }
     Ok(())
@@ -1931,14 +1931,15 @@ mod work_budget_tests {
     // REQ: OA-DSP-054
     #[test]
     fn scene_work_limit_is_exact_and_one_above_is_refused() {
+        assert!(MAX_SCENE_WORK > u128::from(u32::MAX));
         assert!(check_scene_work(MAX_SCENE_WORK).is_ok());
         assert!(matches!(
             check_scene_work(MAX_SCENE_WORK + 1),
             Err(DisplayError::TooLarge {
                 what: "scene work units",
                 requested,
-                ..
-            }) if requested == MAX_SCENE_WORK + 1
+                limit,
+            }) if requested == MAX_SCENE_WORK + 1 && limit == MAX_SCENE_WORK
         ));
     }
 

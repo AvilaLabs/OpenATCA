@@ -1,0 +1,18 @@
+[package]
+name = "oa-workstation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[package.metadata.openatca]
+class = "core"
+
+[dependencies]
+# F1: the approved recovery uses only the existing workspace core that owns FlightTable and
+# operation application; this package adds no shell/private or third-party dependency.
+oa-flight = { path = "../oa-flight" }

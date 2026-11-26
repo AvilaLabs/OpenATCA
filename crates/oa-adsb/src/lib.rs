@@ -126,16 +126,13 @@
 //! collection, one column per field.
 
 mod archive;
-mod category;
 pub mod cli;
 mod frames;
 mod snapshot;
-mod speed;
 mod summary;
 mod trace;
 
 pub use archive::{scan_archive, scan_archive_counted, ScanEnd, ScanError, ScanResult};
-pub use category::{category_is_reserved, category_observe, CategoryState, CATEGORY_PERSIST};
 pub use frames::{
     decode_payload, decode_payload_lenient, decode_payload_lenient_with_dropped, encode_payload,
     frame_ranges, payload_record_count, PayloadCounts, PayloadError, DEFAULT_FRAME_MS,
@@ -143,14 +140,15 @@ pub use frames::{
     MIN_FRAME_MS, PAYLOAD_HEADER_LEN, PAYLOAD_MAGIC, PREVIOUS_PAYLOAD_MAGIC, RECORD_LEN,
     TIME_MAX_NS, TIME_MIN_NS,
 };
+pub use oa_adsb_model::{
+    category_ceiling_kt, category_hard_cap_kt, category_is_reserved, category_observe, is_jump,
+    is_reserved_address, jump_verdict, CategoryState, JumpPair, JumpVerdict, CAP_HIGH_KT,
+    CAP_ORDINARY_KT, CAP_SPACE_KT, CATEGORY_PERSIST, CONSISTENCY_ACCEL_KT_S, CONSISTENCY_BASE_KT,
+    CONSISTENCY_FACTOR, NONE_U16, SPEED_ENVELOPE_KT, SPEED_ENVELOPE_MPS,
+};
 pub use snapshot::{
     decode_snapshot, SnapshotError, SnapshotStats, MAX_POSITION_AGE_MS, MAX_SNAPSHOT_BYTES,
     MAX_SNAPSHOT_NODES, MAX_SNAPSHOT_ROWS,
-};
-pub use speed::{
-    category_ceiling_kt, category_hard_cap_kt, is_jump, is_reserved_address, jump_verdict,
-    JumpPair, JumpVerdict, CAP_HIGH_KT, CAP_ORDINARY_KT, CAP_SPACE_KT, CONSISTENCY_ACCEL_KT_S,
-    CONSISTENCY_BASE_KT, CONSISTENCY_FACTOR, SPEED_ENVELOPE_KT, SPEED_ENVELOPE_MPS,
 };
 pub use summary::{summarize, Summary, MIN_JUMP_NM};
 pub use trace::{decode_trace, TraceError};
@@ -173,8 +171,6 @@ pub const MAX_GZIP_RATIO: u64 = 200;
 
 /// Absent `i32` value (altitudes, rates).
 pub const NONE_I32: i32 = i32::MIN;
-/// Absent `u16` value (speed, track, squawk).
-pub const NONE_U16: u16 = u16::MAX;
 /// Absent `i16` value (temperatures, roll, track rate).
 pub const NONE_I16: i16 = i16::MIN;
 /// Absent `u8` value (the aircraft-object integers, source type). Category uses 0 for absent.

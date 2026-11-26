@@ -5,9 +5,19 @@
 //! text (`shell::hex`) are shell; core writes hex into caller storage ([`to_hex_into`]). The
 //! core's own error is [`MessageTooLong`], converted by `From`.
 
-// The width of `usize` is fixed by construction: no 32-bit build of the core (B10).
-#[cfg(not(target_pointer_width = "64"))]
-compile_error!("this crate supports 64-bit targets only");
+// B10: 64-bit native targets and the audited wasm32-unknown-unknown target are supported.
+#[cfg(not(any(
+    target_pointer_width = "64",
+    all(
+        target_arch = "wasm32",
+        target_pointer_width = "32",
+        target_os = "unknown",
+        target_vendor = "unknown"
+    )
+)))]
+compile_error!(
+    "this crate supports 64-bit targets and the audited wasm32-unknown-unknown target only"
+);
 
 pub mod core;
 pub mod shell;

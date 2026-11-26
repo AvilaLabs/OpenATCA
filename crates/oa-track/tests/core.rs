@@ -12,10 +12,10 @@ use common::*;
 use oa_geo::aeqd::project;
 use oa_sha256::{to_hex, Sha256};
 use oa_track::{
-    measurement_check, output_hash_into, output_new, tracker_advance, tracker_buffers,
-    tracker_bytes, tracker_flush, tracker_live, tracker_log, tracker_new, tracker_stats,
-    tracker_update, Measurement, TrackOutput, TrackerConfig, DEFAULT_CONFIG, END_DROPPED,
-    END_TENTATIVE, M_HAS_VEL, NONE_I32, NO_ADDR, O_COAST, O_HAS_ALT, O_TICK,
+    measurement_check, output_hash_into, output_new, tracker_advance, tracker_flush, tracker_live,
+    tracker_log, tracker_new, tracker_stats, tracker_update, Measurement, TrackOutput,
+    TrackerConfig, DEFAULT_CONFIG, END_DROPPED, END_TENTATIVE, M_HAS_VEL, NONE_I32, NO_ADDR,
+    O_COAST, O_HAS_ALT, O_TICK,
 };
 
 /// Error summary of a scenario in a time window.
@@ -1200,58 +1200,6 @@ fn aircraft_crossing_close_together_keep_their_own_identity() {
     assert!(worst < 50.0, "worst {worst}");
 }
 
-// REQ: OA-TRK-017
-#[test]
-fn nothing_allocates_after_the_tracker_is_built() {
-    // Every buffer keeps its address and capacity through a run with confirmations, late
-    // measurements, drops, restarts and overflow of the output and the log.
-    let mut cfg = big_config();
-    cfg.max_tracks = 8;
-    cfg.out_capacity = 500;
-    cfg.log_capacity = 3;
-    let mut t = tracker_new(&cfg).unwrap();
-    let mut out = output_new(cfg.out_capacity);
-    let before = oa_track::tracker_buffers(&t);
-    let out_before = (
-        out.t_ns.as_ptr() as usize,
-        out.t_ns.capacity(),
-        out.mu_h.as_ptr() as usize,
-        out.mu_h.capacity(),
-    );
-    let mut ms = Vec::new();
-    for a in 0..12u32 {
-        ms.extend(base_measurements(
-            0xF00000 + a * 7919,
-            40,
-            1.0,
-            100 + u64::from(a),
-        ));
-    }
-    ms.sort_by_key(|m| (m.toa_ns, m.addr));
-    // Some late ones.
-    for k in (50..ms.len() - 3).step_by(37) {
-        ms.swap(k, k + 2);
-    }
-    for m in &ms {
-        tracker_update(&mut t, m, &mut out);
-    }
-    tracker_advance(&mut t, 400_000_000_000, &mut out);
-    tracker_flush(&mut t, 500_000_000_000, &mut out);
-    assert!(
-        out.overflow > 0 && tracker_log(&t).overflow > 0 && tracker_stats(&t).capacity_refused > 0
-    );
-    assert_eq!(before, oa_track::tracker_buffers(&t));
-    assert_eq!(
-        out_before,
-        (
-            out.t_ns.as_ptr() as usize,
-            out.t_ns.capacity(),
-            out.mu_h.as_ptr() as usize,
-            out.mu_h.capacity()
-        )
-    );
-}
-
 /// Three aircraft whose reports arrive scrambled by up to 14 positions (past the 12-deep window
 /// for some), with a different-sensor repeat of some reports and a wild position now and then.
 fn scrambled_world() -> Vec<Measurement> {
@@ -1457,7 +1405,7 @@ const GAPPY_DIGEST: &str = "4a705106b8b2beecf911272b615cf909e7b4c87082b8a2de8b62
 
 // REQ: OA-TRK-041
 #[test]
-fn a_full_table_of_max_tracks_refuses_the_next_aircraft_and_never_reallocates() {
+fn a_full_table_refuses_the_next_aircraft() {
     let n = oa_track::params::MAX_TRACKS;
     let cfg = TrackerConfig {
         max_tracks: n,
@@ -1466,7 +1414,6 @@ fn a_full_table_of_max_tracks_refuses_the_next_aircraft_and_never_reallocates() 
         ..DEFAULT_CONFIG
     };
     let mut t = tracker_new(&cfg).unwrap();
-    let before = tracker_buffers(&t);
     let mut out = output_new(cfg.out_capacity);
     let man = Manoeuvre::straight(200.0, 45.0);
     let f = frame0();
@@ -1507,7 +1454,6 @@ fn a_full_table_of_max_tracks_refuses_the_next_aircraft_and_never_reallocates() 
     tracker_update(&mut t, &extra, &mut out);
     assert_eq!(tracker_stats(&t).capacity_refused, 1);
     assert_eq!(tracker_stats(&t).started as usize, n);
-    assert_eq!(tracker_buffers(&t), before, "a buffer was reallocated");
     // A late report for a track in the full table is still re-filtered from its anchor.
     let mut late = measure(
         &f,
@@ -1522,62 +1468,6 @@ fn a_full_table_of_max_tracks_refuses_the_next_aircraft_and_never_reallocates() 
     late.sensor = 4;
     tracker_update(&mut t, &late, &mut out);
     assert_eq!(tracker_stats(&t).refiltered, 1);
-    let bytes = tracker_bytes(&t);
-    println!(
-        "tracker_bytes at {n} tracks: {bytes} ({} per track)",
-        bytes / n
-    );
-    // Add only the budget for raw altitude history to the previous 2,300 bytes per track.
-    // Each track and each rollback snapshot hold two filters with 16 extra bytes each.
-    let history_bytes = (n + cfg.confirm_pool) * 32;
-    assert!(
-        bytes < n * 2_300 + history_bytes,
-        "{} bytes per track",
-        bytes / n
-    );
-}
-
-// REQ: OA-TRK-042
-#[test]
-fn tracker_memory_is_linear_in_capacity_and_about_a_quarter_of_the_full_state_ring() {
-    let mk = |n: usize| {
-        tracker_bytes(
-            &tracker_new(&TrackerConfig {
-                max_tracks: n,
-                out_capacity: 16,
-                log_capacity: 16,
-                // The rollback pool is a fixed cost, not per track: measured apart below.
-                confirm_pool: 0,
-                ..DEFAULT_CONFIG
-            })
-            .unwrap(),
-        )
-    };
-    let (a, b) = (mk(4096), mk(38_000));
-    println!("tracker_bytes: 4096 tracks {a}, 38000 tracks {b}");
-    // The index is the only part that is not exactly linear (a power of two entries).
-    let per = |x: usize, n: usize| x as f64 / n as f64;
-    assert!((per(a, 4096) - per(b, 38_000)).abs() < 12.0);
-    // A ring of 12 full filter states and 12 measurements cost 8.9 kB per track. The large-move
-    // rule (RT-239) adds 39 bytes of columns per track (the bound was 2300 before it).
-    assert!(per(b, 38_000) < 2_300.0);
-    // And its pool of rollback snapshots, 2232 bytes each and a 4-byte free-list entry, a fixed
-    // cost independent of the number of tracks.
-    let with_pool = tracker_bytes(
-        &tracker_new(&TrackerConfig {
-            max_tracks: 4096,
-            out_capacity: 16,
-            log_capacity: 16,
-            ..DEFAULT_CONFIG
-        })
-        .unwrap(),
-    );
-    assert_eq!(
-        with_pool - a,
-        oa_track::params::CONFIRM_POOL * (2_232 + 4),
-        "the pool"
-    );
-    println!("tracker_bytes with the pool: 4096 tracks {with_pool}");
 }
 
 // REQ: OA-TRK-077

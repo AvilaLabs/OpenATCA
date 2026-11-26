@@ -123,6 +123,30 @@ pub const UNSPLIT_ALLOWED: [&str; 12] = [
     "oa-wind",
 ];
 
+/// Exact runtime/compilation packages whose wasm32-unknown-unknown source and width assumptions
+/// are reviewed for the F2 demo. Includes named split packages whose unused shell modules compile
+/// in the target closure; it does not authorize other split packages or general 32-bit builds.
+pub const WASM32_PACKAGE_ALLOWLIST: [&str; 14] = [
+    "oa-adsb-model",
+    "oa-airspace",
+    "oa-ca",
+    "oa-demo-engine",
+    "oa-demo-scenario",
+    "oa-display",
+    "oa-flight",
+    "oa-geo",
+    "oa-ieee",
+    "oa-math",
+    "oa-safety",
+    "oa-sha256",
+    "oa-track-core",
+    "oa-workstation",
+];
+
+fn wasm32_package_allowed(name: &str) -> bool {
+    WASM32_PACKAGE_ALLOWLIST.contains(&name)
+}
+
 /// Modules of `std`, `core` and `alloc` core code may name (RULESET B8). `collections` and
 /// `time` are allowed only for the names in [`ALLOWED_COLLECTIONS`] and `core::time::Duration`.
 const ALLOWED_MODULES: &[&str] = &[
@@ -1158,6 +1182,9 @@ pub struct Ctx<'a> {
     pub depth: usize,
     /// The crate is `oa-ieee`, whose purpose is the float methods B8 forbids elsewhere.
     pub ieee: bool,
+    /// The package is in the exact F2 wasm32 runtime allowlist. This permits only the exact
+    /// native64-or-wasm32 width guard in its source; other target-dependent cfgs remain forbidden.
+    pub wasm32_guard_allowed: bool,
     /// The crate is `oa-math`, which does bit arithmetic on floats by design.
     pub math: bool,
     /// Modules the crate declares (`mod x`): a lowercase path qualifier is one of these, a
@@ -1413,7 +1440,7 @@ fn scan_tokens(toks: &[Tok], ctx: &Ctx<'_>) -> Vec<Hit> {
                     let x = s(toks, k);
                     (x.starts_with("target_") || matches!(x, "unix" | "windows")).then_some(x)
                 })
-                .filter(|_| !pointer_width_guard(toks, i));
+                .filter(|_| !pointer_width_guard(toks, i, ctx.wasm32_guard_allowed));
             if let Some(x) = target {
                 hits.push(hit(
                     t.line,
@@ -1547,11 +1574,11 @@ fn check_use_statement(stmt: &[Tok], ctx: &Ctx<'_>, hits: &mut Vec<Hit>) {
     }
 }
 
-/// Whether the `cfg` at `toks[i]` is the head of the one target cfg core code may have:
-/// `#[cfg(not(target_pointer_width = "64"))]` directly followed by `compile_error!` (the string is
-/// masked, `has_pointer_width_guard` reads it). It refuses a build, it changes no behaviour.
-fn pointer_width_guard(toks: &[Tok], i: usize) -> bool {
-    let want = [
+/// Whether the `cfg` at `toks[i]` is one exact target guard directly followed by `compile_error!`.
+/// The second form is the narrow wasm32-unknown-unknown exception; scan context is created from
+/// the exact package allowlist, and `has_pointer_width_guard` checks the root declaration.
+fn pointer_width_guard(toks: &[Tok], i: usize, allow_wasm32: bool) -> bool {
+    let native64 = [
         "cfg",
         "(",
         "not",
@@ -1564,11 +1591,46 @@ fn pointer_width_guard(toks: &[Tok], i: usize) -> bool {
         "compile_error",
         "!",
     ];
+    let wasm32 = [
+        "cfg",
+        "(",
+        "not",
+        "(",
+        "any",
+        "(",
+        "target_pointer_width",
+        "=",
+        ",",
+        "all",
+        "(",
+        "target_arch",
+        "=",
+        ",",
+        "target_pointer_width",
+        "=",
+        ",",
+        "target_os",
+        "=",
+        ",",
+        "target_vendor",
+        "=",
+        ")",
+        ")",
+        ")",
+        ")",
+        "]",
+        "compile_error",
+        "!",
+    ];
     i >= 2
         && s(toks, i - 1) == "["
         && s(toks, i - 2) == "#"
         && guard_position(toks, i - 2)
-        && want.iter().enumerate().all(|(k, w)| s(toks, i + k) == *w)
+        && (native64
+            .iter()
+            .enumerate()
+            .all(|(k, w)| s(toks, i + k) == *w)
+            || (allow_wasm32 && wasm32.iter().enumerate().all(|(k, w)| s(toks, i + k) == *w)))
 }
 
 /// Whether the attribute that starts at the `#` at `toks[hash]` stands alone at an item
@@ -1681,12 +1743,12 @@ pub struct FileScan {
 pub fn scan_source(src: &str, ctx: &Ctx<'_>) -> FileScan {
     let (masked, strings) = mask_with_strings(src);
     let raw = tokenize(&masked);
-    let mut hits: Vec<Hit> = path_attr_lines(&raw)
+    let st = strip_test_items(raw);
+    let mut hits: Vec<Hit> = path_attr_lines(&st.toks)
         .into_iter()
         .map(|l| hit(l, "#[path]", "B8: core code uses no `#[path]` attribute"))
         .collect();
     hits.extend(pointer_format_hits(src, &strings));
-    let st = strip_test_items(raw);
     hits.extend(scan_tokens(&st.toks, ctx));
     FileScan {
         hits,
@@ -1735,15 +1797,24 @@ fn mask_keep_strings(src: &str) -> Option<String> {
     Some(out.into_iter().collect())
 }
 
-/// Whether `lib.rs` has `#[cfg(not(target_pointer_width = "64"))]` followed by `compile_error!(..);`
-/// at the top level, outside test code: the crate refuses a non-64-bit target, so the width of
-/// `usize` is fixed by construction (RULESET B10).
-pub fn has_pointer_width_guard(src: &str) -> bool {
+/// Whether `lib.rs` has the required top-level width guard. The exact wasm32 form is accepted only
+/// for packages in `WASM32_PACKAGE_ALLOWLIST`; all other core/split packages remain 64-bit only.
+pub fn has_pointer_width_guard(src: &str, allow_wasm32: bool) -> bool {
+    has_width_guard(src, true, allow_wasm32)
+}
+
+/// Whether a crate in the exact demo allowlist has the wasm32 guard, rather than only the native
+/// 64-bit form. Used by the source trace for the pinned runtime closure.
+pub fn has_wasm32_pointer_width_guard(src: &str) -> bool {
+    has_width_guard(src, false, true)
+}
+
+fn has_width_guard(src: &str, allow_native64: bool, allow_wasm32: bool) -> bool {
     let Some(kept) = mask_keep_strings(src) else {
         return false;
     };
     let toks = strip_test_items(tokenize(&kept)).toks;
-    let want = [
+    let native64 = [
         "#",
         "[",
         "cfg",
@@ -1762,6 +1833,55 @@ pub fn has_pointer_width_guard(src: &str) -> bool {
         "!",
         "(",
     ];
+    let wasm32 = [
+        "#",
+        "[",
+        "cfg",
+        "(",
+        "not",
+        "(",
+        "any",
+        "(",
+        "target_pointer_width",
+        "=",
+        "\"",
+        "64",
+        "\"",
+        ",",
+        "all",
+        "(",
+        "target_arch",
+        "=",
+        "\"",
+        "wasm32",
+        "\"",
+        ",",
+        "target_pointer_width",
+        "=",
+        "\"",
+        "32",
+        "\"",
+        ",",
+        "target_os",
+        "=",
+        "\"",
+        "unknown",
+        "\"",
+        ",",
+        "target_vendor",
+        "=",
+        "\"",
+        "unknown",
+        "\"",
+        ")",
+        ")",
+        ")",
+        ")",
+        "]",
+        "compile_error",
+        "!",
+        "(",
+    ];
     let mut depth = 0usize;
     for (i, t) in toks.iter().enumerate() {
         match t.s.as_str() {
@@ -1769,10 +1889,26 @@ pub fn has_pointer_width_guard(src: &str) -> bool {
             "}" => depth = depth.saturating_sub(1),
             _ => {}
         }
+        let native_match = allow_native64
+            && native64
+                .iter()
+                .enumerate()
+                .all(|(k, w)| s(&toks, i + k) == *w);
+        let wasm_match = allow_wasm32
+            && wasm32
+                .iter()
+                .enumerate()
+                .all(|(k, w)| s(&toks, i + k) == *w);
+        let guard_end = if native_match {
+            Some(i + native64.len() - 1)
+        } else if wasm_match {
+            Some(i + wasm32.len() - 1)
+        } else {
+            None
+        };
         if depth == 0
             && guard_position(&toks, i)
-            && want.iter().enumerate().all(|(k, w)| s(&toks, i + k) == *w)
-            && s(&toks, skip_group(&toks, i + want.len() - 1)) == ";"
+            && guard_end.is_some_and(|end| s(&toks, skip_group(&toks, end)) == ";")
         {
             return true;
         }
@@ -1877,6 +2013,29 @@ pub fn ieee_api_problems(src: &str) -> Vec<Hit> {
 /// Problems with `lib.rs` of a split crate: it declares exactly `mod core;` and `mod shell;`
 /// (any visibility), plus re-exports, attributes and doc comments, and nothing else.
 pub fn lib_rs_problems(src: &str) -> Vec<Hit> {
+    lib_rs_problems_for_package(src, false)
+}
+
+fn attribute_matches_without_whitespace(
+    src: &str,
+    start_line: usize,
+    end_line: usize,
+    expected: &str,
+) -> bool {
+    let normalize = |text: &str| {
+        text.chars()
+            .filter(|c| !c.is_whitespace())
+            .collect::<String>()
+    };
+    let actual: String = src
+        .lines()
+        .skip(start_line.saturating_sub(1))
+        .take(end_line.saturating_sub(start_line).saturating_add(1))
+        .collect();
+    normalize(&actual) == normalize(expected)
+}
+
+fn lib_rs_problems_for_package(src: &str, allow_display_wasm_shell_gate: bool) -> Vec<Hit> {
     let raw = tokenize(&mask(src));
     let mut out: Vec<Hit> = path_attr_lines(&raw)
         .into_iter()
@@ -1885,6 +2044,10 @@ pub fn lib_rs_problems(src: &str) -> Vec<Hit> {
     let toks = strip_test_items(raw).toks;
     let msg = "B7: lib.rs of a split crate declares exactly `mod core;` and `mod shell;`, re-exports and attributes";
     let (mut core_n, mut shell_n) = (0, 0);
+    let mut shell_module_gated = false;
+    let mut shell_uses_gated = 0usize;
+    let mut shell_uses_ungated = 0usize;
+    let mut pending_shell_gate = false;
     let mut i = 0;
     while i < toks.len() {
         if s(&toks, i) == "#" {
@@ -1912,9 +2075,13 @@ pub fn lib_rs_problems(src: &str) -> Vec<Hit> {
             // only the attributes a lib.rs of a split crate needs: `forbid(unsafe_code)` and
             // `doc`; anything else (`macro_use` on a module, `allow`, `cfg_attr`, `path`) could
             // carry shell code into the core
-            // the 64-bit guard, exactly: the cfg and the `compile_error!(..);` after it (B10)
+            // One exact width guard and the `compile_error!(..);` after it (B10). The package
+            // allowlist is enforced separately by `has_pointer_width_guard`.
+            let native_width_guard = body == "cfg(not(target_pointer_width=))";
+            let wasm32_width_guard = body
+                == "cfg(not(any(target_pointer_width=,all(target_arch=,target_pointer_width=,target_os=,target_vendor=))))";
             if !inner
-                && body == "cfg(not(target_pointer_width=))"
+                && (native_width_guard || wasm32_width_guard)
                 && s(&toks, end) == "compile_error"
                 && s(&toks, end + 1) == "!"
                 && s(&toks, end + 2) == "("
@@ -1923,9 +2090,36 @@ pub fn lib_rs_problems(src: &str) -> Vec<Hit> {
                 i = skip_group(&toks, end + 2) + 1;
                 continue;
             }
+            const DISPLAY_SHELL_CFG: &str = "#[cfg(not(all(target_arch = \"wasm32\", target_pointer_width = \"32\", target_os = \"unknown\", target_vendor = \"unknown\")))]";
+            let attr_last_line = toks
+                .get(end.saturating_sub(1))
+                .map_or(at_line, |token| token.line);
+            let wasm_shell_cfg = body
+                == "cfg(not(all(target_arch=,target_pointer_width=,target_os=,target_vendor=)))"
+                && attribute_matches_without_whitespace(
+                    src,
+                    at_line,
+                    attr_last_line,
+                    DISPLAY_SHELL_CFG,
+                );
+            let next = skip_modifiers(&toks, end);
+            let gated_shell_module = wasm_shell_cfg
+                && s(&toks, next) == "mod"
+                && s(&toks, next + 1) == "shell"
+                && s(&toks, next + 2) == ";";
+            let gated_shell_use = wasm_shell_cfg
+                && s(&toks, end) == "pub"
+                && s(&toks, next) == "use"
+                && s(&toks, next + 1) == "crate"
+                && s(&toks, next + 2) == "::"
+                && s(&toks, next + 3) == "shell"
+                && (next..toks.len()).any(|j| s(&toks, j) == ";");
             let ok = body.starts_with("doc=")
                 || body.starts_with("doc(")
-                || (inner && body == "forbid(unsafe_code)");
+                || (inner && body == "forbid(unsafe_code)")
+                || (!inner
+                    && allow_display_wasm_shell_gate
+                    && (gated_shell_module || gated_shell_use));
             if !ok {
                 out.push(hit(
                     at_line,
@@ -1933,6 +2127,8 @@ pub fn lib_rs_problems(src: &str) -> Vec<Hit> {
                     "B7: lib.rs of a split crate carries only `#![forbid(unsafe_code)]` and `doc` attributes, an attribute on `mod shell` or `mod core` can import shell code into the core",
                 ));
             }
+            pending_shell_gate =
+                allow_display_wasm_shell_gate && (gated_shell_module || gated_shell_use) && ok;
             i = end;
             continue;
         }
@@ -1940,10 +2136,25 @@ pub fn lib_rs_problems(src: &str) -> Vec<Hit> {
         i = skip_modifiers(&toks, i);
         let kw = s(&toks, i).to_string();
         let semi = (i..toks.len()).find(|&j| s(&toks, j) == ";");
+        let shell_gate = std::mem::take(&mut pending_shell_gate);
         match kw.as_str() {
             "mod" if s(&toks, i + 2) == ";" && s(&toks, i + 1) == "core" => core_n += 1,
-            "mod" if s(&toks, i + 2) == ";" && s(&toks, i + 1) == "shell" => shell_n += 1,
-            "use" if semi.is_some() => {}
+            "mod" if s(&toks, i + 2) == ";" && s(&toks, i + 1) == "shell" => {
+                shell_n += 1;
+                shell_module_gated |= shell_gate;
+            }
+            "use" if semi.is_some() => {
+                if s(&toks, i + 1) == "crate"
+                    && s(&toks, i + 2) == "::"
+                    && s(&toks, i + 3) == "shell"
+                {
+                    if shell_gate {
+                        shell_uses_gated += 1;
+                    } else {
+                        shell_uses_ungated += 1;
+                    }
+                }
+            }
             _ => {
                 out.push(hit(line, &kw, msg));
                 break;
@@ -1954,7 +2165,60 @@ pub fn lib_rs_problems(src: &str) -> Vec<Hit> {
     if core_n != 1 || shell_n != 1 {
         out.push(hit(1, "mod", msg));
     }
+    if allow_display_wasm_shell_gate
+        && (!shell_module_gated || shell_uses_gated == 0 || shell_uses_ungated != 0)
+    {
+        out.push(hit(
+            1,
+            "mod shell",
+            "B7: oa-display must gate its shell module and every shell re-export with the exact inverse wasm32-unknown-unknown predicate",
+        ));
+    }
     out
+}
+
+/// The only split manifest allowed to omit its shell for the F2 WASM target is oa-display. Its
+/// Unix-only oa-sealed dependency must occur once, under the exact inverse WASM target predicate.
+fn display_wasm_shell_manifest_problems(src: &str) -> Vec<String> {
+    const TARGET: &str = "[target.'cfg(not(all(target_arch = \"wasm32\", target_pointer_width = \"32\", target_os = \"unknown\", target_vendor = \"unknown\")))'.dependencies]";
+    const DEP: &str = "oa-sealed = { path = \"../oa-sealed\" }";
+    let mut section = String::new();
+    let mut dependency_lines = Vec::new();
+    for raw in src.lines() {
+        let line = raw.trim();
+        if line.starts_with('[') && line.ends_with(']') {
+            section = line.to_string();
+        } else if line
+            .split_once('=')
+            .is_some_and(|(key, _)| key.trim() == "oa-sealed")
+        {
+            dependency_lines.push((section.clone(), line.to_string()));
+        }
+    }
+    let manifest = parse_manifest(src);
+    let related: Vec<&Dep> = manifest
+        .deps
+        .iter()
+        .filter(|d| {
+            d.key.replace('_', "-") == "oa-sealed"
+                || d.package.as_deref() == Some("oa-sealed")
+                || d.path.as_deref() == Some("../oa-sealed")
+        })
+        .collect();
+    let exact_target_dep = matches!(
+        dependency_lines.as_slice(),
+        [(section, dep)] if section.as_str() == TARGET && dep.as_str() == DEP
+    );
+    if exact_target_dep
+        && matches!(
+            related.as_slice(),
+            [d] if d.key == "oa-sealed" && d.path.as_deref() == Some("../oa-sealed")
+        )
+    {
+        Vec::new()
+    } else {
+        vec!["oa-display: B7: oa-sealed must be declared exactly once under the exact non-WASM target dependency table".to_string()]
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2086,11 +2350,19 @@ fn resolve_dep(
 
 /// Checks every workspace member under `root` (B7 to B9) against [`UNSPLIT_ALLOWED`].
 pub fn check(root: &Path) -> ClassReport {
-    check_with(root, &UNSPLIT_ALLOWED)
+    check_inner(root, &UNSPLIT_ALLOWED, true)
 }
 
 /// [`check`] with another fixed unsplit list (for the fixtures).
 pub fn check_with(root: &Path, unsplit_allowed: &[&str]) -> ClassReport {
+    check_inner(root, unsplit_allowed, false)
+}
+
+fn check_inner(
+    root: &Path,
+    unsplit_allowed: &[&str],
+    enforce_product_exceptions: bool,
+) -> ClassReport {
     let mut rep = ClassReport::default();
     let root_toml = root.join("Cargo.toml");
     let text = match fs::read_to_string(&root_toml) {
@@ -2242,7 +2514,28 @@ pub fn check_with(root: &Path, unsplit_allowed: &[&str]) -> ClassReport {
             check_member(root, m, &view, &mut cbs, &mut rep.failures);
         }
     }
-    check_ffi_a0(root, &members, &mut rep.failures);
+    let ffi_fixture_member = members
+        .iter()
+        .any(|member| member.name == FFI_PACKAGE || member.rel_dir == FFI_PACKAGE_DIR);
+    if enforce_product_exceptions || ffi_fixture_member {
+        check_ffi_a0(root, &members, &mut rep.failures);
+    }
+    // Even lightweight fixture checks enforce the WASM boundary when a fixture contains that
+    // package. Otherwise its positive/negative A0 regressions silently exercise no checker path.
+    let wasm_abi_members: Vec<&Member> = members
+        .iter()
+        .filter(|member| member.name == WASM_ABI_PACKAGE || member.rel_dir == WASM_ABI_DIR)
+        .collect();
+    if enforce_product_exceptions || !wasm_abi_members.is_empty() {
+        if wasm_abi_members.len() != 1 {
+            rep.failures.push(format!(
+                "A0: expected exactly one `{WASM_ABI_PACKAGE}` shell package at `{WASM_ABI_DIR}`"
+            ));
+        }
+        for member in wasm_abi_members {
+            check_wasm_abi_member(root, member, &mut rep.failures);
+        }
+    }
     if allow_ok {
         for (k, p) in allow_keys.difference(&cbs.used) {
             rep.failures.push(format!(
@@ -3003,6 +3296,163 @@ fn workspace_facts(root: &Path, members: &[Member]) -> (FloatFacts, Seals) {
 }
 
 /// B7 to B9 checks of one core or split crate.
+const WASM_ABI_PACKAGE: &str = "oa-demo-wasm";
+const WASM_ABI_DIR: &str = "tools/oa-demo-wasm";
+// Exact reviewed build-time I/O shape: one guarded input descriptor, no other input/process
+// effects, and only the two generated outputs written under Cargo's OUT_DIR.
+const EXPECTED_WASM_BUILD: &str = include_str!("classcheck/oa_demo_wasm_build.expected");
+const EXPECTED_WASM_ABI_SOURCE: &str = include_str!("classcheck/oa_demo_wasm_abi.expected");
+const EXPECTED_WASM_ABI_LIB: &str = r#"//! Host shell for the fixed-width F2 demo ABI. This crate supports native 64-bit parity tools and
+//! the wasm32 browser target; `f2_frame` checks address conversion rather than truncating it.
+
+#![deny(unsafe_code)]
+
+#[cfg(not(any(
+    target_pointer_width = "64",
+    all(
+        target_arch = "wasm32",
+        target_pointer_width = "32",
+        target_os = "unknown",
+        target_vendor = "unknown"
+    )
+)))]
+compile_error!("oa-demo-wasm supports only 64-bit native hosts and wasm32-unknown-unknown");
+
+// The native workspace builds the shell package without pretending to provide browser
+// exports or embedding an arbitrary asset. The scalar ABI exists only for the exact
+// browser target; its build script pins and embeds the real OASD bundle there.
+#[cfg(all(
+    target_arch = "wasm32",
+    target_pointer_width = "32",
+    target_os = "unknown",
+    target_vendor = "unknown"
+))]
+mod abi;
+"#;
+
+/// The fixed A0 exception for the browser's scalar-only ABI. Any source or manifest expansion
+/// requires a corresponding review of this inventory and the RULESET exception.
+fn check_wasm_abi_member(root: &Path, member: &Member, fails: &mut Vec<String>) {
+    let name = &member.name;
+    if name != WASM_ABI_PACKAGE || member.rel_dir != WASM_ABI_DIR || member.class != Class::Shell {
+        fails.push(format!(
+            "{name}: A0: the oa-demo-wasm ABI exception is only `{WASM_ABI_PACKAGE}` at `{WASM_ABI_DIR}` classified as shell"
+        ));
+    }
+
+    let expected_manifest = [
+        "[package]",
+        "name = \"oa-demo-wasm\"",
+        "version.workspace = true",
+        "edition.workspace = true",
+        "license.workspace = true",
+        "rust-version.workspace = true",
+        "authors.workspace = true",
+        "publish = false",
+        "build = \"build.rs\"",
+        "[package.metadata.openatca]",
+        "class = \"shell\"",
+        "[lib]",
+        "crate-type = [\"cdylib\"]",
+        "[dependencies]",
+        "oa-demo-engine = { path = \"../../crates/oa-demo-engine\" }",
+        "[build-dependencies]",
+        "# F1: build-time only guarded input access; no oa-sealed dependency enters the WASM/runtime graph.",
+        "oa-sealed = { path = \"../../crates/oa-sealed\" }",
+        "oa-sha256 = { path = \"../../crates/oa-sha256\" }",
+        "[lints.rust]",
+        "unsafe_code = \"deny\"",
+        "[lints.clippy]",
+        "unwrap_used = \"deny\"",
+        "expect_used = \"deny\"",
+        "panic = \"deny\"",
+        "indexing_slicing = \"deny\"",
+    ];
+    let manifest_path = member.dir.join("Cargo.toml");
+    match fs::read_to_string(&manifest_path) {
+        Ok(text) => {
+            let lines: Vec<&str> = text
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .collect();
+            if lines.as_slice() != expected_manifest.as_slice() {
+                fails.push(format!(
+                    "{name}: A0: Cargo.toml differs from the exact reviewed manifest/dependency/lint inventory"
+                ));
+            }
+            let parsed = parse_manifest(&text);
+            if parsed.name.as_deref() != Some(WASM_ABI_PACKAGE)
+                || parsed.class.as_deref() != Some("shell")
+                || parsed.lints_workspace
+                || parsed.deps.len() != 3
+            {
+                fails.push(format!(
+                    "{name}: A0: package class, local lint policy, or dependency count changed"
+                ));
+            }
+        }
+        Err(error) => fails.push(format!(
+            "{name}: A0: cannot read `{}`: {error}",
+            rel(root, &manifest_path)
+        )),
+    }
+
+    let mut rust_files = Vec::new();
+    let mut walk_failures = Vec::new();
+    walk_rs(&member.dir, &[], &mut rust_files, &mut walk_failures);
+    fails.extend(walk_failures);
+    let mut inventory: Vec<String> = rust_files.iter().map(|path| rel(root, path)).collect();
+    inventory.sort();
+    let mut expected_inventory = vec![
+        format!("{WASM_ABI_DIR}/build.rs"),
+        format!("{WASM_ABI_DIR}/src/abi.rs"),
+        format!("{WASM_ABI_DIR}/src/lib.rs"),
+    ];
+    expected_inventory.sort();
+    if inventory != expected_inventory {
+        fails.push(format!(
+            "{name}: A0: Rust source inventory must be exactly `{WASM_ABI_DIR}/src/lib.rs` and `{WASM_ABI_DIR}/src/abi.rs`"
+        ));
+    }
+
+    let lib_path = member.dir.join("src/lib.rs");
+    let abi_path = member.dir.join("src/abi.rs");
+    let build_path = member.dir.join("build.rs");
+    let lib = fs::read_to_string(&lib_path);
+    let abi = fs::read_to_string(&abi_path);
+    let build = fs::read_to_string(&build_path);
+    match (&lib, &abi, &build) {
+        (Ok(lib), Ok(abi), Ok(build)) => {
+            if lib != EXPECTED_WASM_ABI_LIB {
+                fails.push(format!(
+                    "{name}: A0/B10: lib.rs differs from the exact native64/wasm32-unknown-unknown guard and private-module declaration"
+                ));
+            }
+            if abi != EXPECTED_WASM_ABI_SOURCE {
+                fails.push(format!(
+                    "{name}: A0: abi.rs differs from the reviewed fixed scalar ABI source snapshot"
+                ));
+            }
+            if build != EXPECTED_WASM_BUILD {
+                fails.push(format!(
+                    "{name}: A0: build.rs differs from the reviewed guarded two-output source snapshot"
+                ));
+            }
+        }
+        _ => {
+            for (path, result) in [(&lib_path, &lib), (&abi_path, &abi), (&build_path, &build)] {
+                if let Err(error) = result {
+                    fails.push(format!(
+                        "{name}: A0: cannot read `{}`: {error}",
+                        rel(root, path)
+                    ));
+                }
+            }
+        }
+    }
+}
+
 fn check_member(
     root: &Path,
     m: &Member,
@@ -3077,9 +3527,9 @@ fn check_member(
                         "{name}: A0: src/lib.rs of a core crate must have `#![forbid(unsafe_code)]` as an inner attribute at the top, before any item"
                     ));
                 }
-                if !has_pointer_width_guard(&text) {
+                if !has_pointer_width_guard(&text, wasm32_package_allowed(name)) {
                     fails.push(format!(
-                        "{name}: B10: src/lib.rs of a core crate must have `#[cfg(not(target_pointer_width = \"64\"))]` followed by `compile_error!(..)`, which refuses a non-64-bit target and so fixes the width of usize"
+                        "{name}: B10: src/lib.rs of a core crate must have the 64-bit guard, or the exact wasm32-unknown-unknown guard if its package is in WASM32_PACKAGE_ALLOWLIST"
                     ));
                 }
             }
@@ -3103,9 +3553,9 @@ fn check_member(
                         "{name}: A0: src/lib.rs of a core crate must have `#![forbid(unsafe_code)]` as an inner attribute at the top, before any item"
                     ));
                 }
-                if !has_pointer_width_guard(&text) {
+                if !has_pointer_width_guard(&text, wasm32_package_allowed(name)) {
                     fails.push(format!(
-                        "{name}: B10: src/lib.rs of a core crate must have `#[cfg(not(target_pointer_width = \"64\"))]` followed by `compile_error!(..)`, which refuses a non-64-bit target and so fixes the width of usize"
+                        "{name}: B10: src/lib.rs of a core crate must have the 64-bit guard, or the exact wasm32-unknown-unknown guard if its package is in WASM32_PACKAGE_ALLOWLIST"
                     ));
                 }
             }
@@ -3144,6 +3594,7 @@ fn check_member(
         let ctx = Ctx {
             split,
             ieee,
+            wasm32_guard_allowed: wasm32_package_allowed(&m.name),
             math: m.name == "oa-math",
             modules: &modules,
             floats: w.floats,
@@ -3294,12 +3745,13 @@ fn check_split_layout(
                     "{name}: A0: src/lib.rs of a split crate must have `#![forbid(unsafe_code)]` as an inner attribute at the top, before any item"
                 ));
             }
-            if !has_pointer_width_guard(&text) {
+            if !has_pointer_width_guard(&text, wasm32_package_allowed(name)) {
                 fails.push(format!(
-                    "{name}: B10: src/lib.rs of a split crate must have `#[cfg(not(target_pointer_width = \"64\"))]` followed by `compile_error!(..)`, which refuses a non-64-bit target and so fixes the width of usize"
+                    "{name}: B10: src/lib.rs of a split crate must have the 64-bit guard, or the exact wasm32-unknown-unknown guard if its package is in WASM32_PACKAGE_ALLOWLIST"
                 ));
             }
-            for h in lib_rs_problems(&text) {
+            let display_wasm_shell_gate = name == "oa-display" && wasm32_package_allowed(name);
+            for h in lib_rs_problems_for_package(&text, display_wasm_shell_gate) {
                 fails.push(format!(
                     "{}:{}: {}: {}",
                     rel(root, &lib),
@@ -3307,6 +3759,14 @@ fn check_split_layout(
                     h.token,
                     h.message
                 ));
+            }
+            if display_wasm_shell_gate {
+                match fs::read_to_string(m.dir.join("Cargo.toml")) {
+                    Ok(manifest) => {
+                        fails.extend(display_wasm_shell_manifest_problems(&manifest));
+                    }
+                    Err(e) => fails.push(format!("{name}: cannot read Cargo.toml: {e}")),
+                }
             }
         }
         Err(e) => fails.push(format!("{name}: cannot read src/lib.rs: {e}")),
@@ -3362,4 +3822,64 @@ pub fn render_text(rep: &ClassReport) -> String {
         if rep.ok() { "PASS" } else { "FAIL" }
     ));
     o
+}
+
+#[cfg(test)]
+// The private helper test is synthetic and deliberately reports the token stream on failure.
+#[allow(clippy::expect_used, clippy::panic)]
+mod width_guard_tests {
+    use super::*;
+
+    fn cfg_index(src: &str) -> (Vec<Tok>, usize) {
+        let masked = mask(src);
+        let toks = tokenize(&masked);
+        let index = toks
+            .iter()
+            .enumerate()
+            .find_map(|(index, token)| {
+                (token.s == "cfg"
+                    && s(&toks, index + 1) == "("
+                    && s(&toks, index + 2) == "not"
+                    && (s(&toks, index + 4) == "target_pointer_width"
+                        || s(&toks, index + 6) == "target_pointer_width"))
+                    .then_some(index)
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "width guard cfg not found in {:?}",
+                    toks.iter()
+                        .map(|token| token.s.as_str())
+                        .collect::<Vec<_>>()
+                )
+            });
+        (toks, index)
+    }
+
+    #[test]
+    fn exact_native_and_allowlisted_wasm_width_guards_are_recognized() {
+        let native = "#[cfg(not(target_pointer_width = \"64\"))]\ncompile_error!(\"unsupported\");";
+        let (native_toks, native_index) = cfg_index(native);
+        assert!(pointer_width_guard(&native_toks, native_index, false));
+
+        let wasm = "#[cfg(not(any(target_pointer_width = \"64\", all(target_arch = \"wasm32\", target_pointer_width = \"32\", target_os = \"unknown\", target_vendor = \"unknown\"))))]\ncompile_error!(\"unsupported\");";
+        let (wasm_toks, wasm_index) = cfg_index(wasm);
+        assert!(!pointer_width_guard(&wasm_toks, wasm_index, false));
+        assert!(pointer_width_guard(&wasm_toks, wasm_index, true));
+    }
+
+    #[test]
+    fn display_shell_cfg_accepts_rustfmt_wrapping_but_not_changed_targets() {
+        const EXPECTED: &str = "#[cfg(not(all(target_arch = \"wasm32\", target_pointer_width = \"32\", target_os = \"unknown\", target_vendor = \"unknown\")))]";
+        let wrapped = "#[cfg(not(all(\n    target_arch = \"wasm32\",\n    target_pointer_width = \"32\",\n    target_os = \"unknown\",\n    target_vendor = \"unknown\"\n)))]\nmod shell;";
+        assert!(attribute_matches_without_whitespace(
+            wrapped, 1, 6, EXPECTED
+        ));
+        let wrong_target = wrapped.replace("\"32\"", "\"64\"");
+        assert!(!attribute_matches_without_whitespace(
+            &wrong_target,
+            1,
+            6,
+            EXPECTED
+        ));
+    }
 }

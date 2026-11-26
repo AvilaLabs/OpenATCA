@@ -19,15 +19,15 @@ pub const POS_SIGMA_SCALE: f64 = 1.0;
 /// clip.
 pub const DEFAULT_NACV: u8 = 1;
 /// Per-axis velocity noise from the NACv bound (DO-260B table 2-22: 10, 3, 1 and 0.3 m/s as 95 %
-/// radii) divided by `oa_truth::SIGMA95`, by NACv; index 0 is unused. The behaviour before the
+/// radii) divided by `oa_adsb_model::SIGMA95`, by NACv; index 0 is unused. The behaviour before the
 /// calibrated table: far looser than the measured error, so kept for the tests that pin
 /// outputs bit for bit and for comparison.
 pub const NACV_BOUND_VEL_SIGMA_MPS: [f64; 5] = [
     f64::INFINITY,
-    10.0 / oa_truth::SIGMA95,
-    3.0 / oa_truth::SIGMA95,
-    1.0 / oa_truth::SIGMA95,
-    0.3 / oa_truth::SIGMA95,
+    10.0 / oa_adsb_model::SIGMA95,
+    3.0 / oa_adsb_model::SIGMA95,
+    1.0 / oa_adsb_model::SIGMA95,
+    0.3 / oa_adsb_model::SIGMA95,
 ];
 /// Per-axis velocity noise by NACv, m/s (1 sigma), all flight conditions; index 0 is unused. Calibrated on the
 /// 2026-11-14 ZAU clip (`velocity_diag`, set A reported velocity against the set-B reference
@@ -184,8 +184,8 @@ pub const CONFIRM_POOL: usize = 64;
 /// An altitude innovation above this many standard deviations is not applied.
 pub const ALT_GATE_SIGMAS: f64 = 10.0;
 /// This many rejections in a row re-initialise the filter at the new report (the track the
-/// comparisons were anchored to was probably the bad one). The value of `oa_truth::JUMP_RESYNC`.
-pub const RESYNC_AFTER: u8 = oa_truth::JUMP_RESYNC as u8;
+/// comparisons were anchored to was probably the bad one). The value of `oa_adsb_model::JUMP_RESYNC`.
+pub const RESYNC_AFTER: u8 = oa_adsb_model::JUMP_RESYNC as u8;
 /// A measurement more than this ahead of the tracker clock does not move the clock until a run
 /// of them from enough distinct sensors and addresses confirms it (`crate::time_gate`); until
 /// then it is counted and not applied. Equal to the out-of-order window and below the drop age:
@@ -196,8 +196,8 @@ pub const CLOCK_STEP_LIMIT_NS: i64 = OOO_WINDOW_NS;
 /// Consecutive far-ahead measurements that confirm a step of the clock forward (and, doubled, the
 /// late refusals that confirm a step back).
 pub const CLOCK_STEP_CONFIRM: u32 = 3;
-/// Allowance added to the plausibility distance, metres (`oa_truth::JUMP_SLACK_M`).
-pub const PLAUSIBLE_SLACK_M: f64 = oa_truth::JUMP_SLACK_M;
+/// Allowance added to the plausibility distance, metres (`oa_adsb_model::JUMP_SLACK_M`).
+pub const PLAUSIBLE_SLACK_M: f64 = oa_adsb_model::JUMP_SLACK_M;
 
 // ---- Time, ordering, output -----------------------------------------------------------
 

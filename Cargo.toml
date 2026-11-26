@@ -18,6 +18,7 @@ members = [
     "crates/oa-tar",
     "crates/oa-adsb",
     "crates/oa-modes",
+    "crates/oa-adsb-model",
     "crates/oa-airspace",
     "crates/oa-feed",
     "crates/oa-fixm",
@@ -27,7 +28,10 @@ members = [
     "crates/oa-notam",
     "crates/oa-tfms",
     "crates/oa-display",
+    "crates/oa-workstation",
     "crates/oa-display-present",
+    "crates/oa-track-core",
+    "crates/oa-demo-engine",
     "crates/oa-scope-replay",
     "crates/oa-tiff",
     "crates/oa-dof",
@@ -43,8 +47,10 @@ members = [
     "crates/oa-nam",
     "crates/oa-asdi",
     "crates/oa-sensorsim",
+    "crates/oa-demo-scenario",
     "crates/oa-track",
     "crates/oa-track-tools",
+    "tools/oa-demo-wasm",
     "crates/openatca-core",
     "crates/openatca-core-ffi",
     "crates/oa-encounter",
@@ -77,6 +83,7 @@ members = [
     "tools/oa-stdds-census",
     "tools/oa-trace",
     "tools/oa-sector-reconstruct",
+    "tools/oa-demo-scenario-prep",
 ]
 
 [workspace.package]

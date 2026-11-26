@@ -1,0 +1,32 @@
+[package]
+name = "oa-demo-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[package.metadata.openatca]
+class = "split"
+
+[dependencies]
+# F1: steer30 explicitly authorizes running existing oa-ca in the demo on every scan.
+oa-ca = { path = "../oa-ca" }
+oa-demo-scenario = { path = "../oa-demo-scenario" }
+oa-display = { path = "../oa-display" }
+oa-flight = { path = "../oa-flight" }
+oa-geo = { path = "../oa-geo" }
+oa-math = { path = "../oa-math" }
+oa-safety = { path = "../oa-safety" }
+oa-sha256 = { path = "../oa-sha256" }
+oa-track-core = { path = "../oa-track-core" }
+oa-workstation = { path = "../oa-workstation" }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# F1: approved 2026-11-26 for the native-only oa-demo-runner shell binary to guard-open its
+# OASD/F2TRACE inputs and refuse sealed result paths before create-new private output. This
+# target-specific edge is absent from wasm32's dependency closure.
+oa-sealed = { path = "../oa-sealed" }

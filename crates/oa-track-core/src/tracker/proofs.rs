@@ -1205,7 +1205,6 @@ fn late_replay_restores_transaction_after_current_row_then_later_refusal() {
     assert_eq!(prove_late_replay_rollback_for_capacity(2), 2);
 }
 
-#[path = "tracker_rollback_paths.rs"]
 mod rollback_paths;
 
 const OLD_T: i64 = PROOF_TIME - 1_000;

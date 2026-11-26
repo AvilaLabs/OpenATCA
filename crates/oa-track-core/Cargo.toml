@@ -1,0 +1,21 @@
+[package]
+name = "oa-track-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Pure engine dependencies only; parser, truth selection, sealing and I/O stay outside this crate.
+oa-adsb-model = { path = "../oa-adsb-model" }
+oa-geo = { path = "../oa-geo" }
+oa-math = { path = "../oa-math" }
+# F1 (Connor approval 2026-11-26): deterministic sqrt/round primitives are absent from core and not re-exported by oa-math.
+oa-ieee = { path = "../oa-ieee" }
+
+[package.metadata.openatca]
+class = "core"

@@ -5,7 +5,7 @@
     {
       "id": "output-append",
       "requirement": "OA-TRK-333: append preserves row alignment, prefixes and all payload bits for the bounded two-row sequence.",
-      "package": "oa-track",
+      "package": "oa-track-core",
       "harness": "types::proofs::output_push_appends_every_column_bit_exactly_and_preserves_prefix",
       "enabled": true,
       "experimental": false,
@@ -23,7 +23,7 @@
     {
       "id": "output-capacity",
       "requirement": "OA-TRK-333: a full output table preserves payloads and changes only saturating overflow.",
-      "package": "oa-track",
+      "package": "oa-track-core",
       "harness": "types::proofs::output_push_at_capacity_changes_only_saturating_overflow",
       "enabled": true,
       "experimental": false,
@@ -41,7 +41,7 @@
     {
       "id": "output-clear",
       "requirement": "OA-TRK-333: clear empties aligned output columns while preserving configured and allocated capacity.",
-      "package": "oa-track",
+      "package": "oa-track-core",
       "harness": "types::proofs::output_clear_empties_columns_and_preserves_capacity_and_storage",
       "enabled": true,
       "experimental": false,
@@ -59,7 +59,7 @@
     {
       "id": "tracker-current-row",
       "requirement": "OA-TRK-334: a confirmed applied or resynced dispatch attempts one current report row.",
-      "package": "oa-track",
+      "package": "oa-track-core",
       "harness": "tracker::proofs::confirmed_applied_or_resynced_attempts_one_current_report_row",
       "enabled": true,
       "experimental": false,
@@ -84,7 +84,7 @@
     {
       "id": "tracker-unrepresentable-row",
       "requirement": "OA-TRK-334: an applied or resynced unrepresentable current row is counted without output mutation.",
-      "package": "oa-track",
+      "package": "oa-track-core",
       "harness": "tracker::proofs::confirmed_applied_or_resynced_counts_unrepresentable_current_row",
       "enabled": true,
       "experimental": false,
@@ -109,7 +109,7 @@
     {
       "id": "tracker-output-overflow",
       "requirement": "OA-TRK-334: an applied or resynced row attempt at output capacity preserves payload and increments overflow.",
-      "package": "oa-track",
+      "package": "oa-track-core",
       "harness": "tracker::proofs::confirmed_applied_or_resynced_counts_output_overflow",
       "enabled": true,
       "experimental": false,
@@ -134,7 +134,7 @@
     {
       "id": "tracker-rejected-dispatch",
       "requirement": "OA-TRK-334: a confirmed rejected update does not attempt report output.",
-      "package": "oa-track",
+      "package": "oa-track-core",
       "harness": "tracker::proofs::confirmed_rejected_update_does_not_attempt_report_output",
       "enabled": true,
       "experimental": false,
@@ -154,7 +154,7 @@
     {
       "id": "tracker-unconfirmed-applied",
       "requirement": "OA-TRK-334: an unconfirmed applied or resynced update does not attempt report output.",
-      "package": "oa-track",
+      "package": "oa-track-core",
       "harness": "tracker::proofs::unconfirmed_applied_or_resynced_update_does_not_attempt_report_output",
       "enabled": true,
       "experimental": false,
@@ -175,7 +175,7 @@
     {
       "id": "tracker-unconfirmed-begun",
       "requirement": "OA-TRK-334: an unconfirmed begun update does not attempt report output.",
-      "package": "oa-track",
+      "package": "oa-track-core",
       "harness": "tracker::proofs::unconfirmed_begun_update_does_not_attempt_report_output",
       "enabled": true,
       "experimental": false,
@@ -195,7 +195,7 @@
     {
       "id": "tracker-confirmed-begun-dispatch",
       "requirement": "OA-TRK-334: a confirmed track receiving a Begun dispatch follows the confirmed-state report-output contract.",
-      "package": "oa-track",
+      "package": "oa-track-core",
       "harness": "tracker::proofs::confirmed_begun_update_attempts_one_current_report_row",
       "enabled": true,
       "experimental": false,
@@ -216,7 +216,7 @@
     {
       "id": "tracker-actual-decision",
       "requirement": "OA-TRK-334: with filter_apply stubbed to a fixed result, decide commits the report time, the ring entry, the counters and the current and anchor times, and the current report row is emitted.",
-      "package": "oa-track",
+      "package": "oa-track-core",
       "harness": "tracker::proofs::actual_decide_commits_applied_or_resynced_report_and_emits_current_time",
       "enabled": true,
       "experimental": false,
@@ -240,7 +240,7 @@
     {
       "id": "tracker-refusal-routing",
       "requirement": "OA-TRK-335: numerical refusal dispatch increments its refusal counter exactly once without computing or emitting a row; partial dispatch evidence only.",
-      "package": "oa-track",
+      "package": "oa-track-core",
       "harness": "tracker::proofs::numerical_refusal_dispatch_routes_and_accounts_once",
       "enabled": true,
       "experimental": false,
@@ -263,7 +263,7 @@
     {
       "id": "tracker-restore-current-filter",
       "requirement": "OA-TRK-335: restoring a tracker transaction restores the current filter; component evidence only.",
-      "package": "oa-track",
+      "package": "oa-track-core",
       "harness": "tracker::proofs::restore_track_transaction_restores_current_filter",
       "enabled": true,
       "experimental": false,
@@ -283,7 +283,7 @@
     {
       "id": "tracker-restore-anchor-filter",
       "requirement": "OA-TRK-335: restoring a tracker transaction restores the anchor filter; component evidence only.",
-      "package": "oa-track",
+      "package": "oa-track-core",
       "harness": "tracker::proofs::restore_track_transaction_restores_anchor_filter",
       "enabled": true,
       "experimental": false,
@@ -303,7 +303,7 @@
     {
       "id": "tracker-restore-ring-history",
       "requirement": "OA-TRK-335: restoring a tracker transaction restores ring history; component evidence only.",
-      "package": "oa-track",
+      "package": "oa-track-core",
       "harness": "tracker::proofs::restore_track_transaction_restores_ring_history",
       "enabled": true,
       "experimental": false,
@@ -323,7 +323,7 @@
     {
       "id": "tracker-restore-metadata-category",
       "requirement": "OA-TRK-335: restoring a tracker transaction restores tracker metadata and category state; component evidence only.",
-      "package": "oa-track",
+      "package": "oa-track-core",
       "harness": "tracker::proofs::restore_track_transaction_restores_metadata_and_category",
       "enabled": true,
       "experimental": false,
@@ -343,7 +343,7 @@
     {
       "id": "tracker-restore-statistics",
       "requirement": "OA-TRK-335: restoring a tracker transaction puts back every statistic except numerical_refused, which the restore itself increments by one; component evidence only.",
-      "package": "oa-track",
+      "package": "oa-track-core",
       "harness": "tracker::proofs::restore_track_transaction_restores_all_statistics",
       "enabled": true,
       "experimental": false,
@@ -363,7 +363,7 @@
     {
       "id": "output-restore-appended-row",
       "requirement": "OA-TRK-335: restoring output transaction state removes an appended row and restores all columns; component evidence only.",
-      "package": "oa-track",
+      "package": "oa-track-core",
       "harness": "tracker::proofs::restore_output_transaction_restores_appended_row_and_columns",
       "enabled": true,
       "experimental": false,
@@ -381,7 +381,7 @@
     {
       "id": "output-restore-overflow",
       "requirement": "OA-TRK-335: restoring output transaction state restores the overflow counter; component evidence only.",
-      "package": "oa-track",
+      "package": "oa-track-core",
       "harness": "tracker::proofs::restore_output_transaction_restores_overflow_counter",
       "enabled": true,
       "experimental": false,
@@ -402,7 +402,7 @@
     {
       "id": "tracker-numerical-refusal-rollback",
       "requirement": "OA-TRK-335: numerical refusal restores tracker and output transaction state.",
-      "package": "oa-track",
+      "package": "oa-track-core",
       "harness": "tracker::proofs::numerical_refusal_restores_track_and_output_transaction_state",
       "enabled": false,
       "experimental": true,
@@ -422,7 +422,7 @@
     {
       "id": "tracker-late-replay-rollback",
       "requirement": "OA-TRK-335: a later replay refusal restores tracker state and removes the earlier current-row output attempt.",
-      "package": "oa-track",
+      "package": "oa-track-core",
       "harness": "tracker::proofs::late_replay_restores_transaction_after_current_row_then_later_refusal",
       "enabled": false,
       "experimental": true,
@@ -445,7 +445,7 @@
     {
       "id": "large-move-decision",
       "requirement": "OA-TRK-348/352/353: the pure resolve_decide: only a report apart from the move and inside the window decides; a rollback needs an earlier old-path report 0.5 s before; an unpredictable old path decides nothing (not: how update_in_order_held acts on the verdict).",
-      "package": "oa-track",
+      "package": "oa-track-core",
       "harness": "tracker::proofs::resolve_decide_needs_apart_reports_to_confirm_and_two_to_roll_back",
       "enabled": true,
       "experimental": false,
@@ -471,7 +471,7 @@
     {
       "id": "large-move-marks-rows",
       "requirement": "OA-TRK-347: production update_in_order given a large-move decision starts the move and the emit it calls marks the row it makes (not: update_in_order_held, ticks, forecasts, late-replay rows, the widened radius's value).",
-      "package": "oa-track",
+      "package": "oa-track-core",
       "harness": "tracker::proofs::update_in_order_with_a_large_move_starts_it_and_emit_marks_the_row_it_makes",
       "enabled": true,
       "experimental": false,
@@ -497,7 +497,7 @@
     {
       "id": "large-move-decision-rejected",
       "requirement": "OA-TRK-354: update_in_order_held with a report that is not applied: the move, its snapshot, the move's own columns, the counters that change (jump_rejected one more, at most one of moves_old_path_votes and moves_decision_rejected one more, moves_old_path_unpredictable never) and the old-path vote time are as before apart from the named counters, changed as the real rejected path changes them (default configuration: resync off and the run of refusals below RESYNC_AFTER; the snapshot in the pool is unchanged bit for bit; not: applied or large-move reports, ticks, forecasts, late replay). decide, filter_apply and filter_miss_m are stubs. Nine harnesses over eight groups, in each exactly one group symbolic and the others at one fixed value: here the move's start time, the vote time or none, the report's time (a 1000 ns window) and flags and the distances, which are symbolic in all nine; mv_first_ns and mv_first_sens only in first-times; only ring_m[0] in the ring harness; disagree_until_ns, expected_ns and newest_update_ns at their default only. Ring loops are bounded by the constant RING_DEPTH.",
-      "package": "oa-track",
+      "package": "oa-track-core",
       "harness": "tracker::proofs::update_in_order_held_with_a_report_that_is_not_applied_changes_only_the_refusals_scalars_and_counters",
       "enabled": true,
       "experimental": false,
@@ -523,7 +523,7 @@
     {
       "id": "large-move-rollback",
       "requirement": "OA-TRK-349: snap_restore from the move's snapshot and end_move put back the scalar columns, the category and the current filter's time and first state value, leave the outside columns and the newest-update bound, and return the snapshot to the pool (the filters and ring: the snapshot round-trip proofs).",
-      "package": "oa-track",
+      "package": "oa-track-core",
       "harness": "tracker::proofs::snap_restore_from_the_moves_snapshot_and_end_move_put_back_the_listed_columns",
       "enabled": true,
       "experimental": false,
@@ -615,7 +615,7 @@
     {
       "id": "full-sensor-monotonicity",
       "requirement": "OA-TRK-336: live sensor count is monotone for an advancing clock on a full table.",
-      "package": "oa-track",
+      "package": "oa-track-core",
       "harness": "time_gate::proofs_full::full_sensor_table_live_count_is_monotone",
       "enabled": true,
       "experimental": false,
@@ -639,7 +639,7 @@
     {
       "id": "full-sensor-update",
       "requirement": "OA-TRK-336: a full 64-slot sensor table updates or evicts exactly according to the full-table contract.",
-      "package": "oa-track",
+      "package": "oa-track-core",
       "harness": "time_gate::proofs_full::full_sensor_table_note_preserves_or_evicts_by_contract",
       "enabled": false,
       "experimental": true,
@@ -665,7 +665,7 @@
     {
       "id": "caller-current-filter",
       "requirement": "OA-TRK-335: Selected independently symbolic transaction projection is restored through actual update_in_order under modeled refusal; initialized fixed slot.",
-      "package": "oa-track",
+      "package": "oa-track-core",
       "harness": "tracker::proofs::rollback_paths::in_order_refusal_restores_current_filter_projection",
       "enabled": true,
       "experimental": false,
@@ -687,7 +687,7 @@
     {
       "id": "caller-metadata",
       "requirement": "OA-TRK-335: Selected independently symbolic transaction projection is restored through actual update_in_order under modeled refusal; initialized fixed slot.",
-      "package": "oa-track",
+      "package": "oa-track-core",
       "harness": "tracker::proofs::rollback_paths::in_order_refusal_restores_track_metadata_projection",
       "enabled": true,
       "experimental": false,
@@ -709,7 +709,7 @@
     {
       "id": "caller-anchor-filter",
       "requirement": "OA-TRK-335: Selected independently symbolic transaction projection is restored through actual update_in_order under modeled refusal; initialized fixed slot.",
-      "package": "oa-track",
+      "package": "oa-track-core",
       "harness": "tracker::proofs::rollback_paths::in_order_refusal_restores_anchor_filter_projection",
       "enabled": true,
       "experimental": false,
@@ -731,7 +731,7 @@
     {
       "id": "caller-ring-history",
       "requirement": "OA-TRK-335: Selected independently symbolic transaction projection is restored through actual update_in_order under modeled refusal; initialized fixed slot.",
-      "package": "oa-track",
+      "package": "oa-track-core",
       "harness": "tracker::proofs::rollback_paths::in_order_refusal_restores_all_ring_entry_projection",
       "enabled": true,
       "experimental": false,
@@ -753,7 +753,7 @@
     {
       "id": "caller-statistics",
       "requirement": "OA-TRK-335: Selected independently symbolic transaction projection is restored through actual update_in_order under modeled refusal; initialized fixed slot.",
-      "package": "oa-track",
+      "package": "oa-track-core",
       "harness": "tracker::proofs::rollback_paths::in_order_refusal_restores_stats_projection_except_refusal_count",
       "enabled": true,
       "experimental": false,
@@ -775,7 +775,7 @@
     {
       "id": "full-sensor-note-existing",
       "requirement": "OA-TRK-336: Full64 used table with IDs0..63 and arbitrary i64 timestamps; existing ID updates its max without eviction.",
-      "package": "oa-track",
+      "package": "oa-track-core",
       "harness": "time_gate::proofs_full::full_sensor_table_note_existing_id_updates_max_without_eviction",
       "enabled": true,
       "experimental": false,
@@ -801,7 +801,7 @@
     {
       "id": "full-sensor-note-new",
       "requirement": "OA-TRK-336: Full64 used table with IDs0..63 and arbitrary i64 timestamps; fresh ID64 evicts the first minimum and saturates eviction count.",
-      "package": "oa-track",
+      "package": "oa-track-core",
       "harness": "time_gate::proofs_full::full_sensor_table_note_new_id_evicts_first_argmin",
       "enabled": true,
       "experimental": false,
@@ -826,7 +826,7 @@
     {
       "id": "late-append-anchor-filter-projection",
       "requirement": "OA-TRK-335 bounded late replay rollback fixture; modeled first success then later numerical refusal; scope is limited to this harness and its stated projection.",
-      "package": "oa-track",
+      "package": "oa-track-core",
       "harness": "tracker::proofs::rollback_paths::late_append_anchor_filter_projection",
       "enabled": true,
       "experimental": false,
@@ -853,7 +853,7 @@
     {
       "id": "late-append-current-filter-projection",
       "requirement": "OA-TRK-335 bounded late replay rollback fixture; modeled first success then later numerical refusal; scope is limited to this harness and its stated projection.",
-      "package": "oa-track",
+      "package": "oa-track-core",
       "harness": "tracker::proofs::rollback_paths::late_append_current_filter_projection",
       "enabled": true,
       "experimental": false,
@@ -880,7 +880,7 @@
     {
       "id": "late-append-metadata-projection",
       "requirement": "OA-TRK-335 bounded late replay rollback fixture; modeled first success then later numerical refusal; scope is limited to this harness and its stated projection.",
-      "package": "oa-track",
+      "package": "oa-track-core",
       "harness": "tracker::proofs::rollback_paths::late_append_metadata_projection",
       "enabled": true,
       "experimental": false,
@@ -907,7 +907,7 @@
     {
       "id": "late-append-output-projection",
       "requirement": "OA-TRK-335 bounded late replay rollback fixture; modeled first success then later numerical refusal; scope is limited to this harness and its stated projection.",
-      "package": "oa-track",
+      "package": "oa-track-core",
       "harness": "tracker::proofs::rollback_paths::late_append_output_projection",
       "enabled": true,
       "experimental": false,
@@ -934,7 +934,7 @@
     {
       "id": "late-append-ring-projection",
       "requirement": "OA-TRK-335 bounded late replay rollback fixture; modeled first success then later numerical refusal; scope is limited to this harness and its stated projection.",
-      "package": "oa-track",
+      "package": "oa-track-core",
       "harness": "tracker::proofs::rollback_paths::late_append_ring_projection",
       "enabled": true,
       "experimental": false,
@@ -961,7 +961,7 @@
     {
       "id": "late-append-stats-projection",
       "requirement": "OA-TRK-335 bounded late replay rollback fixture; modeled first success then later numerical refusal; scope is limited to this harness and its stated projection.",
-      "package": "oa-track",
+      "package": "oa-track-core",
       "harness": "tracker::proofs::rollback_paths::late_append_stats_projection",
       "enabled": true,
       "experimental": false,
@@ -988,7 +988,7 @@
     {
       "id": "late-overflow-anchor-filter-projection",
       "requirement": "OA-TRK-335 bounded late replay rollback fixture; modeled first success then later numerical refusal; scope is limited to this harness and its stated projection.",
-      "package": "oa-track",
+      "package": "oa-track-core",
       "harness": "tracker::proofs::rollback_paths::late_overflow_anchor_filter_projection",
       "enabled": true,
       "experimental": false,
@@ -1015,7 +1015,7 @@
     {
       "id": "late-overflow-current-filter-projection",
       "requirement": "OA-TRK-335 bounded late replay rollback fixture; modeled first success then later numerical refusal; scope is limited to this harness and its stated projection.",
-      "package": "oa-track",
+      "package": "oa-track-core",
       "harness": "tracker::proofs::rollback_paths::late_overflow_current_filter_projection",
       "enabled": true,
       "experimental": false,
@@ -1042,7 +1042,7 @@
     {
       "id": "late-overflow-metadata-projection",
       "requirement": "OA-TRK-335 bounded late replay rollback fixture; modeled first success then later numerical refusal; scope is limited to this harness and its stated projection.",
-      "package": "oa-track",
+      "package": "oa-track-core",
       "harness": "tracker::proofs::rollback_paths::late_overflow_metadata_projection",
       "enabled": true,
       "experimental": false,
@@ -1069,7 +1069,7 @@
     {
       "id": "late-overflow-output-projection",
       "requirement": "OA-TRK-335 bounded late replay rollback fixture; modeled first success then later numerical refusal; scope is limited to this harness and its stated projection.",
-      "package": "oa-track",
+      "package": "oa-track-core",
       "harness": "tracker::proofs::rollback_paths::late_overflow_output_projection",
       "enabled": true,
       "experimental": false,
@@ -1096,7 +1096,7 @@
     {
       "id": "late-overflow-ring-projection",
       "requirement": "OA-TRK-335 bounded late replay rollback fixture; modeled first success then later numerical refusal; scope is limited to this harness and its stated projection.",
-      "package": "oa-track",
+      "package": "oa-track-core",
       "harness": "tracker::proofs::rollback_paths::late_overflow_ring_projection",
       "enabled": true,
       "experimental": false,
@@ -1123,7 +1123,7 @@
     {
       "id": "late-overflow-stats-projection",
       "requirement": "OA-TRK-335 bounded late replay rollback fixture; modeled first success then later numerical refusal; scope is limited to this harness and its stated projection.",
-      "package": "oa-track",
+      "package": "oa-track-core",
       "harness": "tracker::proofs::rollback_paths::late_overflow_stats_projection",
       "enabled": true,
       "experimental": false,
@@ -1150,7 +1150,7 @@
     {
       "id": "late-append-reachability",
       "requirement": "OA-TRK-335 bounded late replay rollback fixture; modeled first success then later numerical refusal; scope is limited to this harness and its stated projection.",
-      "package": "oa-track",
+      "package": "oa-track-core",
       "harness": "tracker::proofs::rollback_paths::late_replay_append_reachability",
       "enabled": true,
       "experimental": false,
@@ -1183,7 +1183,7 @@
     {
       "id": "late-overflow-reachability",
       "requirement": "OA-TRK-335 bounded late replay rollback fixture; modeled first success then later numerical refusal; scope is limited to this harness and its stated projection.",
-      "package": "oa-track",
+      "package": "oa-track-core",
       "harness": "tracker::proofs::rollback_paths::late_replay_overflow_reachability",
       "enabled": true,
       "experimental": false,
@@ -1216,7 +1216,7 @@
     {
       "id": "late-overflow-combined",
       "requirement": "OA-TRK-335: Combined postconditions for the fixed two-event modeled-refusal fixture; resource-incomplete experiment, covered separately by the component family.",
-      "package": "oa-track",
+      "package": "oa-track-core",
       "harness": "tracker::proofs::rollback_paths::late_replay_restores_transaction_after_overflow_before_refusal",
       "enabled": false,
       "experimental": true,
@@ -1243,7 +1243,7 @@
     {
       "id": "late-append-combined",
       "requirement": "OA-TRK-335: Combined postconditions for the fixed two-event modeled-refusal fixture; resource-incomplete experiment, covered separately by the component family.",
-      "package": "oa-track",
+      "package": "oa-track-core",
       "harness": "tracker::proofs::rollback_paths::late_replay_restores_transaction_after_append_before_refusal",
       "enabled": false,
       "experimental": true,
@@ -1270,7 +1270,7 @@
     {
       "id": "snapshot-round-trip-current-filter",
       "requirement": "OA-TRK-349: taking a rollback snapshot and restoring it puts the current filter back bit for bit.",
-      "package": "oa-track",
+      "package": "oa-track-core",
       "harness": "tracker::proofs::taking_then_restoring_a_snapshot_restores_the_current_filter",
       "enabled": true,
       "experimental": false,
@@ -1290,7 +1290,7 @@
     {
       "id": "snapshot-round-trip-anchor-filter",
       "requirement": "OA-TRK-349: taking a rollback snapshot and restoring it puts the anchor filter back bit for bit.",
-      "package": "oa-track",
+      "package": "oa-track-core",
       "harness": "tracker::proofs::taking_then_restoring_a_snapshot_restores_the_anchor_filter",
       "enabled": true,
       "experimental": false,
@@ -1310,7 +1310,7 @@
     {
       "id": "snapshot-round-trip-ring",
       "requirement": "OA-TRK-349: taking a rollback snapshot and restoring it puts the measurement ring, its length and head back bit for bit.",
-      "package": "oa-track",
+      "package": "oa-track-core",
       "harness": "tracker::proofs::taking_then_restoring_a_snapshot_restores_the_ring",
       "enabled": true,
       "experimental": false,
@@ -1330,7 +1330,7 @@
     {
       "id": "snapshot-capture-equals-take-scalars-category",
       "requirement": "OA-TRK-354: snap_of_txn(&track_txn(t)) equals snap_take(t) in every field, with the scalars category group symbolic.",
-      "package": "oa-track",
+      "package": "oa-track-core",
       "harness": "tracker::proofs::the_capture_snapshot_equals_the_snapshot_taken_scalars_and_category",
       "enabled": true,
       "experimental": false,
@@ -1348,7 +1348,7 @@
     {
       "id": "snapshot-capture-equals-take-current-filter",
       "requirement": "OA-TRK-354: snap_of_txn(&track_txn(t)) equals snap_take(t) in every field, with the current filter group symbolic.",
-      "package": "oa-track",
+      "package": "oa-track-core",
       "harness": "tracker::proofs::the_capture_snapshot_equals_the_snapshot_taken_current_filter",
       "enabled": true,
       "experimental": false,
@@ -1366,7 +1366,7 @@
     {
       "id": "snapshot-capture-equals-take-anchor-filter",
       "requirement": "OA-TRK-354: snap_of_txn(&track_txn(t)) equals snap_take(t) in every field, with the anchor filter group symbolic.",
-      "package": "oa-track",
+      "package": "oa-track-core",
       "harness": "tracker::proofs::the_capture_snapshot_equals_the_snapshot_taken_anchor_filter",
       "enabled": true,
       "experimental": false,
@@ -1384,7 +1384,7 @@
     {
       "id": "snapshot-capture-equals-take-ring",
       "requirement": "OA-TRK-354: snap_of_txn(&track_txn(t)) equals snap_take(t) in every field, with the ring group symbolic.",
-      "package": "oa-track",
+      "package": "oa-track-core",
       "harness": "tracker::proofs::the_capture_snapshot_equals_the_snapshot_taken_ring",
       "enabled": true,
       "experimental": false,
@@ -1402,7 +1402,7 @@
     {
       "id": "large-move-decision-rejected-current-filter",
       "requirement": "OA-TRK-354: the same scenario as large-move-decision-rejected (the moved track differs from the snapshot in every group), current filter symbolic: the vertical filter, trigonometry and every scalar of the current filter are as before but for its run of refusals (one more). The horizontal half is proved by large-move-decision-rejected-current-filter-horizontal and the snapshot by large-move-decision-rejected-current-filter-snapshot.",
-      "package": "oa-track",
+      "package": "oa-track-core",
       "harness": "tracker::proofs::update_in_order_held_with_a_report_that_is_not_applied_changes_only_the_refusals_current_filter",
       "enabled": true,
       "experimental": false,
@@ -1424,7 +1424,7 @@
     {
       "id": "large-move-decision-rejected-current-filter-horizontal",
       "requirement": "OA-TRK-354: the same scenario as large-move-decision-rejected, current filter symbolic: the horizontal half of the current filter (both models' state, covariance and weight) is as before bit for bit.",
-      "package": "oa-track",
+      "package": "oa-track-core",
       "harness": "tracker::proofs::update_in_order_held_with_a_report_that_is_not_applied_keeps_the_horizontal_current_filter",
       "enabled": true,
       "experimental": false,
@@ -1446,7 +1446,7 @@
     {
       "id": "large-move-decision-rejected-current-filter-snapshot",
       "requirement": "OA-TRK-354: the same scenario as large-move-decision-rejected, current filter symbolic: the snapshot in the pool is unchanged bit for bit.",
-      "package": "oa-track",
+      "package": "oa-track-core",
       "harness": "tracker::proofs::update_in_order_held_with_a_report_that_is_not_applied_keeps_the_snapshot_with_any_current_filter",
       "enabled": true,
       "experimental": false,
@@ -1468,7 +1468,7 @@
     {
       "id": "large-move-decision-rejected-ring",
       "requirement": "OA-TRK-354: the same scenario, ring entry symbolic: the ring is as before and the snapshot in the pool is unchanged bit for bit.",
-      "package": "oa-track",
+      "package": "oa-track-core",
       "harness": "tracker::proofs::update_in_order_held_with_a_report_that_is_not_applied_changes_only_the_refusals_ring",
       "enabled": true,
       "experimental": false,
@@ -1490,7 +1490,7 @@
     {
       "id": "large-move-decision-rejected-anchor-filter",
       "requirement": "OA-TRK-354: the same scenario as large-move-decision-rejected, anchor filter symbolic: the anchor filter is as before bit for bit. The snapshot is proved by large-move-decision-rejected-anchor-filter-snapshot.",
-      "package": "oa-track",
+      "package": "oa-track-core",
       "harness": "tracker::proofs::update_in_order_held_with_a_report_that_is_not_applied_changes_only_the_refusals_anchor_filter",
       "enabled": true,
       "experimental": false,
@@ -1512,7 +1512,7 @@
     {
       "id": "large-move-decision-rejected-anchor-filter-snapshot",
       "requirement": "OA-TRK-354: the same scenario as large-move-decision-rejected, anchor filter symbolic: the snapshot in the pool is unchanged bit for bit.",
-      "package": "oa-track",
+      "package": "oa-track-core",
       "harness": "tracker::proofs::update_in_order_held_with_a_report_that_is_not_applied_keeps_the_snapshot_with_any_anchor_filter",
       "enabled": true,
       "experimental": false,
@@ -1900,7 +1900,7 @@
     {
       "id": "large-move-decision-rejected-category",
       "requirement": "OA-TRK-354: the same scenario, category state symbolic: the category is as before and the snapshot in the pool is unchanged bit for bit.",
-      "package": "oa-track",
+      "package": "oa-track-core",
       "harness": "tracker::proofs::update_in_order_held_with_a_report_that_is_not_applied_changes_only_the_refusals_category",
       "enabled": true,
       "experimental": false,
@@ -1922,7 +1922,7 @@
     {
       "id": "large-move-decision-rejected-state-and-counts",
       "requirement": "OA-TRK-354: the same scenario, state, hit count and ring length and head symbolic: they are as before and the snapshot in the pool is unchanged bit for bit.",
-      "package": "oa-track",
+      "package": "oa-track-core",
       "harness": "tracker::proofs::update_in_order_held_with_a_report_that_is_not_applied_changes_only_the_refusals_state_and_counts",
       "enabled": true,
       "experimental": false,
@@ -1944,7 +1944,7 @@
     {
       "id": "large-move-decision-rejected-first-times",
       "requirement": "OA-TRK-354: the same scenario, the track's first and confirmation times and the move's first report time and sensor symbolic: they are as before and the snapshot in the pool is unchanged bit for bit.",
-      "package": "oa-track",
+      "package": "oa-track-core",
       "harness": "tracker::proofs::update_in_order_held_with_a_report_that_is_not_applied_changes_only_the_refusals_first_times",
       "enabled": true,
       "experimental": false,
@@ -1966,7 +1966,7 @@
     {
       "id": "large-move-decision-rejected-last-time-and-updates",
       "requirement": "OA-TRK-354: the same scenario, the last-update time and the update count symbolic: they, the fusion layer's two columns and the newest-update bound are as before and the snapshot in the pool is unchanged bit for bit.",
-      "package": "oa-track",
+      "package": "oa-track-core",
       "harness": "tracker::proofs::update_in_order_held_with_a_report_that_is_not_applied_changes_only_the_refusals_last_time_and_updates",
       "enabled": true,
       "experimental": false,
@@ -1988,7 +1988,7 @@
     {
       "id": "large-move-decision-rejected-other-counters",
       "requirement": "OA-TRK-354: the same scenario: every counter other than jump_rejected and the three move counters is as before.",
-      "package": "oa-track",
+      "package": "oa-track-core",
       "harness": "tracker::proofs::update_in_order_held_with_a_report_that_is_not_applied_changes_only_the_refusals_other_counters",
       "enabled": true,
       "experimental": false,
