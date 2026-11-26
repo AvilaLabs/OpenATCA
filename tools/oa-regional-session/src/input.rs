@@ -448,6 +448,8 @@ fn parse_filed_route(parts: &[&str]) -> Result<EventKind, InputError> {
 ///
 /// Position rows have 15 fields; the event type selects the remaining fields:
 /// `v1<TAB>receipt_ns<TAB>source_ns<TAB>sequence<TAB>source<TAB>gufi_hex<TAB>address_hex<TAB>centre<TAB>kind...`.
+/// `centre` is canonical one-to-four-character ASCII alphanumeric text; internal storage zero-pads
+/// it to the fixed four-byte source identity.
 /// Position rows append `lat<TAB>lon<TAB>alt-or--<TAB>east-mmps<TAB>north-mmps<TAB>vertical-rate-or--`;
 /// flight and route payloads use the field counts checked below.
 pub fn parse_event_line(line: &str) -> Result<NormalizedEvent, InputError> {

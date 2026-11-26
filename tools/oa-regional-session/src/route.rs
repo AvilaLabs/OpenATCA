@@ -1241,6 +1241,14 @@ mod refusal_fence_tests {
         }
     }
 
+    #[test]
+    fn source_padded_artcc_is_valid_but_noncanonical_padding_is_not() {
+        assert!(valid_padded_centre(b"ZAU\0"));
+        assert!(valid_padded_centre(b"ZAU1"));
+        assert!(!valid_padded_centre(b"Z\0AU"));
+        assert!(!valid_padded_centre(b"\0\0\0\0"));
+    }
+
     fn revision(key: t::FlightKey, source_ms: i64, available_ms: i64) -> t::RevisionEvidence {
         t::RevisionEvidence {
             source_ms,

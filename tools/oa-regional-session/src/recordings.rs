@@ -2690,7 +2690,7 @@ mod tests {
 
     #[test]
     fn sfdps_three_character_artcc_is_preserved_as_zero_padded_identity() {
-        const XML: &str = r#"<ns5:MessageCollection xmlns:ns5="http://www.faa.aero/nas/3.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><message xsi:type="ns5:FlightMessageType"><flight xsi:type="ns5:NasFlightType" centre="ZAU" source="TH" system="SLC" timestamp="2030-01-02T03:04:05.000Z"><gufi codeSpace="urn:uuid">11111111-2222-3333-4444-555555555555</gufi><flightStatus xsi:type="ns5:NasFlightStatusType" fdpsFlightStatus="ACTIVE"/><assignedAltitude><simple uom="FEET">12000.0</simple></assignedAltitude></flight></message></ns5:MessageCollection>"#;
+        const XML: &str = r#"<ns5:MessageCollection xmlns:ns5="http://www.faa.aero/nas/3.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><message xsi:type="ns5:FlightMessageType"><flight xsi:type="ns5:NasFlightType" centre="ZAU" source="TH" system="SLC" timestamp="2030-01-02T03:04:05.000Z"><gufi codeSpace="urn:uuid">11111111-2222-3333-4444-555555555555</gufi><flightStatus xsi:type="ns5:NasFlightStatusType" fdpsFlightStatus="ACTIVE"/><assignedAltitude><simple uom="FEET">12000.0</simple></assignedAltitude><flightPlan identifier="KR000000AB"/></flight></message></ns5:MessageCollection>"#;
         let receipt_ms = oa_fixm::parse_iso_ms(b"2030-01-02T03:04:05.000Z").unwrap();
         let payload = XML.as_bytes().to_vec();
         let frame = RecordedFrame {
@@ -2719,14 +2719,15 @@ mod tests {
 
         assert_eq!(got.counts.sfdps_rows_decoded, 1);
         assert_eq!(got.counts.invalid_operation_centre, 0);
-        assert_eq!(got.counts.sfdps_rows_refused, 0);
-        assert_eq!(got.events.len(), 1);
-        assert_eq!(got.events[0].centre, *b"ZAU\0");
+        assert_eq!(got.counts.sfdps_rows_refused, 0, "{:?}", got.counts);
+        assert_eq!(got.events.len(), 2);
+        assert!(got.events.iter().all(|event| event.centre == *b"ZAU\0"));
         let serialized = serialize_recorded_events(&got.events).unwrap();
         assert!(serialized.contains("\tZAU\tFLIGHT\tASSIGNED\t12000\n"));
-        let line = serialized.lines().nth(1).unwrap();
-        let round_trip = crate::input::parse_event_line(line).unwrap();
-        assert_eq!(round_trip.centre, *b"ZAU\0");
+        for line in serialized.lines().skip(1) {
+            let round_trip = crate::input::parse_event_line(line).unwrap();
+            assert_eq!(round_trip.centre, *b"ZAU\0");
+        }
     }
 
     // REQ: OA-REG-017
