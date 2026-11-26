@@ -203,10 +203,16 @@ mod tests {
 
     fn xyz(rgb: [u8; 3], peak_white_cd_m2: f64) -> [f64; 3] {
         let [r, g, b] = rgb.map(|channel| linear(f64::from(channel)));
+        // The published sRGB-to-XYZ matrix is rounded. Normalize each row to the
+        // corresponding D65 reference-white tristimulus value so neutral sRGB
+        // remains neutral instead of inheriting the matrix's coefficient-rounding error.
+        let x = 0.412_456_4 * r + 0.357_576_1 * g + 0.180_437_5 * b;
+        let y = 0.212_672_9 * r + 0.715_152_2 * g + 0.072_175_0 * b;
+        let z = 0.019_333_9 * r + 0.119_192_0 * g + 0.950_304_1 * b;
         [
-            (0.412_456_4 * r + 0.357_576_1 * g + 0.180_437_5 * b) * peak_white_cd_m2,
-            (0.212_672_9 * r + 0.715_152_2 * g + 0.072_175_0 * b) * peak_white_cd_m2,
-            (0.019_333_9 * r + 0.119_192_0 * g + 0.950_304_1 * b) * peak_white_cd_m2,
+            (x * (0.950_47 / (0.412_456_4 + 0.357_576_1 + 0.180_437_5))) * peak_white_cd_m2,
+            (y * (1.0 / (0.212_672_9 + 0.715_152_2 + 0.072_175_0))) * peak_white_cd_m2,
+            (z * (1.088_83 / (0.019_333_9 + 0.119_192_0 + 0.950_304_1))) * peak_white_cd_m2,
         ]
     }
 
@@ -434,6 +440,10 @@ mod tests {
         // minimum peak-white hardware requirement; ambient reflection remains a measured-device input.
         let white = [255, 255, 255];
         let black = [0, 0, 0];
+        // A neutral sRGB gray lies on the D65 white axis. This checks the rounded
+        // matrix against the independently specified CIE D65 whitepoint.
+        let gray_y = xyz([128, 128, 128], 200.0)[1] / 200.0;
+        assert!((gray_y - linear(128.0)).abs() < 1.0e-14);
         assert!((delta_e_ab(white, black, 200.0) - 100.0).abs() < 1.0e-8);
         assert!((delta_uv_sc(white, black, 200.0, 60.0) - 100.0).abs() < 1.0e-8);
         assert_eq!(uv_size_coefficients(60.0), Some([1.0; 3]));
