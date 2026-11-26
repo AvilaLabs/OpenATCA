@@ -129,6 +129,7 @@ pub struct Surveillance {
     down: [bool; 5],
     track_down: bool,
     track_measurement_seen_ns: Option<i64>,
+    first_measurement_ns: Option<i64>,
     measurement_rejections: u64,
     previous_ns: Option<i64>,
     frames: usize,
@@ -374,6 +375,7 @@ pub fn surveillance_new_with_profile(
         baro_seen: BTreeMap::new(),
         adsb_source_seen: BTreeMap::new(),
         track_measurement_seen_ns: None,
+        first_measurement_ns: None,
         measurement_rejections: 0,
         profile,
         previous_ns: None,
@@ -622,6 +624,10 @@ pub fn surveillance_event(s: &mut Surveillance, event: &NormalizedEvent) -> Resu
             vertical_rate_fpm,
             ..
         } => {
+            s.first_measurement_ns = Some(
+                s.first_measurement_ns
+                    .map_or(event.source_ns, |first| first.min(event.source_ns)),
+            );
             *seen = Some(event.receipt_ns);
             *down = false;
             let before = *tracker_stats(&s.tracker);
@@ -905,6 +911,30 @@ pub fn surveillance_finish_with_mode(
     mode: Option<ModeAdaptation>,
     mode_evidence: &[TargetModeEvidence],
 ) -> Result<SurveillanceFrame, String> {
+    surveillance_finish_inner(s, ownership, mode, mode_evidence, None, *b"\0\0\0\0")
+}
+
+/// Complete the normal regional caller path with current flight-table snapshots for MSAW
+/// eligibility. Unmatched flight rows remain NotJudged unless the table reports ambiguity.
+pub fn surveillance_finish_with_live_flights(
+    s: &mut Surveillance,
+    ownership: Option<&OwnershipStatus>,
+    mode: Option<ModeAdaptation>,
+    mode_evidence: &[TargetModeEvidence],
+    flights: &mut crate::flight::FlightDriver,
+    centre: [u8; 4],
+) -> Result<SurveillanceFrame, String> {
+    surveillance_finish_inner(s, ownership, mode, mode_evidence, Some(flights), centre)
+}
+
+fn surveillance_finish_inner(
+    s: &mut Surveillance,
+    ownership: Option<&OwnershipStatus>,
+    mode: Option<ModeAdaptation>,
+    mode_evidence: &[TargetModeEvidence],
+    mut flight_driver: Option<&mut crate::flight::FlightDriver>,
+    centre: [u8; 4],
+) -> Result<SurveillanceFrame, String> {
     if s.failed {
         return Err("surveillance failed; reconstruct from the admitted input prefix".into());
     }
@@ -912,6 +942,9 @@ pub fn surveillance_finish_with_mode(
         return Err("frame already completed or not begun".into());
     }
     let time_ns = s.previous_ns.ok_or("no admitted receipt group")?;
+    if let (Some(service), Some(first_measurement_ns)) = (s.msaw.as_mut(), s.first_measurement_ns) {
+        crate::msaw_bridge::regional_msaw_set_request_epoch(service, first_measurement_ns)?;
+    }
     if mode_evidence.len() > s.profile.max_tracks
         || mode_evidence
             .windows(2)
@@ -960,6 +993,16 @@ pub fn surveillance_finish_with_mode(
     let mut tracks = Vec::with_capacity(s.profile.max_tracks);
     let mut flags = Vec::with_capacity(s.profile.max_tracks);
     let mut msaw_rows = Vec::with_capacity(s.profile.max_tracks);
+    let mut msaw_basis = Vec::with_capacity(if s.msaw.is_some() {
+        s.profile.max_tracks
+    } else {
+        0
+    });
+    let flight_view_capacity = flight_driver
+        .as_deref()
+        .map(crate::flight::flight_driver_capacity)
+        .unwrap_or(0);
+    let mut flight_views = Vec::with_capacity(flight_view_capacity);
     let mut mode_decisions = Vec::with_capacity(if mode.is_some() {
         s.profile.max_tracks
     } else {
@@ -999,6 +1042,41 @@ pub fn surveillance_finish_with_mode(
             .get(&address)
             .copied()
             .filter(|item| item.source_ns == source_ns);
+        if s.msaw.is_some() {
+            let (flight, ambiguous) = match flight_driver.as_deref_mut() {
+                Some(driver) => {
+                    let result = crate::flight::flight_views_for_address(
+                        driver,
+                        address,
+                        centre,
+                        time_ns / 1_000_000,
+                        &mut flight_views,
+                    );
+                    let view = (result.status == crate::flight::FlightViewStatus::Found
+                        && flight_views.len() == 1)
+                        .then(|| flight_views.first().copied())
+                        .flatten();
+                    (
+                        view,
+                        result.status == crate::flight::FlightViewStatus::AmbiguousAddress,
+                    )
+                }
+                None => (None, false),
+            };
+            let service = s
+                .msaw
+                .as_mut()
+                .ok_or("MSAW service disappeared during eligibility")?;
+            msaw_basis.push(crate::msaw_bridge::regional_msaw_track_basis(
+                service,
+                address,
+                source_ns,
+                adsb_observation.map(|item| item.evidence),
+                flight,
+                ambiguous,
+                time_ns,
+            ));
+        }
         let actual_source = adsb_observation.map_or(TargetSource::Unknown, |item| {
             if matches!(item.evidence.source_type, 0 | 1 | 8) {
                 TargetSource::AdsB
@@ -1197,10 +1275,11 @@ pub fn surveillance_finish_with_mode(
         append(&mut snapshot, row)?;
     }
     let msaw = match s.msaw.as_mut() {
-        Some(service) => Some(crate::msaw_bridge::regional_msaw_cycle(
+        Some(service) => Some(crate::msaw_bridge::regional_msaw_cycle_with_basis(
             service,
             time_ns,
             &msaw_rows,
+            &msaw_basis,
             &mut s.states,
             &mut s.inhibits,
         )?),

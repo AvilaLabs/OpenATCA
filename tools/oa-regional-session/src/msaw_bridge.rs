@@ -6,7 +6,7 @@ use oa_msaw::{
     skip_log_clear, skip_log_new, Alert, AlertLog, CycleStats, FloorSample, MsawState, MsawTrack,
     SkipLog, Skipped, FLOOR_NONE, F_COLD_CORRECTED, F_COLD_HIGH, F_COLD_UNKNOWN, F_QNH_MISSING,
 };
-use oa_msaw_run::config::Settings;
+use oa_msaw_run::config::{Requester, Settings};
 use oa_msaw_run::floors::Floors;
 use oa_msaw_run::qnh::Qnh;
 use oa_msaw_run::regional::RegionalData;
@@ -69,6 +69,22 @@ pub struct AuralReport {
     pub events: Vec<AuralEvent>,
     pub unlatched_alerts: u32,
     pub unreported_events: u32,
+}
+
+// A7.2: one bounded per-current-track policy result; no table slots or adapter pointers escape.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LiveTrackBasis {
+    pub address: u32,
+    pub basis: oa_msaw_run::eligibility::Basis,
+}
+
+// A7.2: a fixed scalar identifying one condition the MSAW core retains while presentation is
+// inhibited by a known VFR plan.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SuppressedAlert {
+    pub address: u32,
+    pub alert_start_ns: i64,
+    pub basis: oa_msaw_run::eligibility::Basis,
 }
 
 /// Explicit, bounded startup manifest. Observation time is never substituted for a METAR
@@ -183,6 +199,7 @@ pub struct RegionalMsaw {
     max_aural_events: usize,
     aural_event_overflow: u32,
     aural_pending_overflow: u32,
+    request_epoch_ns: Option<i64>,
 }
 
 // A3/C6: bounded cold frame evidence; all rows are copied before the core logs are drained.
@@ -205,6 +222,8 @@ pub struct RegionalMsawFrame {
     pub completed_floor_samples: usize,
     pub evaluation_attempted: bool,
     pub aural: AuralReport,
+    pub live_track_basis: Vec<LiveTrackBasis>,
+    pub suppressed_alerts: Vec<SuppressedAlert>,
 }
 
 fn assemble(
@@ -227,11 +246,8 @@ fn assemble(
     {
         return Err("MSAW configuration exceeds regional row/sample/log budgets".into());
     }
-    // Requests need source-backed pilot/flight eligibility (Mode A and callsign data). Area
-    // inhibitions are installed into the session's existing shared table at its admitted cutoff.
-    if !settings.requests.is_empty() {
-        return Err("MSAW service requests need source-backed VFR eligibility inputs".into());
-    }
+    // Requests are evaluated against the current exact-row ADS-B evidence and live flight view;
+    // area inhibitions are installed into the shared table at the admitted cutoff.
     let max_points = max_rows
         .checked_mul(settings.msaw.samples)
         .ok_or("MSAW point budget overflow")?;
@@ -267,6 +283,7 @@ fn assemble(
         max_aural_events,
         aural_event_overflow: 0,
         aural_pending_overflow: 0,
+        request_epoch_ns: None,
     })
 }
 
@@ -362,6 +379,80 @@ pub fn regional_msaw_net_policy(service: &RegionalMsaw) -> (i64, i64) {
         service.settings.net_stale_limit_ns,
         service.settings.net_future_horizon_ns,
     )
+}
+
+pub fn regional_msaw_set_request_epoch(
+    service: &mut RegionalMsaw,
+    first_measurement_ns: i64,
+) -> Result<(), String> {
+    if first_measurement_ns < 0 {
+        return Err("MSAW request epoch must be nonnegative".into());
+    }
+    match service.request_epoch_ns {
+        Some(existing) if existing != first_measurement_ns => {
+            Err("MSAW request epoch changed after first measurement".into())
+        }
+        Some(_) => Ok(()),
+        None => {
+            service.request_epoch_ns = Some(first_measurement_ns);
+            Ok(())
+        }
+    }
+}
+
+/// Match source-backed adaptation requests at the current MSAW cutoff and apply the same pure
+/// basis rules as the offline eligibility evaluator. Missing live flight-table coverage remains
+/// NotJudged; a beacon alone never converts missing records into a NoFlight finding.
+pub fn regional_msaw_track_basis(
+    service: &mut RegionalMsaw,
+    address: u32,
+    source_ns: i64,
+    evidence: Option<crate::input::AdsbSourceEvidence>,
+    flight: Option<crate::flight::SharedFlightView>,
+    ambiguous: bool,
+    time_ns: i64,
+) -> LiveTrackBasis {
+    let epoch = service.request_epoch_ns.unwrap_or(time_ns);
+    let request_time_s = source_ns
+        .checked_sub(epoch)
+        .filter(|delta| *delta >= 0)
+        .map_or(f64::NEG_INFINITY, |delta| delta as f64 / 1.0e9);
+    let callsign = evidence.map(|row| oa_flight_sfdps::norm_callsign(row.callsign));
+    let requested = service.settings.requests.iter().any(|request| {
+        request_time_s >= request.start_s
+            && request_time_s < request.end_s
+            && match &request.who {
+                Requester::Address(requested_address) => *requested_address == address,
+                Requester::Callsign(requested_callsign) => callsign.is_some_and(|observed| {
+                    let mut wanted = [0; 8];
+                    for (slot, byte) in wanted.iter_mut().zip(requested_callsign.bytes()) {
+                        *slot = byte.to_ascii_uppercase();
+                    }
+                    observed == wanted
+                }),
+            }
+    });
+    let vfr_code = evidence.is_some_and(|row| {
+        row.squawk != u16::MAX && service.settings.vfr_codes.contains(&row.squawk)
+    });
+    let basis = match flight {
+        Some(view) => oa_msaw_run::eligibility::live_flight_basis(
+            matches!(
+                view.plan_state,
+                oa_flight::ST_ACTIVE | oa_flight::ST_DEPARTED
+            ),
+            view.assigned.form,
+            true,
+        ),
+        None if ambiguous => oa_msaw_run::eligibility::Basis::Ambiguous,
+        // The live runtime has no complete-source marker for unmatched flight rows. Keep them
+        // unevaluated and alerting, even when a VFR beacon code is present.
+        None => oa_msaw_run::eligibility::Basis::NotJudged,
+    };
+    LiveTrackBasis {
+        address,
+        basis: oa_msaw_run::eligibility::live_source_basis(basis, requested, vfr_code),
+    }
 }
 
 fn synthetic_floor(point: &oa_msaw::SamplePoint) -> FloorSample {
@@ -521,6 +612,8 @@ fn evaluate_cycle(
             unlatched_alerts: 0,
             unreported_events: 0,
         },
+        live_track_basis: Vec::new(),
+        suppressed_alerts: Vec::new(),
     })
 }
 
@@ -558,7 +651,8 @@ fn update_aural(
     service: &mut RegionalMsaw,
     time_ns: i64,
     current_rows: &[MsawTrack],
-    open: &[Alert],
+    actual_open: &[Alert],
+    presented_open: &[Alert],
 ) -> AuralReport {
     service.aural_events.clear();
     service.aural_event_overflow = 0;
@@ -571,7 +665,7 @@ fn update_aural(
         .append(&mut service.aural_pending_events);
     let mut unlatched_alerts = 0u32;
 
-    for alert in open {
+    for alert in presented_open {
         if service
             .aural_latches
             .iter()
@@ -660,7 +754,7 @@ fn update_aural(
     for index in 0..service.aural_latches.len() {
         let event = if let Some(state) = service.aural_latches.get_mut(index) {
             if state.cleared_at_ns.is_none()
-                && !open.iter().any(|alert| {
+                && !actual_open.iter().any(|alert| {
                     alert.addr == state.address && alert.start_ns == state.alert_start_ns
                 })
             {
@@ -751,8 +845,31 @@ pub fn regional_msaw_cycle(
     states: &mut StateTable,
     inhibits: &mut InhibitTable,
 ) -> Result<RegionalMsawFrame, String> {
+    regional_msaw_cycle_with_basis(service, time_ns, pressure_rows, &[], states, inhibits)
+}
+
+pub fn regional_msaw_cycle_with_basis(
+    service: &mut RegionalMsaw,
+    time_ns: i64,
+    pressure_rows: &[MsawTrack],
+    track_basis: &[LiveTrackBasis],
+    states: &mut StateTable,
+    inhibits: &mut InhibitTable,
+) -> Result<RegionalMsawFrame, String> {
     if time_ns <= 0 || service.last_ns.is_some_and(|last| time_ns <= last) {
         return Err("MSAW report time is not a valid advancing regional cutoff".into());
+    }
+    if !track_basis.is_empty()
+        && (track_basis.len() != pressure_rows.len()
+            || track_basis
+                .iter()
+                .zip(pressure_rows)
+                .any(|(basis, row)| basis.address != row.addr)
+            || track_basis
+                .windows(2)
+                .any(|pair| pair[0].address >= pair[1].address))
+    {
+        return Err("MSAW eligibility rows do not match the ordered track set".into());
     }
     alert_log_clear(&mut service.alerts);
     skip_log_clear(&mut service.skips);
@@ -765,7 +882,34 @@ pub fn regional_msaw_cycle(
     };
     match result {
         Ok(mut frame) => {
-            frame.aural = update_aural(service, time_ns, pressure_rows, &frame.open);
+            let actual_open = frame.open.clone();
+            let mut suppressed_alerts = Vec::with_capacity(frame.open.len());
+            if !track_basis.is_empty() {
+                frame.open.retain(|alert| {
+                    let basis = track_basis
+                        .binary_search_by_key(&alert.addr, |row| row.address)
+                        .ok()
+                        .and_then(|index| track_basis.get(index))
+                        .map_or(oa_msaw_run::eligibility::Basis::NotJudged, |row| row.basis);
+                    if basis.alerted() {
+                        true
+                    } else {
+                        suppressed_alerts.push(SuppressedAlert {
+                            address: alert.addr,
+                            alert_start_ns: alert.start_ns,
+                            basis,
+                        });
+                        false
+                    }
+                });
+            }
+            frame.live_track_basis = track_basis.to_vec();
+            frame.vfr_service_eligibility_available = !track_basis.is_empty()
+                && track_basis
+                    .iter()
+                    .all(|row| row.basis != oa_msaw_run::eligibility::Basis::NotJudged);
+            frame.suppressed_alerts = suppressed_alerts;
+            frame.aural = update_aural(service, time_ns, pressure_rows, &actual_open, &frame.open);
             Ok(frame)
         }
         Err(reason) => {
@@ -812,6 +956,8 @@ pub fn regional_msaw_cycle(
                         .aural_pending_overflow
                         .saturating_add(service.aural_event_overflow),
                 },
+                live_track_basis: track_basis.to_vec(),
+                suppressed_alerts: Vec::new(),
             })
         }
     }
@@ -987,6 +1133,100 @@ mod tests {
             .events
             .iter()
             .any(|event| event.kind == AuralEventKind::Acknowledged));
+    }
+
+    // REQ: OA-MSAW-083
+    #[test]
+    fn vfr_presentation_suppression_retains_the_same_open_condition_for_reenable() {
+        let mut service = regional_msaw_synthetic(32).unwrap();
+        let mut states = oa_safety::net::state_table_new(10_000_000_000, 0).unwrap();
+        let mut inhibits = oa_safety::inhibit::inhibits_new();
+        let vfr = [LiveTrackBasis {
+            address: 0xabc101,
+            basis: oa_msaw_run::eligibility::Basis::VfrPlan,
+        }];
+        let suppressed = regional_msaw_cycle_with_basis(
+            &mut service,
+            2_000_000_000,
+            &[track(1500.0, -600.0)],
+            &vfr,
+            &mut states,
+            &mut inhibits,
+        )
+        .unwrap();
+        assert!(suppressed.open.is_empty());
+        assert_eq!(suppressed.suppressed_alerts.len(), 1);
+        let original_start = suppressed.suppressed_alerts[0].alert_start_ns;
+
+        let unevaluated = [LiveTrackBasis {
+            address: 0xabc101,
+            basis: oa_msaw_run::eligibility::Basis::NotJudged,
+        }];
+        let reenabled = regional_msaw_cycle_with_basis(
+            &mut service,
+            3_000_000_000,
+            &[track(1490.0, -600.0)],
+            &unevaluated,
+            &mut states,
+            &mut inhibits,
+        )
+        .unwrap();
+        assert_eq!(reenabled.open.len(), 1);
+        assert_eq!(reenabled.open[0].start_ns, original_start);
+        assert!(reenabled.suppressed_alerts.is_empty());
+    }
+
+    // REQ: OA-MSAW-083
+    #[test]
+    fn request_match_overrides_vfr_beacon_but_missing_live_flight_is_not_no_flight() {
+        let mut service = regional_msaw_synthetic(32).unwrap();
+        service.request_epoch_ns = Some(1_000_000_000);
+        service
+            .settings
+            .requests
+            .push(oa_msaw_run::config::RequestSpec {
+                who: Requester::Address(0xabc101),
+                start_s: 0.0,
+                end_s: 10.0,
+            });
+        let evidence = crate::input::AdsbSourceEvidence {
+            source_type: 0,
+            category: 0,
+            version: 0,
+            nic: 0,
+            nac_p: 0,
+            nac_v: 0,
+            sil: 0,
+            sil_type: 0,
+            sda: 0,
+            gva: 0,
+            nic_baro: 0,
+            row_flags: 0,
+            squawk: 1200,
+            callsign: [0; 8],
+        };
+        let basis = regional_msaw_track_basis(
+            &mut service,
+            0xabc101,
+            2_000_000_000,
+            Some(evidence),
+            None,
+            false,
+            2_000_000_000,
+        );
+        assert_eq!(basis.basis, oa_msaw_run::eligibility::Basis::Request);
+
+        service.settings.requests.clear();
+        let unknown = regional_msaw_track_basis(
+            &mut service,
+            0xabc101,
+            2_000_000_000,
+            Some(evidence),
+            None,
+            false,
+            2_000_000_000,
+        );
+        assert_eq!(unknown.basis, oa_msaw_run::eligibility::Basis::NotJudged);
     }
 
     // REQ: OA-MSAW-007

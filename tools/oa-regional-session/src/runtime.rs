@@ -676,11 +676,13 @@ fn execute(
     }
     // Flight ownership presentation currently requires an explicitly selected flight. Per-flight
     // snapshots below preserve every owner; no arbitrary 'first' flight is promoted to selection.
-    let mut surveillance = surveillance::surveillance_finish_with_mode(
+    let mut surveillance = surveillance::surveillance_finish_with_live_flights(
         &mut runtime.surveillance,
         None,
         surveillance_mode.map(|(adaptation, _)| adaptation),
         surveillance_mode.map_or(&[], |(_, evidence)| evidence),
+        &mut runtime.flights,
+        runtime.centre,
     )?;
     if runtime.profile.surveillance.render_scope {
         surveillance.frame_sha256 = surveillance::surveillance_present_controls(
