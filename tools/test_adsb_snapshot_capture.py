@@ -200,6 +200,98 @@ class CaptureTests(unittest.TestCase):
         self.assertTrue(children[0].stdout.closed)
         self.assertTrue(children[0].stderr.closed)
 
+    def test_empty_selector_waits_for_child_within_original_deadline(self):
+        class Clock:
+            now = 10.0
+
+            def monotonic(self):
+                return self.now
+
+        class Pipe:
+            def __init__(self, fd):
+                self.fd = fd
+                self.closed = False
+
+            def fileno(self):
+                return self.fd
+
+            def close(self):
+                self.closed = True
+
+        class FakeSelector:
+            def __init__(self):
+                self.keys = {}
+                self.closed = False
+
+            def register(self, fileobj, events, data=None):
+                key = capture.selectors.SelectorKey(fileobj, fileobj.fileno(), events, data)
+                self.keys[fileobj] = key
+
+            def unregister(self, fileobj):
+                return self.keys.pop(fileobj)
+
+            def get_map(self):
+                return self.keys
+
+            def select(self, timeout=None):
+                if not self.keys:
+                    clock.now += timeout
+                    return []
+                return [(key, capture.selectors.EVENT_READ) for key in self.keys.values()]
+
+            def close(self):
+                self.closed = True
+
+        class FakeProcess:
+            pid = 12345
+
+            def __init__(self):
+                self.stdin = Pipe(10)
+                self.stdout = Pipe(11)
+                self.stderr = Pipe(12)
+                self.returncode = None
+                self.wait_timeouts = []
+
+            def poll(self):
+                if self.returncode is None:
+                    clock.now += 0.01
+                return self.returncode
+
+            def wait(self, timeout=None):
+                self.wait_timeouts.append(timeout)
+                if timeout is None:
+                    self.returncode = 0
+                else:
+                    self.assert_wait_is_bounded(timeout)
+                    # The child exits shortly after both pipes reach EOF, before the deadline.
+                    clock.now += 0.1
+                    self.returncode = 0
+                return self.returncode
+
+            @staticmethod
+            def assert_wait_is_bounded(timeout):
+                if not 0 < timeout < 1.0:
+                    raise AssertionError(f"wait must use the remaining original deadline: {timeout}")
+
+            def kill(self):
+                self.returncode = -capture.signal.SIGKILL
+
+        clock = Clock()
+        selector = FakeSelector()
+        process = FakeProcess()
+        with patch.object(capture.selectors, "DefaultSelector", return_value=selector), \
+             patch.object(capture.subprocess, "Popen", return_value=process), \
+             patch.object(capture.os, "set_blocking"), \
+             patch.object(capture.os, "read", return_value=b""), \
+             patch.object(capture.os, "killpg"), \
+             patch.object(capture.time, "monotonic", side_effect=clock.monotonic):
+            code, stdout, stderr = capture.bounded_process(["unused"], b"", 1, 10, 10)
+        self.assertEqual(code, 0)
+        self.assertEqual((stdout, stderr), (b"", b""))
+        self.assertAlmostEqual(process.wait_timeouts[0], 0.98)
+        self.assertIsNone(process.wait_timeouts[1])
+        self.assertTrue(selector.closed)
+
     def test_timeout_kills_and_reaps_child_and_closes_pipes(self):
         real_popen = capture.subprocess.Popen
         children = []

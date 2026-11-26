@@ -346,6 +346,21 @@ def bounded_process(command: list[str], body: bytes, timeout_s: int, stdout_limi
                 break
             if remaining <= 0:
                 raise subprocess.TimeoutExpired(command, timeout_s)
+            if not selector.get_map():
+                # With both output pipes at EOF, there is nothing left for the selector to watch.
+                # Wait on the child itself for only the original deadline's remaining time;
+                # selecting on an empty map can otherwise sleep until the deadline and misclassify
+                # a child that exits during that interval as overdue on the next loop.
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(command, timeout_s)
+                try:
+                    proc.wait(timeout=remaining)
+                except subprocess.TimeoutExpired as exc:
+                    raise subprocess.TimeoutExpired(command, timeout_s) from exc
+                if time.monotonic() > deadline:
+                    raise subprocess.TimeoutExpired(command, timeout_s)
+                break
             events = selector.select(remaining)
             for key, _ in events:
                 stream = key.fileobj
