@@ -5479,8 +5479,8 @@ mod tests {
 
     // REQ: OA-MIG-414
     #[test]
-    fn paired_consumer_gap_and_decision_thresholds_are_inclusive_at_the_limit(
-    ) -> Result<(), String> {
+    fn paired_consumer_gap_and_decision_thresholds_are_inclusive_at_the_limit() -> Result<(), String>
+    {
         assert_eq!(checked_frame_gap(None, 10)?, None);
         assert_eq!(
             checked_frame_gap(Some(10), 4_800_000_010)?,
