@@ -37,6 +37,12 @@ def proof_entry() -> dict[str, object]:
 
 
 class ProofResourceEvidenceTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self._temporary.cleanup)
+        self.root = Path(self._temporary.name)
+        self.repo, self.registry, self.output, self.target = self.make_workspace(self.root)
+
     def make_workspace(self, root: Path) -> tuple[Path, Path, Path, Path]:
         repo = root / "repo"
         tools = repo / "tools"
@@ -74,8 +80,8 @@ class ProofResourceEvidenceTests(unittest.TestCase):
         )
         subprocess.run(["git", "init", "-q", str(repo)], check=True)
         subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
-        out, target = root / "evidence", root / "target"
-        return repo, registry, out, target
+        output, target = root / "evidence", root / "target"
+        return repo, registry, output, target
 
     def make_time_wrapper(self, root: Path, mode: str) -> Path:
         wrapper = root / "synthetic-time"
@@ -98,64 +104,56 @@ class ProofResourceEvidenceTests(unittest.TestCase):
     def test_full_suite_binds_gnu_time_peak_and_elapsed_file_to_proof_outcome(self) -> None:
         if shutil.which(GNU_TIME_COMMAND) is None:
             self.skipTest("GNU time is unavailable on this host")
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            repo, registry, out, target = self.make_workspace(root)
-            result = run_suite(repo, out, target, registry)
-            suite = json.loads((out / "suite.json").read_text(encoding="utf-8"))
-            self.assertEqual(result, 0)
-            self.assertEqual(suite["status"], "PASS")
-            proof = suite["checks"][0]
-            resource_path = out / proof["resource_file"]
-            resource_bytes = resource_path.read_bytes()
-            self.assertEqual(proof["resource_file_sha256"], hashlib.sha256(resource_bytes).hexdigest())
-            resource = json.loads(resource_bytes)
-            self.assertEqual(resource["status"], "available")
-            self.assertGreater(resource["measurement"]["maximum_rss_kib"], 0)
-            self.assertGreaterEqual(resource["measurement"]["elapsed_seconds"], 0)
-            self.assertIn("largest individual waited child", resource["measurement"]["measurement_scope"])
-            self.assertTrue(resource["tool"]["binary_sha256"])
+        result = run_suite(self.repo, self.output, self.target, self.registry)
+        suite = json.loads((self.output / "suite.json").read_text(encoding="utf-8"))
+        self.assertEqual(result, 0)
+        self.assertEqual(suite["status"], "PASS")
+        proof = suite["checks"][0]
+        resource_path = self.output / proof["resource_file"]
+        resource_bytes = resource_path.read_bytes()
+        self.assertEqual(proof["resource_file_sha256"], hashlib.sha256(resource_bytes).hexdigest())
+        resource = json.loads(resource_bytes)
+        self.assertEqual(resource["status"], "available")
+        self.assertGreater(resource["measurement"]["maximum_rss_kib"], 0)
+        self.assertGreaterEqual(resource["measurement"]["elapsed_seconds"], 0)
+        self.assertIn("largest individual waited child", resource["measurement"]["measurement_scope"])
+        self.assertTrue(resource["tool"]["binary_sha256"])
 
     def test_resource_peak_includes_waited_descendant_allocation(self) -> None:
         """Kills a direct-runner-only peak interpretation by allocating in a waited child."""
         if shutil.which(GNU_TIME_COMMAND) is None:
             self.skipTest("GNU time is unavailable on this host")
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            repo, registry, out, target = self.make_workspace(root)
-            child_allocation_bytes = 64 * 1024 * 1024
-            with mock.patch.dict(os.environ, {"SYNTHETIC_RESOURCE_CHILD_BYTES": str(child_allocation_bytes)}):
-                result = run_suite(repo, out, target, registry)
-            suite = json.loads((out / "suite.json").read_text(encoding="utf-8"))
-            measurement = suite["checks"][0]["resource_measurement"]["measurement"]
-            self.assertEqual(result, 0)
-            self.assertGreater(measurement["maximum_rss_kib"], child_allocation_bytes * 3 // (4 * 1024))
+        child_allocation_bytes = 64 * 1024 * 1024
+        with mock.patch.dict(os.environ, {"SYNTHETIC_RESOURCE_CHILD_BYTES": str(child_allocation_bytes)}):
+            result = run_suite(self.repo, self.output, self.target, self.registry)
+        suite = json.loads((self.output / "suite.json").read_text(encoding="utf-8"))
+        measurement = suite["checks"][0]["resource_measurement"]["measurement"]
+        self.assertEqual(result, 0)
+        self.assertGreater(measurement["maximum_rss_kib"], child_allocation_bytes * 3 // (4 * 1024))
 
     def test_nonzero_runner_exit_keeps_resource_record_but_still_fails_proof(self) -> None:
         """Kills omission of GNU time's quiet mode, which prefixes nonzero child status text."""
         if shutil.which(GNU_TIME_COMMAND) is None:
             self.skipTest("GNU time is unavailable on this host")
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            repo, registry, out, target = self.make_workspace(root)
-            with mock.patch.dict(os.environ, {"SYNTHETIC_RESOURCE_RUNNER_EXIT": "7"}):
-                result = run_suite(repo, out, target, registry)
-            suite = json.loads((out / "suite.json").read_text(encoding="utf-8"))
-            proof = suite["checks"][0]
-            self.assertEqual(result, 1)
-            self.assertEqual(proof["status"], "FAIL")
-            self.assertEqual(proof["exit_code"], 7)
-            self.assertEqual(proof["resource_measurement"]["status"], "available")
+        with mock.patch.dict(os.environ, {"SYNTHETIC_RESOURCE_RUNNER_EXIT": "7"}):
+            result = run_suite(self.repo, self.output, self.target, self.registry)
+        suite = json.loads((self.output / "suite.json").read_text(encoding="utf-8"))
+        proof = suite["checks"][0]
+        self.assertEqual(result, 1)
+        self.assertEqual(proof["status"], "FAIL")
+        self.assertEqual(proof["exit_code"], 7)
+        self.assertEqual(proof["resource_measurement"]["status"], "available")
 
     def test_missing_or_malformed_resource_output_cannot_earn_pass(self) -> None:
         for mode in ("missing", "malformed"):
-            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
-                root = Path(directory)
-                repo, registry, out, target = self.make_workspace(root)
+            with self.subTest(mode=mode):
+                root = self.root / mode
+                root.mkdir()
+                repo, registry, output, target = self.make_workspace(root)
                 wrapper = self.make_time_wrapper(root, mode)
                 with mock.patch("rust_proof_suite.GNU_TIME_COMMAND", str(wrapper)):
-                    result = run_suite(repo, out, target, registry)
-                suite = json.loads((out / "suite.json").read_text(encoding="utf-8"))
+                    result = run_suite(repo, output, target, registry)
+                suite = json.loads((output / "suite.json").read_text(encoding="utf-8"))
                 proof = suite["checks"][0]
                 self.assertEqual(result, 1)
                 self.assertEqual(suite["status"], "FAIL")
