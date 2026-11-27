@@ -450,7 +450,7 @@ fn typed_runway_assignment_uses_normal_selection_queue_advance_and_pinned_audit(
     assert!(
         journal.contains("RUNWAY_COMMAND\t")
             && journal
-                .contains("\tREFUSED\trunway assignment requires an active configured runtime"),
+                .contains("\tREFUSED\ttyped runway assignment does not name one issued runway end"),
         "{journal}"
     );
     assert!(
