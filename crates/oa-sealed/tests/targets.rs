@@ -1112,9 +1112,22 @@ fn harness_files() -> Vec<PathBuf> {
 // REQ: OA-SEAL-006
 #[test]
 fn shared_refusal_helper_is_scanned_and_a_bare_read_mutation_is_rejected() {
-    let helper = repo().join("crates/oa-sealed/src/test_support/sealed_refusal.rs");
-    assert!(covered_files().contains(&helper));
+    let shared = repo().join("crates/oa-sealed/src/test_support");
+    let scanned = covered_files();
+    for name in [
+        "sealed_data_root.rs",
+        "sealed_guard.rs",
+        "sealed_inputs.rs",
+        "sealed_output.rs",
+        "sealed_refusal.rs",
+    ] {
+        assert!(
+            scanned.contains(&shared.join(name)),
+            "{name} is outside scanner scope"
+        );
+    }
 
+    let helper = shared.join("sealed_refusal.rs");
     let source = fs::read_to_string(&helper).unwrap();
     let mutated =
         format!("{source}\nfn bare_read_mutation() {{ let _ = std::fs::read(\"synthetic\"); }}\n");

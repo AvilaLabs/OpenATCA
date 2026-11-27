@@ -71,7 +71,7 @@ mod tests {
     mod shared_guard {
         include!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../test-support/sealed_guard.rs"
+            "/../../crates/oa-sealed/src/test_support/sealed_guard.rs"
         ));
     }
     pub(crate) use shared_guard::guard;

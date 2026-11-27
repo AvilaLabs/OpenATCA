@@ -8,7 +8,7 @@
     clippy::panic
 )]
 
-#[path = "../../test-support/sealed_data_root.rs"]
+#[path = "../../../crates/oa-sealed/src/test_support/sealed_data_root.rs"]
 mod sealed_data_root;
 
 use std::fs;

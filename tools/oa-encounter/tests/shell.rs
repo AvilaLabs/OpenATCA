@@ -7,7 +7,7 @@
     clippy::panic
 )]
 
-#[path = "../../test-support/sealed_output.rs"]
+#[path = "../../../crates/oa-sealed/src/test_support/sealed_output.rs"]
 mod sealed_output;
 
 use std::collections::BTreeMap;

@@ -10,7 +10,7 @@
     clippy::panic
 )]
 
-#[path = "../../test-support/sealed_inputs.rs"]
+#[path = "../../../crates/oa-sealed/src/test_support/sealed_inputs.rs"]
 mod sealed_inputs;
 #[path = "../../../crates/oa-sealed/src/test_support/sealed_refusal.rs"]
 mod sealed_refusal;

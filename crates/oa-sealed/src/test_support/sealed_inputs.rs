@@ -3,7 +3,7 @@ use std::path::PathBuf;
 mod root {
     include!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../test-support/sealed_data_root.rs"
+        "/../../crates/oa-sealed/src/test_support/sealed_data_root.rs"
     ));
 }
 
