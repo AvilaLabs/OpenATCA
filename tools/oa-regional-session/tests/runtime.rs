@@ -1031,9 +1031,12 @@ fn route_plan_mismatch_blocks_old_route_and_failed_frame_requires_reconstruction
         )],
     };
     let frame = regional_step(&mut engine, &changed).unwrap();
-    assert!(frame.flights[0]
-        .refusal
-        .contains("does not match frozen flight plan"));
+    assert!(frame.flights[0].trajectory.is_none());
+    assert!(
+        frame.flights[0].refusal.contains("NoAvailableEvidence"),
+        "route plan change must refuse without matching full-key route evidence: {}",
+        frame.flights[0].refusal
+    );
     let invalid = ReceiptBatch {
         receipt_ns: 3 * SECOND,
         source_clock_regressions: 0,

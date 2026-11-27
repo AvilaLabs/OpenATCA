@@ -3,11 +3,11 @@
 //! stamps, refusal counts and conflicts belong to `oa-flight`.
 
 use oa_flight::{
-    flight_get, flights_apply, flights_claiming_address, flights_len, flights_new, key_gufi,
-    op_new, Alt, Flight, FlightConfig, FlightTable, Outcome, Stamp, ALT_NIL, ALT_NONE, ALT_SIMPLE,
-    C_COUNT, HO_NONE, MAX_VIEWS, OP_ADDRESS, OP_ASSIGN, OP_CANCEL, OP_COUNT, OP_HO_ACCEPT,
-    OP_HO_FAIL, OP_HO_INITIATE, OP_HO_RETRACT, OP_HO_TAKE, OP_HO_UPDATE, OP_IDENTITY, OP_INTERIM,
-    OP_OWNER, OP_SET_PLAN, R_COUNT, ST_ACTIVE, ST_PROPOSED,
+    flight_get, flight_is_live, flights_apply, flights_claiming_address, flights_len, flights_new,
+    flights_remove, key_gufi, op_new, Alt, Flight, FlightConfig, FlightTable, Outcome, Stamp,
+    ALT_NIL, ALT_NONE, ALT_SIMPLE, C_COUNT, HO_NONE, MAX_VIEWS, OP_ADDRESS, OP_ASSIGN, OP_CANCEL,
+    OP_COUNT, OP_HO_ACCEPT, OP_HO_FAIL, OP_HO_INITIATE, OP_HO_RETRACT, OP_HO_TAKE, OP_HO_UPDATE,
+    OP_IDENTITY, OP_INTERIM, OP_OWNER, OP_SET_PLAN, REM_RETIRED, R_COUNT, ST_ACTIVE, ST_PROPOSED,
 };
 
 use crate::input::{EventKind, FlightOperation, HandoffOperation, NormalizedEvent, SourceKind};
@@ -82,6 +82,8 @@ pub struct FlightDriverStats {
     pub taking_unit_mismatches: u64,
     pub offers_without_owner: u64,
     pub failing_unit_mismatches: u64,
+    /// Core Removal rows synchronously consumed by the retention-watermark path.
+    pub retirements_consumed: u64,
 }
 
 /// Complete bounded-flight accounting snapshot, including core log overflow counters.
@@ -98,6 +100,7 @@ pub struct FlightDriverReport {
     pub conflicts_by_kind: [u64; C_COUNT],
     pub conflicts_logged: usize,
     pub conflicts_unlisted: u64,
+    pub retirements_consumed: u64,
 }
 
 /// Bounded bridge state. The core table and all of its indexes remain encapsulated by this
@@ -503,6 +506,37 @@ pub fn flight_driver_len(driver: &FlightDriver) -> usize {
     flights_len(&driver.table)
 }
 
+/// Retire one nonlive flight only after consuming the core's bounded removal-log row.
+/// The returned core row is the regional caller's synchronous acknowledgement that identity,
+/// removal time and terminal state were recorded before the table slot was freed.
+pub(crate) fn flight_driver_remove_retired(
+    driver: &mut FlightDriver,
+    key: &oa_flight::FlightKey,
+    at_ms: i64,
+) -> Result<Option<oa_flight::Removal>, &'static str> {
+    if !driver.table.removals.is_empty() {
+        return Err("pending core removal row was not consumed");
+    }
+    let Some(flight) = flight_get(&driver.table, key) else {
+        return Ok(None);
+    };
+    if flight_is_live(&flight) {
+        return Ok(None);
+    }
+    if !flights_remove(&mut driver.table, key, at_ms, REM_RETIRED) {
+        return Err("core refused retirement or removal log capacity");
+    }
+    let Some(removal) = driver.table.removals.first().copied() else {
+        return Err("core removed flight without a removal receipt");
+    };
+    if removal.key != *key || removal.at_ms != at_ms {
+        return Err("core retirement receipt identity or time mismatch");
+    }
+    driver.table.removals.clear();
+    driver.stats.retirements_consumed = driver.stats.retirements_consumed.saturating_add(1);
+    Ok(Some(removal))
+}
+
 /// Copies all flight and adapter counters; log saturation remains visible in the returned values.
 pub fn flight_driver_report(driver: &FlightDriver) -> FlightDriverReport {
     FlightDriverReport {
@@ -517,6 +551,7 @@ pub fn flight_driver_report(driver: &FlightDriver) -> FlightDriverReport {
         conflicts_by_kind: driver.table.stats.conflicts,
         conflicts_logged: driver.table.conflicts.len(),
         conflicts_unlisted: driver.table.stats.conflicts_unlisted,
+        retirements_consumed: driver.stats.retirements_consumed,
     }
 }
 
@@ -530,11 +565,20 @@ pub fn flight_apply_event(
     event: &NormalizedEvent,
 ) -> Result<FlightApplyOutcome, FlightDriverError> {
     driver.stats.events_seen = driver.stats.events_seen.saturating_add(1);
-    if let Err(error) = validate_flight_event(event, driver.last_receipt_ns) {
+    if let Err(error) = flight_validate_event(driver, event) {
         record_input_refusal(&mut driver.stats, error);
         return Err(error);
     }
     Ok(flight_apply_validated_event(driver, event))
+}
+
+/// Checks timestamp, seal, source and receipt ordering without mutating flight state or counters.
+/// Retention callers use this before consuming a removal receipt and freeing a slot.
+pub(crate) fn flight_validate_event(
+    driver: &FlightDriver,
+    event: &NormalizedEvent,
+) -> Result<(), FlightDriverError> {
+    validate_flight_event(event, driver.last_receipt_ns)
 }
 
 fn validate_flight_event(

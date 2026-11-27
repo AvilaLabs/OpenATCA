@@ -10,7 +10,7 @@ use crate::nam_handoff::{
     accepted_delivery_seq, accepted_message, nam_session_ingress_receive, NamHandoffError,
     NamIngressResult, NamSessionIngress, SessionAcceptedMessage,
 };
-use crate::route::{self, RouteStore, MAX_ROUTE_REVISIONS};
+use crate::route::{self, RouteStore};
 use oa_airspace::core::model::{self as air_model, Model};
 use oa_airspace::shell::route_parse::{
     resolve_icao_item15, Item15Reject as RouteReject, MagneticVariationSource,
@@ -19,7 +19,9 @@ use oa_flight::{FlightKey, Outcome, KEY_GUFI, ST_ACTIVE, ST_CANCELLED, ST_PROPOS
 use oa_nam::item15::{catalogue_lrm_reply, filed_change, lrm_reply, FiledChange, Item15Reject};
 use oa_nam::{model, Kind, Message, MsgId, Profile};
 
-/// Maximum filed plans retained by one regional NAM runtime.
+/// Maximum active plus still-retained terminal plans in one regional NAM runtime. The explicit
+/// replay profile reuses a slot only after the one-day as-of watermark; when all 8,192 are still
+/// within that horizon, new unique plans are visibly refused rather than evicting live history.
 pub const MAX_NAM_PLANS: usize = 8192;
 const MANUAL_COORDINATION_CODE: u8 = 62;
 
@@ -117,6 +119,7 @@ pub enum NamFlightReject {
     UnknownPlan,
     DuplicatePlan,
     CancelledPlan,
+    HistoryExpired,
     FlightRuntimeRefusal,
     Route(Item15Reject),
 }
@@ -131,6 +134,7 @@ struct FiledPlan {
     departure_time: Option<model::Hhmm>,
     cancelled: bool,
     preferred_route: PreferredRouteAssessment,
+    cancelled_at_ms: Option<i64>,
 }
 
 /// Bounded application state for filed NAM plans. The authoritative flight state remains in
@@ -212,22 +216,50 @@ pub fn nam_flight_apply(
     if !valid_context(context) {
         return fail(NamFlightReject::MissingOrInvalidContext);
     }
+    let now_ms = context.receipt_ns / 1_000_000;
+    let candidate_watermark = route::candidate_history_watermark(routes, now_ms);
+    if !route::source_time_is_retained(routes, context.source_ns / 1_000_000)
+        || (routes.reclaim_current_by_key && context.source_ns / 1_000_000 < candidate_watermark)
+    {
+        return fail(NamFlightReject::HistoryExpired);
+    }
     if !matches!(
         message.header.kind,
         Kind::Fpl | Kind::Chg | Kind::Dla | Kind::Cnl
     ) {
         return fail(NamFlightReject::WrongMessageKind);
     }
-    if message.header.kind == Kind::Fpl {
-        if runtime.plan_index(context.key, context.plan_id).is_some() {
-            return fail(NamFlightReject::DuplicatePlan);
-        }
-        if runtime.plans.len() >= runtime.capacity {
-            return fail(NamFlightReject::FlightRuntimeRefusal);
-        }
-    }
     let plan_index = runtime.plan_index(context.key, context.plan_id);
     let existing = plan_index.and_then(|index| runtime.plans.get(index));
+    let reusable_plan_index = if message.header.kind == Kind::Fpl {
+        if let Some(index) = plan_index {
+            let reusable = runtime.plans.get(index).is_some_and(|plan| {
+                plan.cancelled
+                    && plan
+                        .cancelled_at_ms
+                        .is_some_and(|cancelled| cancelled < candidate_watermark)
+            });
+            if !reusable {
+                return fail(NamFlightReject::DuplicatePlan);
+            }
+            Some(index)
+        } else {
+            runtime.plans.iter().position(|plan| {
+                plan.cancelled
+                    && plan
+                        .cancelled_at_ms
+                        .is_some_and(|cancelled| cancelled < candidate_watermark)
+            })
+        }
+    } else {
+        None
+    };
+    if message.header.kind == Kind::Fpl
+        && runtime.plans.len() >= runtime.capacity
+        && reusable_plan_index.is_none()
+    {
+        return fail(NamFlightReject::FlightRuntimeRefusal);
+    }
     if matches!(message.header.kind, Kind::Chg | Kind::Dla | Kind::Cnl) && existing.is_none() {
         return fail(NamFlightReject::UnknownPlan);
     }
@@ -291,14 +323,14 @@ pub fn nam_flight_apply(
     };
 
     let staged_revision = if let Some((resolved, _, _, _)) = staged_route.as_ref() {
-        if routes.revisions.len() + routes.route_refusals.len() >= MAX_ROUTE_REVISIONS {
+        if !route::revision_admission_ok(routes, context.route_key) {
             return fail(NamFlightReject::FlightRuntimeRefusal);
         }
         let encoded = match oa_nam::encode(message) {
             Ok(value) => value,
             Err(_) => return fail(NamFlightReject::FlightRuntimeRefusal),
         };
-        match route::icao_route_revision(
+        let revision = match route::icao_route_revision(
             context.route_key,
             resolved,
             context.source_ns / 1_000_000,
@@ -307,7 +339,24 @@ pub fn nam_flight_apply(
             oa_sha256::sha256(&encoded),
             routes.snapshot_sha256,
         ) {
-            Ok(revision) => Some(revision),
+            Ok(revision) => revision,
+            Err(_) => return fail(NamFlightReject::FlightRuntimeRefusal),
+        };
+        if !route::route_revision_admission(routes, &revision) {
+            return fail(NamFlightReject::FlightRuntimeRefusal);
+        }
+        Some(revision)
+    } else {
+        None
+    };
+
+    let staged_retirement = if message.header.kind == Kind::Cnl {
+        match route::route_stage_retirement(
+            routes,
+            context.route_key,
+            context.receipt_ns / 1_000_000,
+        ) {
+            Ok(stage) => Some(stage),
             Err(_) => return fail(NamFlightReject::FlightRuntimeRefusal),
         }
     } else {
@@ -336,6 +385,7 @@ pub fn nam_flight_apply(
                 context.plan_id,
                 message.f13.and_then(|f| f.time),
             );
+            route::advance_route_history_watermark(routes, now_ms);
             let preferred_route = runtime
                 .plan_index(context.key, context.plan_id)
                 .and_then(|index| runtime.plans.get(index))
@@ -359,6 +409,29 @@ pub fn nam_flight_apply(
         centre: context.centre,
         kind: EventKind::Flight(operation),
     };
+    if crate::flight::flight_validate_event(flights, &event).is_err() {
+        return fail(NamFlightReject::FlightRuntimeRefusal);
+    }
+    if let Some(index) = reusable_plan_index {
+        if let Some(old) = runtime.plans.get(index).cloned() {
+            let other_unexpired_for_flight =
+                runtime.plans.iter().enumerate().any(|(other_index, plan)| {
+                    other_index != index
+                        && plan.key == old.key
+                        && !(plan.cancelled
+                            && plan
+                                .cancelled_at_ms
+                                .is_some_and(|cancelled| cancelled < candidate_watermark))
+                });
+            if !other_unexpired_for_flight {
+                match crate::flight::flight_driver_remove_retired(flights, &old.key, now_ms) {
+                    Ok(Some(receipt)) if receipt.key == old.key && receipt.at_ms == now_ms => {}
+                    Ok(None) => {}
+                    Ok(Some(_)) | Err(_) => return fail(NamFlightReject::FlightRuntimeRefusal),
+                }
+            }
+        }
+    }
     let applied = match flight_apply_event(flights, &event) {
         Ok(result) => matches!(
             result.operation,
@@ -377,13 +450,14 @@ pub fn nam_flight_apply(
     if !applied {
         return fail(NamFlightReject::FlightRuntimeRefusal);
     }
+    route::advance_route_history_watermark(routes, now_ms);
     match message.header.kind {
         Kind::Fpl => {
             let Some((_, departure_airport, destination_airport, preferred_route)) = staged_route
             else {
                 return fail(NamFlightReject::Route(Item15Reject::Model));
             };
-            runtime.plans.push(FiledPlan {
+            let filed = FiledPlan {
                 key: context.key,
                 plan_id: context.plan_id,
                 status: context.plan_status,
@@ -392,7 +466,17 @@ pub fn nam_flight_apply(
                 departure_time: message.f13.and_then(|field| field.time),
                 cancelled: false,
                 preferred_route,
-            });
+                cancelled_at_ms: None,
+            };
+            if let Some(index) = reusable_plan_index {
+                if let Some(slot) = runtime.plans.get_mut(index) {
+                    *slot = filed;
+                } else {
+                    return fail(NamFlightReject::FlightRuntimeRefusal);
+                }
+            } else {
+                runtime.plans.push(filed);
+            }
         }
         Kind::Chg => {
             if let Some(index) = plan_index {
@@ -409,13 +493,17 @@ pub fn nam_flight_apply(
                 if let Some(plan) = runtime.plans.get_mut(index) {
                     plan.cancelled = true;
                     plan.status = ST_CANCELLED;
+                    plan.cancelled_at_ms = Some(now_ms);
                 }
+            }
+            if let Some(stage) = staged_retirement {
+                route::route_commit_stage(routes, stage);
             }
         }
         _ => {}
     }
     if let Some(revision) = staged_revision {
-        routes.revisions.push(revision);
+        route::route_commit_stage(routes, route::RouteStage::Revision(revision));
     }
     let preferred_route = runtime
         .plan_index(context.key, context.plan_id)
@@ -783,10 +871,11 @@ mod tests {
             m.points.region.push(region_ix);
             m.points.scope.push(StrIx::NONE);
             m.points.name.push(StrIx::NONE);
+            for bits in [&mut m.points.src_nasr, &mut m.points.src_cifp] {
+                air_model::bit_push(bits, false);
+            }
+            air_model::bit_push(&mut m.points.in_area, true);
             for bits in [
-                &mut m.points.src_nasr,
-                &mut m.points.src_cifp,
-                &mut m.points.in_area,
                 &mut m.points.cls_b,
                 &mut m.points.cls_c,
                 &mut m.points.cls_d,
@@ -1044,6 +1133,52 @@ mod tests {
             receipt_ns: source_ms * 1_000_000,
             response_number,
         }
+    }
+
+    fn capacity_context(index: u64, source_ms: i64, response_number: u16) -> NamFlightContext {
+        let gufi = 0x1020_3040_5060_7080_90a0_b0c0_d0e0_f001_u128 + u128::from(index);
+        let mut plan_id = [0u8; 12];
+        plan_id[..4].copy_from_slice(b"B2C1");
+        plan_id[4..].copy_from_slice(&index.to_be_bytes());
+        NamFlightContext {
+            key: key_gufi(gufi),
+            route_key: oa_legacy_traj::core::trajectory::FlightKey {
+                gufi: gufi.to_be_bytes(),
+                aircraft_address: 0x100000 + u32::try_from(index).expect("bounded plan index"),
+                centre: *b"KZMP",
+                plan_id,
+            },
+            plan_id,
+            centre: *b"KZMP",
+            plan_status: ST_PROPOSED,
+            source_ns: source_ms * 1_000_000,
+            receipt_ns: source_ms * 1_000_000,
+            response_number,
+        }
+    }
+
+    fn receive_regional(
+        runtime: &mut crate::runtime::RegionalRuntime,
+        ingress: &mut NamSessionIngress,
+        kind: Kind,
+        number: u16,
+        now_ms: u64,
+        context: NamFlightContext,
+    ) -> NamFlightResult {
+        let encoded = encode(&message(kind, number)).expect("capacity message encodes");
+        let bytes = frame(&encoded).expect("capacity message frames");
+        let (session, result) = crate::runtime::regional_receive_nam_flight(
+            runtime,
+            ingress,
+            &bytes,
+            now_ms,
+            context,
+            &[],
+            Profile::Core,
+        )
+        .expect("regional NAM session admission");
+        assert!(session.accepted.is_some());
+        result.expect("admitted message reaches flight adapter")
     }
 
     // REQ: OA-NAM-039
@@ -1540,5 +1675,358 @@ mod tests {
         .expect("duplicate amendment has a catalogued LRM");
         assert_eq!(duplicate_response.header.kind, Kind::Lrm);
         assert_eq!(flight_driver_len(&catalog_flights), 1);
+    }
+
+    // REQ: OA-NAM-039, OA-REG-019
+    // B2: run both the historic 256-route profile and the opt-in current-route pool through the
+    // real regional NAM session, route adapter and oa-flight table. The first retains the
+    // explicit refusal result; the second exercises bounded replacement and as-of expiry.
+    #[test]
+    fn legacy_and_explicit_route_pool_account_7080_nam_plans() {
+        let mut legacy = crate::runtime::RegionalRunProfile::recorded_peak();
+        legacy.surveillance = crate::surveillance::DEFAULT_SURVEILLANCE_PROFILE;
+        assert_route_capacity_profile(legacy, crate::route::MAX_ROUTE_REVISIONS);
+
+        let mut pool = crate::runtime::RegionalRunProfile::flight_plan_capacity();
+        pool.surveillance = crate::surveillance::DEFAULT_SURVEILLANCE_PROFILE;
+        assert_route_capacity_profile(pool, PLANS_FOR_CAPACITY_TEST);
+    }
+
+    const PLANS_FOR_CAPACITY_TEST: usize = 7_080;
+
+    fn assert_route_capacity_profile(
+        mut profile: crate::runtime::RegionalRunProfile,
+        expected: usize,
+    ) {
+        use crate::flight::MAX_DRIVER_LOG_ENTRIES;
+        use crate::runtime::{regional_new_with_profile, regional_profile_limits};
+        use crate::session::ReceiptBatch;
+        use crate::surveillance::{SurveillanceConfig, DEFAULT_SURVEILLANCE_PROFILE};
+
+        const PLANS: usize = PLANS_FOR_CAPACITY_TEST;
+        let model = model_fixture();
+        let snapshot = oa_airspace::core::snapshot::encode(&model).expect("encode model");
+        // This harness measures the flight/route table without allocating the unrelated peak
+        // surveillance and conflict-analysis profile.
+        profile.surveillance = DEFAULT_SURVEILLANCE_PROFILE;
+        profile.surveillance.render_scope = false;
+        profile.surveillance.max_presentation_updates = 0;
+        let mut runtime = regional_new_with_profile(
+            model.clone(),
+            oa_sha256::sha256(&snapshot),
+            *b"ZAU1",
+            SurveillanceConfig {
+                centre_lat_e7: 410_000_000,
+                centre_lon_e7: -870_000_000,
+                range_nm: 180.0,
+            },
+            profile,
+        )
+        .expect("explicit recorded flight capacity profile");
+        assert_eq!(regional_profile_limits(&runtime).max_flights, MAX_NAM_PLANS);
+        assert!(
+            crate::runtime::regional_route_store_reserved_bytes(&runtime).expect("route bytes")
+                <= crate::route::MAX_CURRENT_ROUTE_POOL_BYTES
+        );
+        assert_eq!(profile.max_flight_log_entries, MAX_DRIVER_LOG_ENTRIES);
+        let mut ingress = active_ingress();
+        let mut fpl_accepted = 0usize;
+        let mut fpl_route_capacity_refused = 0usize;
+        let mut sequence = 0usize;
+        for index in 0..PLANS {
+            let number = u16::try_from((sequence + 1) % 1000).expect("NAM sequence bound");
+            let result = receive_regional(
+                &mut runtime,
+                &mut ingress,
+                Kind::Fpl,
+                number,
+                u64::try_from(sequence + 2).expect("NAM clock bound"),
+                capacity_context(
+                    index as u64,
+                    i64::try_from(sequence + 2).expect("source clock bound"),
+                    number,
+                ),
+            );
+            sequence += 1;
+            if result.applied {
+                fpl_accepted += 1;
+            } else {
+                assert_eq!(
+                    result.rejection,
+                    Some(NamFlightReject::FlightRuntimeRefusal)
+                );
+                fpl_route_capacity_refused += 1;
+            }
+        }
+        let route_capacity = if profile.reclaim_current_route_by_key {
+            crate::route::MAX_CURRENT_ROUTE_PLANS
+        } else {
+            expected
+        };
+        assert_eq!(profile.max_route_revisions, route_capacity);
+        assert_eq!(fpl_accepted, expected);
+        assert_eq!(fpl_route_capacity_refused, PLANS - expected);
+
+        let mut chg_accepted = 0usize;
+        let mut chg_route_capacity_refused = 0usize;
+        let mut dla_accepted = 0usize;
+        let mut cnl_accepted = 0usize;
+        for index in 0..expected {
+            let plan_index = index as u64;
+            let now_ms = u64::try_from(sequence + 2).expect("NAM clock bound");
+            let source_ms = i64::try_from(sequence + 2).expect("source clock bound");
+            let number = u16::try_from((sequence + 1) % 1000).expect("NAM sequence bound");
+            let result = receive_regional(
+                &mut runtime,
+                &mut ingress,
+                Kind::Chg,
+                number,
+                now_ms,
+                capacity_context(plan_index, source_ms, number),
+            );
+            sequence += 1;
+            if result.applied {
+                chg_accepted += 1;
+            } else {
+                assert_eq!(
+                    result.rejection,
+                    Some(NamFlightReject::FlightRuntimeRefusal)
+                );
+                chg_route_capacity_refused += 1;
+            }
+
+            let number = u16::try_from((sequence + 1) % 1000).expect("NAM sequence bound");
+            let result = receive_regional(
+                &mut runtime,
+                &mut ingress,
+                Kind::Dla,
+                number,
+                u64::try_from(sequence + 2).expect("NAM clock bound"),
+                capacity_context(
+                    plan_index,
+                    i64::try_from(sequence + 2).expect("source clock bound"),
+                    number,
+                ),
+            );
+            sequence += 1;
+            assert!(result.applied, "DLA must update an accepted plan");
+            dla_accepted += 1;
+
+            let number = u16::try_from((sequence + 1) % 1000).expect("NAM sequence bound");
+            let result = receive_regional(
+                &mut runtime,
+                &mut ingress,
+                Kind::Cnl,
+                number,
+                u64::try_from(sequence + 2).expect("NAM clock bound"),
+                capacity_context(
+                    plan_index,
+                    i64::try_from(sequence + 2).expect("source clock bound"),
+                    number,
+                ),
+            );
+            sequence += 1;
+            assert!(result.applied, "CNL must cancel an accepted plan");
+            cnl_accepted += 1;
+        }
+        let expected_chg = if profile.reclaim_current_route_by_key {
+            expected
+        } else {
+            0
+        };
+        assert_eq!(chg_accepted, expected_chg);
+        assert_eq!(chg_route_capacity_refused, expected - expected_chg);
+        assert_eq!(dla_accepted, expected);
+        assert_eq!(cnl_accepted, expected);
+
+        let churn_plans = if profile.reclaim_current_route_by_key {
+            1_500
+        } else {
+            0
+        };
+        let mut churn_accepted = 0usize;
+        let mut churn_cancelled = 0usize;
+        if churn_plans > 0 {
+            sequence = sequence
+                .checked_add(
+                    usize::try_from(route::CURRENT_ROUTE_HISTORY_RETENTION_MS)
+                        .expect("retention interval fits usize"),
+                )
+                .and_then(|value| value.checked_add(30_000))
+                .expect("retention clock advance fits usize");
+        }
+        for offset in 0..churn_plans {
+            let index = PLANS + offset;
+            let number = u16::try_from((sequence + 1) % 1000).expect("NAM sequence bound");
+            let result = receive_regional(
+                &mut runtime,
+                &mut ingress,
+                Kind::Fpl,
+                number,
+                u64::try_from(sequence + 2).expect("NAM clock bound"),
+                capacity_context(
+                    index as u64,
+                    i64::try_from(sequence + 2).expect("source clock bound"),
+                    number,
+                ),
+            );
+            sequence += 1;
+            assert!(result.applied, "cancelled route slots are reusable");
+            churn_accepted += 1;
+            let number = u16::try_from((sequence + 1) % 1000).expect("NAM sequence bound");
+            let result = receive_regional(
+                &mut runtime,
+                &mut ingress,
+                Kind::Cnl,
+                number,
+                u64::try_from(sequence + 2).expect("NAM clock bound"),
+                capacity_context(
+                    index as u64,
+                    i64::try_from(sequence + 2).expect("source clock bound"),
+                    number,
+                ),
+            );
+            sequence += 1;
+            assert!(
+                result.applied,
+                "churned plan cancellation remains accounted"
+            );
+            churn_cancelled += 1;
+        }
+
+        if profile.reclaim_current_route_by_key {
+            let number = u16::try_from((sequence + 1) % 1000).expect("NAM sequence bound");
+            let stale = receive_regional(
+                &mut runtime,
+                &mut ingress,
+                Kind::Dla,
+                number,
+                u64::try_from(sequence + 2).expect("NAM clock bound"),
+                capacity_context(0, 2, number),
+            );
+            sequence += 1;
+            assert!(!stale.applied);
+            assert_eq!(stale.rejection, Some(NamFlightReject::HistoryExpired));
+
+            let sealed_ns = oa_sealed::sealed_windows()
+                .first()
+                .expect("synthetic seal list has a window")
+                .from_ns;
+            let number = u16::try_from((sequence + 1) % 1000).expect("NAM sequence bound");
+            let refused_context =
+                capacity_context((PLANS + churn_plans) as u64, sealed_ns / 1_000_000, number);
+            let refused = receive_regional(
+                &mut runtime,
+                &mut ingress,
+                Kind::Fpl,
+                number,
+                u64::try_from(sealed_ns / 1_000_000).expect("seal timestamp is nonnegative"),
+                refused_context,
+            );
+            sequence += 1;
+            assert!(!refused.applied);
+            assert_eq!(
+                refused.rejection,
+                Some(NamFlightReject::FlightRuntimeRefusal)
+            );
+            assert_eq!(
+                crate::runtime::regional_flight_reclamation_counts(&runtime).0,
+                expected
+            );
+            assert_eq!(
+                crate::runtime::regional_flight_reclamation_counts(&runtime).1,
+                churn_cancelled as u64
+            );
+
+            let valid_ns = oa_sealed::sealed_windows()
+                .iter()
+                .map(|window| window.to_ns)
+                .max()
+                .expect("synthetic seal list has a window")
+                .checked_add(1)
+                .expect("post-seal test time fits");
+            let number = u16::try_from((sequence + 1) % 1000).expect("NAM sequence bound");
+            let mut active_context = capacity_context(
+                (PLANS + churn_plans + 1) as u64,
+                valid_ns / 1_000_000,
+                number,
+            );
+            active_context.plan_status = ST_ACTIVE;
+            let active = receive_regional(
+                &mut runtime,
+                &mut ingress,
+                Kind::Fpl,
+                number,
+                u64::try_from(valid_ns / 1_000_000).expect("test timestamp is nonnegative"),
+                active_context,
+            );
+            sequence += 1;
+            assert!(
+                active.applied,
+                "active plan survives bounded slot reclamation"
+            );
+        }
+
+        let receipt_ns = if profile.reclaim_current_route_by_key {
+            let last_seal_ns = oa_sealed::sealed_windows()
+                .iter()
+                .map(|window| window.to_ns)
+                .max()
+                .expect("synthetic seal list has a window");
+            last_seal_ns
+                .div_euclid(1_000_000_000)
+                .checked_add(1)
+                .and_then(|seconds| seconds.checked_mul(1_000_000_000))
+                .expect("post-seal report time fits")
+        } else {
+            i64::try_from((sequence + 1) / 1_000 + 1).expect("report clock bound") * 1_000_000_000
+        };
+        let post_capacity_fpl_count = if profile.reclaim_current_route_by_key {
+            1_u64
+        } else {
+            0
+        };
+        let frame = crate::runtime::regional_step(
+            &mut runtime,
+            &ReceiptBatch {
+                receipt_ns,
+                source_clock_regressions: 0,
+                events: Vec::new(),
+            },
+        )
+        .expect("flight table accounting frame");
+        assert_eq!(frame.flight_report.flights, expected);
+        assert_eq!(
+            frame.flight_report.operations,
+            2 * expected as u64
+                + expected_chg as u64
+                + churn_accepted as u64
+                + churn_cancelled as u64
+                + post_capacity_fpl_count
+        );
+        assert_eq!(
+            frame.flight_report.applied,
+            2 * expected as u64
+                + churn_accepted as u64
+                + churn_cancelled as u64
+                + post_capacity_fpl_count
+        );
+        assert_eq!(frame.flight_report.adapter.adapter_refusals, 0);
+        assert_eq!(fpl_accepted + dla_accepted + cnl_accepted, 3 * expected);
+        assert_eq!(
+            fpl_route_capacity_refused + chg_route_capacity_refused,
+            PLANS + expected - fpl_accepted - expected_chg
+        );
+        if profile.reclaim_current_route_by_key {
+            assert_eq!(
+                crate::runtime::regional_route_store_counts(&runtime),
+                (1, 0)
+            );
+            assert_eq!(
+                frame.flight_report.adapter.retirements_consumed,
+                churn_accepted as u64 + 1
+            );
+            assert_eq!(post_capacity_fpl_count, 1);
+        }
     }
 }

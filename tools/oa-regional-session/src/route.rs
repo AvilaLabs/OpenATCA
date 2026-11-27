@@ -18,6 +18,15 @@ use oa_legacy_traj::core::trajectory::{
 /// C6/C7: one session retains at most 256 route/cursor revisions across all flights, matching
 /// the shared selector's bound. Exhaustion stops the run before conversion or storage.
 pub const MAX_ROUTE_REVISIONS: usize = 256;
+/// Separate current-route pool for explicit high-volume offline replay. The legacy selector,
+/// cursor history and quadratic comparison ceilings above remain unchanged.
+pub const MAX_CURRENT_ROUTE_PLANS: usize = 8192;
+/// Startup-reserved current-route storage budget (~250 MiB payload plus fence/index metadata).
+pub const MAX_CURRENT_ROUTE_POOL_BYTES: usize = 320 * 1024 * 1024;
+/// One-day as-of horizon for offline full-day replay. Returned frames copy all route-derived
+/// values and retain no route-store references, so no reader pin survives a successful frame.
+/// Cutoffs and delayed source rows older than this watermark are explicitly refused.
+pub const CURRENT_ROUTE_HISTORY_RETENTION_MS: i64 = 24 * 60 * 60 * 1000;
 /// Maximum bytes in the versioned canonical route payload encoding. The checked maximum is
 /// 91-byte header + 256 active points × 125 bytes per point = 32,091 bytes.
 const MAX_ROUTE_HASH_BYTES: usize = 512 * 1024;
@@ -51,11 +60,25 @@ pub struct RouteRefusalFence {
     pub reason: u16,
 }
 
+/// A replaced route's discarded as-of interval. Queries in this interval fail explicitly rather
+/// than accidentally selecting the newer current route as historical truth.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RouteHistoryExpiry {
+    pub key: t::FlightKey,
+    pub from_available_ms: i64,
+    pub until_available_ms: i64,
+    pub until_inclusive: bool,
+}
+
 // A7.2: cold per-item stage value; inline fixed-size converted route avoids a new allocation.
 #[allow(clippy::large_enum_variant)]
 pub enum RouteStage {
     Noop,
     Revision(RouteRevision),
+    Retire {
+        key: t::FlightKey,
+        available_ms: i64,
+    },
     Cursor(t::ActiveRouteCursor, [u8; 32]),
     Refusal {
         reason: u16,
@@ -67,6 +90,11 @@ pub struct RouteStore {
     pub revisions: Vec<RouteRevision>,
     /// Failed filed-route amendments retained so a later success cannot rewrite past cutoffs.
     pub route_refusals: Vec<RouteRefusalFence>,
+    pub history_expiries: Vec<RouteHistoryExpiry>,
+    pub revision_capacity: usize,
+    pub refusal_capacity: usize,
+    pub reclaim_current_by_key: bool,
+    pub history_watermark_ms: i64,
     pub cursors: Vec<t::ActiveRouteCursor>,
     pub cursor_text_hashes: Vec<[u8; 32]>,
     pub rejected_legacy_routes: u64,
@@ -74,13 +102,245 @@ pub struct RouteStore {
 }
 
 pub fn route_store_new(snapshot_sha256: [u8; 32]) -> RouteStore {
+    route_store_new_with_capacity(snapshot_sha256, MAX_ROUTE_REVISIONS, false)
+}
+
+pub fn route_store_new_with_capacity(
+    snapshot_sha256: [u8; 32],
+    revision_capacity: usize,
+    reclaim_current_by_key: bool,
+) -> RouteStore {
     RouteStore {
-        revisions: Vec::with_capacity(MAX_ROUTE_REVISIONS),
-        route_refusals: Vec::with_capacity(MAX_ROUTE_REVISIONS),
+        revisions: Vec::with_capacity(revision_capacity),
+        route_refusals: Vec::with_capacity(revision_capacity),
+        history_expiries: Vec::with_capacity(revision_capacity),
+        revision_capacity,
+        refusal_capacity: revision_capacity,
+        reclaim_current_by_key,
+        history_watermark_ms: 0,
         cursors: Vec::with_capacity(MAX_ROUTE_REVISIONS),
         cursor_text_hashes: Vec::with_capacity(MAX_ROUTE_REVISIONS),
         rejected_legacy_routes: 0,
         snapshot_sha256,
+    }
+}
+
+pub fn route_store_reserved_bytes(store: &RouteStore) -> Option<usize> {
+    store
+        .revisions
+        .capacity()
+        .checked_mul(core::mem::size_of::<RouteRevision>())?
+        .checked_add(
+            store
+                .route_refusals
+                .capacity()
+                .checked_mul(core::mem::size_of::<RouteRefusalFence>())?,
+        )?
+        .checked_add(
+            store
+                .history_expiries
+                .capacity()
+                .checked_mul(core::mem::size_of::<RouteHistoryExpiry>())?,
+        )?
+        .checked_add(
+            store
+                .cursors
+                .capacity()
+                .checked_mul(core::mem::size_of::<t::ActiveRouteCursor>())?,
+        )?
+        .checked_add(
+            store
+                .cursor_text_hashes
+                .capacity()
+                .checked_mul(core::mem::size_of::<[u8; 32]>())?,
+        )
+}
+
+fn revision_capacity_ok(store: &RouteStore) -> bool {
+    if store.reclaim_current_by_key {
+        store.revisions.len() < store.revision_capacity
+    } else {
+        store
+            .revisions
+            .len()
+            .saturating_add(store.route_refusals.len())
+            < store.revision_capacity
+    }
+}
+
+fn refusal_capacity_ok(store: &RouteStore) -> bool {
+    if store.reclaim_current_by_key {
+        store.route_refusals.len() < store.refusal_capacity
+    } else {
+        store
+            .revisions
+            .len()
+            .saturating_add(store.route_refusals.len())
+            < store.refusal_capacity
+    }
+}
+
+pub fn route_history_expired(
+    store: &RouteStore,
+    key: t::FlightKey,
+    cutoff_ms: i64,
+) -> Result<bool, String> {
+    if store.reclaim_current_by_key && cutoff_ms < store.history_watermark_ms {
+        return Ok(true);
+    }
+    if store.history_expiries.len() > store.revision_capacity {
+        return Err("route history-expiry budget exceeded".into());
+    }
+    let mut matching_key_seen = false;
+    for expiry in &store.history_expiries {
+        if !valid_refusal_key(expiry.key)
+            || expiry.from_available_ms < 0
+            || expiry.until_available_ms < expiry.from_available_ms
+        {
+            return Err("invalid route history-expiry interval".into());
+        }
+        if expiry.key == key {
+            if matching_key_seen {
+                return Err("duplicate route history-expiry key".into());
+            }
+            matching_key_seen = true;
+            if expiry.from_available_ms <= cutoff_ms
+                && (cutoff_ms < expiry.until_available_ms
+                    || (expiry.until_inclusive && cutoff_ms == expiry.until_available_ms))
+            {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+pub(crate) fn revision_admission_ok(store: &RouteStore, key: t::FlightKey) -> bool {
+    if store.reclaim_current_by_key && store.revisions.iter().any(|r| r.evidence.key == key) {
+        return store.history_expiries.len() < store.revision_capacity
+            || store.history_expiries.iter().any(|e| e.key == key);
+    }
+    revision_capacity_ok(store)
+}
+
+pub(crate) fn candidate_history_watermark(store: &RouteStore, now_ms: i64) -> i64 {
+    if store.reclaim_current_by_key {
+        store
+            .history_watermark_ms
+            .max(now_ms.saturating_sub(CURRENT_ROUTE_HISTORY_RETENTION_MS))
+    } else {
+        store.history_watermark_ms
+    }
+}
+
+pub(crate) fn source_time_is_retained(store: &RouteStore, source_ms: i64) -> bool {
+    !store.reclaim_current_by_key || source_ms >= store.history_watermark_ms
+}
+
+pub(crate) fn advance_route_history_watermark(store: &mut RouteStore, now_ms: i64) {
+    if !store.reclaim_current_by_key {
+        return;
+    }
+    let watermark = candidate_history_watermark(store, now_ms);
+    store.history_watermark_ms = watermark;
+    store.history_expiries.retain(|expiry| {
+        expiry.until_available_ms > watermark
+            || (expiry.until_inclusive && expiry.until_available_ms == watermark)
+    });
+    let mut index = 0;
+    while let Some(cursor) = store.cursors.get(index) {
+        if cursor.source_ms < watermark {
+            if store.cursor_text_hashes.get(index).is_none() {
+                break;
+            }
+            store.cursors.swap_remove(index);
+            store.cursor_text_hashes.swap_remove(index);
+        } else {
+            index += 1;
+        }
+    }
+    store.route_refusals.retain(|fence| {
+        if fence.available_ms > watermark {
+            return true;
+        }
+        let blocked_through = fence.source_ms.unwrap_or(fence.available_ms);
+        store.revisions.iter().any(|revision| {
+            revision.evidence.key == fence.key && revision.evidence.source_ms <= blocked_through
+        })
+    });
+}
+
+pub(crate) fn route_revision_admission(store: &RouteStore, revision: &RouteRevision) -> bool {
+    if !revision_admission_ok(store, revision.evidence.key) {
+        return false;
+    }
+    if !store.reclaim_current_by_key {
+        return true;
+    }
+    let watermark = candidate_history_watermark(store, revision.evidence.available_ms);
+    let retained_expiries = store
+        .history_expiries
+        .iter()
+        .filter(|expiry| {
+            expiry.until_available_ms > watermark
+                || (expiry.until_inclusive && expiry.until_available_ms == watermark)
+        })
+        .count();
+    let existing_expiry = store
+        .history_expiries
+        .iter()
+        .any(|expiry| expiry.key == revision.evidence.key);
+    match store
+        .revisions
+        .iter()
+        .find(|current| current.evidence.key == revision.evidence.key)
+    {
+        Some(current) => {
+            revision.evidence.source_ms >= current.evidence.source_ms
+                && revision.evidence.available_ms >= current.evidence.available_ms
+                && (retained_expiries < store.revision_capacity || existing_expiry)
+        }
+        None => true,
+    }
+}
+
+pub(crate) fn route_stage_retirement(
+    store: &RouteStore,
+    key: t::FlightKey,
+    available_ms: i64,
+) -> Result<RouteStage, String> {
+    if !store.reclaim_current_by_key {
+        return Ok(RouteStage::Noop);
+    }
+    if !valid_refusal_key(key) || available_ms < 0 {
+        return Err(
+            "route retirement requires the explicit current-route pool and valid identity".into(),
+        );
+    }
+    if let Some(current) = store.revisions.iter().find(|r| r.evidence.key == key) {
+        if available_ms < current.evidence.available_ms {
+            return Err("route retirement precedes current route availability".into());
+        }
+        let watermark = candidate_history_watermark(store, available_ms);
+        let retained_expiries = store
+            .history_expiries
+            .iter()
+            .filter(|expiry| {
+                expiry.until_available_ms > watermark
+                    || (expiry.until_inclusive && expiry.until_available_ms == watermark)
+            })
+            .count();
+        if !store
+            .history_expiries
+            .iter()
+            .any(|expiry| expiry.key == key)
+            && retained_expiries >= store.revision_capacity
+        {
+            return Err("route history-expiry capacity exhausted".into());
+        }
+        Ok(RouteStage::Retire { key, available_ms })
+    } else {
+        Ok(RouteStage::Noop)
     }
 }
 
@@ -168,7 +428,7 @@ fn refuse_filed_route(
     text_len: u16,
     reason: u16,
 ) -> Result<RouteStage, String> {
-    if store.revisions.len() + store.route_refusals.len() >= MAX_ROUTE_REVISIONS {
+    if !refusal_capacity_ok(store) {
         return Err(
             "route refusal fence capacity exhausted; refusing to expose stale route".into(),
         );
@@ -204,8 +464,9 @@ pub fn route_refusal_blocks(
     selected: t::RevisionEvidence,
     cutoff_ms: i64,
 ) -> Result<bool, String> {
-    if store.revisions.len() + store.route_refusals.len() > MAX_ROUTE_REVISIONS
-        || store.route_refusals.len() > MAX_ROUTE_REVISIONS
+    if store.route_refusals.len() > store.refusal_capacity
+        || (!store.reclaim_current_by_key
+            && store.revisions.len() + store.route_refusals.len() > store.revision_capacity)
     {
         return Err("route revision/fence budget exceeded".into());
     }
@@ -271,6 +532,18 @@ pub fn route_stage_event(
                 }
             };
             let available_ms = ms(event.receipt_ns)?;
+            if store.reclaim_current_by_key
+                && source_ms < candidate_history_watermark(store, available_ms)
+            {
+                return refuse_filed_route(
+                    store,
+                    event,
+                    plan_id,
+                    &text,
+                    text_len,
+                    oa_quarantine::REASON_INPUT_INVALID,
+                );
+            }
             if source_ms > available_ms || usize::from(text_len) > MAX_FILED_ROUTE_BYTES {
                 return refuse_filed_route(
                     store,
@@ -281,7 +554,7 @@ pub fn route_stage_event(
                     oa_quarantine::REASON_ALTITUDE_ROUTE_INVALID,
                 );
             }
-            if store.revisions.len() + store.route_refusals.len() >= MAX_ROUTE_REVISIONS {
+            if !revision_admission_ok(store, event_key(event, plan_id)) {
                 return Err("route revision/fence capacity exhausted".into());
             }
             let maximum_encoding_size = hash_size(t::MAX_ROUTE_POINTS)?;
@@ -344,7 +617,7 @@ pub fn route_stage_event(
                     oa_quarantine::REASON_IDENTITY_OR_LOCATION_CONFLICT,
                 );
             }
-            Ok(RouteStage::Revision(RouteRevision {
+            let revision = RouteRevision {
                 evidence: t::RevisionEvidence {
                     source_ms,
                     available_ms,
@@ -356,7 +629,18 @@ pub fn route_stage_event(
                 text_sha256,
                 report,
                 converted,
-            }))
+            };
+            if !route_revision_admission(store, &revision) {
+                return refuse_filed_route(
+                    store,
+                    event,
+                    plan_id,
+                    &text,
+                    text_len,
+                    oa_quarantine::REASON_INPUT_INVALID,
+                );
+            }
+            Ok(RouteStage::Revision(revision))
         }
         EventKind::ActiveCursor {
             plan_id,
@@ -364,10 +648,7 @@ pub fn route_stage_event(
             fix_len,
             fix: text,
         } => {
-            if event.source != SourceKind::Route
-                || event.source_ns > event.receipt_ns
-                || store.cursors.len() >= MAX_ROUTE_REVISIONS
-            {
+            if event.source != SourceKind::Route || event.source_ns > event.receipt_ns {
                 return Ok(RouteStage::Refusal {
                     reason: oa_quarantine::REASON_ALTITUDE_ROUTE_INVALID,
                     fence: None,
@@ -383,6 +664,20 @@ pub fn route_stage_event(
                 }
             };
             let available_ms = ms(event.receipt_ns)?;
+            if store.reclaim_current_by_key
+                && source_ms < candidate_history_watermark(store, available_ms)
+            {
+                return Ok(RouteStage::Refusal {
+                    reason: oa_quarantine::REASON_INPUT_INVALID,
+                    fence: None,
+                });
+            }
+            if store.cursors.len() >= MAX_ROUTE_REVISIONS {
+                return Ok(RouteStage::Refusal {
+                    reason: oa_quarantine::REASON_ALTITUDE_ROUTE_INVALID,
+                    fence: None,
+                });
+            }
             let text_view = match bounded_text(&text, fix_len) {
                 Ok(value) if usize::from(fix_len) <= MAX_FILED_ROUTE_BYTES => value,
                 _ => {
@@ -430,7 +725,71 @@ pub fn route_stage_event(
 pub fn route_commit_stage(store: &mut RouteStore, stage: RouteStage) {
     match stage {
         RouteStage::Noop | RouteStage::Refusal { .. } => {}
-        RouteStage::Revision(revision) => store.revisions.push(revision),
+        RouteStage::Retire { key, available_ms } => {
+            if let Some(index) = store
+                .revisions
+                .iter()
+                .position(|revision| revision.evidence.key == key)
+            {
+                let old = store.revisions.swap_remove(index).evidence;
+                if let Some(expiry) = store
+                    .history_expiries
+                    .iter_mut()
+                    .find(|expiry| expiry.key == key)
+                {
+                    expiry.until_available_ms = available_ms;
+                    expiry.until_inclusive = true;
+                } else {
+                    store.history_expiries.push(RouteHistoryExpiry {
+                        key,
+                        from_available_ms: old.available_ms,
+                        until_available_ms: available_ms,
+                        until_inclusive: true,
+                    });
+                }
+            }
+        }
+        RouteStage::Revision(revision) => {
+            if store.reclaim_current_by_key {
+                if let Some(index) = store
+                    .revisions
+                    .iter()
+                    .position(|current| current.evidence.key == revision.evidence.key)
+                {
+                    let old = store.revisions.swap_remove(index).evidence;
+                    if old.available_ms < revision.evidence.available_ms {
+                        if let Some(expiry) = store
+                            .history_expiries
+                            .iter_mut()
+                            .find(|expiry| expiry.key == revision.evidence.key)
+                        {
+                            expiry.until_available_ms = revision.evidence.available_ms;
+                            expiry.until_inclusive = false;
+                        } else {
+                            store.history_expiries.push(RouteHistoryExpiry {
+                                key: revision.evidence.key,
+                                from_available_ms: old.available_ms,
+                                until_available_ms: revision.evidence.available_ms,
+                                until_inclusive: false,
+                            });
+                        }
+                    }
+                    store.revisions.push(revision);
+                } else {
+                    if let Some(expiry) = store
+                        .history_expiries
+                        .iter_mut()
+                        .find(|expiry| expiry.key == revision.evidence.key)
+                    {
+                        expiry.until_available_ms = revision.evidence.available_ms;
+                        expiry.until_inclusive = false;
+                    }
+                    store.revisions.push(revision);
+                }
+            } else {
+                store.revisions.push(revision);
+            }
+        }
         RouteStage::Cursor(cursor, text_hash) => {
             store.cursors.push(cursor);
             store.cursor_text_hashes.push(text_hash);
@@ -453,7 +812,7 @@ pub fn route_rejection_fence(
             let EventKind::FiledRoute { .. } = event.kind else {
                 return Ok(None);
             };
-            if store.revisions.len() + store.route_refusals.len() >= MAX_ROUTE_REVISIONS {
+            if !refusal_capacity_ok(store) {
                 return Err("route refusal fence capacity exhausted".into());
             }
             Ok(Some(RouteRefusalFence {
@@ -465,7 +824,7 @@ pub fn route_rejection_fence(
                 reason,
             }))
         }
-        RouteStage::Noop | RouteStage::Cursor(..) => Ok(None),
+        RouteStage::Noop | RouteStage::Retire { .. } | RouteStage::Cursor(..) => Ok(None),
     }
 }
 
@@ -473,7 +832,7 @@ pub fn route_commit_refusal(
     store: &mut RouteStore,
     fence: RouteRefusalFence,
 ) -> Result<(), String> {
-    if store.revisions.len() + store.route_refusals.len() >= MAX_ROUTE_REVISIONS {
+    if !refusal_capacity_ok(store) {
         return Err("route refusal fence capacity exhausted".into());
     }
     store.route_refusals.push(fence);
@@ -635,7 +994,7 @@ pub fn route_event(
             if event.source != SourceKind::Route {
                 return Err("filed route has wrong source kind".into());
             }
-            if store.revisions.len() + store.route_refusals.len() >= MAX_ROUTE_REVISIONS {
+            if !revision_admission_ok(store, event_key(event, plan_id)) {
                 return Err("route revision capacity exhausted".into());
             }
             let source_ms = ms(event.source_ns)?;
@@ -660,12 +1019,15 @@ pub fn route_event(
                 key: event_key(event, plan_id),
                 reserved: [0; 4],
             };
-            store.revisions.push(RouteRevision {
-                evidence,
-                text_sha256,
-                report,
-                converted,
-            });
+            route_commit_stage(
+                store,
+                RouteStage::Revision(RouteRevision {
+                    evidence,
+                    text_sha256,
+                    report,
+                    converted,
+                }),
+            );
         }
         EventKind::ActiveCursor {
             plan_id,
@@ -1000,13 +1362,26 @@ fn prepare_route_issue(
         return Err("flight view has invalid or future-stamped state at cutoff".into());
     }
     let key = flight_key(view);
-    if store.revisions.len() + store.route_refusals.len() > MAX_ROUTE_REVISIONS
+    if store.revisions.len() > store.revision_capacity
+        || store.route_refusals.len() > store.refusal_capacity
+        || (!store.reclaim_current_by_key
+            && store.revisions.len() + store.route_refusals.len() > store.revision_capacity)
         || store.cursors.len() > MAX_ROUTE_REVISIONS
         || store.cursors.len() != store.cursor_text_hashes.len()
     {
         return Err("route store budget exceeded or cursor columns inconsistent".into());
     }
-    let evidence: Vec<_> = store.revisions.iter().map(|r| r.evidence).collect();
+    if route_history_expired(store, key, cutoff_ms)? {
+        return Err("route as-of history expired after current-route reclamation".into());
+    }
+    // The selector's quadratic evidence contract remains capped at 256 candidates. The current
+    // route pool is indexed by full FlightKey, so only this aircraft's current evidence enters it.
+    let evidence: Vec<_> = store
+        .revisions
+        .iter()
+        .filter(|r| r.evidence.key == key)
+        .map(|r| r.evidence)
+        .collect();
     let selected = t::select_revision_evidence(key, cutoff_ms, &evidence);
     if selected.available == t::Availability::Unavailable {
         return Err(format!(
@@ -1235,6 +1610,24 @@ mod refusal_fence_tests {
         }
     }
 
+    fn stored_revision(key: t::FlightKey, source_ms: i64, available_ms: i64) -> RouteRevision {
+        RouteRevision {
+            evidence: revision(key, source_ms, available_ms),
+            text_sha256: [source_ms as u8; 32],
+            report: RouteReport {
+                failure: RouteFailure::None,
+                offered: 0,
+                resolved: 0,
+                unsupported: 0,
+                refused: 0,
+                unexamined: 0,
+                work_used: 0,
+                work_limit: oa_airspace::core::route::MAX_ROUTE_WORK,
+            },
+            converted: empty_converted_route(),
+        }
+    }
+
     // REQ: OA-REG-018
     #[test]
     fn route_refusal_fence_is_scoped_and_preserved_for_historical_cutoffs() {
@@ -1262,5 +1655,142 @@ mod refusal_fence_tests {
         store.route_refusals.first_mut().unwrap().source_ms = None;
         assert!(route_refusal_blocks(&store, revision(plan_a, 1_999, 2_000), 2_000).unwrap());
         assert!(!route_refusal_blocks(&store, revision(plan_a, 2_001, 2_001), 2_001).unwrap());
+    }
+
+    // REQ: OA-REG-020
+    #[test]
+    fn current_route_reuse_expires_old_as_of_queries_and_bounds_churn() {
+        let plan = key(*b"PLAN00000001");
+        let mut store = route_store_new_with_capacity([0; 32], 2, true);
+        route_commit_stage(
+            &mut store,
+            RouteStage::Revision(stored_revision(plan, 10, 10)),
+        );
+        route_commit_stage(
+            &mut store,
+            RouteStage::Revision(stored_revision(plan, 20, 20)),
+        );
+        assert_eq!(store.revisions.len(), 1);
+        assert_eq!(store.history_expiries.len(), 1);
+        assert!(!route_history_expired(&store, plan, 9).unwrap());
+        assert!(route_history_expired(&store, plan, 10).unwrap());
+        assert!(route_history_expired(&store, plan, 19).unwrap());
+        assert!(!route_history_expired(&store, plan, 20).unwrap());
+
+        for source_ms in 21..=100 {
+            route_commit_stage(
+                &mut store,
+                RouteStage::Revision(stored_revision(plan, source_ms, source_ms)),
+            );
+        }
+        assert_eq!(
+            store.revisions.len(),
+            1,
+            "replacement reuses the current slot"
+        );
+        assert_eq!(
+            store.history_expiries.len(),
+            1,
+            "expiry index remains per full key"
+        );
+        assert!(route_history_expired(&store, plan, 50).unwrap());
+        assert!(!route_history_expired(&store, plan, 100).unwrap());
+
+        let retirement = route_stage_retirement(&store, plan, 100).unwrap();
+        route_commit_stage(&mut store, retirement);
+        assert!(store.revisions.is_empty());
+        assert!(route_history_expired(&store, plan, 100).unwrap());
+        route_commit_stage(
+            &mut store,
+            RouteStage::Revision(stored_revision(plan, 120, 120)),
+        );
+        assert_eq!(store.revisions.len(), 1);
+        assert!(route_history_expired(&store, plan, 119).unwrap());
+        assert!(!route_history_expired(&store, plan, 120).unwrap());
+        advance_route_history_watermark(&mut store, CURRENT_ROUTE_HISTORY_RETENTION_MS + 120);
+        assert_eq!(store.history_watermark_ms, 120);
+        assert!(store.history_expiries.is_empty());
+        assert!(route_history_expired(&store, plan, 119).unwrap());
+        assert!(!route_history_expired(&store, plan, 120).unwrap());
+    }
+
+    // REQ: OA-REG-020
+    #[test]
+    fn expiry_index_exhaustion_refuses_retirement_without_mutation() {
+        let first = key(*b"PLAN00000001");
+        let second = key(*b"PLAN00000002");
+        let mut store = route_store_new_with_capacity([0; 32], 1, true);
+        route_commit_stage(
+            &mut store,
+            RouteStage::Revision(stored_revision(first, 10, 10)),
+        );
+        let retirement = route_stage_retirement(&store, first, 11).unwrap();
+        route_commit_stage(&mut store, retirement);
+        route_commit_stage(
+            &mut store,
+            RouteStage::Revision(stored_revision(second, 20, 20)),
+        );
+
+        let before_revision_count = store.revisions.len();
+        let before_expiry_count = store.history_expiries.len();
+        assert!(route_stage_retirement(&store, second, 21).is_err());
+        assert_eq!(store.revisions.len(), before_revision_count);
+        assert_eq!(store.history_expiries.len(), before_expiry_count);
+        assert_eq!(
+            store.revisions.first().map(|r| r.evidence.key),
+            Some(second)
+        );
+    }
+
+    // REQ: OA-REG-020
+    #[test]
+    fn history_watermark_reclaims_only_rows_outside_supported_asof_window() {
+        let plan = key(*b"PLAN00000001");
+        let mut store = route_store_new_with_capacity([0; 32], 4, true);
+        store.revisions.push(stored_revision(plan, 10, 10));
+        store.route_refusals.push(RouteRefusalFence {
+            key: plan,
+            source_ms: Some(11),
+            available_ms: 20,
+            message_id: 1,
+            attempted_text_sha256: [1; 32],
+            reason: oa_quarantine::REASON_INPUT_INVALID,
+        });
+        store.cursors.push(t::ActiveRouteCursor {
+            source_ms: 10,
+            available_ms: 20,
+            message_id: 1,
+            route_payload_sha256: [0; 32],
+            key: plan,
+            next_fix: t::FixIdentity {
+                ident: t::RouteIdentifier {
+                    len: 0,
+                    bytes: [0; 12],
+                },
+                region: [0; 4],
+                scope: t::RouteIdentifier {
+                    len: 0,
+                    bytes: [0; 12],
+                },
+                class: 0,
+            },
+            reserved: [0; 5],
+        });
+        store.cursor_text_hashes.push([2; 32]);
+
+        let watermark = CURRENT_ROUTE_HISTORY_RETENTION_MS + 120;
+        advance_route_history_watermark(&mut store, watermark);
+        assert_eq!(store.history_watermark_ms, 120);
+        assert!(store.cursors.is_empty());
+        assert!(store.cursor_text_hashes.is_empty());
+        // The expired refusal still protects an older current route, so it cannot be reclaimed.
+        assert_eq!(store.route_refusals.len(), 1);
+        assert!(!source_time_is_retained(&store, 119));
+        assert!(route_history_expired(&store, plan, 119).unwrap());
+
+        assert!(store.revisions.pop().is_some());
+        store.revisions.push(stored_revision(plan, 12, watermark));
+        advance_route_history_watermark(&mut store, watermark + 1);
+        assert!(store.route_refusals.is_empty());
     }
 }

@@ -109,6 +109,10 @@ pub struct RegionalRuntime {
 pub struct RegionalRunProfile {
     pub surveillance: surveillance::SurveillanceProfile,
     pub max_flights: usize,
+    /// Current converted-route slots. The legacy selector history remains independently capped.
+    pub max_route_revisions: usize,
+    /// Replace a flight's current route in-place while recording explicit as-of expiry intervals.
+    pub reclaim_current_route_by_key: bool,
     pub max_flight_log_entries: usize,
     pub max_total_events: usize,
 }
@@ -135,6 +139,8 @@ impl RegionalRunProfile {
                 render_scope: false,
             },
             max_flights: 8192,
+            max_route_revisions: route::MAX_ROUTE_REVISIONS,
+            reclaim_current_route_by_key: false,
             max_flight_log_entries: MAX_DRIVER_LOG_ENTRIES,
             max_total_events: crate::session::MAX_RECORDED_PROFILE_EVENTS,
         }
@@ -152,11 +158,30 @@ impl RegionalRunProfile {
         profile.surveillance.render_scope = true;
         profile
     }
+
+    /// Explicit 8,192-plan offline profile. It reserves a bounded current-route table and
+    /// replaces route payloads by full flight key; older as-of intervals return HistoryExpired.
+    /// The one-day horizon matches the full-day replay/query workflow; successful frames own
+    /// copies and retain no store references. With 7,080 current plans, at most 1,112 additional
+    /// identities fit in the same retained pool before an explicit capacity refusal or watermark
+    /// reclamation. This is a finite occupancy envelope, not a guarantee of arbitrary turnover.
+    /// The 256-entry cursor history and 32,640 pairwise cursor-work limit are unchanged.
+    /// Inline converted payload is 32,004 B × 8,192 (~250 MiB); exact vector capacities are
+    /// measured at startup and refused above 320 MiB. This is the route-store reservation only,
+    /// not a whole-process RSS bound.
+    pub const fn flight_plan_capacity() -> Self {
+        let mut profile = Self::recorded_peak();
+        profile.max_route_revisions = route::MAX_CURRENT_ROUTE_PLANS;
+        profile.reclaim_current_route_by_key = true;
+        profile
+    }
 }
 
 pub const DEFAULT_REGIONAL_RUN_PROFILE: RegionalRunProfile = RegionalRunProfile {
     surveillance: surveillance::DEFAULT_SURVEILLANCE_PROFILE,
     max_flights: MAX_DRIVER_FLIGHTS,
+    max_route_revisions: route::MAX_ROUTE_REVISIONS,
+    reclaim_current_route_by_key: false,
     max_flight_log_entries: MAX_DRIVER_LOG_ENTRIES,
     max_total_events: crate::session::MAX_SESSION_EVENTS,
 };
@@ -857,6 +882,28 @@ pub fn regional_profile_limits(runtime: &RegionalRuntime) -> RegionalRunProfile 
     runtime.profile
 }
 
+/// Actual startup-reserved route-store bytes, measured from the vectors' capacities.
+pub fn regional_route_store_reserved_bytes(runtime: &RegionalRuntime) -> Result<usize, String> {
+    route::route_store_reserved_bytes(&runtime.routes)
+        .ok_or_else(|| "route reservation byte count overflow".to_owned())
+}
+
+#[cfg(test)]
+pub(crate) fn regional_route_store_counts(runtime: &RegionalRuntime) -> (usize, usize) {
+    (
+        runtime.routes.revisions.len(),
+        runtime.routes.history_expiries.len(),
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn regional_flight_reclamation_counts(runtime: &RegionalRuntime) -> (usize, u64) {
+    (
+        flight::flight_driver_len(&runtime.flights),
+        flight::flight_driver_report(&runtime.flights).retirements_consumed,
+    )
+}
+
 /// Apply one framed NAM FPL/CHG/DLA/CNL through the admitted peer session and the composed
 /// runtime's authoritative flight table and route store. The caller supplies the exact positive
 /// flight identity and capture time context; this boundary does not join from callsign or header ID.
@@ -961,6 +1008,8 @@ fn regional_new_with_source_identity_and_checkpoint(
     }
     if profile.max_flights == 0
         || profile.max_flights > crate::flight::MAX_OFFLINE_DRIVER_FLIGHTS
+        || profile.max_route_revisions == 0
+        || profile.max_route_revisions > route::MAX_CURRENT_ROUTE_PLANS
         || profile.max_flight_log_entries == 0
         || profile.max_flight_log_entries > MAX_DRIVER_LOG_ENTRIES
         || profile.max_total_events == 0
@@ -978,6 +1027,16 @@ fn regional_new_with_source_identity_and_checkpoint(
     }
     let nam_flights = nam_flight::nam_flight_runtime_new(profile.max_flights)
         .ok_or("NAM flight-plan runtime capacity is invalid")?;
+    let routes = route::route_store_new_with_capacity(
+        adaptation_sha256,
+        profile.max_route_revisions,
+        profile.reclaim_current_route_by_key,
+    );
+    let route_bytes = route::route_store_reserved_bytes(&routes)
+        .ok_or("route startup reservation byte count overflow")?;
+    if route_bytes > route::MAX_CURRENT_ROUTE_POOL_BYTES {
+        return Err("route startup reservation exceeds fixed 320 MiB budget".into());
+    }
     Ok(RegionalRuntime {
         surveillance: surveillance::surveillance_new_with_profile(
             model.clone(),
@@ -996,7 +1055,7 @@ fn regional_new_with_source_identity_and_checkpoint(
             profile.max_flights,
         )
         .map_err(|e| format!("flight startup: {e:?}"))?,
-        routes: route::route_store_new(adaptation_sha256),
+        routes,
         nam_flights,
         centre,
         frame_sequence: 0,
@@ -1440,7 +1499,16 @@ fn regional_step_inner(
         return Err("session failed; reconstruct from the admitted input prefix".into());
     }
     match execute(runtime, batch, performance) {
-        Ok(frame) => Ok(frame),
+        Ok(frame) => {
+            // `RegionalFrame` owns copied route/view values; no renderer or caller retains a
+            // borrow into the route store. Advancing only after the complete frame exists means
+            // failed work never reclaims history or frees current-plan storage.
+            route::advance_route_history_watermark(
+                &mut runtime.routes,
+                batch.receipt_ns / 1_000_000,
+            );
+            Ok(frame)
+        }
         Err(error) => {
             runtime.failed = true;
             Err(error)
