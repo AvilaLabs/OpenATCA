@@ -886,7 +886,7 @@ mod tests {
         status: LocalInventoryStatus,
     ) -> String {
         format!(
-            "OA_FLEET_PROCESSOR_REPORT\t2\n{}\t{}\t{}\t{}\t{}\ttrue\t{}\t{}\t9\t7\t1\t1000\t{}\t{}\t0\t-\t-\t-\n",
+            "OA_FLEET_PROCESSOR_REPORT\t2\n{}\t{}\t{}\t{}\t{}\ttrue\t{}\t9\t7\t1\t1000\t{}\t{}\t0\t-\t-\t-\n",
             id,
             oa_sha256::to_hex(&pin),
             oa_sha256::to_hex(&loaded),
