@@ -370,7 +370,6 @@ fn parse_manifest(bytes: &[u8]) -> Result<Manifest, VerifyError> {
     };
     let has_ca_preset = version == CA_PRESET_MANIFEST_VERSION
         || (version == PVER_CATALOG_MANIFEST_VERSION && component_count == 3)
-        || (version == RUNWAY_AIDS_MANIFEST_VERSION && component_count == 3)
         || (version == RUNWAY_AIDS_MANIFEST_VERSION && component_count == 4);
     let ca_preset = if has_ca_preset {
         let len = u64_at(bytes, &mut offset)?;
