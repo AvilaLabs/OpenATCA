@@ -742,6 +742,8 @@
     "OA-RWY-019",
     "OA-RWY-020",
     "OA-RWY-021",
+    "OA-RWY-022",
+    "OA-RWY-023",
     "OA-SAF-001",
     "OA-SAF-002",
     "OA-SAF-003",
@@ -9457,6 +9459,7 @@
         "OA-L23-002",
         "OA-RWY-020",
         "OA-RWY-021",
+        "OA-RWY-023",
         "OA-ENC-023"
       ],
       "source_refs": [
@@ -9519,6 +9522,18 @@
         {
           "document": "tools/oa-perf/tests/parallel_final.rs",
           "locator": "synthetic radar-scan \u2192 tracker-output \u2192 final-monitor integration fixture"
+        },
+        {
+          "document": "REQUIREMENTS.md",
+          "locator": "OA-RWY-023"
+        },
+        {
+          "document": "FAA JO 7110.10EE",
+          "locator": "Pilot/Controller Glossary, ATPA entry: 45-second warning and 24-second alert lead times"
+        },
+        {
+          "document": "crates/oa-runway/src/terminal_aids.rs",
+          "locator": "evaluate_atpa_pairs implementation and refusal tests"
         }
       ],
       "verification_refs": [
@@ -9866,6 +9881,41 @@
           "requirement_id": "OA-RWY-016",
           "file": "tools/oa-perf/tests/parallel_final.rs",
           "test_name": "synthetic_1_2s_reports_track_a_blunder_from_caution_to_warning"
+        },
+        {
+          "requirement_id": "OA-RWY-023",
+          "file": "crates/oa-runway/src/terminal_aids.rs",
+          "test_name": "atpa_uses_warning_and_alert_lead_times_for_predicted_loss"
+        },
+        {
+          "requirement_id": "OA-RWY-023",
+          "file": "crates/oa-runway/src/terminal_aids.rs",
+          "test_name": "atpa_immediate_loss_and_nonclosing_cases_are_distinct"
+        },
+        {
+          "requirement_id": "OA-RWY-023",
+          "file": "crates/oa-runway/src/terminal_aids.rs",
+          "test_name": "atpa_invalid_pairs_and_capacity_refuse_atomically"
+        },
+        {
+          "requirement_id": "OA-RWY-023",
+          "file": "crates/oa-runway/src/terminal_aids.rs",
+          "test_name": "atpa_rejects_bad_or_unrepresentable_late_row_without_output_mutation"
+        },
+        {
+          "requirement_id": "OA-RWY-023",
+          "file": "crates/oa-runway/src/terminal_aids.rs",
+          "test_name": "atpa_accepts_all_32640_pairs_and_refuses_pair_32641"
+        },
+        {
+          "requirement_id": "OA-RWY-023",
+          "file": "crates/oa-runway/src/adaptation.rs",
+          "test_name": "profile_accepts_bounded_sorted_pair_and_returns_exact_adaptation_values"
+        },
+        {
+          "requirement_id": "OA-RWY-023",
+          "file": "crates/oa-runway/src/adaptation.rs",
+          "test_name": "profile_refuses_invalid_values_duplicate_or_unsorted_pairs"
         }
       ],
       "proof_refs": [
@@ -10373,6 +10423,11 @@
           "requirement_id": "OA-AUDIT-006",
           "file": "tools/oa-regional-session/src/runtime.rs",
           "test_name": "quarantine_maintainer_appends_before_ack_and_refuses_audit_failure"
+        },
+        {
+          "requirement_id": "OA-AUDIT-002",
+          "file": "crates/oa-audit-log/tests/action_cli.rs",
+          "test_name": "action_cli_derives_roles_and_appends_before_register_mutation_boundary"
         }
       ],
       "proof_refs": []
@@ -13474,6 +13529,7 @@
         "OA-GEO-026",
         "OA-GEO-027",
         "OA-GEO-028",
+        "OA-RWY-022",
         "OA-MATH-001",
         "OA-MATH-002",
         "OA-MATH-003",
@@ -13523,6 +13579,18 @@
         {
           "document": "REQUIREMENTS.md",
           "locator": "OA-RWY-014"
+        },
+        {
+          "document": "REQUIREMENTS.md",
+          "locator": "OA-RWY-022"
+        },
+        {
+          "document": "FAA JO 7110.663",
+          "locator": "CRDA display/sequence aid; this requirement covers only its caller-configured coordinate transform"
+        },
+        {
+          "document": "crates/oa-runway/src/terminal_aids.rs",
+          "locator": "project_crda_ghosts implementation and refusal tests"
         }
       ],
       "verification_refs": [
@@ -13845,6 +13913,41 @@
           "requirement_id": "OA-RWY-014",
           "file": "crates/oa-runway/src/final_monitor.rs",
           "test_name": "kord_parallel_pair_uses_public_runway_geometry"
+        },
+        {
+          "requirement_id": "OA-RWY-022",
+          "file": "crates/oa-runway/src/terminal_aids.rs",
+          "test_name": "translated_ghost_preserves_parent_offset_and_speed"
+        },
+        {
+          "requirement_id": "OA-RWY-022",
+          "file": "crates/oa-runway/src/terminal_aids.rs",
+          "test_name": "invalid_reference_or_capacity_refuses_without_partial_write"
+        },
+        {
+          "requirement_id": "OA-RWY-022",
+          "file": "crates/oa-runway/src/terminal_aids.rs",
+          "test_name": "crda_validates_late_rows_and_geometry_boundaries_before_writing"
+        },
+        {
+          "requirement_id": "OA-RWY-022",
+          "file": "crates/oa-runway/src/terminal_aids.rs",
+          "test_name": "crda_accepts_256_rows_and_refuses_257_before_write"
+        },
+        {
+          "requirement_id": "OA-RWY-022",
+          "file": "crates/oa-runway/src/adaptation.rs",
+          "test_name": "profile_accepts_bounded_sorted_pair_and_returns_exact_adaptation_values"
+        },
+        {
+          "requirement_id": "OA-RWY-022",
+          "file": "crates/oa-runway/src/adaptation.rs",
+          "test_name": "profile_refuses_invalid_values_duplicate_or_unsorted_pairs"
+        },
+        {
+          "requirement_id": "OA-RWY-022",
+          "file": "tools/oa-regional-session/src/runway_aids.rs",
+          "test_name": "reciprocal_end_preserves_parallel_designator_sides"
         }
       ],
       "proof_refs": [
@@ -23370,6 +23473,18 @@
       "function": "runway_assignment_verification",
       "hazard_id": "HZ-CA-001",
       "rationale": "Engineering safety candidate: incomplete identity, malformed geometry, capacity overflow or partial output could bind an ARV result to the wrong flight or path. The bounded pure core preserves the full supplied identity and refuses before output mutation. The tests establish synthetic API behavior only; caller source binding and operational warning delivery are not implemented."
+    },
+    {
+      "id": "OA-RWY-022",
+      "function": "geodetic_and_navigation_geometry",
+      "hazard_id": "HZ-GEOMETRY-001",
+      "rationale": "Engineering safety candidate: an incorrect CRDA ghost transform could misplace the planning reference. The core uses only explicit caller-supplied source/target geometry and offset, validates inputs and capacity before writing, and preserves parent speed/order. It is a bounded transform only; it does not perform sequencing, determine separation, validate facility geometry, or claim operational CRDA behavior."
+    },
+    {
+      "id": "OA-RWY-023",
+      "function": "conflict_alert",
+      "hazard_id": "HZ-CA-001",
+      "rationale": "Engineering safety candidate: an incorrect ATPA pair forecast could misclassify a caller-supplied pair's modeled spacing-loss lead time. The core requires matching caller runway/end/scan values, validates all bounded pair rows before output mutation, and uses only the supplied minimum spacing and constant-closure model. It is not a full facility ATPA implementation, approved minima, or operational alert-delivery claim."
     },
     {
       "id": "OA-ENC-023",

@@ -57,7 +57,7 @@ fn append(
         .unwrap()
 }
 
-// REQ: OA-AUDIT-009
+// REQ: OA-AUDIT-002
 #[test]
 fn action_cli_derives_roles_and_appends_before_register_mutation_boundary() {
     let root = fresh_root();

@@ -7666,6 +7666,17 @@ FAA value.
   `invalid_late_row_and_duplicate_identity_leave_output_unchanged`,
   `malformed_and_over_capacity_inputs_refuse_before_mutation`,
   `maximum_capacities_fit_checked_work_budget` and `candidate_path_ids_must_be_strictly_increasing`.
+- **OA-RWY-022** The bounded CRDA core transforms caller-supplied parent positions from a directed source line to a
+  directed target line with an explicit signed along-line offset, preserving input row order and parent ground speed.
+  It validates all geometry, rows and output capacity before writing and refuses invalid or oversized input atomically.
+  This is a planning-coordinate transform only; it does not sequence arrivals, determine separation or establish a
+  facility's CRDA configuration.
+- **OA-RWY-023** The bounded ATPA core evaluates caller-supplied lead/trail pairs only when runway, runway end and scan
+  timestamp match, using caller-supplied along-track positions, speeds and minimum spacing. Its constant-closure
+  forecast reports immediate alert when spacing is already violated, Alert at or within 24 seconds, Warning at or
+  within 45 seconds before predicted minimum-spacing loss, and no predicted loss when closure is nonpositive. It
+  validates the full input and output capacity before writing, with at most 32,640 pairs per call. Minimum spacing is
+  supplied adaptation; this core is not a full facility ATPA implementation or approved separation determination.
 
 ## Feed damage check (oa-feed-gaps, P-006 section 6 and P-007)
 
