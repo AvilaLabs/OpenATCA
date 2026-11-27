@@ -348,13 +348,17 @@ def _verify_test_refs(root: Path, inventory: dict[str, Any], validator_path: Pat
         for reference in references[offset : offset + 64]:
             args.extend(("--verify-test", reference))
         try:
+            validator_env = {"PATH": os.defpath}
+            data_root = os.environ.get("OPENATCA_DATA")
+            if data_root is not None:
+                validator_env["OPENATCA_DATA"] = data_root
             result = subprocess.run(
                 args,
                 capture_output=True,
                 text=True,
                 timeout=30,
                 check=False,
-                env={"PATH": os.defpath},
+                env=validator_env,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise ClaimError("oa-trace validator could not verify test inventory") from exc

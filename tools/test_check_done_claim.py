@@ -309,6 +309,10 @@ class ClaimCheckerTests(unittest.TestCase):
         ]
         env = os.environ.copy()
         env["OPENATCA_PRIVATE"] = str(private)
+        data_root = self.root / "synthetic-data-root"
+        data_root.mkdir()
+        (data_root / ".openatca-data-root").write_bytes(b"openatca-data-root-v1\n")
+        env["OPENATCA_DATA"] = str(data_root)
         result = subprocess.run(command, env=env, capture_output=True, text=True, check=False)
         if validator_path.is_file() and os.access(validator_path, os.X_OK):
             self.assertEqual(result.returncode, 0, result.stderr)
