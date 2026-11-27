@@ -101,10 +101,26 @@ fn storage_capacities(o: &TrackOutput) -> [usize; 18] {
 
 fn assert_storage_capacities(o: &TrackOutput, expected: &[usize; 18]) {
     let actual = storage_capacities(o);
-    // Elementwise checks avoid lowering array equality into a 120-byte memcmp loop.
-    for i in 0..18 {
-        assert_eq!(actual[i], expected[i]);
-    }
+    // Keep this comparison fully unrolled: all eighteen current TrackOutput columns are checked
+    // under the existing small proof unwind. The fixed array types catch count mismatches.
+    assert_eq!(actual[0], expected[0]);
+    assert_eq!(actual[1], expected[1]);
+    assert_eq!(actual[2], expected[2]);
+    assert_eq!(actual[3], expected[3]);
+    assert_eq!(actual[4], expected[4]);
+    assert_eq!(actual[5], expected[5]);
+    assert_eq!(actual[6], expected[6]);
+    assert_eq!(actual[7], expected[7]);
+    assert_eq!(actual[8], expected[8]);
+    assert_eq!(actual[9], expected[9]);
+    assert_eq!(actual[10], expected[10]);
+    assert_eq!(actual[11], expected[11]);
+    assert_eq!(actual[12], expected[12]);
+    assert_eq!(actual[13], expected[13]);
+    assert_eq!(actual[14], expected[14]);
+    assert_eq!(actual[15], expected[15]);
+    assert_eq!(actual[16], expected[16]);
+    assert_eq!(actual[17], expected[17]);
 }
 
 // REQ: OA-TRK-333

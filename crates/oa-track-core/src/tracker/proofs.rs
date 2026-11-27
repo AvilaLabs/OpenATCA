@@ -579,10 +579,29 @@ fn assert_output_row(out: &TrackOutput, i: usize, row: &OutRow) {
 }
 
 fn assert_output_txn_eq(a: &OutputTxn, b: &OutputTxn) {
+    // A new production column must force this exhaustive proof comparison to be updated.
+    let _: &[usize; 18] = &a.lens;
     assert_eq!(a.overflow, b.overflow);
-    for i in 0..18 {
-        assert_eq!(a.lens[i], b.lens[i]);
-    }
+    // Check every current output-column length without a proof-time loop, preserving the
+    // production snapshot's fixed 18-entry representation and the existing harness unwind.
+    assert_eq!(a.lens[0], b.lens[0]);
+    assert_eq!(a.lens[1], b.lens[1]);
+    assert_eq!(a.lens[2], b.lens[2]);
+    assert_eq!(a.lens[3], b.lens[3]);
+    assert_eq!(a.lens[4], b.lens[4]);
+    assert_eq!(a.lens[5], b.lens[5]);
+    assert_eq!(a.lens[6], b.lens[6]);
+    assert_eq!(a.lens[7], b.lens[7]);
+    assert_eq!(a.lens[8], b.lens[8]);
+    assert_eq!(a.lens[9], b.lens[9]);
+    assert_eq!(a.lens[10], b.lens[10]);
+    assert_eq!(a.lens[11], b.lens[11]);
+    assert_eq!(a.lens[12], b.lens[12]);
+    assert_eq!(a.lens[13], b.lens[13]);
+    assert_eq!(a.lens[14], b.lens[14]);
+    assert_eq!(a.lens[15], b.lens[15]);
+    assert_eq!(a.lens[16], b.lens[16]);
+    assert_eq!(a.lens[17], b.lens[17]);
 }
 
 fn assert_output_len(out: &TrackOutput, n: usize) {
