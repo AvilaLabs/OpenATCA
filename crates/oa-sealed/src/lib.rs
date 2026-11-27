@@ -60,7 +60,11 @@ const DEFAULT_DATA_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../o
 const DATA_ROOT_SENTINEL: &str = ".openatca-data-root";
 const DATA_ROOT_SENTINEL_BYTES: &[u8] = b"openatca-data-root-v1\n";
 
-fn configured_root(root: &Path, data_root: Option<std::ffi::OsString>) -> Result<PathBuf, ()> {
+fn configured_root(
+    root: &Path,
+    data_root: Option<std::ffi::OsString>,
+    default_data_root: &Path,
+) -> Result<PathBuf, ()> {
     if root == Path::new("$OPENATCA_DATA") {
         return match data_root {
             Some(value) if !value.is_empty() => {
@@ -68,7 +72,7 @@ fn configured_root(root: &Path, data_root: Option<std::ffi::OsString>) -> Result
                 path.is_absolute().then_some(path).ok_or(())
             }
             Some(_) => Err(()),
-            None => Ok(PathBuf::from(DEFAULT_DATA_ROOT)),
+            None => Ok(default_data_root.to_path_buf()),
         };
     }
     if root.is_absolute() {
@@ -95,7 +99,12 @@ mod data_root_tests {
             std::path::PathBuf::from(DEFAULT_DATA_ROOT),
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../openatca-data")
         );
-        let configured = super::configured_root(Path::new("$OPENATCA_DATA"), None).unwrap();
+        let configured = super::configured_root(
+            Path::new("$OPENATCA_DATA"),
+            None,
+            Path::new(DEFAULT_DATA_ROOT),
+        )
+        .unwrap();
         assert_eq!(configured, Path::new(DEFAULT_DATA_ROOT));
     }
 
@@ -111,6 +120,43 @@ mod data_root_tests {
         assert!(guard.check(&parent.join("outside-unsealed-path")).is_err());
         assert!(guard.in_window(i64::MIN) && guard.in_window(i64::MAX));
         assert_eq!(guard.drop_window(), oa_time_window::DropWindow::all_time());
+        std::fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn an_unset_root_uses_the_supplied_fallback_through_full_guard_validation() {
+        let parent =
+            std::env::temp_dir().join(format!("oa-sealed-fallback-root-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&parent);
+        std::fs::create_dir_all(&parent).unwrap();
+
+        let missing = parent.join("missing-default");
+        let markerless = parent.join("wrong-default");
+        std::fs::create_dir_all(&markerless).unwrap();
+        let outside = parent.join("ordinary-outside-path");
+        for fallback in [missing.as_path(), markerless.as_path(), Path::new("/")] {
+            let guard = Sealed::with_list_using_data_root_and_default(LIST, None, None, fallback);
+            assert!(guard.broken);
+            assert!(guard.check(&outside).is_err());
+            assert!(guard.in_window(i64::MIN) && guard.in_window(i64::MAX));
+            assert_eq!(guard.drop_window(), oa_time_window::DropWindow::all_time());
+        }
+
+        let valid = parent.join("valid-default");
+        std::fs::create_dir_all(valid.join("scds/rec-20261119/day2/sfdps")).unwrap();
+        std::fs::write(valid.join(DATA_ROOT_SENTINEL), b"openatca-data-root-v1\n").unwrap();
+        std::fs::write(
+            valid.join("scds/rec-20261119/day2/sfdps/a.bin"),
+            b"synthetic",
+        )
+        .unwrap();
+        let guard = Sealed::with_list_using_data_root_and_default(LIST, None, None, &valid);
+        assert!(!guard.broken);
+        assert!(guard.check(&outside).is_ok());
+        assert!(guard
+            .check(&valid.join("scds/rec-20261119/day2/sfdps/a.bin"))
+            .is_err());
+        assert_ne!(guard.drop_window(), oa_time_window::DropWindow::all_time());
         std::fs::remove_dir_all(parent).unwrap();
     }
 }
@@ -683,12 +729,27 @@ impl Sealed {
         root: Option<&Path>,
         data_root: Option<std::ffi::OsString>,
     ) -> Sealed {
+        Self::with_list_using_data_root_and_default(
+            text,
+            root,
+            data_root,
+            Path::new(DEFAULT_DATA_ROOT),
+        )
+    }
+
+    fn with_list_using_data_root_and_default(
+        text: &str,
+        root: Option<&Path>,
+        data_root: Option<std::ffi::OsString>,
+        default_data_root: &Path,
+    ) -> Sealed {
         match parse_list(text) {
             Ok(mut list) => {
                 if let Some(r) = root {
                     list.root = r.to_path_buf();
                 }
-                let configured = configured_root(&list.root, data_root).unwrap_or_default();
+                let configured =
+                    configured_root(&list.root, data_root, default_data_root).unwrap_or_default();
                 let root = if configured.as_os_str().is_empty() {
                     PathBuf::new()
                 } else {
