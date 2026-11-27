@@ -71,6 +71,10 @@ pub enum Intent {
     AcceptHandoff(u32),
     TakeHandoff(u32),
     CancelHandoff(u32),
+    /// Local typed request consumed only by the regional runway-assignment audit adapter.
+    AssignRunway(u32),
+    /// Local typed request consumed only by the regional ARV acknowledgement audit adapter.
+    AcknowledgeRunwayAlert,
 }
 const _: () = assert!(core::mem::size_of::<Intent>() == 8);
 
