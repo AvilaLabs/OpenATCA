@@ -36,6 +36,8 @@ loads a native library.
 | `oa-json` | `oa_json_parse` | `TextBindings.parse_json` | One-shot default parser limits; flat preorder node table and decoded string/exact lexical-number pool; capacity query then all-or-nothing fill; 256 MiB Python output ceiling |
 | `oa-xml` | `oa_xml_parse`, `oa_xml_decode_span` | `TextBindings.parse_xml`, `decode_xml_span` | One-shot default parser limits; spans reference immutable input; namespace URIs copied to a pool; DTD refused; exact parser offsets preserved |
 | `oa-csv` | `oa_csv_parse` | `TextBindings.parse_csv` | One-shot default reader limits; header is row zero; quoted fields decoded into a byte pool; physical starting line retained; input capped at 32 MiB by the adapter |
+| `oa-asterix` CAT021/048/062 | `oa_asterix_decode_block` | `AsterixBindings.decode_block` | One bounded block; explicit CAT021 Ed 2.4/2.7 selector; caller-owned fixed rows, two-call capacity protocol, exact typed/raw/unprojected masks and raw source units; see [ASTERIX binding preview](formats/asterix-bindings.md) |
+| `oa-zip` | `oa_zip_list`, `oa_zip_extract_entry` | `Archives.parse_zip`, `Archives.extract_zip_entry` | Borrowed ZIP bytes; caller-owned flat metadata/name/output buffers; existing oa-zip parser and extraction limits; no filesystem extraction |
 
 The polygon handle is the only retained native allocation in this slice. Python's context
 manager releases it with `oa_geo_polygon_free`; callers must not use a handle after closing it.
@@ -48,12 +50,16 @@ successful calls, invalid arguments, non-finite values, coordinate ranges, conve
 message buffers, contained panic, invalid core parameters, excessive lengths, unknown operation
 codes, and bounded-allocation failure. Message text is queried through the existing size-query
 and all-or-nothing `oa_core_error_message` interface. Python exposes `OpenAtcaError.code`,
-`location_kind`, `location`, and the optional native message.
+`location_kind`, `location`, and the optional native message. The existing DEFLATE statuses occupy
+13–17, and tar statuses 18–22. ASTERIX returns the shared generic status (for example,
+`PARSE_ERROR`) while `OaAsterixError.kind` carries the detailed decoder classification 1–23; status
+values 23–31 are currently unassigned. ZIP statuses occupy 32–40. These assignments remain
+provisional and are mirrored by the Python status-name map.
 
 ## Evidence and remaining work
 
-The C source runner and Python source runner use the same committed synthetic scalar, digest,
-rhumb, and polygon vectors. Existing inverse/direct vectors remain unchanged. Source presence and
+The C and Python runners use shared committed synthetic scalar, digest, rhumb, polygon, text,
+container and ZIP vectors. Existing inverse/direct vectors remain unchanged. Source presence and
 shared vector definitions are not evidence that a native library was built, tests passed, ABI
 layout was independently reviewed, or every supported platform was qualified. Those checks are
 queued for the coordinator after source review; the ABI remains Preview until the §8 evidence and
@@ -64,7 +70,7 @@ approval conditions are met. No Stable designation is made here.
 The §10 inventory also requires container, CAT021/CAT048/CAT062, CIFP, NASR,
 FNS-AIXM/NOTAM, and bounded GRIB2 APIs with Python wrappers. Each parser API must disclose its
 accepted edition/profile and explicit byte, record, nesting, and work bounds before it is exposed.
-Those modules are staged separately; this first source slice does not imply those bindings exist.
+The remaining modules are staged separately; these source slices do not imply those bindings exist.
 
 ### Proposed tar metadata binding (Preview; awaiting designated API review)
 
@@ -87,3 +93,36 @@ checksum failures, truncated members/end markers, and limit refusals leave calle
 metadata unchanged. Python candidate: `Archives.parse_tar(bytes, max_entries=4096)` returns an
 immutable `TarResult.entries` tuple of `TarEntry` records. These names and layouts are
 proposals, not compatibility promises; designated API review remains required before freezing.
+ASTERIX is implemented as a Preview source slice. The remaining modules are staged separately;
+this implementation does not establish independent ABI review, platform qualification, or the
+Stable evidence bar.
+
+### Proposed ZIP metadata and selected-entry binding (Preview; awaiting designated API review)
+
+Candidate C functions are `oa_zip_list(input, input_length, entries, entry_capacity,
+entry_count, name_pool, name_pool_capacity, name_pool_length, error)` and
+`oa_zip_extract_entry(input, input_length, entry_index, output, output_capacity, output_length,
+error)`. Both borrow archive bytes for the call and retain no pointers or handles. Listing exposes
+ordered central-directory metadata only. `OaZipEntry` is a 56-byte fixed-width record with five
+64-bit name/size/offset fields, CRC-32, source flags and method, ZIP64 and bit-11 indicators, and
+six named zero-padding bytes. Name spans index UTF-8 bytes returned by `oa-zip`; they are subject
+to that decoder's UTF-8/ASCII name profile, not a lossless copy of arbitrary legacy bytes.
+Encryption and unsupported methods refuse the complete archive rather than being silently
+skipped.
+
+`oa_zip_list` validates the complete central directory under `oa-zip::DEFAULT_LIMITS`. If either
+metadata capacity is short it returns exact entry and name-pool sizes with no array writes.
+Selected extraction is index-based and writes only to caller memory. Its zero-capacity query
+validates directory metadata and reports the declared output size; local-header, stream, size, and
+CRC integrity are established only by successful fill. A short output buffer reports required
+size but remains unchanged. Other failures leave output bytes and size metadata unchanged. No
+directory or filesystem API is provided.
+
+The binding accepts at most 1 GiB of borrowed archive input and retains existing bounds: 10,000
+entries, 4,096-byte names, 256 MiB per entry, 1 GiB total declared output, ratio 200 except the
+1 MiB small-entry exemption, and the existing EOCD search bound. Candidate Python methods return
+immutable `ZipResult.entries` / `ZipEntry` values and extracted `bytes`; the native library remains
+an explicit caller-supplied path. The shared `zip-v1.tsv` vectors are synthetic CC0 inputs covering
+stored/deflated entries, UTF-8 flag behavior, truncated/unsupported/corrupt/unsafe/ratio refusals,
+capacities, and CRC checks across Rust, C, and ctypes. The names and layout remain proposals until
+designated API review. No Stable designation is made; §8 evidence remains outstanding.

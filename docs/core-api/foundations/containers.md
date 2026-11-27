@@ -20,6 +20,11 @@ ZIP supports stored and DEFLATE entries. `Entry` exposes name, method, flags, CR
 uncompressed sizes, local offset and ZIP64 status. Unsafe paths are listed but extraction refuses
 them; no extraction-to-filesystem API exists.
 
+The current bounded ZIP name profile is UTF-8/ASCII only: general-purpose bit 11 requires valid
+UTF-8, while names without bit 11 must be ASCII until a legacy decoding table is supported. Invalid
+high-bit names are refused instead of being lossy-normalized, preventing distinct raw names from
+aliasing through replacement characters. This is a Preview profile choice, not CP437 support.
+
 Default archive bounds: 10,000 entries; 256 MiB per output entry; 1 GiB total output; ratio 200
 after a 1 MiB exemption; 4,096-byte names; 1 GiB archive; EOCD search 65,557 bytes. `Limits`
 allows tighter limits. Inflate has a fixed 32 KiB history window and caller-provided output/ratio

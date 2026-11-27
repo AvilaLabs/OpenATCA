@@ -95,6 +95,8 @@ pub enum ZipError {
     MultiDisk,
     /// Entry is encrypted (traditional, strong or AES).
     Encrypted(String),
+    /// The member name is not valid UTF-8 with bit 11 set, or is non-ASCII without it.
+    InvalidNameEncoding,
     /// Compression method other than stored (0) and deflate (8).
     UnsupportedMethod { name: String, method: u16 },
     /// ZIP64 structures missing or inconsistent.
@@ -143,6 +145,7 @@ impl fmt::Display for ZipError {
             ZipError::BadSignature(w) => write!(f, "zip: bad signature in {w}"),
             ZipError::MultiDisk => write!(f, "zip: multi-disk archives are not supported"),
             ZipError::Encrypted(n) => write!(f, "zip: entry {n:?} is encrypted"),
+            ZipError::InvalidNameEncoding => write!(f, "zip: member name encoding is unsupported"),
             ZipError::UnsupportedMethod { name, method } => {
                 write!(f, "zip: entry {name:?} uses unsupported method {method}")
             }
@@ -206,7 +209,7 @@ pub struct Entry {
 }
 
 impl Entry {
-    /// Name as stored (invalid UTF-8 is replaced, not rejected).
+    /// Decoded name under the bounded UTF-8/ASCII profile; invalid legacy encodings are refused.
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -548,7 +551,7 @@ impl<'a> Archive<'a> {
         let name_bytes = d
             .get(name_at..plus(name_at, nlen, "local header name")?)
             .ok_or(ZipError::Truncated("local header name"))?;
-        if String::from_utf8_lossy(name_bytes) != e.name {
+        if name_bytes != e.name.as_bytes() {
             return Err(ZipError::Inconsistent("local and central name differ"));
         }
         let has_descriptor = flags & FLAG_DESCRIPTOR != 0;
@@ -648,7 +651,16 @@ fn read_central(cd: &[u8], p: usize, limits: &Limits) -> Result<(Entry, usize), 
     let name_bytes = cd
         .get(name_at..name_at + nlen)
         .ok_or(ZipError::Truncated(W))?;
-    let name = String::from_utf8_lossy(name_bytes).into_owned();
+    // This bounded profile accepts UTF-8 only when general-purpose bit 11 declares it. Without
+    // bit 11, ASCII is unambiguous; legacy high-bit encodings are refused until a documented
+    // decoding table is supported. Never replace bytes and then alias distinct names.
+    let name = if flags & (1 << 11) != 0 {
+        String::from_utf8(name_bytes.to_vec()).map_err(|_| ZipError::InvalidNameEncoding)?
+    } else if name_bytes.is_ascii() {
+        String::from_utf8(name_bytes.to_vec()).map_err(|_| ZipError::InvalidNameEncoding)?
+    } else {
+        return Err(ZipError::InvalidNameEncoding);
+    };
     let extra = cd
         .get(name_at + nlen..name_at + nlen + elen)
         .ok_or(ZipError::Truncated(W))?;

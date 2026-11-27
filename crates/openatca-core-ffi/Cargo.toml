@@ -34,9 +34,11 @@ oa-sha256 = { path = "../oa-sha256" }
 oa-csv = { path = "../oa-csv" }
 oa-json = { path = "../oa-json" }
 oa-xml = { path = "../oa-xml" }
-# F1a: expose the existing bounded raw-DEFLATE decoder without implementing a second inflater.
+# F1a: ZIP metadata/extraction bindings delegate to oa-zip's bounded directory checks and inflater.
 oa-zip = { path = "../oa-zip" }
 # F1a: one-shot C wrapper delegates raw-DEFLATE encoding to the existing streaming compressor.
 oa-deflate = { path = "../oa-deflate" }
 # F1a: bounded metadata-only tar facade delegates parsing to the existing streaming reader.
 oa-tar = { path = "../oa-tar" }
+# F1a: fixed C/ctypes projection delegates bounded decode to the existing ASTERIX core.
+oa-asterix = { path = "../oa-asterix" }

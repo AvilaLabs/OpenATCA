@@ -24,6 +24,12 @@ _MAX_DEFLATE_ENCODE_OUTPUT_BYTES: Final[int] = 128 * 1024 * 1024
 _MAX_TAR_INPUT_BYTES: Final[int] = 64 * 1024 * 1024
 _MAX_TAR_ENTRIES: Final[int] = 4096
 _MAX_TAR_NAME_POOL_BYTES: Final[int] = _MAX_TAR_ENTRIES * 4096
+_MAX_ASTERIX_BLOCK_BYTES: Final[int] = 65_535
+_MAX_ASTERIX_RECORDS: Final[int] = 21_844
+_MAX_ZIP_INPUT_BYTES: Final[int] = 1024 * 1024 * 1024
+_MAX_ZIP_ENTRIES: Final[int] = 10_000
+_MAX_ZIP_ENTRY_BYTES: Final[int] = 256 * 1024 * 1024
+_MAX_ZIP_NAME_POOL_BYTES: Final[int] = _MAX_ZIP_ENTRIES * 4096
 
 
 class _ErrorInfo(ctypes.Structure):
@@ -32,6 +38,62 @@ class _ErrorInfo(ctypes.Structure):
         ("location_kind", ctypes.c_uint32),
         ("location", ctypes.c_uint64),
     ]
+
+
+class _AsterixPosition(ctypes.Structure):
+    _fields_ = [("item", ctypes.c_uint16), ("kind", ctypes.c_uint8),
+                ("scale", ctypes.c_uint8), ("a_raw", ctypes.c_int32),
+                ("b_raw", ctypes.c_int32)]
+
+
+class _AsterixVertical(ctypes.Structure):
+    _fields_ = [("item", ctypes.c_uint16), ("subitem", ctypes.c_uint8),
+                ("kind", ctypes.c_uint8), ("scale", ctypes.c_uint8),
+                ("flags", ctypes.c_uint8), ("auxiliary", ctypes.c_uint8),
+                ("reserved", ctypes.c_uint8), ("raw", ctypes.c_int32)]
+
+
+class _AsterixRecord(ctypes.Structure):
+    _fields_ = [("category", ctypes.c_uint8), ("cat021_edition", ctypes.c_uint8),
+                ("source_sac", ctypes.c_uint8), ("source_sic", ctypes.c_uint8),
+                ("reserved0", ctypes.c_uint32), ("present_frn_mask", ctypes.c_uint64),
+                ("raw_untyped_frn_mask", ctypes.c_uint64),
+                ("typed_unprojected_frn_mask", ctypes.c_uint64),
+                ("present_field_mask", ctypes.c_uint64), ("target_address", ctypes.c_uint32),
+                ("target_ident", ctypes.c_uint8 * 8), ("track_number", ctypes.c_uint16),
+                ("time_item", ctypes.c_uint16), ("time_raw", ctypes.c_uint32),
+                ("position_count", ctypes.c_uint8), ("velocity_kind", ctypes.c_uint8),
+                ("velocity_flags", ctypes.c_uint8), ("mode3a_flags", ctypes.c_uint8),
+                ("positions", _AsterixPosition * 2), ("velocity_a_raw", ctypes.c_int32),
+                ("velocity_b_raw", ctypes.c_int32), ("mode3a_code", ctypes.c_uint16),
+                ("reserved3", ctypes.c_uint16), ("raw_untyped_subitem_mask", ctypes.c_uint32),
+                ("reserved4", ctypes.c_uint32), ("reserved5", ctypes.c_uint32),
+                ("vertical_count", ctypes.c_uint8), ("reserved6", ctypes.c_uint8 * 7),
+                ("vertical", _AsterixVertical * 6)]
+
+
+class _AsterixCounts(ctypes.Structure):
+    _fields_ = [("category", ctypes.c_uint8), ("edition", ctypes.c_uint8),
+                ("reserved", ctypes.c_uint16), ("reserved_bytes", ctypes.c_uint8 * 4),
+                ("consumed_bytes", ctypes.c_uint64),
+                ("required_record_count", ctypes.c_uint64),
+                ("written_record_count", ctypes.c_uint64)]
+
+
+class _AsterixError(ctypes.Structure):
+    _fields_ = [("status", ctypes.c_uint32), ("kind", ctypes.c_uint32),
+                ("category", ctypes.c_uint8), ("subitem", ctypes.c_uint8),
+                ("item", ctypes.c_uint16), ("record", ctypes.c_uint32),
+                ("reserved_bytes", ctypes.c_uint8 * 8), ("offset", ctypes.c_uint64)]
+
+
+assert ctypes.sizeof(_AsterixPosition) == 12 and ctypes.alignment(_AsterixPosition) == 4
+assert ctypes.sizeof(_AsterixVertical) == 12 and ctypes.alignment(_AsterixVertical) == 4
+assert ctypes.sizeof(_AsterixRecord) == 192 and ctypes.alignment(_AsterixRecord) == 8
+assert _AsterixRecord.present_frn_mask.offset == 8 and _AsterixRecord.positions.offset == 64
+assert _AsterixRecord.vertical.offset == 120
+assert ctypes.sizeof(_AsterixCounts) == 32 and _AsterixCounts.consumed_bytes.offset == 8
+assert ctypes.sizeof(_AsterixError) == 32 and _AsterixError.offset.offset == 24
 
 
 _STATUS_NAMES: Final[dict[int, str]] = {
@@ -58,6 +120,15 @@ _STATUS_NAMES: Final[dict[int, str]] = {
     20: "TAR_LIMIT",
     21: "TAR_NAME_TOO_LONG",
     22: "TAR_READ_ERROR",
+    32: "ZIP_FORMAT",
+    33: "ZIP_TRUNCATED",
+    34: "ZIP_UNSUPPORTED_METHOD",
+    35: "ZIP_ENCRYPTED",
+    36: "ZIP_UNSAFE_PATH",
+    37: "ZIP_LIMIT",
+    38: "ZIP_INFLATE_OR_SIZE",
+    39: "ZIP_CRC",
+    40: "ZIP_BAD_ENTRY_INDEX",
 }
 
 
@@ -152,6 +223,94 @@ class TarEntry:
 @dataclass(frozen=True, slots=True)
 class TarResult:
     entries: tuple[TarEntry, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class AsterixPosition:
+    item: int
+    kind: int
+    scale: int
+    a_raw: int
+    b_raw: int
+
+
+@dataclass(frozen=True, slots=True)
+class AsterixVertical:
+    item: int
+    subitem: int
+    kind: int
+    scale: int
+    flags: int
+    auxiliary: int
+    raw: int
+
+
+@dataclass(frozen=True, slots=True)
+class AsterixRecord:
+    category: int
+    cat021_edition: int
+    source_sac: int
+    source_sic: int
+    present_frn_mask: int
+    raw_untyped_frn_mask: int
+    typed_unprojected_frn_mask: int
+    present_field_mask: int
+    target_address: int
+    target_ident: bytes
+    track_number: int
+    time_item: int
+    time_raw: int
+    positions: tuple[AsterixPosition, ...]
+    velocity_kind: int
+    velocity_flags: int
+    velocity_a_raw: int
+    velocity_b_raw: int
+    mode3a_code: int
+    mode3a_flags: int
+    vertical: tuple[AsterixVertical, ...]
+    raw_untyped_subitem_mask: int
+
+
+@dataclass(frozen=True, slots=True)
+class AsterixResult:
+    records: tuple[AsterixRecord, ...]
+    category: int
+    edition: int
+    consumed_bytes: int
+
+
+class AsterixError(OpenAtcaError):
+    """Structured ASTERIX block refusal from the existing Rust decoder."""
+
+    def __init__(self, status: int, kind: int, category: int, record: int,
+                 item: int, subitem: int, offset: int) -> None:
+        self.asterix_kind = kind
+        self.category = category
+        self.record = record
+        self.item = item
+        self.subitem = subitem
+        self.offset = offset
+        super().__init__(status, message=f"ASTERIX error kind {kind}")
+
+
+@dataclass(frozen=True, slots=True)
+class ZipEntry:
+    """One validated ZIP central-directory record; flags and method are source values."""
+
+    name: str
+    compressed_size: int
+    uncompressed_size: int
+    local_offset: int
+    crc32: int
+    flags: int
+    method: int
+    zip64: bool
+    utf8_name_flag: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ZipResult:
+    entries: tuple[ZipEntry, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -318,6 +477,22 @@ class _TarEntry(ctypes.Structure):
         ("header_offset", ctypes.c_uint64),
         ("typeflag", ctypes.c_uint8),
         ("reserved", ctypes.c_uint8 * 7),
+    ]
+
+
+class _ZipEntry(ctypes.Structure):
+    _fields_ = [
+        ("name_offset", ctypes.c_uint64),
+        ("name_length", ctypes.c_uint64),
+        ("compressed_size", ctypes.c_uint64),
+        ("uncompressed_size", ctypes.c_uint64),
+        ("local_offset", ctypes.c_uint64),
+        ("crc32", ctypes.c_uint32),
+        ("flags", ctypes.c_uint16),
+        ("method", ctypes.c_uint16),
+        ("zip64", ctypes.c_uint8),
+        ("utf8_name_flag", ctypes.c_uint8),
+        ("reserved", ctypes.c_uint8 * 6),
     ]
 
 
@@ -499,6 +674,61 @@ class Integrity:
         status = int(self._library.oa_sha256_hex(source, output, ctypes.byref(error)))
         _raise_if_error(self._library, status, error)
         return bytes(output).decode("ascii", errors="strict")
+
+
+class AsterixBindings:
+    """One-block ASTERIX decoder using the explicit CAT021 edition selector."""
+
+    def __init__(self, library: ctypes.CDLL) -> None:
+        self._library = library
+        byte_p = ctypes.POINTER(ctypes.c_uint8)
+        lib = library
+        lib.oa_asterix_decode_block.argtypes = [byte_p, ctypes.c_uint64, ctypes.c_uint8,
+            ctypes.POINTER(_AsterixRecord), ctypes.c_uint64, ctypes.POINTER(_AsterixCounts),
+            ctypes.POINTER(_AsterixError), ctypes.POINTER(_ErrorInfo)]
+        lib.oa_asterix_decode_block.restype = ctypes.c_uint32
+
+    def decode_block(self, data: bytes, *, cat021_edition: int = 0) -> AsterixResult:
+        if not isinstance(data, bytes):
+            raise TypeError("data must be bytes")
+        if len(data) > _MAX_ASTERIX_BLOCK_BYTES:
+            raise ValueError("data exceeds the ASTERIX block limit")
+        if isinstance(cat021_edition, bool) or cat021_edition not in (0, 24, 27):
+            raise ValueError("cat021_edition must be 0, 24, or 27")
+        source = (ctypes.c_uint8 * len(data)).from_buffer_copy(data) if data else None
+        counts, detail, generic = _AsterixCounts(), _AsterixError(), _ErrorInfo()
+        status = int(self._library.oa_asterix_decode_block(source, len(data), cat021_edition,
+            None, 0, ctypes.byref(counts), ctypes.byref(detail), ctypes.byref(generic)))
+        if status not in (0, 6):
+            raise AsterixError(detail.status, detail.kind, detail.category, detail.record,
+                               detail.item, detail.subitem, detail.offset)
+        count = int(counts.required_record_count)
+        if count > _MAX_ASTERIX_RECORDS:
+            raise RuntimeError("native ASTERIX record count exceeded its documented bound")
+        if not count:
+            return AsterixResult((), counts.category, counts.edition, counts.consumed_bytes)
+        rows = (_AsterixRecord * count)()
+        status = int(self._library.oa_asterix_decode_block(source, len(data), cat021_edition,
+            rows, count, ctypes.byref(counts), ctypes.byref(detail), ctypes.byref(generic)))
+        if status:
+            raise AsterixError(detail.status, detail.kind, detail.category, detail.record,
+                               detail.item, detail.subitem, detail.offset)
+        converted = []
+        for row in rows:
+            positions = tuple(AsterixPosition(p.item, p.kind, p.scale, p.a_raw, p.b_raw)
+                              for p in row.positions[:row.position_count])
+            vertical = tuple(AsterixVertical(v.item, v.subitem, v.kind, v.scale, v.flags,
+                                             v.auxiliary, v.raw)
+                             for v in row.vertical[:row.vertical_count])
+            converted.append(AsterixRecord(row.category, row.cat021_edition, row.source_sac,
+                row.source_sic, row.present_frn_mask, row.raw_untyped_frn_mask,
+                row.typed_unprojected_frn_mask, row.present_field_mask, row.target_address,
+                bytes(row.target_ident), row.track_number, row.time_item, row.time_raw,
+                positions, row.velocity_kind, row.velocity_flags, row.velocity_a_raw,
+                row.velocity_b_raw, row.mode3a_code, row.mode3a_flags, vertical,
+                row.raw_untyped_subitem_mask))
+        return AsterixResult(tuple(converted), counts.category, counts.edition,
+                             counts.consumed_bytes)
 
 
 class Polygon:
@@ -761,6 +991,7 @@ class Geodesy:
         self.text = TextBindings(library)
         self.compression = Compression(library)
         self.archives = Archives(library)
+        self.asterix = AsterixBindings(library)
 
     def _bind(self) -> None:
         lib = self._library
@@ -782,6 +1013,13 @@ class Geodesy:
             ctypes.POINTER(_TarEntry), ctypes.c_uint64, u64_p,
             byte_p, ctypes.c_uint64, u64_p, error_p]
         lib.oa_tar_parse.restype = ctypes.c_uint32
+        lib.oa_zip_list.argtypes = [byte_p, ctypes.c_uint64,
+            ctypes.POINTER(_ZipEntry), ctypes.c_uint64, u64_p,
+            byte_p, ctypes.c_uint64, u64_p, error_p]
+        lib.oa_zip_list.restype = ctypes.c_uint32
+        lib.oa_zip_extract_entry.argtypes = [byte_p, ctypes.c_uint64, ctypes.c_uint64,
+            byte_p, ctypes.c_uint64, u64_p, error_p]
+        lib.oa_zip_extract_entry.restype = ctypes.c_uint32
         lib.oa_geo_wgs84_inverse.argtypes = [
             ctypes.c_double, ctypes.c_double, ctypes.c_double, ctypes.c_double,
             double_p, double_p, double_p, error_p,
@@ -1027,6 +1265,85 @@ class Archives:
             ))
         return TarResult(tuple(output))
 
+    def parse_zip(self, data: bytes) -> ZipResult:
+        """Validate bounded ZIP metadata; names follow oa-zip's UTF-8/ASCII profile."""
+        if not isinstance(data, bytes):
+            raise TypeError("data must be bytes")
+        if len(data) > _MAX_ZIP_INPUT_BYTES:
+            raise ValueError("data exceeds the native ZIP input limit")
+        input_buffer = (ctypes.c_uint8 * len(data)).from_buffer_copy(data) if data else None
+        count, names_length, error = ctypes.c_uint64(), ctypes.c_uint64(), _ErrorInfo()
+        status = int(self._library.oa_zip_list(
+            input_buffer, len(data), None, 0, ctypes.byref(count), None, 0,
+            ctypes.byref(names_length), ctypes.byref(error)))
+        if status not in (0, 6):
+            _raise_if_error(self._library, status, error)
+        if status == 0:
+            if count.value != 0 or names_length.value != 0:
+                raise RuntimeError("native ZIP parser skipped required output on empty success")
+            return ZipResult(())
+        if count.value > _MAX_ZIP_ENTRIES or names_length.value > _MAX_ZIP_NAME_POOL_BYTES:
+            raise RuntimeError("native ZIP parser returned sizes beyond its declared bound")
+        entries = (_ZipEntry * count.value)() if count.value else None
+        name_pool = (ctypes.c_uint8 * names_length.value)() if names_length.value else None
+        status = int(self._library.oa_zip_list(
+            input_buffer, len(data), entries, count.value, ctypes.byref(count),
+            name_pool, names_length.value, ctypes.byref(names_length), ctypes.byref(error)))
+        _raise_if_error(self._library, status, error)
+        if count.value != (len(entries) if entries is not None else 0):
+            raise RuntimeError("native ZIP parser changed its entry count between passes")
+        pool = bytes(name_pool) if name_pool is not None else b""
+        if names_length.value != len(pool):
+            raise RuntimeError("native ZIP parser changed its name-pool length between passes")
+        output: list[ZipEntry] = []
+        for item in entries or ():
+            start, end = item.name_offset, item.name_offset + item.name_length
+            if end > len(pool) or bytes(item.reserved) != bytes(6):
+                raise RuntimeError("native ZIP parser returned invalid metadata spans/padding")
+            output.append(ZipEntry(
+                name=pool[start:end].decode("utf-8"),
+                compressed_size=int(item.compressed_size),
+                uncompressed_size=int(item.uncompressed_size),
+                local_offset=int(item.local_offset),
+                crc32=int(item.crc32),
+                flags=int(item.flags),
+                method=int(item.method),
+                zip64=bool(item.zip64),
+                utf8_name_flag=bool(item.utf8_name_flag),
+            ))
+        return ZipResult(tuple(output))
+
+    def extract_zip_entry(self, data: bytes, index: int) -> bytes:
+        """Extract one ZIP member to memory after full size, stream, and CRC validation."""
+        if not isinstance(data, bytes):
+            raise TypeError("data must be bytes")
+        if len(data) > _MAX_ZIP_INPUT_BYTES:
+            raise ValueError("data exceeds the native ZIP input limit")
+        if isinstance(index, bool) or not isinstance(index, int):
+            raise TypeError("index must be an integer")
+        if index < 0 or index >= _MAX_ZIP_ENTRIES:
+            raise ValueError("index is outside the native ZIP entry limit")
+        input_buffer = (ctypes.c_uint8 * len(data)).from_buffer_copy(data) if data else None
+        output_length, error = ctypes.c_uint64(), _ErrorInfo()
+        status = int(self._library.oa_zip_extract_entry(
+            input_buffer, len(data), index, None, 0, ctypes.byref(output_length), ctypes.byref(error)))
+        if status == 0:
+            if output_length.value != 0:
+                raise RuntimeError("native ZIP extractor omitted a required output buffer")
+            return b""
+        if status != 6:
+            _raise_if_error(self._library, status, error)
+        if output_length.value > _MAX_ZIP_ENTRY_BYTES:
+            raise RuntimeError("native ZIP extractor returned a size beyond its declared bound")
+        output = (ctypes.c_uint8 * output_length.value)() if output_length.value else None
+        status = int(self._library.oa_zip_extract_entry(
+            input_buffer, len(data), index, output, output_length.value,
+            ctypes.byref(output_length), ctypes.byref(error)))
+        _raise_if_error(self._library, status, error)
+        if output_length.value != (len(output) if output is not None else 0):
+            raise RuntimeError("native ZIP extractor changed its output length between passes")
+        return bytes(output) if output is not None else b""
+
 
 def load(library_path: os.PathLike[str] | str) -> Geodesy:
     """Explicit-path loader; this package does not bundle or build the native library."""
@@ -1035,6 +1352,12 @@ def load(library_path: os.PathLike[str] | str) -> Geodesy:
 
 __all__ = [
     "Archives",
+    "AsterixBindings",
+    "AsterixError",
+    "AsterixPosition",
+    "AsterixRecord",
+    "AsterixResult",
+    "AsterixVertical",
     "CsvField",
     "Compression",
     "CsvResult",
@@ -1052,6 +1375,8 @@ __all__ = [
     "RawDeflateResult",
     "TarEntry",
     "TarResult",
+    "ZipEntry",
+    "ZipResult",
     "ScalarMath",
     "SeparationResult",
     "TextBindings",
