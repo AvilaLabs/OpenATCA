@@ -33,10 +33,12 @@ class SealedGuardTests(unittest.TestCase):
         with patch.dict(os.environ):
             os.environ.pop("OPENATCA_DATA", None)
             guard = sealed_guard.Guard()
-            expected = sealed_guard._resolve(os.fspath(sealed_guard.DEFAULT_DATA_ROOT))
+            expected = sealed_guard._resolve(
+                os.fspath(Path(__file__).resolve().parents[2] / "openatca-data")
+            )
             self.assertEqual(guard.root, expected)
             with self.assertRaises(sealed_guard.SealedError):
-                guard.check(Path(guard.root) / "derived/public/2026.11.20.synthetic.oaf")
+                guard.check(Path(expected) / "derived/public/2026.11.20.synthetic.oaf")
 
     def test_configured_data_root_override_is_resolved_before_refusal_check(self):
         with tempfile.TemporaryDirectory() as temporary:

@@ -112,9 +112,14 @@ fn a_list_that_does_not_parse_is_an_error_and_the_guard_then_refuses_everything(
 
 #[test]
 fn a_sealed_data_path_is_refused_below_an_independently_resolved_root() {
+    let repository_parent = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(3)
+        .unwrap();
+    let default_data_root = repository_parent.join("openatca-data");
     let root = std::env::var_os("OPENATCA_DATA")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../openatca-data"));
+        .unwrap_or(default_data_root);
     let guard = Sealed::production();
     let synthetic = root.join("derived/public/2026.11.20.synthetic.oaf");
     assert!(guard.check(&synthetic).is_err());
@@ -562,13 +567,19 @@ fn nothing_switches_the_guard_off() {
     let root = fake_root("nooff");
     let g = Sealed::with_root(&root);
     let sealed = root.join("scds/rec-20261119/day2/sfdps/a.bin");
-    // Whatever the environment says, the answer is the same: the guard reads no environment.
+    // The only supported environment read selects the data root; it cannot disable the guard.
     let src = include_str!("../src/lib.rs");
+    let allowed_data_root = "std::env::var_os(\"OPENATCA_DATA\")";
+    assert_eq!(src.matches(allowed_data_root).count(), 1);
+    let src = src.replace(allowed_data_root, "");
     for word in ["env::var", "env::args", "getenv", "OA_SEAL"] {
         assert!(!src.contains(word), "{word}");
     }
     assert!(g.check(&sealed).is_err());
     let py = include_str!("../../../tools/sealed_guard.py");
+    let allowed_data_root = "os.environ.get(\"OPENATCA_DATA\")";
+    assert_eq!(py.matches(allowed_data_root).count(), 1);
+    let py = py.replace(allowed_data_root, "");
     for word in ["os.environ", "getenv", "argparse"] {
         assert!(!py.contains(word), "{word}");
     }

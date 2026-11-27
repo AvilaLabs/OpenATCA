@@ -56,11 +56,11 @@ pub const LIST: &str = include_str!("../sealed_paths.txt");
 /// Where [`LIST`] was read from at build time. At run time the guard compares the file there, if
 /// there is one, with the compiled-in text ([`production_guard`]).
 const LIST_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/sealed_paths.txt");
-const DEFAULT_DATA_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../openatca-data");
+const DEFAULT_DATA_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../openatca-data");
 
-fn configured_root(root: &Path) -> Result<PathBuf, ()> {
+fn configured_root(root: &Path, data_root: Option<std::ffi::OsString>) -> Result<PathBuf, ()> {
     if root == Path::new("$OPENATCA_DATA") {
-        return match std::env::var_os("OPENATCA_DATA") {
+        return match data_root {
             Some(value) if !value.is_empty() => {
                 let path = PathBuf::from(value);
                 path.is_absolute().then_some(path).ok_or(())
@@ -73,6 +73,32 @@ fn configured_root(root: &Path) -> Result<PathBuf, ()> {
         Ok(root.to_path_buf())
     } else {
         Err(())
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic
+)]
+mod data_root_tests {
+    use super::{resolve_data_root, Sealed, LIST};
+    use std::path::Path;
+
+    #[test]
+    fn default_root_is_the_repository_sibling_and_refuses_a_synthetic_sealed_path() {
+        let repository_parent = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(3)
+            .unwrap();
+        let expected = repository_parent.join("openatca-data");
+        let guard = Sealed::with_list_using_data_root(LIST, None, None);
+        assert_eq!(guard.root, resolve_data_root(&expected).unwrap());
+        assert!(guard
+            .check(&expected.join("derived/public/2026.11.20.synthetic.oaf"))
+            .is_err());
     }
 }
 
@@ -625,12 +651,20 @@ impl Sealed {
     /// The guard for list text (and, if given, another data root). A list that does not parse
     /// refuses every path: the guard fails closed.
     pub fn with_list(text: &str, root: Option<&Path>) -> Sealed {
+        Self::with_list_using_data_root(text, root, std::env::var_os("OPENATCA_DATA"))
+    }
+
+    fn with_list_using_data_root(
+        text: &str,
+        root: Option<&Path>,
+        data_root: Option<std::ffi::OsString>,
+    ) -> Sealed {
         match parse_list(text) {
             Ok(mut list) => {
                 if let Some(r) = root {
                     list.root = r.to_path_buf();
                 }
-                let configured = configured_root(&list.root).unwrap_or_default();
+                let configured = configured_root(&list.root, data_root).unwrap_or_default();
                 let root = if configured.as_os_str().is_empty() {
                     PathBuf::new()
                 } else {

@@ -96,7 +96,9 @@ fn arguments_are_strict_and_a_sealed_path_exits_2_before_anything_is_opened() {
     let out = scratch("exit");
     let data = std::env::var_os("OPENATCA_DATA")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../openatca-data"));
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../openatca-data")
+        });
     let sealed_day = data.join("raw/adsblol/2026.11.20/a.oaf");
     let sealed_cfg = data.join("scds/stdds-20261119-holdout/k.cfg");
     let sealed_out = data.join("scds/stdds-smoke-20261119T1/o");

@@ -2050,7 +2050,7 @@ mod public_window_tests {
         let data = std::env::var_os("OPENATCA_DATA")
             .map(PathBuf::from)
             .unwrap_or_else(|| {
-                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../openatca-data")
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../openatca-data")
             });
         assert!(oa_sealed::refuse(&data.join("derived/public/2026.11.20.oaf")).is_err());
     }

@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 LIST_PATH = Path(__file__).resolve().parent.parent / "crates" / "oa-sealed" / "sealed_paths.txt"
-DEFAULT_DATA_ROOT = LIST_PATH.parent / "../../openatca-data"
+DEFAULT_DATA_ROOT = LIST_PATH.parent / "../../../openatca-data"
 MAX_LINKS = 40
 MAX_WALK_DEPTH = 64
 
