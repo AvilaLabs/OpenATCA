@@ -112,7 +112,11 @@ def mask_email_before_use(value: str) -> None:
 
 def normalized_message(message: str) -> str:
     compatible = unicodedata.normalize("NFKC", message)
-    return "".join(ch for ch in compatible if unicodedata.category(ch) != "Cf").casefold()
+    # Nonspacing/enclosing marks include zero-width joiners and variation selectors that
+    # are not category Cf. Test the actual CLI, not only normalization in isolation.
+    return "".join(
+        ch for ch in compatible if unicodedata.category(ch) not in {"Cf", "Mn", "Me"}
+    ).casefold()
 
 
 def check_commit(sha: str, expected_email: str, cwd=None) -> None:

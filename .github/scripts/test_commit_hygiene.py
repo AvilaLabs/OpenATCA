@@ -198,6 +198,10 @@ def proof_cases() -> dict[str, tuple[ProofCase, ...]]:
                       {"fixture.txt": b"safe"}, MESSAGE_RULE),
             ProofCase("E02", "zero-width-copilot", CommitFixture("Co\u200bPilot fixture"),
                       {"fixture.txt": b"safe"}, MESSAGE_RULE),
+            ProofCase("E02", "grapheme-joiner-copilot", CommitFixture("Co\u034fPilot fixture"),
+                      {"fixture.txt": b"safe"}, MESSAGE_RULE),
+            ProofCase("E02", "variation-selector-copilot", CommitFixture("Co\ufe0fPilot fixture"),
+                      {"fixture.txt": b"safe"}, MESSAGE_RULE),
             ProofCase("E02", "gemini", CommitFixture("Gemini fixture"),
                       {"fixture.txt": b"safe"}, MESSAGE_RULE),
             ProofCase("E02", "cursor", CommitFixture("Cursor fixture"),
@@ -594,7 +598,7 @@ class CommitHygieneTests(unittest.TestCase):
 
     def test_E02_synthetic_attribution_message_mutation_is_refused(self):
         receipts = run_proof_class("E02")
-        self.assertEqual(tuple(receipt.refusal for receipt in receipts), (MESSAGE_RULE,) * 7)
+        self.assertEqual(tuple(receipt.refusal for receipt in receipts), (MESSAGE_RULE,) * 9)
         self.assertTrue(all(receipt.baseline_exit == 0 for receipt in receipts))
         self.assertTrue(all(receipt.checker_exit == 1 for receipt in receipts))
 
@@ -612,7 +616,7 @@ class CommitHygieneTests(unittest.TestCase):
             exit_code = proof_command("E02")
         self.assertEqual(exit_code, 1)
         lines = output.getvalue().splitlines()
-        self.assertEqual(len(lines), 7)
+        self.assertEqual(len(lines), 9)
         self.assertTrue(lines[0].startswith(
             "proof_fixture=validated class=E02 baseline_exit=0 checker_exit=1 "
             f"expected_refusal={MESSAGE_RULE} observed_refusal={MESSAGE_RULE} fixture_sha="
@@ -624,7 +628,7 @@ class CommitHygieneTests(unittest.TestCase):
         fixture_env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin")}
         expected_rules = {
             "E01": (AUTHOR_EMAIL_RULE, COMMITTER_EMAIL_RULE),
-            "E02": (MESSAGE_RULE,) * 7,
+            "E02": (MESSAGE_RULE,) * 9,
             "E03": (PATH_RULE,),
         }
         for class_id, rules in expected_rules.items():
