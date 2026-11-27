@@ -77,6 +77,8 @@ fn arguments() -> Result<Arguments, CliError> {
     let mut quarantine_instance = None;
     let mut quarantine_item = None;
     let mut manual_handoff_ref = None;
+    let mut audit_registry = None;
+    let mut audit_registry_pin = None;
     let mut audit_log = None;
     let mut audit_count = None;
     let mut audit_tail = None;
@@ -176,6 +178,17 @@ fn arguments() -> Result<Arguments, CliError> {
                         .ok_or(CliError::Usage)?,
                 );
             }
+            Some("--audit-registry") if execute && audit_registry.is_none() => {
+                audit_registry = args.next().map(PathBuf::from);
+            }
+            Some("--audit-registry-sha256") if execute && audit_registry_pin.is_none() => {
+                audit_registry_pin = Some(
+                    args.next()
+                        .and_then(|value| value.into_string().ok())
+                        .and_then(|value| parse_audit_digest(&value).ok())
+                        .ok_or(CliError::Usage)?,
+                );
+            }
             Some("--audit-log") if execute && audit_log.is_none() => {
                 audit_log = args.next().map(PathBuf::from);
             }
@@ -259,6 +272,8 @@ fn arguments() -> Result<Arguments, CliError> {
         || quarantine_instance.is_some()
         || quarantine_item.is_some()
         || manual_handoff_ref.is_some()
+        || audit_registry.is_some()
+        || audit_registry_pin.is_some()
         || audit_log.is_some()
         || audit_count.is_some()
         || audit_tail.is_some()
@@ -269,6 +284,15 @@ fn arguments() -> Result<Arguments, CliError> {
         let source = quarantine_source.ok_or(CliError::Usage)?;
         let source_instance = quarantine_instance.ok_or(CliError::Usage)?;
         let item_id = quarantine_item.ok_or(CliError::Usage)?;
+        let audit_registry_path = audit_registry.ok_or(CliError::Usage)?;
+        let registry_pin = audit_registry_pin.ok_or(CliError::Usage)?;
+        let principal = audit_principal.ok_or(CliError::Usage)?;
+        let principal_registry = load_quarantine_principal_registry(
+            &audit_registry_path,
+            registry_pin,
+            principal,
+            audit_role,
+        )?;
         Some(oa_regional_session::cli::QuarantineReleaseOptions {
             source,
             identity: oa_quarantine::InputIdentity {
@@ -282,8 +306,8 @@ fn arguments() -> Result<Arguments, CliError> {
                 count: audit_count.ok_or(CliError::Usage)?,
                 tail: audit_tail.ok_or(CliError::Usage)?,
             },
-            principal: audit_principal.ok_or(CliError::Usage)?,
-            role: audit_role.ok_or(CliError::Usage)?,
+            principal_registry,
+            principal,
             time_ns: audit_time_ns.ok_or(CliError::Usage)?,
         })
     } else {
@@ -312,6 +336,28 @@ fn parse_audit_digest(value: &str) -> Result<[u8; 32], ()> {
         *byte = (hex_nibble(high).ok_or(())? << 4) | hex_nibble(low).ok_or(())?;
     }
     Ok(digest)
+}
+
+fn load_quarantine_principal_registry(
+    path: &Path,
+    pin: [u8; 32],
+    principal: u64,
+    role_claim: Option<oa_audit_core::Role>,
+) -> Result<oa_audit_core::PrincipalRegistry, CliError> {
+    let registry = oa_audit_log::shell::load_principal_registry(path, pin)
+        .map_err(|error| CliError::Runtime(format!("quarantine principal registry: {error}")))?;
+    let role = oa_audit_core::authorize_principal(
+        &registry,
+        principal,
+        oa_audit_core::Action::QuarantineRelease,
+    )
+    .map_err(|error| CliError::Runtime(format!("quarantine authorization: {error:?}")))?;
+    if role_claim.is_some_and(|claim| claim != role) {
+        return Err(CliError::Runtime(
+            "quarantine role claim does not match pinned registry".into(),
+        ));
+    }
+    Ok(registry)
 }
 
 fn hex_nibble(byte: u8) -> Option<u8> {
@@ -575,7 +621,7 @@ fn run() -> Result<(), CliError> {
 fn main() {
     if let Err(error) = run() {
         let message = match error {
-            CliError::Usage => "usage: oa-regional-session run --input FILE --out NEW_DIR (--snapshot FILE | --synthetic-model | --issued-package DIR --issued-manifest-sha256 PIN --processor-id ID) [--msaw-inputs MANIFEST | --synthetic-msaw] [--performance MANIFEST] [--profile recorded-peak-rendered] [--quarantine-release-source flight-data|surveillance --quarantine-release-instance N --quarantine-release-item N --manual-handoff-ref TEXT --audit-log FILE --audit-count N --audit-tail SHA256 --audit-principal N --audit-role monitor|operate|configure --audit-time-ns N]; stage --input FILE --out NEW_DIR".to_owned(),
+            CliError::Usage => "usage: oa-regional-session run --input FILE --out NEW_DIR (--snapshot FILE | --synthetic-model | --issued-package DIR --issued-manifest-sha256 PIN --processor-id ID) [--msaw-inputs MANIFEST | --synthetic-msaw] [--performance MANIFEST] [--profile recorded-peak-rendered] [--quarantine-release-source flight-data|surveillance --quarantine-release-instance N --quarantine-release-item N --manual-handoff-ref TEXT --audit-registry FILE --audit-registry-sha256 SHA256 --audit-log FILE --audit-count N --audit-tail SHA256 --audit-principal N [--audit-role operate|configure] --audit-time-ns N]; stage --input FILE --out NEW_DIR".to_owned(),
             CliError::Io(error) => format!("I/O error: {error}"),
             CliError::InputTooLarge => "input exceeds the 16 MiB limit".to_owned(),
             CliError::InvalidUtf8 => "input is not UTF-8".to_owned(),
@@ -603,10 +649,49 @@ mod tests {
     #![allow(clippy::expect_used)]
 
     use super::{
-        parse_input, parse_input_with_limit, CliError, FrameEvidence, InputError, RowAccounting,
+        load_quarantine_principal_registry, parse_input, parse_input_with_limit, CliError,
+        FrameEvidence, InputError, RowAccounting,
     };
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     const ROW: &str = "v1\t1000\t900\t{sequence}\tADAPTATION\t00000000000000000000000000000385\tABC123\tZAU1\tFEED\tUP\t1";
+    static REGISTRY_TEST_ID: AtomicU64 = AtomicU64::new(0);
+
+    // REQ: OA-AUDIT-002, OA-AUDIT-008
+    #[test]
+    fn quarantine_cli_derives_release_role_from_pinned_registry() {
+        let id = REGISTRY_TEST_ID.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "oa-regional-quarantine-registry-{}-{id}.tsv",
+            std::process::id()
+        ));
+        let bytes = b"OACERT-LOCAL-PRINCIPALS-V1\n51\toperate\n52\tmonitor\n";
+        std::fs::write(&path, bytes).expect("write synthetic registry");
+        let pin = oa_sha256::sha256(bytes);
+        assert!(load_quarantine_principal_registry(
+            &path,
+            pin,
+            51,
+            Some(oa_audit_core::Role::Operate)
+        )
+        .is_ok());
+        assert!(load_quarantine_principal_registry(
+            &path,
+            pin,
+            51,
+            Some(oa_audit_core::Role::Monitor)
+        )
+        .is_err());
+        assert!(load_quarantine_principal_registry(
+            &path,
+            pin,
+            52,
+            Some(oa_audit_core::Role::Monitor)
+        )
+        .is_err());
+        assert!(load_quarantine_principal_registry(&path, [0; 32], 51, None).is_err());
+        let _ = std::fs::remove_file(path);
+    }
 
     fn bad_line_accounting(
         result: Result<Vec<FrameEvidence>, CliError>,

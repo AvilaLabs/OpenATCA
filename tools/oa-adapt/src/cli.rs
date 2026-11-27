@@ -11,6 +11,7 @@
 //!                 --previous-manifest-sha256 <hex> --release <id> --facility <ARTCC>
 //!                 --change-ref <record> --change-class initial|routine|field-change
 //!                 --issuer <principal-id> --approver <principal-id> --reason <text>
+//!                 --audit-registry <file> --audit-registry-sha256 <sha256>
 //!                 --audit-log <file> --audit-count <n> --audit-tail <sha256>
 //!                 --audit-principal <numeric-id> --audit-role monitor|operate|configure
 //!                 --audit-time-ns <n>
@@ -99,6 +100,7 @@ pub const USAGE: &str = "usage:
                  --previous-manifest-sha256 <hex> --release <id> --facility <ARTCC>
                  --change-ref <record> --change-class initial|routine|field-change
                  --issuer <principal-id> --approver <principal-id> --reason <text>
+                 --audit-registry <file> --audit-registry-sha256 <sha256>
                  --audit-log <file> --audit-count <n> --audit-tail <sha256>
                  --audit-principal <numeric-id> --audit-role monitor|operate|configure
                  --audit-time-ns <n>
@@ -402,7 +404,7 @@ pub fn run_package(args: &[String], out: &mut dyn Write) -> Result<(), CliError>
 
 /// `issue`: create a bounded v2, v3, or v4 manifest after verifying the prior pin.
 pub fn run_issue(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
-    const FIELDS: [&str; 17] = [
+    const FIELDS: [&str; 19] = [
         "--snapshot",
         "--out-root",
         "--previous-package-root",
@@ -414,6 +416,8 @@ pub fn run_issue(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
         "--issuer",
         "--approver",
         "--reason",
+        "--audit-registry",
+        "--audit-registry-sha256",
         "--audit-log",
         "--audit-count",
         "--audit-tail",
@@ -423,7 +427,7 @@ pub fn run_issue(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
     ];
     if args.len() < FIELDS.len() * 2 || args.len() > (FIELDS.len() + 2) * 2 || args.len() % 2 != 0 {
         return Err(CliError::Usage(
-            "issue requires seventeen mandatory flag/value pairs and optional --ca-preset/--pver-catalog pairs".into(),
+            "issue requires nineteen mandatory flag/value pairs and optional --ca-preset/--pver-catalog pairs".into(),
         ));
     }
     if args
@@ -498,7 +502,7 @@ pub fn run_issue(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
     let audit_time = get("--audit-time-ns")?
         .parse::<u64>()
         .map_err(|_| CliError::Usage("--audit-time-ns must be a positive integer".into()))?;
-    let audit_role = match get("--audit-role")? {
+    let audit_role_claim = match get("--audit-role")? {
         "monitor" => oa_audit_core::Role::Monitor,
         "operate" => oa_audit_core::Role::Operate,
         "configure" => oa_audit_core::Role::Configure,
@@ -508,6 +512,23 @@ pub fn run_issue(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
             )));
         }
     };
+    let registry_path = PathBuf::from(get("--audit-registry")?);
+    let registry_pin = crate::manifest::parse_pin(get("--audit-registry-sha256")?)
+        .map_err(|e| CliError::Usage(format!("invalid --audit-registry-sha256: {e}")))?;
+    let registry = oa_audit_log::shell::load_principal_registry(&registry_path, registry_pin)
+        .map_err(|error| failed("adaptation principal registry", error))?;
+    let registry_role = oa_audit_core::authorize_principal(
+        &registry,
+        audit_principal,
+        oa_audit_core::Action::AdaptationIssue,
+    )
+    .map_err(|error| failed("adaptation principal authorization", format!("{error:?}")))?;
+    if audit_role_claim != registry_role {
+        return Err(failed(
+            "adaptation principal authorization",
+            "claimed role does not match pinned registry role",
+        ));
+    }
     let audit_count = get("--audit-count")?
         .parse::<u64>()
         .map_err(|_| CliError::Usage("--audit-count must be an unsigned integer".into()))?;
@@ -527,7 +548,7 @@ pub fn run_issue(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
         .map_err(|e| CliError::Usage(format!("adaptation issue audit details invalid: {e:?}")))?;
     let event = oa_audit_core::Event {
         principal: audit_principal,
-        role: audit_role,
+        role: registry_role,
         action: oa_audit_core::Action::AdaptationIssue,
         target,
         target_len,
@@ -684,7 +705,7 @@ mod tests {
 
     static NEXT: AtomicU64 = AtomicU64::new(0);
 
-    // REQ: OA-AUDIT-003, OA-AUDIT-005
+    // REQ: OA-AUDIT-002, OA-AUDIT-003, OA-AUDIT-005
     #[test]
     fn issue_command_computes_next_version_and_records_field_change() {
         let serial = NEXT.fetch_add(1, Ordering::Relaxed);
@@ -727,6 +748,11 @@ mod tests {
         let candidate_root = root.join("candidate");
         let audit_path = root.join("audit.log");
         let audit_path_text = audit_path.to_str().expect("audit path is utf8");
+        let registry_path = root.join("principals.tsv");
+        let registry_path_text = registry_path.to_str().expect("registry path is utf8");
+        let registry_bytes = b"OACERT-LOCAL-PRINCIPALS-V1\n103\tconfigure\n105\toperate\n";
+        std::fs::write(&registry_path, registry_bytes).expect("write synthetic registry");
+        let registry_pin = oa_sha256::to_hex(&oa_sha256::sha256(registry_bytes));
         let empty_audit_tail = "00".repeat(32);
         let first_pin_hex = oa_sha256::to_hex(&first_pin);
         let args = [
@@ -753,6 +779,10 @@ mod tests {
             "approver-4",
             "--reason",
             "sector field correction",
+            "--audit-registry",
+            registry_path_text,
+            "--audit-registry-sha256",
+            registry_pin.as_str(),
             "--audit-log",
             audit_path_text,
             "--audit-count",
@@ -800,6 +830,7 @@ mod tests {
             *role = "operate".to_owned();
         }
         let wrong_output = root.join("wrong-role");
+        let wrong_log = root.join("wrong-role.audit");
         let output_flag = wrong_role_args
             .iter()
             .position(|arg| arg == "--out-root")
@@ -807,8 +838,51 @@ mod tests {
         if let Some(path) = wrong_role_args.get_mut(output_flag + 1) {
             *path = wrong_output.to_str().expect("path is utf8").to_owned();
         }
+        let log_flag = wrong_role_args
+            .iter()
+            .position(|arg| arg == "--audit-log")
+            .expect("audit log flag exists");
+        if let Some(path) = wrong_role_args.get_mut(log_flag + 1) {
+            *path = wrong_log.to_str().expect("path is utf8").to_owned();
+        }
         assert!(run(&wrong_role_args, &mut Vec::new()).is_err());
         assert!(!wrong_output.exists());
+        assert!(!wrong_log.exists());
+
+        let mut denied_args = args.clone();
+        let principal_flag = denied_args
+            .iter()
+            .position(|arg| arg == "--audit-principal")
+            .expect("principal flag exists");
+        if let Some(principal) = denied_args.get_mut(principal_flag + 1) {
+            *principal = "105".to_owned();
+        }
+        let denied_output = root.join("denied-principal");
+        let denied_log = root.join("denied-principal.audit");
+        let output_flag = denied_args
+            .iter()
+            .position(|arg| arg == "--out-root")
+            .expect("output flag exists");
+        if let Some(path) = denied_args.get_mut(output_flag + 1) {
+            *path = denied_output.to_str().expect("path is utf8").to_owned();
+        }
+        let log_flag = denied_args
+            .iter()
+            .position(|arg| arg == "--audit-log")
+            .expect("audit log flag exists");
+        if let Some(path) = denied_args.get_mut(log_flag + 1) {
+            *path = denied_log.to_str().expect("path is utf8").to_owned();
+        }
+        let role_flag = denied_args
+            .iter()
+            .position(|arg| arg == "--audit-role")
+            .expect("role flag exists");
+        if let Some(role) = denied_args.get_mut(role_flag + 1) {
+            *role = "operate".to_owned();
+        }
+        assert!(run(&denied_args, &mut Vec::new()).is_err());
+        assert!(!denied_output.exists());
+        assert!(!denied_log.exists());
         let _ = std::fs::remove_dir_all(root);
     }
 }

@@ -414,6 +414,37 @@ pub fn authorize_configure_claim(
     })
 }
 
+/// Build the certification claim only from a role derived by the shared bounded principal
+/// registry. `registry_sha256` is the independently supplied pin verified by the shell loader;
+/// it does not authenticate who supplied the registry or principal ID.
+pub fn authorize_configure_registry_claim(
+    registry: &oa_audit_core::PrincipalRegistry,
+    registry_sha256: oa_sha256::Digest,
+    principal_id: u64,
+) -> Result<PrincipalAuthorizationClaim, CertificationError> {
+    if registry_sha256 == [0; 32] || principal_id == 0 {
+        return Err(CertificationError::Invalid(
+            "principal or registry pin is invalid",
+        ));
+    }
+    let role = oa_audit_core::authorize_principal(
+        registry,
+        principal_id,
+        oa_audit_core::Action::Certification,
+    )
+    .map_err(|_| CertificationError::Invalid("principal is not authorized to certify"))?;
+    if role != oa_audit_core::Role::Configure {
+        return Err(CertificationError::Invalid(
+            "certification requires configure role",
+        ));
+    }
+    Ok(PrincipalAuthorizationClaim {
+        principal_id,
+        registry_sha256,
+        level: AuthorizationLevelClaim::Configure,
+    })
+}
+
 /// The bounded set of outcomes supported by this synthetic workflow.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CertificationOutcome {
