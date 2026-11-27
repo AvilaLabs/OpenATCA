@@ -42,10 +42,19 @@ class ProofSourceInventoryTests(unittest.TestCase):
     def _proof(self):
         return {"package": "sample", "harness": "proofs::source_case"}
 
+    def _assert_inventory(self, result, status, detail_key=None, expected=None):
+        self.assertEqual(result["status"], status)
+        if detail_key is not None:
+            self.assertEqual(result[detail_key], expected)
+
+    def _assert_discovered_harnesses(self, expected):
+        source = inventory.discover_source_proofs(self.root)
+        identities = [(item.package, item.harness) for item in source]
+        self.assertEqual(identities, expected)
+
     def test_unregistered_source_harness_fails_source_inward(self):
         result = inventory.check_paths(self.root, self.root / "tools/rust_proofs.json")
-        self.assertEqual(result["status"], "FAIL")
-        self.assertEqual(result["unaccounted_source_harnesses"], [{
+        self._assert_inventory(result, "FAIL", "unaccounted_source_harnesses", [{
             "package": "sample", "harness": "proofs::source_case",
             "path": "crates/sample/src/proofs.rs", "line": 1,
         }])
@@ -53,7 +62,7 @@ class ProofSourceInventoryTests(unittest.TestCase):
     def test_registered_identity_and_named_exclusion_account_for_source(self):
         self._registry([self._proof()])
         result = inventory.check_paths(self.root, self.root / "tools/rust_proofs.json")
-        self.assertEqual(result["status"], "PASS")
+        self._assert_inventory(result, "PASS")
         exclusions = self._write("tools/exclusions.json", json.dumps({"exclusions": [
             {**self._proof(), "reason": "not selected for the bounded registry"},
         ]}))
@@ -67,18 +76,16 @@ class ProofSourceInventoryTests(unittest.TestCase):
         exclusions.write_text(json.dumps({"exclusions": [
             {**self._proof(), "reason": "source harness is intentionally not registered"},
         ]}), encoding="utf-8")
-        self.assertEqual(inventory.check_paths(
+        self._assert_inventory(inventory.check_paths(
             self.root, self.root / "tools/rust_proofs.json", exclusions
-        )["status"], "PASS")
+        ), "PASS")
 
     def test_path_attribute_maps_harness_to_declaring_module(self):
         self._write("crates/sample/src/lib.rs", "mod wire;\n")
         self._write("crates/sample/src/proofs.rs", "")
         self._write("crates/sample/src/wire.rs", '#[path = "wire_proofs.rs"]\nmod proofs;\n')
         self._write("crates/sample/src/wire_proofs.rs", "#[kani::proof]\nfn wire_case() {}\n")
-        source = inventory.discover_source_proofs(self.root)
-        self.assertEqual([(item.package, item.harness) for item in source],
-                         [("sample", "wire::proofs::wire_case")])
+        self._assert_discovered_harnesses([("sample", "wire::proofs::wire_case")])
 
     def test_conventional_nested_modules_map_to_their_file_path(self):
         self._write("crates/sample/src/lib.rs", "mod navigation;\n")
@@ -86,9 +93,7 @@ class ProofSourceInventoryTests(unittest.TestCase):
         self._write("crates/sample/src/navigation.rs", "pub mod checks;\n")
         self._write("crates/sample/src/navigation/checks.rs",
                     "#[kani::proof]\nfn nested_case() {}\n")
-        source = inventory.discover_source_proofs(self.root)
-        self.assertEqual([(item.package, item.harness) for item in source],
-                         [("sample", "navigation::checks::nested_case")])
+        self._assert_discovered_harnesses([("sample", "navigation::checks::nested_case")])
 
     def test_inline_and_cfg_disabled_module_proofs_are_still_inventory_entries(self):
         self._write(
@@ -96,9 +101,7 @@ class ProofSourceInventoryTests(unittest.TestCase):
             "#[cfg(any())]\nmod disabled { mod proofs { #[kani::proof] fn hidden_case() {} } }\n",
         )
         self._write("crates/sample/src/proofs.rs", "")
-        source = inventory.discover_source_proofs(self.root)
-        self.assertEqual([(item.package, item.harness) for item in source],
-                         [("sample", "disabled::proofs::hidden_case")])
+        self._assert_discovered_harnesses([("sample", "disabled::proofs::hidden_case")])
 
     def test_ambiguous_same_name_module_paths_refuse_inventory(self):
         self._write(
@@ -117,8 +120,7 @@ class ProofSourceInventoryTests(unittest.TestCase):
     def test_stale_registry_identity_fails_closed(self):
         self._registry([{"package": "sample", "harness": "proofs::renamed_case"}])
         result = inventory.check_paths(self.root, self.root / "tools/rust_proofs.json")
-        self.assertEqual(result["status"], "FAIL")
-        self.assertEqual(result["stale_registry_or_exclusion_identities"], [{
+        self._assert_inventory(result, "FAIL", "stale_registry_or_exclusion_identities", [{
             "package": "sample", "harness": "proofs::renamed_case",
         }])
 
@@ -151,14 +153,12 @@ class ProofSourceInventoryTests(unittest.TestCase):
             check=False, capture_output=True,
         )
         self.assertNotEqual(tracked.returncode, 0)
-        result = inventory.discover_source_proofs(self.root)
-        self.assertEqual([(item.package, item.harness) for item in result],
-                         [("sample", "proofs::source_case")])
+        self._assert_discovered_harnesses([("sample", "proofs::source_case")])
 
     def test_workspace_source_inventory_is_fully_accounted(self):
         workspace = Path(__file__).resolve().parents[1]
         result = inventory.check_paths(workspace, workspace / "tools/rust_proofs.json")
-        self.assertEqual(result["status"], "PASS")
+        self._assert_inventory(result, "PASS")
         self.assertEqual(result["source_harness_count"], result["registered_source_harness_count"])
         self.assertEqual(result["unaccounted_source_harnesses"], [])
         self.assertEqual(result["stale_registry_or_exclusion_identities"], [])

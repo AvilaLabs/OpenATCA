@@ -143,10 +143,11 @@ def _module_bodies(tokens: list[ratchet.Token]) -> list[tuple[int, int, str]]:
     for index, token in enumerate(tokens[:-2]):
         if token.value != "mod" or tokens[index + 1].kind != "identifier":
             continue
-        boundary = next((cursor for cursor in range(index + 2, len(tokens))
-                         if tokens[cursor].value in ("{", ";")), None)
-        if boundary is None or tokens[boundary].value != "{":
+        boundary = index + 2
+        if tokens[boundary].value == ";":
             continue
+        if tokens[boundary].value != "{":
+            raise InventoryError(f"unsupported module declaration at line {token.line}")
         closing = ratchet._matching(tokens, boundary, "{", "}")
         if closing is None:
             raise InventoryError(f"unclosed inline module at line {token.line}")
