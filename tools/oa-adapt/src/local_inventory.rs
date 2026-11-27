@@ -16,6 +16,7 @@ pub struct LocalActivation {
     package_root: PathBuf,
     issued_manifest_sha256: Digest,
     loaded_adaptation_sha256: Digest,
+    issued_components: IssuedComponents,
 }
 
 impl LocalActivation {
@@ -46,6 +47,28 @@ pub struct LocalInventoryReport {
     /// Always true: local IDs and content hashes do not authenticate a processor or reporter.
     pub provenance_unverified: bool,
     pub status: LocalInventoryStatus,
+    pub issued_components: IssuedComponents,
+    pub loaded_components: LoadedComponents,
+    pub disk_components: IssuedComponents,
+    pub adaptation_components_complete: Option<bool>,
+}
+
+/// Optional manifest-bound companion digests. `None` means the package did not issue that
+/// component; it is not a claim that a runtime loaded it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct IssuedComponents {
+    pub ca_preset: Option<Digest>,
+    pub pver_catalog: Option<Digest>,
+    pub runway_aids: Option<Digest>,
+}
+
+/// Fingerprints captured from actual component constructors. Missing values remain unavailable.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LoadedComponents {
+    pub model_snapshot: Option<Digest>,
+    pub ca_preset: Option<Digest>,
+    pub pver_catalog: Option<Digest>,
+    pub runway_aids: Option<Digest>,
 }
 
 /// Local comparison only; matching content never authenticates a processor or report.
@@ -70,6 +93,11 @@ pub fn verify_local_startup(
         package_root: package_root.to_path_buf(),
         issued_manifest_sha256: expected_manifest_sha256,
         loaded_adaptation_sha256: package.identity().snapshot_sha256,
+        issued_components: IssuedComponents {
+            ca_preset: package.identity().ca_preset_sha256,
+            pver_catalog: package.identity().pver_catalog_sha256,
+            runway_aids: package.identity().runway_aids_sha256,
+        },
     };
     Ok((package, activation))
 }
@@ -88,6 +116,26 @@ pub fn verify_local_inventory_at(
     loaded_runtime_adaptation_sha256: Digest,
     observed_at_unix_ns: Option<i64>,
 ) -> LocalInventoryReport {
+    verify_local_inventory_with_components(
+        activation,
+        LoadedComponents {
+            model_snapshot: Some(loaded_runtime_adaptation_sha256),
+            ..LoadedComponents::default()
+        },
+        observed_at_unix_ns,
+    )
+}
+
+/// Recheck all issued components against the exact loaded constructor fingerprints and the
+/// currently verified disk package. The caller must provide only observed runtime digests.
+pub fn verify_local_inventory_with_components(
+    activation: &LocalActivation,
+    loaded_components: LoadedComponents,
+    observed_at_unix_ns: Option<i64>,
+) -> LocalInventoryReport {
+    let loaded_runtime_adaptation_sha256 = loaded_components
+        .model_snapshot
+        .unwrap_or(activation.loaded_adaptation_sha256);
     let mut report = LocalInventoryReport {
         processor_id: activation.processor_id,
         observed_at_unix_ns,
@@ -100,17 +148,26 @@ pub fn verify_local_inventory_at(
             activation.issued_manifest_sha256,
             Some(activation.loaded_adaptation_sha256),
             None,
-            Some(loaded_runtime_adaptation_sha256),
+            loaded_components.model_snapshot,
             None,
         ),
         provenance_unverified: true,
         status: LocalInventoryStatus::PackageRefused,
+        issued_components: activation.issued_components,
+        loaded_components,
+        disk_components: IssuedComponents::default(),
+        adaptation_components_complete: None,
     };
 
     match verify_current(&activation.package_root, activation.issued_manifest_sha256) {
         Ok(package) => {
             report.disk_manifest_sha256 = Some(package.identity().manifest_sha256);
             report.disk_adaptation_sha256 = Some(package.identity().snapshot_sha256);
+            report.disk_components = IssuedComponents {
+                ca_preset: package.identity().ca_preset_sha256,
+                pver_catalog: package.identity().pver_catalog_sha256,
+                runway_aids: package.identity().runway_aids_sha256,
+            };
             report.status = LocalInventoryStatus::Match;
         }
         Err(VerifyError::ManifestIdentityMismatch { actual, .. }) => {
@@ -118,6 +175,11 @@ pub fn verify_local_inventory_at(
                 if let Ok(package) = verify_current(&activation.package_root, observed_pin) {
                     report.disk_manifest_sha256 = Some(package.identity().manifest_sha256);
                     report.disk_adaptation_sha256 = Some(package.identity().snapshot_sha256);
+                    report.disk_components = IssuedComponents {
+                        ca_preset: package.identity().ca_preset_sha256,
+                        pver_catalog: package.identity().pver_catalog_sha256,
+                        runway_aids: package.identity().runway_aids_sha256,
+                    };
                     report.status = LocalInventoryStatus::IssuedManifestMismatch;
                 }
             }
@@ -128,9 +190,10 @@ pub fn verify_local_inventory_at(
         activation.issued_manifest_sha256,
         Some(activation.loaded_adaptation_sha256),
         report.disk_manifest_sha256,
-        Some(loaded_runtime_adaptation_sha256),
+        loaded_components.model_snapshot,
         report.disk_adaptation_sha256,
     );
+    report.adaptation_components_complete = None;
     if report.status != LocalInventoryStatus::IssuedManifestMismatch {
         report.status = match report.comparison.state {
             AdaptationIdentityState::Match => LocalInventoryStatus::Match,
@@ -153,7 +216,7 @@ pub fn verify_local_inventory_at(
 /// Each field is explicitly tagged `OBSERVED` or `UNAVAILABLE`; local labels and hashes do not
 /// authenticate the processor, issuer, clock, or reporting channel.
 pub fn render_processor_report_tsv(phase: &str, report: &LocalInventoryReport) -> String {
-    let mut out = String::from("OA_TECHOPS_PROCESSOR_REPORT\t1\n");
+    let mut out = String::from("OA_TECHOPS_PROCESSOR_REPORT\t2\n");
     out.push_str(&format!("phase\tOBSERVED\t{phase}\n"));
     out.push_str(&format!(
         "processor_id\tOBSERVED\t{}\n",
@@ -170,10 +233,77 @@ pub fn render_processor_report_tsv(phase: &str, report: &LocalInventoryReport) -
     out.push_str(
         "issuer_identity\tUNAVAILABLE\tmanifest principal IDs are not authenticated here\n",
     );
-    out.push_str("verified_component_coverage\tOBSERVED\tmodel_snapshot_only\n");
-    out.push_str("other_loaded_components\tUNAVAILABLE\tCA, PVER, runway and MVA runtime components are not fingerprinted by this producer\n");
+    out.push_str("verified_component_coverage\tOBSERVED\tcomponent_digest_rows_v2\n");
+    push_optional_digest(
+        &mut out,
+        "issued_ca_preset_sha256",
+        report.issued_components.ca_preset,
+    );
+    out.push_str("loaded_ca_preset_sha256\t");
+    push_optional_digest_value(&mut out, report.loaded_components.ca_preset);
+    push_optional_digest(
+        &mut out,
+        "disk_ca_preset_sha256",
+        report.disk_components.ca_preset,
+    );
+    push_component_match(
+        &mut out,
+        "ca_preset",
+        report.issued_components.ca_preset,
+        report.loaded_components.ca_preset,
+        report.disk_components.ca_preset,
+    );
+    push_optional_digest(
+        &mut out,
+        "issued_pver_catalog_sha256",
+        report.issued_components.pver_catalog,
+    );
+    out.push_str("loaded_pver_catalog_sha256\t");
+    push_optional_digest_value(&mut out, report.loaded_components.pver_catalog);
+    push_optional_digest(
+        &mut out,
+        "disk_pver_catalog_sha256",
+        report.disk_components.pver_catalog,
+    );
+    push_component_match(
+        &mut out,
+        "pver_catalog",
+        report.issued_components.pver_catalog,
+        report.loaded_components.pver_catalog,
+        report.disk_components.pver_catalog,
+    );
+    push_optional_digest(
+        &mut out,
+        "issued_runway_aids_sha256",
+        report.issued_components.runway_aids,
+    );
+    out.push_str("loaded_runway_aids_sha256\t");
+    push_optional_digest_value(&mut out, report.loaded_components.runway_aids);
+    push_optional_digest(
+        &mut out,
+        "disk_runway_aids_sha256",
+        report.disk_components.runway_aids,
+    );
+    push_component_match(
+        &mut out,
+        "runway_aids",
+        report.issued_components.runway_aids,
+        report.loaded_components.runway_aids,
+        report.disk_components.runway_aids,
+    );
+    out.push_str("other_loaded_components\tOBSERVED\tactual constructor digest rows above; unobserved components remain unavailable\n");
+    match report.adaptation_components_complete {
+        Some(complete) => out.push_str(&format!("components_complete\tOBSERVED\t{complete}\n")),
+        None => out.push_str(
+            "components_complete\tUNAVAILABLE\tindependent expected process role not supplied\n",
+        ),
+    }
     out.push_str("ca_configuration_state\tUNAVAILABLE\truntime CA configuration not observed; empty is not inferred\n");
-    out.push_str("composite_adaptation_status\tUNAVAILABLE\tmodel snapshot identity does not certify all runtime components\n");
+    match report.adaptation_components_complete {
+        Some(true) => out.push_str("composite_adaptation_status\tOBSERVED\tcomponents_observed\n"),
+        Some(false) => out.push_str("composite_adaptation_status\tOBSERVED\tcomponent_coverage_incomplete\n"),
+        None => out.push_str("composite_adaptation_status\tUNAVAILABLE\tindependent expected process role not supplied\n"),
+    }
     out.push_str(&format!(
         "issued_manifest_sha256\tOBSERVED\t{}\n",
         oa_sha256::to_hex(&report.issued_manifest_sha256)
@@ -183,10 +313,11 @@ pub fn render_processor_report_tsv(phase: &str, report: &LocalInventoryReport) -
         "expected_adaptation_sha256",
         report.expected_adaptation_sha256,
     );
-    out.push_str(&format!(
-        "loaded_runtime_model_snapshot_sha256\tOBSERVED\t{}\n",
-        oa_sha256::to_hex(&report.loaded_adaptation_sha256)
-    ));
+    push_optional_digest(
+        &mut out,
+        "loaded_runtime_model_snapshot_sha256",
+        report.loaded_components.model_snapshot,
+    );
     push_optional_digest(
         &mut out,
         "disk_manifest_sha256",
@@ -227,6 +358,38 @@ pub fn render_processor_report_tsv(phase: &str, report: &LocalInventoryReport) -
     ));
     out.push_str("provenance\tUNVERIFIED\tcontent comparison only; no authenticated processor or issuer claim\n");
     out
+}
+
+fn push_optional_digest_value(out: &mut String, digest: Option<Digest>) {
+    match digest {
+        Some(value) => out.push_str(&format!("OBSERVED\t{}\n", oa_sha256::to_hex(&value))),
+        None => out.push_str("UNAVAILABLE\tcomponent constructor fingerprint not observed\n"),
+    }
+}
+
+fn push_component_match(
+    out: &mut String,
+    name: &str,
+    issued: Option<Digest>,
+    loaded: Option<Digest>,
+    disk: Option<Digest>,
+) {
+    let loaded_matches = match (issued, loaded) {
+        (None, None) => Some(true),
+        (Some(a), Some(b)) => Some(a == b),
+        _ => None,
+    };
+    let disk_matches = match (issued, disk) {
+        (None, None) => Some(true),
+        (Some(a), Some(b)) => Some(a == b),
+        _ => None,
+    };
+    push_optional_bool(
+        out,
+        &format!("{name}_loaded_matches_issued"),
+        loaded_matches,
+    );
+    push_optional_bool(out, &format!("{name}_disk_matches_issued"), disk_matches);
 }
 
 fn push_optional_digest(out: &mut String, name: &str, digest: Option<Digest>) {

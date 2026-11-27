@@ -743,6 +743,10 @@
     "OA-RWY-019",
     "OA-RWY-020",
     "OA-RWY-021",
+    "OA-RWY-022",
+    "OA-RWY-023",
+    "OA-RWY-024",
+    "OA-RWY-025",
     "OA-SAF-001",
     "OA-SAF-002",
     "OA-SAF-003",
@@ -9509,7 +9513,9 @@
         "OA-L23-002",
         "OA-RWY-020",
         "OA-RWY-021",
-        "OA-ENC-023"
+        "OA-ENC-023",
+        "OA-RWY-023",
+        "OA-RWY-025"
       ],
       "source_refs": [
         {
@@ -9571,6 +9577,14 @@
         {
           "document": "tools/oa-perf/tests/parallel_final.rs",
           "locator": "synthetic radar-scan \u2192 tracker-output \u2192 final-monitor integration fixture"
+        },
+        {
+          "document": "REQUIREMENTS.md",
+          "locator": "OA-RWY-025"
+        },
+        {
+          "document": "REQUIREMENTS.md",
+          "locator": "OA-RWY-023"
         }
       ],
       "verification_refs": [
@@ -9918,6 +9932,46 @@
           "requirement_id": "OA-RWY-016",
           "file": "tools/oa-perf/tests/parallel_final.rs",
           "test_name": "synthetic_1_2s_reports_track_a_blunder_from_caution_to_warning"
+        },
+        {
+          "requirement_id": "OA-RWY-023",
+          "file": "crates/oa-runway/src/terminal_aids.rs",
+          "test_name": "atpa_uses_warning_and_alert_lead_times_for_predicted_loss"
+        },
+        {
+          "requirement_id": "OA-RWY-023",
+          "file": "crates/oa-runway/src/terminal_aids.rs",
+          "test_name": "atpa_immediate_loss_and_nonclosing_cases_are_distinct"
+        },
+        {
+          "requirement_id": "OA-RWY-023",
+          "file": "crates/oa-runway/src/terminal_aids.rs",
+          "test_name": "atpa_invalid_pairs_and_capacity_refuse_atomically"
+        },
+        {
+          "requirement_id": "OA-RWY-023",
+          "file": "crates/oa-runway/src/terminal_aids.rs",
+          "test_name": "atpa_rejects_bad_or_unrepresentable_late_row_without_output_mutation"
+        },
+        {
+          "requirement_id": "OA-RWY-023",
+          "file": "crates/oa-runway/src/terminal_aids.rs",
+          "test_name": "atpa_accepts_all_32640_pairs_and_refuses_pair_32641"
+        },
+        {
+          "requirement_id": "OA-RWY-023",
+          "file": "crates/oa-runway/src/adaptation.rs",
+          "test_name": "profile_accepts_bounded_sorted_pair_and_returns_exact_adaptation_values"
+        },
+        {
+          "requirement_id": "OA-RWY-023",
+          "file": "crates/oa-runway/src/adaptation.rs",
+          "test_name": "profile_refuses_invalid_values_duplicate_or_unsorted_pairs"
+        },
+        {
+          "requirement_id": "OA-RWY-025",
+          "file": "tools/oa-regional-session/src/runtime.rs",
+          "test_name": "typed_runway_dispatch_audits_assignment_and_ack_without_clearing_alert"
         }
       ],
       "proof_refs": [
@@ -13655,7 +13709,9 @@
         "OA-MATH-037",
         "OA-MATH-038",
         "OA-MATH-039",
-        "OA-RWY-014"
+        "OA-RWY-014",
+        "OA-RWY-022",
+        "OA-RWY-024"
       ],
       "source_refs": [
         {
@@ -13665,6 +13721,14 @@
         {
           "document": "REQUIREMENTS.md",
           "locator": "OA-RWY-014"
+        },
+        {
+          "document": "REQUIREMENTS.md",
+          "locator": "OA-RWY-022"
+        },
+        {
+          "document": "REQUIREMENTS.md",
+          "locator": "OA-RWY-024"
         }
       ],
       "verification_refs": [
@@ -13987,6 +14051,66 @@
           "requirement_id": "OA-RWY-014",
           "file": "crates/oa-runway/src/final_monitor.rs",
           "test_name": "kord_parallel_pair_uses_public_runway_geometry"
+        },
+        {
+          "requirement_id": "OA-RWY-022",
+          "file": "crates/oa-runway/src/terminal_aids.rs",
+          "test_name": "translated_ghost_preserves_parent_offset_and_speed"
+        },
+        {
+          "requirement_id": "OA-RWY-022",
+          "file": "crates/oa-runway/src/terminal_aids.rs",
+          "test_name": "invalid_reference_or_capacity_refuses_without_partial_write"
+        },
+        {
+          "requirement_id": "OA-RWY-022",
+          "file": "crates/oa-runway/src/terminal_aids.rs",
+          "test_name": "crda_validates_late_rows_and_geometry_boundaries_before_writing"
+        },
+        {
+          "requirement_id": "OA-RWY-022",
+          "file": "crates/oa-runway/src/terminal_aids.rs",
+          "test_name": "crda_accepts_256_rows_and_refuses_257_before_write"
+        },
+        {
+          "requirement_id": "OA-RWY-022",
+          "file": "crates/oa-runway/src/adaptation.rs",
+          "test_name": "profile_accepts_bounded_sorted_pair_and_returns_exact_adaptation_values"
+        },
+        {
+          "requirement_id": "OA-RWY-022",
+          "file": "crates/oa-runway/src/adaptation.rs",
+          "test_name": "profile_refuses_invalid_values_duplicate_or_unsorted_pairs"
+        },
+        {
+          "requirement_id": "OA-RWY-022",
+          "file": "tools/oa-regional-session/src/runway_aids.rs",
+          "test_name": "reciprocal_end_preserves_parallel_designator_sides"
+        },
+        {
+          "requirement_id": "OA-RWY-024",
+          "file": "crates/oa-runway/src/adaptation.rs",
+          "test_name": "v1_pair_only_profile_is_not_complete_arv_coverage"
+        },
+        {
+          "requirement_id": "OA-RWY-024",
+          "file": "crates/oa-runway/src/adaptation.rs",
+          "test_name": "v2_complete_profile_preserves_sorted_runway_and_taxiway_paths"
+        },
+        {
+          "requirement_id": "OA-RWY-024",
+          "file": "crates/oa-runway/src/adaptation.rs",
+          "test_name": "v2_complete_coverage_requires_both_assigned_pair_runways_and_valid_order"
+        },
+        {
+          "requirement_id": "OA-RWY-024",
+          "file": "tools/oa-regional-session/src/runtime.rs",
+          "test_name": "runtime_arv_uses_the_shared_tracker_and_issued_candidate_paths"
+        },
+        {
+          "requirement_id": "OA-RWY-024",
+          "file": "tools/oa-regional-session/src/runtime.rs",
+          "test_name": "pair_only_adaptation_keeps_arv_unavailable_instead_of_reporting_clear"
         }
       ],
       "proof_refs": [
@@ -23473,6 +23597,30 @@
       "function": "runway_assignment_verification",
       "hazard_id": "HZ-CA-001",
       "rationale": "Engineering safety candidate: incomplete identity, malformed geometry, capacity overflow or partial output could bind an ARV result to the wrong flight or path. The bounded pure core preserves the full supplied identity and refuses before output mutation. The tests establish synthetic API behavior only; caller source binding and operational warning delivery are not implemented."
+    },
+    {
+      "id": "OA-RWY-022",
+      "function": "geodetic_and_navigation_geometry",
+      "hazard_id": "HZ-GEOMETRY-001",
+      "rationale": "Engineering safety candidate: an incorrect CRDA ghost transform could misplace the planning reference. The core uses only explicit caller-supplied source/target geometry and offset, validates inputs and capacity before writing, and preserves parent speed/order. It does not sequence arrivals, determine separation, validate facility geometry, or claim operational CRDA behavior."
+    },
+    {
+      "id": "OA-RWY-023",
+      "function": "conflict_alert",
+      "hazard_id": "HZ-CA-001",
+      "rationale": "Engineering safety candidate: an incorrect ATPA pair forecast could misclassify a caller-supplied pair's modeled spacing-loss lead time. The core requires matching caller runway/end/scan values, validates bounded pair rows before output mutation, and uses only supplied minimum spacing and constant closure. It is not a full facility ATPA implementation, approved minima, or operational alert-delivery claim."
+    },
+    {
+      "id": "OA-RWY-024",
+      "function": "geodetic_and_navigation_geometry",
+      "hazard_id": "HZ-GEOMETRY-001",
+      "rationale": "Engineering safety candidate: incomplete or incorrectly resolved issued candidate paths could turn an ARV path mismatch into a false clear. The bounded v2 codec preserves explicit runway/taxiway segment values and coverage claims; runtime resolves against the exact issued model, and incomplete coverage remains unavailable. Synthetic tests do not establish physical airport inventory completeness, source authentication, or operational ARV qualification."
+    },
+    {
+      "id": "OA-RWY-025",
+      "function": "runway_assignment_verification",
+      "hazard_id": "HZ-CA-001",
+      "rationale": "Engineering safety candidate: stale identity, incorrect role claims, missing audit receipts, or a false clear could corrupt runway assignment or ARV acknowledgement. The typed caller binds identity/view/generation, checks local principal-role claims and appends a receipt before mutation. No credential authentication, trusted go-around source, or facility authorization is implemented."
     },
     {
       "id": "OA-ENC-023",

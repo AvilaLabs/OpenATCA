@@ -21,17 +21,21 @@ const LEGACY_MANIFEST_VERSION: u16 = 1;
 const ISSUED_MANIFEST_VERSION: u16 = 2;
 const CA_PRESET_MANIFEST_VERSION: u16 = 3;
 const PVER_CATALOG_MANIFEST_VERSION: u16 = 4;
+const RUNWAY_AIDS_MANIFEST_VERSION: u16 = 5;
 const READER_API: u16 = 1;
 const MANIFEST_FILE: &str = "manifest.oag2";
 const SNAPSHOT_FILE: &str = "airspace.snapshot";
 const CA_PRESET_FILE: &str = "ca-preset.oaca";
 const PVER_CATALOG_FILE: &str = "pver-catalog.oapv";
+const RUNWAY_AIDS_FILE: &str = "runway-aids.oarw";
 pub const MAX_PVER_CATALOG_BYTES: usize = 16 * 1024;
+const MAX_RUNWAY_AIDS_BYTES: usize = oa_runway::adaptation::MAX_PROFILE_BYTES;
 const MAX_MANIFEST_BYTES: usize = 1024;
 const MAX_PACKAGE_BYTES: u64 = MAX_SNAPSHOT_BYTES as u64
     + MAX_MANIFEST_BYTES as u64
     + oa_ca::CA_PRESET_MAX_BYTES as u64
-    + MAX_PVER_CATALOG_BYTES as u64;
+    + MAX_PVER_CATALOG_BYTES as u64
+    + MAX_RUNWAY_AIDS_BYTES as u64;
 const MAX_RELEASE_BYTES: usize = 64;
 const MAX_FACILITY_BYTES: usize = 64;
 const MAX_CHANGE_REF_BYTES: usize = 128;
@@ -122,6 +126,8 @@ pub struct PackageIdentity {
     pub ca_preset_sha256: Option<Digest>,
     /// Present only for issued v4 packages; checksum of the exact PVER catalog companion.
     pub pver_catalog_sha256: Option<Digest>,
+    /// Present when the issued manifest includes a validated terminal-aid adaptation component.
+    pub runway_aids_sha256: Option<Digest>,
     /// Present for structured issues; the legacy package command has no issued version.
     pub adaptation_version: Option<u64>,
     /// Structured issue metadata; SHA-256 still does not authenticate these claims.
@@ -156,6 +162,7 @@ pub struct VerifiedPackage {
     identity: PackageIdentity,
     ca_preset: Option<Vec<u8>>,
     pver_catalog: Option<Vec<u8>>,
+    runway_aids: Option<Vec<u8>>,
 }
 
 impl VerifiedPackage {
@@ -178,6 +185,11 @@ impl VerifiedPackage {
     pub fn pver_catalog_bytes(&self) -> Option<&[u8]> {
         self.pver_catalog.as_deref()
     }
+
+    /// Exact versioned runway-aid bytes bound to the issued manifest, if present.
+    pub fn runway_aids_bytes(&self) -> Option<&[u8]> {
+        self.runway_aids.as_deref()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -188,6 +200,12 @@ struct CaPresetMeta {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct PverCatalogMeta {
+    len: u64,
+    sha256: Digest,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RunwayAidsMeta {
     len: u64,
     sha256: Digest,
 }
@@ -206,6 +224,7 @@ struct Manifest {
     issue: Option<IssueMetadata>,
     ca_preset: Option<CaPresetMeta>,
     pver_catalog: Option<PverCatalogMeta>,
+    runway_aids: Option<RunwayAidsMeta>,
 }
 
 fn field<'a>(bytes: &'a [u8], offset: &mut usize, len: usize) -> Result<&'a [u8], VerifyError> {
@@ -293,6 +312,7 @@ fn parse_manifest(bytes: &[u8]) -> Result<Manifest, VerifyError> {
         && version != ISSUED_MANIFEST_VERSION
         && version != CA_PRESET_MANIFEST_VERSION
         && version != PVER_CATALOG_MANIFEST_VERSION
+        && version != RUNWAY_AIDS_MANIFEST_VERSION
     {
         return Err(VerifyError::UnsupportedManifestVersion(version));
     }
@@ -306,6 +326,7 @@ fn parse_manifest(bytes: &[u8]) -> Result<Manifest, VerifyError> {
     let count_valid = match version {
         CA_PRESET_MANIFEST_VERSION => component_count == 2,
         PVER_CATALOG_MANIFEST_VERSION => component_count == 2 || component_count == 3,
+        RUNWAY_AIDS_MANIFEST_VERSION => component_count == 3 || component_count == 4,
         _ => component_count == 1,
     };
     if !count_valid {
@@ -347,9 +368,10 @@ fn parse_manifest(bytes: &[u8]) -> Result<Manifest, VerifyError> {
     } else {
         None
     };
-    let ca_preset = if version == CA_PRESET_MANIFEST_VERSION
+    let has_ca_preset = version == CA_PRESET_MANIFEST_VERSION
         || (version == PVER_CATALOG_MANIFEST_VERSION && component_count == 3)
-    {
+        || (version == RUNWAY_AIDS_MANIFEST_VERSION && component_count == 4);
+    let ca_preset = if has_ca_preset {
         let len = u64_at(bytes, &mut offset)?;
         let digest = field(bytes, &mut offset, 32)?
             .try_into()
@@ -364,15 +386,31 @@ fn parse_manifest(bytes: &[u8]) -> Result<Manifest, VerifyError> {
     } else {
         None
     };
-    let pver_catalog = if version == PVER_CATALOG_MANIFEST_VERSION {
+    let pver_catalog =
+        if version == PVER_CATALOG_MANIFEST_VERSION || version == RUNWAY_AIDS_MANIFEST_VERSION {
+            let len = u64_at(bytes, &mut offset)?;
+            let digest = field(bytes, &mut offset, 32)?
+                .try_into()
+                .map_err(|_| VerifyError::Truncated)?;
+            if len == 0 || len > MAX_PVER_CATALOG_BYTES as u64 {
+                return Err(VerifyError::Oversize("PVER catalog"));
+            }
+            Some(PverCatalogMeta {
+                len,
+                sha256: digest,
+            })
+        } else {
+            None
+        };
+    let runway_aids = if version == RUNWAY_AIDS_MANIFEST_VERSION {
         let len = u64_at(bytes, &mut offset)?;
         let digest = field(bytes, &mut offset, 32)?
             .try_into()
             .map_err(|_| VerifyError::Truncated)?;
-        if len == 0 || len > MAX_PVER_CATALOG_BYTES as u64 {
-            return Err(VerifyError::Oversize("PVER catalog"));
+        if len == 0 || len > MAX_RUNWAY_AIDS_BYTES as u64 {
+            return Err(VerifyError::Oversize("runway-aid adaptation"));
         }
-        Some(PverCatalogMeta {
+        Some(RunwayAidsMeta {
             len,
             sha256: digest,
         })
@@ -453,6 +491,7 @@ fn parse_manifest(bytes: &[u8]) -> Result<Manifest, VerifyError> {
         issue,
         ca_preset,
         pver_catalog,
+        runway_aids,
     };
     if encode_manifest(&manifest)?.as_slice() != bytes {
         return Err(VerifyError::NonCanonical);
@@ -472,20 +511,27 @@ fn encode_manifest(manifest: &Manifest) -> Result<Vec<u8>, VerifyError> {
         && manifest.schema_version != ISSUED_MANIFEST_VERSION
         && manifest.schema_version != CA_PRESET_MANIFEST_VERSION
         && manifest.schema_version != PVER_CATALOG_MANIFEST_VERSION
+        && manifest.schema_version != RUNWAY_AIDS_MANIFEST_VERSION
     {
         return Err(VerifyError::UnsupportedManifestVersion(
             manifest.schema_version,
         ));
     }
+    let has_pver_catalog = matches!(
+        manifest.schema_version,
+        PVER_CATALOG_MANIFEST_VERSION | RUNWAY_AIDS_MANIFEST_VERSION
+    );
+    let has_runway_aids = matches!(manifest.schema_version, RUNWAY_AIDS_MANIFEST_VERSION);
     if (manifest.schema_version == LEGACY_MANIFEST_VERSION) != manifest.issue.is_none()
         || (manifest.schema_version == CA_PRESET_MANIFEST_VERSION
             && (manifest.ca_preset.is_none() || manifest.issue.is_none()))
         || (manifest.schema_version != CA_PRESET_MANIFEST_VERSION
             && manifest.schema_version != PVER_CATALOG_MANIFEST_VERSION
+            && manifest.schema_version != RUNWAY_AIDS_MANIFEST_VERSION
             && manifest.ca_preset.is_some())
-        || (manifest.schema_version == PVER_CATALOG_MANIFEST_VERSION)
-            != manifest.pver_catalog.is_some()
-        || (manifest.schema_version == PVER_CATALOG_MANIFEST_VERSION && manifest.issue.is_none())
+        || has_pver_catalog != manifest.pver_catalog.is_some()
+        || has_runway_aids != manifest.runway_aids.is_some()
+        || (manifest.schema_version >= PVER_CATALOG_MANIFEST_VERSION && manifest.issue.is_none())
     {
         return Err(VerifyError::InvalidField("manifest issue schema"));
     }
@@ -515,12 +561,12 @@ fn encode_manifest(manifest: &Manifest) -> Result<Vec<u8>, VerifyError> {
     let issue_text_bytes = manifest.issue.as_ref().map_or(0, |issue| {
         issue.issuer_principal_id.len() + issue.approver_principal_id.len() + issue.reason.len()
     });
-    let fixed_bytes = if manifest.schema_version == CA_PRESET_MANIFEST_VERSION {
-        ISSUED_HEADER_BYTES + 40
-    } else if manifest.schema_version == PVER_CATALOG_MANIFEST_VERSION {
-        ISSUED_HEADER_BYTES + 40 + if manifest.ca_preset.is_some() { 40 } else { 0 }
-    } else if manifest.issue.is_some() {
-        ISSUED_HEADER_BYTES
+    let component_metadata_bytes = (usize::from(manifest.ca_preset.is_some())
+        + usize::from(manifest.pver_catalog.is_some())
+        + usize::from(manifest.runway_aids.is_some()))
+        * 40;
+    let fixed_bytes = if manifest.issue.is_some() {
+        ISSUED_HEADER_BYTES + component_metadata_bytes
     } else {
         FIXED_HEADER_BYTES
     };
@@ -549,17 +595,10 @@ fn encode_manifest(manifest: &Manifest) -> Result<Vec<u8>, VerifyError> {
         u8::try_from(manifest.change_ref.len())
             .map_err(|_| VerifyError::InvalidField("change reference length"))?,
     );
-    let component_count = if manifest.schema_version == CA_PRESET_MANIFEST_VERSION {
-        2
-    } else if manifest.schema_version == PVER_CATALOG_MANIFEST_VERSION {
-        if manifest.ca_preset.is_some() {
-            3
-        } else {
-            2
-        }
-    } else {
-        1
-    };
+    let component_count = 1
+        + u8::from(manifest.ca_preset.is_some())
+        + u8::from(manifest.pver_catalog.is_some())
+        + u8::from(manifest.runway_aids.is_some());
     bytes.push(component_count);
     bytes.extend_from_slice(&manifest.snapshot_len.to_le_bytes());
     bytes.extend_from_slice(&manifest.snapshot_sha256);
@@ -594,6 +633,13 @@ fn encode_manifest(manifest: &Manifest) -> Result<Vec<u8>, VerifyError> {
         }
         bytes.extend_from_slice(&catalog.len.to_le_bytes());
         bytes.extend_from_slice(&catalog.sha256);
+    }
+    if let Some(runway_aids) = manifest.runway_aids {
+        if runway_aids.len == 0 || runway_aids.len > MAX_RUNWAY_AIDS_BYTES as u64 {
+            return Err(VerifyError::Oversize("runway-aid adaptation"));
+        }
+        bytes.extend_from_slice(&runway_aids.len.to_le_bytes());
+        bytes.extend_from_slice(&runway_aids.sha256);
     }
     bytes.extend_from_slice(manifest.release.as_bytes());
     bytes.extend_from_slice(manifest.facility.as_bytes());
@@ -750,6 +796,7 @@ fn decode_verified(
     snapshot_bytes: Vec<u8>,
     ca_preset: Option<Vec<u8>>,
     pver_catalog: Option<Vec<u8>>,
+    runway_aids: Option<Vec<u8>>,
 ) -> Result<VerifiedPackage, VerifyError> {
     let actual_len =
         u64::try_from(snapshot_bytes.len()).map_err(|_| VerifyError::Oversize("snapshot"))?;
@@ -818,6 +865,28 @@ fn decode_verified(
             "unexpected PVER catalog component",
         ));
     }
+    if let Some(meta) = manifest.runway_aids {
+        let bytes = runway_aids
+            .as_ref()
+            .ok_or(VerifyError::InvalidField("runway-aid component missing"))?;
+        if bytes.len() as u64 != meta.len {
+            return Err(VerifyError::ComponentLengthMismatch {
+                expected: meta.len,
+                actual: bytes.len() as u64,
+            });
+        }
+        let actual = sha256(bytes);
+        if actual != meta.sha256 {
+            return Err(VerifyError::ComponentDigestMismatch {
+                expected: oa_sha256::to_hex(&meta.sha256),
+                actual: oa_sha256::to_hex(&actual),
+            });
+        }
+        oa_runway::adaptation::parse(bytes)
+            .map_err(|_| VerifyError::InvalidField("runway-aid adaptation schema"))?;
+    } else if runway_aids.is_some() {
+        return Err(VerifyError::InvalidField("unexpected runway-aid component"));
+    }
     Ok(VerifiedPackage {
         model,
         identity: PackageIdentity {
@@ -829,6 +898,7 @@ fn decode_verified(
             snapshot_bytes: actual_len,
             ca_preset_sha256: manifest.ca_preset.map(|preset| preset.sha256),
             pver_catalog_sha256: manifest.pver_catalog.map(|catalog| catalog.sha256),
+            runway_aids_sha256: manifest.runway_aids.map(|profile| profile.sha256),
             adaptation_version: manifest
                 .issue
                 .as_ref()
@@ -837,6 +907,7 @@ fn decode_verified(
         },
         ca_preset,
         pver_catalog,
+        runway_aids,
     })
 }
 
@@ -887,6 +958,15 @@ pub fn verify_current(
             "component set does not match manifest schema",
         ));
     }
+    let has_runway_aids = before
+        .entries
+        .iter()
+        .any(|(name, _)| name == RUNWAY_AIDS_FILE);
+    if has_runway_aids != manifest.runway_aids.is_some() {
+        return Err(VerifyError::InvalidField(
+            "runway-aid component set does not match manifest schema",
+        ));
+    }
     if manifest.snapshot_len > MAX_SNAPSHOT_BYTES as u64 {
         return Err(VerifyError::Oversize("snapshot declared by manifest"));
     }
@@ -929,6 +1009,20 @@ pub fn verify_current(
     } else {
         None
     };
+    let runway_aids_bytes = if let Some(meta) = manifest.runway_aids {
+        let stamp = inventory_stamp(&before, RUNWAY_AIDS_FILE)?;
+        Some(read_guarded(
+            &root.join(RUNWAY_AIDS_FILE),
+            MAX_RUNWAY_AIDS_BYTES,
+            "runway-aid adaptation",
+            Some(meta.len),
+            stamp,
+            root,
+            (before.device, before.inode),
+        )?)
+    } else {
+        None
+    };
     let after = check_package_entries(root)?;
     if after != before {
         return Err(VerifyError::PackageChanged("bounded package inventory"));
@@ -939,6 +1033,7 @@ pub fn verify_current(
         snapshot_bytes,
         ca_preset_bytes,
         pver_catalog_bytes,
+        runway_aids_bytes,
     )
 }
 
@@ -970,6 +1065,7 @@ fn check_package_entries(root: &Path) -> Result<PackageInventory, VerifyError> {
             && name != SNAPSHOT_FILE
             && name != CA_PRESET_FILE
             && name != PVER_CATALOG_FILE
+            && name != RUNWAY_AIDS_FILE
         {
             return Err(VerifyError::InvalidField("unreferenced package component"));
         }
@@ -991,7 +1087,7 @@ fn check_package_entries(root: &Path) -> Result<PackageInventory, VerifyError> {
             return Err(VerifyError::InvalidField("duplicate package component"));
         }
         names.push((name, entry_stamp));
-        if names.len() > 4 {
+        if names.len() > 5 {
             return Err(VerifyError::InvalidField("unreferenced package component"));
         }
     }
@@ -1003,12 +1099,35 @@ fn check_package_entries(root: &Path) -> Result<PackageInventory, VerifyError> {
     if component_names != [SNAPSHOT_FILE, MANIFEST_FILE]
         && component_names != [SNAPSHOT_FILE, CA_PRESET_FILE, MANIFEST_FILE]
         && component_names != [SNAPSHOT_FILE, MANIFEST_FILE, PVER_CATALOG_FILE]
+        && component_names != [SNAPSHOT_FILE, MANIFEST_FILE, RUNWAY_AIDS_FILE]
         && component_names
             != [
                 SNAPSHOT_FILE,
                 CA_PRESET_FILE,
                 MANIFEST_FILE,
                 PVER_CATALOG_FILE,
+            ]
+        && component_names
+            != [
+                SNAPSHOT_FILE,
+                CA_PRESET_FILE,
+                MANIFEST_FILE,
+                RUNWAY_AIDS_FILE,
+            ]
+        && component_names
+            != [
+                SNAPSHOT_FILE,
+                MANIFEST_FILE,
+                PVER_CATALOG_FILE,
+                RUNWAY_AIDS_FILE,
+            ]
+        && component_names
+            != [
+                SNAPSHOT_FILE,
+                CA_PRESET_FILE,
+                MANIFEST_FILE,
+                PVER_CATALOG_FILE,
+                RUNWAY_AIDS_FILE,
             ]
     {
         return Err(VerifyError::InvalidField("package component set"));
@@ -1066,6 +1185,7 @@ pub fn manifest_for_snapshot(
         issue: None,
         ca_preset: None,
         pver_catalog: None,
+        runway_aids: None,
     };
     let bytes = encode_manifest(&manifest)?;
     let digest = sha256(&bytes);
@@ -1114,6 +1234,7 @@ fn issued_manifest_for_snapshot(
         issue: Some(issue),
         ca_preset: None,
         pver_catalog: None,
+        runway_aids: None,
     };
     let bytes = encode_manifest(&manifest)?;
     let digest = sha256(&bytes);
@@ -1281,6 +1402,7 @@ pub fn issue_new_package_with_ca_preset(
             sha256: sha256(ca_preset),
         }),
         pver_catalog: None,
+        runway_aids: None,
     };
     let manifest_bytes = encode_manifest(&manifest)?;
     let digest = sha256(&manifest_bytes);
@@ -1378,6 +1500,7 @@ pub fn issue_new_package_with_pver_catalog(
             len: pver_catalog.len() as u64,
             sha256: sha256(pver_catalog),
         }),
+        runway_aids: None,
     };
     let manifest_bytes = encode_manifest(&manifest)?;
     let digest = sha256(&manifest_bytes);
@@ -1392,6 +1515,117 @@ pub fn issue_new_package_with_pver_catalog(
     verify_current(root, digest).map_err(|e| {
         VerifyError::Output(format!(
             "issued v4 package read-back verification failed; directory retained: {e}"
+        ))
+    })?;
+    Ok((adaptation_version, digest))
+}
+
+/// Issue a package that adds verified runway-aid adaptation while carrying forward the previous
+/// package's PVER and CA components byte-for-byte. The profile remains a caller-issued input;
+/// this function validates structure and binds its digest, but does not authenticate its source.
+#[allow(clippy::too_many_arguments)]
+pub fn issue_new_package_with_runway_aids(
+    root: &Path,
+    snapshot_bytes: &[u8],
+    runway_aids: &[u8],
+    release: &str,
+    facility: &str,
+    change_ref: &str,
+    previous_root: &Path,
+    previous_manifest_sha256: Digest,
+    change_class: ChangeClass,
+    issuer_principal_id: &str,
+    approver_principal_id: &str,
+    reason: &str,
+) -> Result<(u64, Digest), VerifyError> {
+    if runway_aids.is_empty() || runway_aids.len() > MAX_RUNWAY_AIDS_BYTES {
+        return Err(VerifyError::Oversize("runway-aid adaptation"));
+    }
+    oa_runway::adaptation::parse(runway_aids)
+        .map_err(|_| VerifyError::InvalidField("runway-aid adaptation schema"))?;
+    let previous = verify_current(previous_root, previous_manifest_sha256)?;
+    if previous.identity().facility != facility {
+        return Err(VerifyError::InvalidField(
+            "previous package facility differs from issued facility",
+        ));
+    }
+    let adaptation_version = previous
+        .identity()
+        .adaptation_version
+        .unwrap_or(0)
+        .checked_add(1)
+        .ok_or(VerifyError::InvalidField("adaptation version overflow"))?;
+    if (adaptation_version == 1) != (change_class == ChangeClass::Initial) {
+        return Err(VerifyError::InvalidField(
+            "initial change class/version mismatch",
+        ));
+    }
+    validate_issue_fields(issuer_principal_id, approver_principal_id, reason)?;
+    let model = decode(snapshot_bytes).map_err(|e| VerifyError::SnapshotDecode(e.to_string()))?;
+    if encode(&model).map_err(|e| VerifyError::SnapshotDecode(e.to_string()))? != snapshot_bytes {
+        return Err(VerifyError::NonCanonical);
+    }
+    if model.meta.artcc != facility {
+        return Err(VerifyError::FacilityMismatch {
+            manifest: facility.to_owned(),
+            snapshot: model.meta.artcc,
+        });
+    }
+    let issue = IssueMetadata {
+        adaptation_version,
+        previous_manifest_sha256,
+        change_class,
+        issuer_principal_id: issuer_principal_id.to_owned(),
+        approver_principal_id: approver_principal_id.to_owned(),
+        reason: reason.to_owned(),
+    };
+    let prior_ca = previous.ca_preset_bytes();
+    let prior_pver = previous.pver_catalog_bytes();
+    if prior_pver.is_none() {
+        return Err(VerifyError::InvalidField(
+            "runway-aid package requires an existing PVER catalog",
+        ));
+    }
+    let version = RUNWAY_AIDS_MANIFEST_VERSION;
+    let manifest = Manifest {
+        schema_version: version,
+        reader_min: READER_API,
+        reader_max: READER_API,
+        release: release.to_owned(),
+        facility: facility.to_owned(),
+        change_ref: change_ref.to_owned(),
+        snapshot_len: snapshot_bytes.len() as u64,
+        snapshot_sha256: sha256(snapshot_bytes),
+        issue: Some(issue),
+        ca_preset: prior_ca.map(|bytes| CaPresetMeta {
+            len: bytes.len() as u64,
+            sha256: sha256(bytes),
+        }),
+        pver_catalog: prior_pver.map(|bytes| PverCatalogMeta {
+            len: bytes.len() as u64,
+            sha256: sha256(bytes),
+        }),
+        runway_aids: Some(RunwayAidsMeta {
+            len: runway_aids.len() as u64,
+            sha256: sha256(runway_aids),
+        }),
+    };
+    let manifest_bytes = encode_manifest(&manifest)?;
+    let digest = sha256(&manifest_bytes);
+    oa_sealed::refuse(root).map_err(VerifyError::Path)?;
+    fs::create_dir(root).map_err(|e| VerifyError::Output(format!("{}: {e}", root.display())))?;
+    write_new_file(&root.join(SNAPSHOT_FILE), snapshot_bytes)?;
+    if let Some(bytes) = prior_ca {
+        write_new_file(&root.join(CA_PRESET_FILE), bytes)?;
+    }
+    if let Some(bytes) = prior_pver {
+        write_new_file(&root.join(PVER_CATALOG_FILE), bytes)?;
+    }
+    write_new_file(&root.join(RUNWAY_AIDS_FILE), runway_aids)?;
+    write_new_file(&root.join(MANIFEST_FILE), &manifest_bytes)?;
+    verify_current(root, digest).map_err(|e| {
+        VerifyError::Output(format!(
+            "issued runway-aid package read-back verification failed; directory retained: {e}"
         ))
     })?;
     Ok((adaptation_version, digest))
@@ -1543,6 +1777,77 @@ mod tests {
         fs::write(root.join(PVER_CATALOG_FILE), b"tampered").expect("tamper synthetic catalog");
         assert!(verify_current(&root, pin).is_err());
         let _ = fs::remove_dir_all(previous_root);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn v5_runway_aids_extend_pver_manifest_and_bind_profile_bytes() {
+        let (_, snapshot) = sample();
+        let (legacy_root, legacy_pin) = make_package();
+        let pver_root = temp_root("runway-pver-base");
+        let catalog = b"schema,synthetic-pver-v1\nsynthetic-pver-v1,full,T1,410000000,-870000000,1.0,2.0,100.0,1.0\n";
+        let (_, pver_pin) = issue_new_package_with_pver_catalog(
+            &pver_root,
+            &snapshot,
+            catalog,
+            None,
+            "release",
+            "ZAU",
+            "pver",
+            &legacy_root,
+            legacy_pin,
+            ChangeClass::Initial,
+            "issuer-a",
+            "approver-b",
+            "test PVER",
+        )
+        .expect("v4 baseline package verifies");
+        let mut profile =
+            vec![0u8; oa_runway::adaptation::HEADER_BYTES + oa_runway::adaptation::PAIR_BYTES];
+        profile[..8].copy_from_slice(oa_runway::adaptation::MAGIC);
+        profile[8..10].copy_from_slice(&1u16.to_le_bytes());
+        let row = &mut profile[10..];
+        row[..4].copy_from_slice(b"KORD");
+        row[4..8].copy_from_slice(&1u32.to_le_bytes());
+        row[8..11].copy_from_slice(b"27L");
+        row[11..13].copy_from_slice(&150u16.to_le_bytes());
+        row[13..17].copy_from_slice(&2u32.to_le_bytes());
+        row[17..20].copy_from_slice(b"27R");
+        row[20..22].copy_from_slice(&150u16.to_le_bytes());
+        row[22..24].copy_from_slice(&2_000u16.to_le_bytes());
+        row[24..26].copy_from_slice(&3_100u16.to_le_bytes());
+        row[26..30].copy_from_slice(&10_000u32.to_le_bytes());
+        row[30..34].copy_from_slice(&1_200u32.to_le_bytes());
+        row[34..38].copy_from_slice(&10_000u32.to_le_bytes());
+        row[38..42].copy_from_slice(&50_000u32.to_le_bytes());
+        row[42..44].copy_from_slice(&500u16.to_le_bytes());
+        assert!(oa_runway::adaptation::parse(&profile).is_ok());
+        let root = temp_root("runway-aids-v5");
+        let (version, pin) = issue_new_package_with_runway_aids(
+            &root,
+            &snapshot,
+            &profile,
+            "release",
+            "ZAU",
+            "runway-aids",
+            &pver_root,
+            pver_pin,
+            ChangeClass::Routine,
+            "issuer-c",
+            "approver-d",
+            "explicit terminal aid adaptation",
+        )
+        .expect("v5 package verifies by readback");
+        assert_eq!(version, 2);
+        let verified = verify_current(&root, pin).expect("v5 manifest verifies");
+        assert_eq!(verified.pver_catalog_bytes(), Some(catalog.as_slice()));
+        assert_eq!(verified.runway_aids_bytes(), Some(profile.as_slice()));
+        assert_eq!(
+            verified.identity().runway_aids_sha256,
+            Some(sha256(&profile))
+        );
+        let _ = fs::remove_dir_all(legacy_root);
+        let _ = fs::remove_dir_all(pver_root);
         let _ = fs::remove_dir_all(root);
     }
 
@@ -1727,7 +2032,7 @@ mod tests {
         let (manifest_bytes, pin) = manifest_for_snapshot(&snapshot, "test-1", "ZAU", "CHG-17")
             .expect("manifest is derived from the supplied snapshot");
         let manifest = parse_manifest(&manifest_bytes).expect("canonical manifest");
-        let verified = decode_verified(manifest, pin, snapshot.clone(), None, None)
+        let verified = decode_verified(manifest, pin, snapshot.clone(), None, None, None)
             .expect("verified model is decoded from the exact snapshot bytes");
         assert_eq!(verified.model(), &model);
         assert_ne!(verified.model(), &different_same_facility);

@@ -265,6 +265,8 @@ pub const FLAG_SAMPLE_OUTSIDE_WINDOW: u32 = 1 << 20;
 pub const FLAG_INVALID_TIME: u32 = 1 << 21;
 pub const FLAG_EPOCH_ORDER_UNKNOWN: u32 = 1 << 22;
 pub const FLAG_EPOCH_REGRESSION: u32 = 1 << 23;
+/// At least one process-role-required issued adaptation companion is unavailable or differs.
+pub const FLAG_ADAPTATION_COMPONENT_INCOMPLETE: u32 = 1 << 24;
 
 const INCOMPLETE_FLAGS: u32 = FLAG_MISSING_PROCESSOR
     | FLAG_MISSING_SEQUENCE
@@ -278,7 +280,8 @@ const INCOMPLETE_FLAGS: u32 = FLAG_MISSING_PROCESSOR
     | FLAG_SEQUENCE_OUTSIDE_WINDOW
     | FLAG_SAMPLE_OUTSIDE_WINDOW
     | FLAG_INVALID_TIME
-    | FLAG_EPOCH_ORDER_UNKNOWN;
+    | FLAG_EPOCH_ORDER_UNKNOWN
+    | FLAG_ADAPTATION_COMPONENT_INCOMPLETE;
 const MISMATCH_FLAGS: u32 = FLAG_SOURCE_MISMATCH
     | FLAG_EPOCH_MISMATCH
     | FLAG_CLOCK_DOMAIN_MISMATCH
@@ -325,6 +328,8 @@ pub struct ProcessorReport {
     pub disk_adaptation_sha256: [u8; 32],
     /// Number of source-reported lost events known at this sample.
     pub telemetry_loss_events: u32,
+    /// Caller-computed companion coverage; false is a blocking incomplete inventory claim.
+    pub adaptation_components_complete: bool,
 }
 
 /// Per-processor counters and flags. Every expected processor has one row, including missing ones.

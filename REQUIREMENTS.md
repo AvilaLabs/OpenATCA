@@ -422,6 +422,13 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
   manifest SHA-256 identifies those exact bytes; recorded principal IDs are claims, not authenticated approval.
   Startup and on-demand processor inventories compare each processor's loaded and on-disk adaptation digest to
   the issued manifest digest, retaining every expected processor and any mismatch. The current
+  component inventory also compares each manifest-issued CA preset, PVER catalog and runway-aid companion
+  with its independently observed loaded digest and the verified disk digest. Fleet role applicability comes
+  only from a versioned independent expected roster; a processor report cannot self-declare a component
+  `NotApplicable`. An issued required companion that is absent or differs prevents a complete aggregate;
+  an absent companion remains `NotIssued`. A process role may make CA/PVER or runway loading inapplicable only
+  where that role explicitly says so. The model snapshot comparison fields retain their existing meaning.
+  The current
   `oa-techops::assess_inventory` result remains `ClaimsMatchUnverified` at best; it is integrity/status evidence,
   not an authenticated issuer, deployment attestation, or operational certification.
 - **OA-ADAPT-004** `oa-adapt issue --ca-preset` accepts a bounded versioned CA preset only after the shared
@@ -7663,12 +7670,14 @@ FAA value.
   `warning_is_limited_to_the_final_segment_endpoints` and `predicted_zone_entry_beyond_final_endpoint_is_clear`.
 - **OA-RWY-020** The ARV core evaluates caller-supplied predicted track positions against the assigned runway and
   candidate runway/taxiway centerlines, using a configured lateral tolerance and heading tolerance within 5 NM of
-  each candidate threshold. A match to the assigned runway is clear; an aligned match to another parallel runway or
-  taxiway is reported distinctly. A latched alert clears only when the caller supplies an authenticated go-around
+  each candidate threshold. A match only to the assigned runway is clear; an aligned match to another parallel
+  runway or taxiway is reported distinctly, and simultaneous assigned/other-path matches are AmbiguousPath rather
+  than Clear. A latched alert clears only when the caller supplies an authenticated go-around
   event. The core neither authenticates that event nor claims an operational controller warning. Tested by
   `assigned_runway_match_is_clear_and_keeps_full_identity`, `parallel_runway_and_taxiway_mismatches_alert`,
   `only_authenticated_go_around_clears_latched_alert` and
-  `threshold_range_and_heading_tolerances_bound_candidate_matches`.
+  `threshold_range_and_heading_tolerances_bound_candidate_matches` and
+  `simultaneous_assigned_and_other_path_matches_are_ambiguous_not_clear`.
 - **OA-RWY-021** ARV consumes complete bounded structure-of-arrays inputs for at most 256 unique full flight
   identities and 512 candidate paths with strictly increasing path IDs. It refuses missing assignments, malformed
   columns and invalid geometry before output mutation, and preserves all 36 bytes of identity in output. A checked
@@ -7677,6 +7686,26 @@ FAA value.
   `invalid_late_row_and_duplicate_identity_leave_output_unchanged`,
   `malformed_and_over_capacity_inputs_refuse_before_mutation`,
   `maximum_capacities_fit_checked_work_budget` and `candidate_path_ids_must_be_strictly_increasing`.
+- **OA-RWY-022** The bounded CRDA core transforms caller-supplied parent positions from a directed source line to a
+  directed target line with an explicit signed along-line offset, preserving input row order and parent ground speed.
+  It validates all geometry, rows and output capacity before writing and refuses invalid or oversized input atomically.
+  This is a planning-coordinate transform only; it does not sequence arrivals, determine separation or establish a
+  facility's CRDA configuration.
+- **OA-RWY-023** The bounded ATPA core evaluates caller-supplied lead/trail pairs only when runway, runway end and scan
+  timestamp match, using caller-supplied along-track positions, speeds and minimum spacing. Its constant-closure
+  forecast reports immediate alert when spacing is already violated, Alert at or within 24 seconds, Warning at or
+  within 45 seconds before predicted minimum-spacing loss, and no predicted loss when closure is nonpositive. It
+  validates the full input and output capacity before writing, with at most 32,640 pairs per call. Minimum spacing is
+  supplied adaptation; this core is not a full facility ATPA implementation or approved separation determination.
+- **OA-RWY-024** Runway-aid adaptation v2 carries a bounded sorted, directed-segment candidate-path set, explicit
+  coverage scope, and WGS-84 endpoint/width values for runway and taxiway centerlines. Runtime resolves it against the
+  exact issued model; invalid or incomplete candidate data remain unavailable, never clear. Package hashes establish
+  byte identity only, not geometry authority or physical inventory completeness.
+- **OA-RWY-025** The regional runway-aid caller accepts assignment and ARV acknowledgement only through typed operator
+  commands, current full identity/generation/view checks, configured principal role and an appended audit receipt
+  before mutation. The runtime reuses surveillance forecasts and issued paths; stale, unconfirmed, coasting,
+  incomplete-coverage, ambiguous or over-budget inputs remain unavailable. No trusted go-around source is integrated,
+  so acknowledgements do not clear or suppress latched ARV alerts.
 
 ## Feed damage check (oa-feed-gaps, P-006 section 6 and P-007)
 
@@ -7913,7 +7942,8 @@ claims; a match is explicitly unverified.
   findings. It does not infer an expected population from received rows.
 - **OA-TECHOPS-003** Source, epoch, clock domain, release-manifest, firmware, running-image, loaded
   adaptation and on-disk adaptation claims are compared exactly. A mismatch remains named and
-  counted. Even complete equality yields `ClaimsMatchUnverified`, never `PASS`, because this core
+  counted. The adaptation-companion completeness input is retained as an incomplete flag in both processor
+  and aggregate results. Even complete equality yields `ClaimsMatchUnverified`, never `PASS`, because this core
   has no authenticated evidence or profile authority.
 - **OA-TECHOPS-004** A metric window retains its profile/metric/processor/epoch/clock identity,
   expected sample denominator, received/unique/missing counts, freshness and loss findings, observed

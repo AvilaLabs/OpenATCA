@@ -75,7 +75,7 @@ fn command_binary_forbids_unsafe_code() {
 
 // REQ: OA-CERT-001
 #[test]
-fn issue_cli_binds_catalog_companion_and_reads_it_back_from_v4() {
+fn issue_cli_binds_catalog_then_runway_aids_and_reads_v5_back() {
     let scratch = Scratch::new("issue-pver-v4");
     let legacy_snapshot = include_bytes!("../../oa-ca/tests/fixtures/a3-empty-synthetic.oag2");
     let model = decode(legacy_snapshot).expect("legacy v3 synthetic snapshot");
@@ -159,6 +159,79 @@ fn issue_cli_binds_catalog_companion_and_reads_it_back_from_v4() {
         verified.identity().pver_catalog_sha256,
         Some(sha256(catalog))
     );
+
+    let runway_profile = {
+        let mut bytes =
+            vec![0u8; oa_runway::adaptation::HEADER_BYTES + oa_runway::adaptation::PAIR_BYTES];
+        bytes[..8].copy_from_slice(oa_runway::adaptation::MAGIC);
+        bytes[8..10].copy_from_slice(&1u16.to_le_bytes());
+        let row = &mut bytes[10..];
+        row[..4].copy_from_slice(b"KORD");
+        row[4..8].copy_from_slice(&1u32.to_le_bytes());
+        row[8..11].copy_from_slice(b"27L");
+        row[11..13].copy_from_slice(&150u16.to_le_bytes());
+        row[13..17].copy_from_slice(&2u32.to_le_bytes());
+        row[17..20].copy_from_slice(b"27R");
+        row[20..22].copy_from_slice(&150u16.to_le_bytes());
+        row[22..24].copy_from_slice(&2_000u16.to_le_bytes());
+        row[24..26].copy_from_slice(&3_100u16.to_le_bytes());
+        row[26..30].copy_from_slice(&10_000u32.to_le_bytes());
+        row[30..34].copy_from_slice(&1_200u32.to_le_bytes());
+        row[34..38].copy_from_slice(&10_000u32.to_le_bytes());
+        row[38..42].copy_from_slice(&50_000u32.to_le_bytes());
+        row[42..44].copy_from_slice(&500u16.to_le_bytes());
+        bytes
+    };
+    let runway_profile_path = scratch.path("runway-aids.oarw");
+    std::fs::write(&runway_profile_path, &runway_profile).expect("synthetic runway profile");
+    let runway_output = scratch.path("issued-runway-aids");
+    let next_count = text
+        .lines()
+        .find_map(|line| line.strip_prefix("audit_count\t"))
+        .expect("first issue audit count");
+    let next_tail = text
+        .lines()
+        .find_map(|line| line.strip_prefix("audit_tail\t"))
+        .expect("first issue audit tail");
+    let pin_hex = to_hex(&pin);
+    let mut v5_args = args(&["issue"]);
+    for pair in issue_args.get(1..).unwrap_or_default().chunks_exact(2) {
+        let [flag, value] = pair else { continue };
+        if flag == "--pver-catalog" {
+            continue;
+        }
+        let replacement = match flag.as_str() {
+            "--out-root" => runway_output.to_str().unwrap(),
+            "--previous-package-root" => output.to_str().unwrap(),
+            "--previous-manifest-sha256" => &pin_hex,
+            "--change-ref" => "RUNWAY-AID-ISSUE-2",
+            "--change-class" => "routine",
+            "--reason" => "issue synthetic runway-aid companion",
+            "--audit-count" => next_count,
+            "--audit-tail" => next_tail,
+            "--audit-time-ns" => "1800000000000000001",
+            _ => value,
+        };
+        v5_args.push(flag.clone());
+        v5_args.push(replacement.to_owned());
+    }
+    v5_args.extend(args(&[
+        "--runway-aids",
+        runway_profile_path.to_str().unwrap(),
+    ]));
+    let mut v5_stdout = Vec::new();
+    run(&v5_args, &mut v5_stdout).expect("CLI issues v5 runway-aid package");
+    let v5_text = String::from_utf8(v5_stdout).expect("v5 output is UTF-8");
+    let v5_pin = v5_text
+        .lines()
+        .find_map(|line| line.strip_prefix("manifest_sha256\t"))
+        .and_then(|value| oa_adapt::manifest::parse_pin(value).ok())
+        .expect("v5 manifest pin");
+    let v5 =
+        oa_adapt::manifest::verify_current(&runway_output, v5_pin).expect("v5 package verifies");
+    assert_eq!(v5.identity().adaptation_version, Some(2));
+    assert_eq!(v5.pver_catalog_bytes(), Some(catalog.as_slice()));
+    assert_eq!(v5.runway_aids_bytes(), Some(runway_profile.as_slice()));
 }
 
 // REQ: OA-ASP-001

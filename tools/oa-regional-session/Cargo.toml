@@ -69,6 +69,11 @@ oa-audit-core = { path = "../../crates/oa-audit-core" }
 # F1: Connor approved this shell-only M4 projection edge on 2026-11-26. The regional shell is the
 # existing boundary that receives flight and alert outputs; import site: migration_shadow.rs.
 oa-migration-shadow = { path = "../../crates/oa-migration-shadow" }
+# F1a: the existing regional shell resolves issued runway endpoints and runs the bounded
+# final-monitor, ARV, CRDA, and ATPA cores against the same verified snapshot and tracks.
+oa-runway = { path = "../../crates/oa-runway" }
+# Deterministic local-plane distance calculations for adaptation runway geometry.
+oa-math = { path = "../../crates/oa-math" }
 
 [package.metadata.openatca]
 class = "shell"

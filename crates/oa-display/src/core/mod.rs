@@ -12,6 +12,7 @@ pub mod ownership;
 pub mod palette;
 pub mod project;
 pub mod raster;
+pub mod runway_aids;
 pub mod safety;
 pub mod scene;
 pub mod text;
