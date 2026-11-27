@@ -5,8 +5,6 @@ from pathlib import Path
 import unittest
 
 from e10_kani_diagnostic import (
-    BASELINE_REF,
-    CURRENT_REF,
     DIAGNOSTIC_CASES,
     PROOF_IDS,
     single_entry_registry,
@@ -19,11 +17,17 @@ REPO = Path(__file__).resolve().parents[1]
 
 class DiagnosticRegistryTests(unittest.TestCase):
     def test_matrix_is_exactly_two_proofs_on_each_pinned_revision(self):
+        expected = (
+            ("8c5923da2f0c7f11ca84e99fc443980d86b4ef5c", "late-append-output-projection"),
+            ("8c5923da2f0c7f11ca84e99fc443980d86b4ef5c", "large-move-decision-rejected-current-filter-snapshot"),
+            ("64c44e714bc47bdeb956e671d7e15aa4f06edfde", "late-append-output-projection"),
+            ("64c44e714bc47bdeb956e671d7e15aa4f06edfde", "large-move-decision-rejected-current-filter-snapshot"),
+        )
         self.assertEqual(
             DIAGNOSTIC_CASES,
-            tuple((revision, proof_id) for revision in (BASELINE_REF, CURRENT_REF) for proof_id in PROOF_IDS),
+            expected,
         )
-        self.assertEqual(len(DIAGNOSTIC_CASES), 4)
+        self.assertEqual(len(DIAGNOSTIC_CASES), len(set(DIAGNOSTIC_CASES)))
         self.assertEqual(set(PROOF_IDS), {
             "late-append-output-projection",
             "large-move-decision-rejected-current-filter-snapshot",

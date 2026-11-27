@@ -20,7 +20,6 @@ from rust_proof_suite import (
     validate_registry,
 )
 from kani_validation import LOOP_UNWIND_PRESETS
-from e10_kani_diagnostic import BASELINE_REF, CURRENT_REF, PROOF_IDS
 
 
 REPO = Path(__file__).resolve().parents[1]
@@ -939,11 +938,19 @@ class ShardBalanceTests(unittest.TestCase):
         self.assertIsNotNone(match, text)
         diagnostic = json.loads(match.group(1))
         normal = json.loads(match.group(2))
-        self.assertEqual(
-            {(row["source_ref"], row["proof_id"]) for row in diagnostic},
-            {(revision, proof_id) for revision in (BASELINE_REF, CURRENT_REF) for proof_id in PROOF_IDS},
-        )
-        self.assertTrue(all(row["diagnostic"] and row["shard"] == "0/1" for row in diagnostic))
+        expected = [
+            ("8c5923da2f0c7f11ca84e99fc443980d86b4ef5c", "late-append-output-projection"),
+            ("64c44e714bc47bdeb956e671d7e15aa4f06edfde", "late-append-output-projection"),
+            ("8c5923da2f0c7f11ca84e99fc443980d86b4ef5c", "large-move-decision-rejected-current-filter-snapshot"),
+            ("64c44e714bc47bdeb956e671d7e15aa4f06edfde", "large-move-decision-rejected-current-filter-snapshot"),
+        ]
+        actual = [(row["source_ref"], row["proof_id"]) for row in diagnostic]
+        self.assertEqual(actual, expected)
+        self.assertEqual(len(actual), len(set(actual)))
+        self.assertTrue(all(
+            row["diagnostic"] and row["shard"] == "0/1"
+            for row in diagnostic
+        ))
         self.assertEqual([row["shard"] for row in normal], ["0/4", "1/4", "2/4", "3/4"])
         self.assertTrue(all(not row["diagnostic"] for row in normal))
         self.assertNotIn("python3 tools/rust_proof_suite.py\n          --fail-fast", text)
