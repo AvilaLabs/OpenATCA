@@ -1,7 +1,7 @@
 //! Deterministic conversion of decoded recording rows into the normalized regional timeline.
 //! Shell adapter (RULESET B1, B3, B7); callers own file decoding and receipt metadata.
 
-use crate::input::{EventKind, Identity, NormalizedEvent, SourceKind};
+use crate::input::{AdsbSourceEvidence, EventKind, Identity, NormalizedEvent, SourceKind};
 use crate::recordings_reader::{RecordedFrame, RecordingCounts, RecordingSource};
 
 use oa_adsb::{
@@ -1069,8 +1069,14 @@ fn adapt_adsb_frame(
     }
     // Reuse the tracker’s existing quality/velocity conversion so the regional adapter does not
     // duplicate ADS-B unit math or platform trig. All quality-gated row losses remain reported.
-    let (measurements, stats) =
-        oa_track::adsb::adsb_measurements(&airborne_reports, &oa_track::adsb::DEFAULT_ADSB_CONFIG);
+    let (measurements, measurement_source_rows, stats) =
+        oa_track::adsb::adsb_measurements_with_indices(
+            &airborne_reports,
+            &oa_track::adsb::DEFAULT_ADSB_CONFIG,
+        );
+    if measurements.len() != measurement_source_rows.len() {
+        return Err(AdapterError::WorkBudget);
+    }
     for (dst, src) in out
         .counts
         .adsb_quality_removed
@@ -1079,36 +1085,14 @@ fn adapt_adsb_frame(
     {
         *dst = dst.saturating_add(src);
     }
-    let mut source_row_cursor = 0usize;
     let mut represented_rows = Vec::new();
     represented_rows
         .try_reserve_exact(airborne_source_ordinals.len())
         .map_err(|_| AdapterError::AllocationRefused)?;
     represented_rows.resize(airborne_source_ordinals.len(), false);
-    for measurement in measurements {
-        let mut source_row = None;
-        let mut source_index = None;
-        while source_row_cursor < reports_len(&airborne_reports) {
-            let index = source_row_cursor;
-            source_row_cursor += 1;
-            let Some(candidate) = reports_row(&airborne_reports, index) else {
-                continue;
-            };
-            if candidate.icao == measurement.addr
-                && candidate.time_ns == measurement.toa_ns
-                && candidate.lat_e7 == measurement.lat_e7
-                && candidate.lon_e7 == measurement.lon_e7
-            {
-                source_row = Some(candidate);
-                source_index = Some(index);
-                break;
-            }
-        }
-        let Some(source_row) = source_row else {
-            out.counts.invalid_position_rows = out.counts.invalid_position_rows.saturating_add(1);
-            continue;
-        };
-        let source_index = source_index.ok_or(AdapterError::WorkBudget)?;
+    for (measurement, source_index) in measurements.into_iter().zip(measurement_source_rows) {
+        let source_row =
+            reports_row(&airborne_reports, source_index).ok_or(AdapterError::WorkBudget)?;
         let represented = represented_rows
             .get_mut(source_index)
             .ok_or(AdapterError::WorkBudget)?;
@@ -1222,7 +1206,31 @@ fn adapt_adsb_frame(
             .counts
             .adsb_unknown_gufi_positions
             .saturating_add(adapted.counts.unknown_identity);
-        if let Some(event) = adapted.events.into_iter().next() {
+        if let Some(mut event) = adapted.events.into_iter().next() {
+            event.kind = EventKind::PositionV2 {
+                latitude_e7: measurement.lat_e7,
+                longitude_e7: measurement.lon_e7,
+                altitude_ft,
+                east_mmps,
+                north_mmps,
+                vertical_rate_fpm,
+                evidence: AdsbSourceEvidence {
+                    source_type: source_row.source,
+                    category: source_row.category,
+                    version: source_row.version,
+                    nic: source_row.nic,
+                    nac_p: source_row.nac_p,
+                    nac_v: source_row.nac_v,
+                    sil: source_row.sil,
+                    sil_type: source_row.sil_type,
+                    sda: source_row.sda,
+                    gva: source_row.gva,
+                    nic_baro: source_row.nic_baro,
+                    row_flags: source_row.flags,
+                    squawk: source_row.squawk,
+                    callsign: source_row.callsign,
+                },
+            };
             let next = next_sequence
                 .checked_add(1)
                 .ok_or(AdapterError::CountOverflow)?;
@@ -2279,12 +2287,23 @@ pub fn serialize_positions(events: &[NormalizedEvent]) -> Result<String, Adapter
     Ok(out)
 }
 
-/// Serializes the complete subset emitted by the recording adapter as the established OA-RS v1
-/// protocol. A row that cannot be represented within 768 bytes refuses the serialization whole.
+/// Serializes the complete subset emitted by the recording adapter. If any row carries preserved
+/// ADS-B source evidence, the output uses OA-RS v2 and positions without that evidence explicitly
+/// encode fourteen absent/default fields. Otherwise it remains v1 byte-for-byte. A row that cannot be
+/// represented within 768 bytes refuses the serialization whole.
 pub fn serialize_recorded_events(events: &[NormalizedEvent]) -> Result<String, AdapterError> {
     use crate::input::{FlightOperation, HandoffOperation, MAX_EVENT_LINE_BYTES};
     use core::fmt::Write;
-    let mut out = String::from("OA-RS\t1\n");
+    let version = if events
+        .iter()
+        .any(|event| matches!(event.kind, EventKind::PositionV2 { .. }))
+    {
+        2
+    } else {
+        1
+    };
+    let version_text = if version == 2 { "v2" } else { "v1" };
+    let mut out = format!("OA-RS\t{version}\n");
     for event in events {
         let (source_name, kind) = match event.source {
             SourceKind::Surveillance => ("SURVEILLANCE", "POS"),
@@ -2298,7 +2317,8 @@ pub fn serialize_recorded_events(events: &[NormalizedEvent]) -> Result<String, A
         }
         write!(
             out,
-            "v1\t{}\t{}\t{}\t{}\t{:032X}\t{:06X}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{}\t{:032X}\t{:06X}\t{}\t{}",
+            version_text,
             event.receipt_ns,
             event.source_ns,
             event.sequence,
@@ -2332,6 +2352,67 @@ pub fn serialize_recorded_events(events: &[NormalizedEvent]) -> Result<String, A
                     vertical_rate_fpm.map_or_else(|| "-".to_owned(), |v| v.to_string())
                 )
                 .map_err(|_| AdapterError::CountOverflow)?;
+                if version == 2 {
+                    out.push_str("\t-\t0\t-");
+                    for _ in 0..8 {
+                        out.push_str("\t-");
+                    }
+                    out.push_str("\t-\t-\t0000000000000000");
+                }
+            }
+            EventKind::PositionV2 {
+                latitude_e7,
+                longitude_e7,
+                altitude_ft,
+                east_mmps,
+                north_mmps,
+                vertical_rate_fpm,
+                evidence,
+            } if event.source == SourceKind::Surveillance && version == 2 => {
+                write!(
+                    out,
+                    "\t{}\t{}\t{}\t{}\t{}\t{}",
+                    latitude_e7,
+                    longitude_e7,
+                    altitude_ft.map_or_else(|| "-".to_owned(), |v| v.to_string()),
+                    east_mmps,
+                    north_mmps,
+                    vertical_rate_fpm.map_or_else(|| "-".to_owned(), |v| v.to_string())
+                )
+                .map_err(|_| AdapterError::CountOverflow)?;
+                write!(
+                    out,
+                    "\t{}\t{}\t{}",
+                    source_evidence_field(evidence.source_type),
+                    evidence.category,
+                    source_evidence_field(evidence.version)
+                )
+                .map_err(|_| AdapterError::CountOverflow)?;
+                for field in [
+                    evidence.nic,
+                    evidence.nac_p,
+                    evidence.nac_v,
+                    evidence.sil,
+                    evidence.sil_type,
+                    evidence.sda,
+                    evidence.gva,
+                    evidence.nic_baro,
+                ] {
+                    write!(out, "\t{}", source_evidence_field(field))
+                        .map_err(|_| AdapterError::CountOverflow)?;
+                }
+                write!(
+                    out,
+                    "\t{}\t{}",
+                    source_evidence_field(evidence.row_flags),
+                    source_squawk_field(evidence.squawk)
+                )
+                .map_err(|_| AdapterError::CountOverflow)?;
+                out.write_char('\t')
+                    .map_err(|_| AdapterError::CountOverflow)?;
+                for byte in evidence.callsign {
+                    write!(out, "{byte:02X}").map_err(|_| AdapterError::CountOverflow)?;
+                }
             }
             EventKind::Flight(op) if event.source == SourceKind::Flight => {
                 match op {
@@ -2400,6 +2481,22 @@ pub fn serialize_recorded_events(events: &[NormalizedEvent]) -> Result<String, A
         out.push('\n');
     }
     Ok(out)
+}
+
+fn source_evidence_field(value: u8) -> String {
+    if value == u8::MAX {
+        "-".to_owned()
+    } else {
+        value.to_string()
+    }
+}
+
+fn source_squawk_field(value: u16) -> String {
+    if value == u16::MAX {
+        "-".to_owned()
+    } else {
+        format!("{value:04}")
+    }
 }
 
 /// Deterministic companion manifest binding each normalized line to its input recording frame.

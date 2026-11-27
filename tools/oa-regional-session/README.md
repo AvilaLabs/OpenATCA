@@ -114,13 +114,25 @@ CONFIG<TAB>path/to/config.json
 TERRAIN<TAB>path/to/terrain-directory
 DOF<TAB>path/to/obstacles.zip
 METAR<TAB>actual_file_receipt_unix_ms<TAB>path/to/metar.json
+CIFP<TAB>path/to/FAACIFP18-or-cifp.zip
 ```
 
-CONFIG is required; TERRAIN is optional and unique; at most 32 DOF and 32 METAR files are
-accepted. Each weather file must have actually arrived by the first session cutoff; report
-observation times also pass causal admission. Missing terrain, obstacles, weather and chart
-coverage remain explicit. Automatic CIFP corridor loading and controller-authorized MSAW
-inhibition/service requests are not yet bridged and configured requests are refused.
+CONFIG is required; TERRAIN and CIFP are optional and unique; CIFP input is capped at 512 MiB;
+at most 32 DOF and 32 METAR files are accepted. Each weather file must have actually arrived by the first session cutoff; report
+observation times also pass causal admission. When supplied, CIFP adds corridors named by
+`cifp_airport` and approach/runway corridors for the clip bounds widened by
+`cifp_area_margin_nm`. The corridor source bytes are included in the regional MSAW provenance.
+The MSAW input config's polygon inhibitions are installed into the shared inhibition table at the
+first MSAW cycle and expire on their configured end times. Their author field is configuration
+text, not an authenticated identity. Adaptation `msaw_request` rows remain refused until their
+address/callsign selectors can be joined to full runtime identity and beacon evidence. A separate
+typed controller `MSAW_SERVICE <expiry_ns>` command can request service for its currently selected
+full flight identity; expiry zero revokes that exact request. This command requires the separate
+`--msaw-service-audit-*` registry, independent registry digest pin, principal, audit-log and
+checkpoint inputs. Role is derived from that pinned registry. The registry is local role
+configuration, not a login or authenticated identity. Missing flight or beacon evidence remains
+explicit and no VFR status is inferred. Missing terrain, obstacles, weather and chart coverage
+remain explicit.
 `msaw-data.txt` records supplied settings, source hashes, receipt stamps and loader limits,
 bound by the closed run manifest; frame evidence records the exact terrain tiles used.
 
@@ -204,7 +216,9 @@ target with no invented fix deadline. Only explicit route restrictions impose fi
 `COMMAND` carries plan ID, expected target generation, displayed frame sequence, local actor ID,
 and a typed operation/value. Development actor IDs 1 and 2 map to `SECTOR1` and `SECTOR2`.
 Operations are `ASSIGNED`, `UNASSIGNED`, `INTERIM`, `CLEAR_INTERIM`, `HO_OFFER`, `HO_ACCEPT`,
-`HO_TAKE`, `HO_CANCEL`. Handoff values name stable unit IDs. A request must match the exact
+`HO_TAKE`, `HO_CANCEL`, and `MSAW_SERVICE <expiry_ns>` (zero revokes). MSAW service commands are
+durably audited before their bounded request state changes; they require the separate pinned
+registry and audit checkpoint CLI options described above. Handoff values name stable unit IDs. A request must match the exact
 visible flight/address/centre/plan/generation and a fresh track; the bridge then rechecks the
 authoritative flight and actor's ownership/offer authority. Ambiguous, stale or unauthorized
 requests are recorded as refusals. This local actor registry is not network authentication.

@@ -101,6 +101,21 @@ pub struct RegionalRuntime {
     selected_mode: RegionalAutomationMode,
     last_automation: RegionalAutomationStatus,
     known_flights: Vec<oa_flight::FlightKey>,
+    msaw_service_audit: Option<MsawServiceAuditState>,
+}
+
+struct MsawServiceAuditState {
+    audit_log: std::path::PathBuf,
+    checkpoint: oa_audit_core::Checkpoint,
+    registry: oa_audit_log::shell::PinnedPrincipalRegistry,
+    principal: u64,
+}
+
+pub struct MsawServiceAuditConfiguration {
+    pub audit_log: std::path::PathBuf,
+    pub checkpoint: oa_audit_core::Checkpoint,
+    pub registry: oa_audit_log::shell::PinnedPrincipalRegistry,
+    pub principal: u64,
 }
 
 /// Versioned capacities for a single offline replay. Defaults reproduce the historic small
@@ -326,6 +341,7 @@ pub const MAX_PERFORMANCE_ENVELOPES: usize = MAX_DRIVER_FLIGHTS;
 fn transaction_item(event: &crate::input::NormalizedEvent) -> bool {
     match event.kind {
         crate::input::EventKind::Position { .. }
+        | crate::input::EventKind::PositionV2 { .. }
         | crate::input::EventKind::Flight(_)
         | crate::input::EventKind::FiledRoute { .. }
         | crate::input::EventKind::ActiveCursor { .. } => true,
@@ -624,8 +640,10 @@ fn surveillance_refusal_reason(error: surveillance::SurveillanceStageError) -> O
         surveillance::SurveillanceStageError::BarometricEvidenceCapacity => {
             Some(REASON_RESOURCE_LIMIT)
         }
+        surveillance::SurveillanceStageError::SourceEvidenceCapacity => Some(REASON_RESOURCE_LIMIT),
         surveillance::SurveillanceStageError::WrongSourceKind
-        | surveillance::SurveillanceStageError::InvalidPosition => {
+        | surveillance::SurveillanceStageError::InvalidPosition
+        | surveillance::SurveillanceStageError::InvalidSourceEvidence => {
             Some(REASON_SURVEILLANCE_INVALID)
         }
         surveillance::SurveillanceStageError::SealedTimestamp
@@ -780,10 +798,6 @@ pub struct QuarantineMaintenanceReceipt {
     pub audit_checkpoint: oa_audit_core::Checkpoint,
 }
 
-/// Audit and acknowledge the selected front item as an explicit manual-responsibility handoff.
-/// The principal, registry, timestamp and note are caller-supplied inputs. The registry role is a
-/// local configuration claim, not authenticated identity, and this path does not imply that the
-/// external manual workflow itself was performed.
 pub struct QuarantineMaintenanceRequest<'a> {
     pub source: InputSource,
     pub expected_identity: InputIdentity,
@@ -809,11 +823,8 @@ pub fn regional_acknowledge_quarantine_before_commit(
         time_ns,
         manual_handoff_ref,
     } = request;
-    if runtime.failed {
-        return Err("session failed; reconstruct before quarantine maintenance".into());
-    }
-    if principal == 0 || time_ns == 0 {
-        return Err("audit principal and timestamp must be positive".into());
+    if runtime.failed || principal == 0 || time_ns == 0 {
+        return Err("session or quarantine audit context is invalid".into());
     }
     let role = oa_audit_core::authorize_principal(
         principal_registry,
@@ -880,6 +891,38 @@ pub fn regional_acknowledge_quarantine_before_commit(
 /// Returns the immutable validated capacities selected at construction.
 pub fn regional_profile_limits(runtime: &RegionalRuntime) -> RegionalRunProfile {
     runtime.profile
+}
+
+/// Install the host-pinned audit authority before the first admitted receipt. This checks local
+/// role configuration only and does not authenticate the configured principal or caller.
+pub fn regional_configure_msaw_service_audit(
+    runtime: &mut RegionalRuntime,
+    configuration: MsawServiceAuditConfiguration,
+) -> Result<(), String> {
+    if runtime.failed || runtime.frame_sequence != 0 || runtime.msaw_service_audit.is_some() {
+        return Err(
+            "MSAW service audit authority must be configured once before the first frame".into(),
+        );
+    }
+    if !surveillance::surveillance_msaw_enabled(&runtime.surveillance) {
+        return Err("MSAW service audit authority requires configured MSAW service".into());
+    }
+    configuration
+        .registry
+        .authorize(
+            configuration.principal,
+            oa_audit_core::Action::MsawServiceRequest,
+        )
+        .map_err(|error| format!("MSAW service registry refused: {error:?}"))?;
+    oa_sealed::refuse(&configuration.audit_log)
+        .map_err(|error| format!("MSAW service audit path refused: {error}"))?;
+    runtime.msaw_service_audit = Some(MsawServiceAuditState {
+        audit_log: configuration.audit_log,
+        checkpoint: configuration.checkpoint,
+        registry: configuration.registry,
+        principal: configuration.principal,
+    });
+    Ok(())
 }
 
 /// Actual startup-reserved route-store bytes, measured from the vectors' capacities.
@@ -1076,6 +1119,7 @@ fn regional_new_with_source_identity_and_checkpoint(
             fusion_off: true,
         },
         known_flights: Vec::with_capacity(profile.max_flights),
+        msaw_service_audit: None,
     })
 }
 
@@ -1143,15 +1187,42 @@ fn execute(
         if !eligible {
             order_result.map_err(|error| format!("flight adapter preflight: {error:?}"))?;
             if let crate::input::EventKind::Operator(request) = event.kind {
-                let dispatch = commands::dispatch(
-                    &mut runtime.flights,
-                    &mut runtime.interaction,
-                    &runtime.views,
-                    &runtime.observed,
-                    u32::try_from(runtime.frame_sequence).map_err(|_| "view sequence exhausted")?,
-                    event,
-                    request,
-                );
+                let view_sequence =
+                    u32::try_from(runtime.frame_sequence).map_err(|_| "view sequence exhausted")?;
+                let dispatch = if let Some(state) = runtime.msaw_service_audit.as_mut() {
+                    let mut context = commands::MsawServiceAuditContext {
+                        audit_log: &state.audit_log,
+                        checkpoint: &mut state.checkpoint,
+                        registry: &state.registry,
+                        principal: state.principal,
+                    };
+                    commands::dispatch_with_msaw_audit(
+                        commands::DispatchContext {
+                            driver: &mut runtime.flights,
+                            interaction: &mut runtime.interaction,
+                            surveillance: &mut runtime.surveillance,
+                            views: &runtime.views,
+                            observed: &runtime.observed,
+                            view_sequence,
+                        },
+                        event,
+                        request,
+                        Some(&mut context),
+                    )
+                } else {
+                    commands::dispatch(
+                        commands::DispatchContext {
+                            driver: &mut runtime.flights,
+                            interaction: &mut runtime.interaction,
+                            surveillance: &mut runtime.surveillance,
+                            views: &runtime.views,
+                            observed: &runtime.observed,
+                            view_sequence,
+                        },
+                        event,
+                        request,
+                    )
+                };
                 if dispatch.terminal_failure {
                     return Err(format!(
                         "controller bridge invariant failure: {}",
@@ -1279,11 +1350,13 @@ fn execute(
         }
         AutomationDegradation::None => None,
     };
-    let mut surveillance = surveillance::surveillance_finish_with_visibility(
+    let mut surveillance = surveillance::surveillance_finish_with_live_flights(
         &mut runtime.surveillance,
         None,
         automation.effective == EffectiveAutomationMode::Surveillance,
         unavailable_reason,
+        &mut runtime.flights,
+        &runtime.views,
     )?;
     if runtime.profile.surveillance.render_scope {
         surveillance.frame_sha256 = surveillance::surveillance_present_controls(
@@ -1639,6 +1712,178 @@ mod transaction_tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_QUARANTINE_AUDIT_TEST: AtomicU64 = AtomicU64::new(0);
+
+    // REQ: OA-MSAW-084, OA-AUDIT-002, OA-AUDIT-003, OA-AUDIT-005, OA-AUDIT-007, OA-AUDIT-008
+    #[test]
+    fn queued_msaw_service_request_is_pinned_audited_and_used_on_the_next_cycle() {
+        let id = NEXT_QUARANTINE_AUDIT_TEST.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "oa-msaw-service-request-{}-{id}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).expect("create synthetic request directory");
+        let registry_path = root.join("principals.tsv");
+        let audit_path = root.join("audit.log");
+        let registry_bytes = b"OACERT-LOCAL-PRINCIPALS-V1\n51\toperate\n52\tmonitor\n";
+        std::fs::write(&registry_path, registry_bytes).expect("write synthetic registry");
+        let registry = oa_audit_log::shell::load_pinned_principal_registry(
+            &registry_path,
+            oa_sha256::sha256(registry_bytes),
+        )
+        .expect("load independently pinned registry");
+        let mut engine = runtime();
+        regional_enable_synthetic_msaw(&mut engine).expect("enable synthetic MSAW");
+        regional_configure_msaw_service_audit(
+            &mut engine,
+            MsawServiceAuditConfiguration {
+                audit_log: audit_path.clone(),
+                checkpoint: oa_audit_core::genesis(),
+                registry,
+                principal: 51,
+            },
+        )
+        .expect("install host-pinned authority");
+        let gufi = "00000000000000000000000000000001";
+        let seeded = [
+            format!("v1\t1000000000\t1000000000\t1\tSURVEILLANCE\t{gufi}\tABCDEF\tZAU1\tPOS\t410000000\t-870000000\t10000\t0\t0\t0"),
+            format!("v1\t1000000000\t1000000000\t2\tFLIGHT\t{gufi}\tABCDEF\tZAU1\tFLIGHT\tPLAN\tPLAN00000001\t2"),
+            format!("v1\t1000000000\t1000000000\t3\tFLIGHT\t{gufi}\tABCDEF\tZAU1\tFLIGHT\tADDRESS"),
+            format!("v1\t1000000000\t1000000000\t4\tFLIGHT\t{gufi}\tABCDEF\tZAU1\tFLIGHT\tOWNER\tSECTOR1"),
+        ].map(|line| parse_event_line(&line).expect("parse seeded event"));
+        let seeded_frame = regional_step(
+            &mut engine,
+            &ReceiptBatch {
+                receipt_ns: 1_000_000_000,
+                source_clock_regressions: 0,
+                events: seeded.to_vec(),
+            },
+        )
+        .expect("first frame");
+        assert!(seeded_frame.controller_views.is_empty());
+        let confirmed = regional_step(
+            &mut engine,
+            &ReceiptBatch {
+                receipt_ns: 2_000_000_000,
+                source_clock_regressions: 0,
+                events: vec![parse_event_line(&format!(
+                    "v1\t2000000000\t2000000000\t5\tSURVEILLANCE\t{gufi}\tABCDEF\tZAU1\tPOS\t410000000\t-870000000\t10000\t0\t0\t0"
+                ))
+                .expect("parse confirming position")],
+            },
+        )
+        .expect("confirmed target frame");
+        let target = confirmed
+            .controller_views
+            .first()
+            .expect("confirmed flight view");
+        let command = parse_event_line(&format!(
+            "v1\t3000000000\t3000000000\t7\tFLIGHT\t{gufi}\tABCDEF\tZAU1\tCOMMAND\tPLAN00000001\t{}\t{}\t1\tMSAW_SERVICE\t62000000000",
+            target.generation, confirmed.sequence,
+        )).expect("parse queued service request");
+        let position = parse_event_line(&format!(
+            "v1\t3000000000\t3000000000\t6\tSURVEILLANCE\t{gufi}\tABCDEF\tZAU1\tPOS\t410000000\t-870000000\t10000\t0\t0\t0"
+        )).expect("parse third position");
+        let frame = regional_step(
+            &mut engine,
+            &ReceiptBatch {
+                receipt_ns: 3_000_000_000,
+                source_clock_regressions: 0,
+                events: vec![position, command],
+            },
+        )
+        .expect("queued request and next MSAW cycle");
+        assert_eq!(frame.controller_dispatches.len(), 1);
+        let dispatch = frame
+            .controller_dispatches
+            .first()
+            .expect("one controller dispatch");
+        assert!(
+            dispatch.outcome.is_some(),
+            "MSAW request was refused: {:?}",
+            dispatch.refusal
+        );
+        assert_eq!(
+            surveillance::surveillance_msaw_service_request_count(&engine.surveillance),
+            1
+        );
+        let report = frame.surveillance.msaw.as_ref().expect("MSAW report");
+        assert_eq!(
+            report.live_track_basis,
+            vec![crate::msaw_bridge::LiveTrackBasis {
+                address: 0x00ab_cdef,
+                basis: oa_msaw_run::eligibility::Basis::Request,
+            }]
+        );
+        let expected = engine
+            .msaw_service_audit
+            .as_ref()
+            .expect("audit context")
+            .checkpoint;
+        assert_eq!(expected.count, 1);
+        assert_eq!(
+            oa_audit_log::shell::verify(&audit_path, expected).expect("verify request audit"),
+            expected
+        );
+        let revoke = parse_event_line(&format!(
+            "v1\t4000000000\t4000000000\t9\tFLIGHT\t{gufi}\tABCDEF\tZAU1\tCOMMAND\tPLAN00000001\t{}\t{}\t1\tMSAW_SERVICE\t0",
+            target.generation, frame.sequence,
+        )).expect("parse revocation");
+        let position = parse_event_line(&format!(
+            "v1\t4000000000\t4000000000\t8\tSURVEILLANCE\t{gufi}\tABCDEF\tZAU1\tPOS\t410000000\t-870000000\t10000\t0\t0\t0"
+        )).expect("parse third position");
+        let revoked = regional_step(
+            &mut engine,
+            &ReceiptBatch {
+                receipt_ns: 4_000_000_000,
+                source_clock_regressions: 0,
+                events: vec![position, revoke],
+            },
+        )
+        .expect("audited request revocation");
+        assert_eq!(
+            surveillance::surveillance_msaw_service_request_count(&engine.surveillance),
+            0
+        );
+        assert_eq!(
+            engine
+                .msaw_service_audit
+                .as_ref()
+                .expect("audit state")
+                .checkpoint
+                .count,
+            2
+        );
+        engine
+            .msaw_service_audit
+            .as_mut()
+            .expect("audit state")
+            .audit_log = root.join("missing-parent").join("audit.log");
+        let failed_activation = parse_event_line(&format!(
+            "v1\t5000000000\t5000000000\t11\tFLIGHT\t{gufi}\tABCDEF\tZAU1\tCOMMAND\tPLAN00000001\t{}\t{}\t1\tMSAW_SERVICE\t64000000000",
+            target.generation, revoked.sequence,
+        )).expect("parse failed activation");
+        let position = parse_event_line(&format!(
+            "v1\t5000000000\t5000000000\t10\tSURVEILLANCE\t{gufi}\tABCDEF\tZAU1\tPOS\t410000000\t-870000000\t10000\t0\t0\t0"
+        )).expect("parse fourth position");
+        let refused = regional_step(
+            &mut engine,
+            &ReceiptBatch {
+                receipt_ns: 5_000_000_000,
+                source_clock_regressions: 0,
+                events: vec![position, failed_activation],
+            },
+        )
+        .expect("audit refusal is a recorded operator refusal");
+        assert!(refused
+            .controller_dispatches
+            .iter()
+            .any(|dispatch| dispatch.refusal.contains("audit append")));
+        assert_eq!(
+            surveillance::surveillance_msaw_service_request_count(&engine.surveillance),
+            0
+        );
+        std::fs::remove_dir_all(root).expect("remove synthetic request directory");
+    }
 
     fn intern(model: &mut Model, text: &str) -> oa_airspace::core::model::StrIx {
         let raw = model.strings.offsets.len().checked_sub(1).unwrap();

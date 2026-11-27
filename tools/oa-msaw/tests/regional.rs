@@ -25,7 +25,89 @@ fn base_paths(root: &Path) -> RegionalDataPaths {
         terrain_dir: None,
         dof_files: Vec::new(),
         metar_files: Vec::new(),
+        cifp: None,
+        cifp_area: None,
     }
+}
+
+fn cifp_fixture_bytes() -> Vec<u8> {
+    let header = include_str!("../../../crates/oa-arinc424/tests/fixtures/header.txt");
+    let body = [
+        include_str!("../../../crates/oa-arinc424/tests/fixtures/airports.txt"),
+        include_str!("../../../crates/oa-arinc424/tests/fixtures/runways.txt"),
+        include_str!("../../../crates/oa-arinc424/tests/fixtures/terminal_waypoints.txt"),
+        include_str!("../../../crates/oa-arinc424/tests/fixtures/approach.txt"),
+    ]
+    .concat();
+    let mut rows: Vec<String> = header.lines().map(str::to_string).collect();
+    rows[0].replace_range(28..35, &format!("{:07}", body.lines().count()));
+    let mut text = rows.join("\n");
+    text.push('\n');
+    text.push_str(&body);
+    text.into_bytes()
+}
+
+#[test]
+fn configured_and_clip_area_cifp_corridors_load_into_regional_floors_with_content_provenance() {
+    let root = scratch("cifp-corridors");
+    let mut paths = base_paths(&root);
+    let config = format!("{DEV_CFG}\ncifp_airport = KORD\ncifp_area_margin_nm = 20\n");
+    std::fs::write(&paths.config, config).unwrap();
+    let cifp_path = root.join("FAACIFP18");
+    let source = cifp_fixture_bytes();
+    std::fs::write(&cifp_path, &source).unwrap();
+    paths.cifp = Some(cifp_path);
+    paths.cifp_area = Some((41.0, 42.0, -88.0, -87.0));
+
+    let data = load_regional_data(
+        &paths,
+        RegionalDataLimits::default(),
+        WeatherAdmission { cutoff_ms: 0 },
+    )
+    .unwrap();
+    assert!(data.provenance.cifp_source_present);
+    assert!(data.provenance.cifp_corridors > 0);
+    assert_eq!(
+        data.provenance
+            .sources
+            .iter()
+            .find(|source| source.kind == oa_msaw_run::regional::RegionalSourceKind::Cifp)
+            .unwrap()
+            .sha256,
+        oa_sha256::sha256(&source)
+    );
+    assert_eq!(
+        data.settings.msaw.corridors.len(),
+        data.provenance.cifp_corridors
+    );
+}
+
+#[test]
+fn cifp_corridor_configuration_requires_the_named_input() {
+    let root = scratch("cifp-missing");
+    let paths = base_paths(&root);
+    std::fs::write(&paths.config, format!("{DEV_CFG}\ncifp_airport = KORD\n")).unwrap();
+    let result = load_regional_data(
+        &paths,
+        RegionalDataLimits::default(),
+        WeatherAdmission { cutoff_ms: 0 },
+    );
+    assert!(matches!(result, Err(error) if error.contains("no CIFP input")));
+}
+
+#[test]
+fn cifp_source_bytes_refuse_before_decode_when_over_the_regional_limit() {
+    let root = scratch("cifp-over-limit");
+    let mut paths = base_paths(&root);
+    let path = root.join("oversized.FAACIFP18");
+    std::fs::write(&path, b"not decoded").unwrap();
+    paths.cifp = Some(path);
+    let limits = RegionalDataLimits {
+        max_cifp_file_bytes: 4,
+        ..RegionalDataLimits::default()
+    };
+    let result = load_regional_data(&paths, limits, WeatherAdmission { cutoff_ms: 0 });
+    assert!(matches!(result, Err(error) if error.contains("source exceeds 4 bytes")));
 }
 
 #[test]

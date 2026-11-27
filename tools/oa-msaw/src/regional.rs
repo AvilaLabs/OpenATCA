@@ -1,6 +1,7 @@
 //! Bounded reusable regional data services for MSAW. Shell-only startup reads and decodes exact
-//! configuration, terrain, DOF and METAR inputs; runtime terrain reads remain lazily bounded by
-//! `Floors`. This service is intentionally separate from any regional session or display runner.
+//! configuration, terrain, DOF, METAR and optional CIFP inputs; runtime terrain reads remain
+//! lazily bounded by `Floors`. This service is intentionally separate from any regional session or
+//! display runner.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -10,8 +11,11 @@ use oa_sealed::Sealed;
 use oa_sha256::{sha256, to_hex};
 use oa_zip::{Archive, Limits as ZipLimits};
 
+use crate::cifp::{airports_with_approach, corridors_from_cifp_area, corridors_from_cifp_with};
 use crate::config::{parse_config, GtmShape, Settings};
-use crate::floors::{obstacle_index, Area, Floors, ObstacleIndex, TerrainServiceLimits};
+use crate::floors::{
+    obstacle_index, AirportArea, Area, Floors, ObstacleIndex, TerrainServiceLimits,
+};
 use crate::guard::{open_guarded, OpenFail};
 use crate::qnh::Qnh;
 
@@ -36,25 +40,31 @@ pub const DEFAULT_MAX_METAR_FILE_BYTES: u64 = 8 * 1024 * 1024;
 pub const DEFAULT_MAX_METAR_TOTAL_BYTES: u64 = 64 * 1024 * 1024;
 pub const DEFAULT_MAX_GTM_POLYGON_BYTES: u64 = 1024 * 1024;
 pub const DEFAULT_MAX_GTM_POLYGON_VERTICES: usize = 100_000;
+pub const DEFAULT_MAX_CIFP_FILE_BYTES: u64 = 512 * 1024 * 1024;
 
 /// A METAR source and the caller's receipt-time evidence. Receipt is per file, not a global
 /// timestamp that could make other files or later observations appear available earlier.
 // A7.2: cold startup input record, size guard waived.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MetarSource {
     pub path: PathBuf,
     pub received_at_ms: i64,
 }
 
 /// Exact startup inputs. Missing optional sources remain absent; no terrain, obstacle, chart or
-/// altimeter value is synthesized to fill them.
+/// altimeter value is synthesized to fill them. CIFP bounds are used only for a requested area
+/// margin and derive from admitted regional positions.
 // A7.2: cold startup input record, size guard waived.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RegionalDataPaths {
     pub config: PathBuf,
     pub terrain_dir: Option<PathBuf>,
     pub dof_files: Vec<PathBuf>,
     pub metar_files: Vec<MetarSource>,
+    /// Optional public CIFP file or ZIP supplying configured approach corridors.
+    pub cifp: Option<PathBuf>,
+    /// South, north, west, east bounds of the admitted clip for the configured area margin.
+    pub cifp_area: Option<(f64, f64, f64, f64)>,
 }
 
 /// Every caller-supplied limit is required to be no larger than these implementation ceilings.
@@ -80,6 +90,7 @@ pub struct RegionalDataLimits {
     pub max_metar_total_bytes: u64,
     pub max_gtm_polygon_bytes: u64,
     pub max_gtm_polygon_vertices: usize,
+    pub max_cifp_file_bytes: u64,
 }
 
 impl Default for RegionalDataLimits {
@@ -104,6 +115,7 @@ impl Default for RegionalDataLimits {
             max_metar_total_bytes: DEFAULT_MAX_METAR_TOTAL_BYTES,
             max_gtm_polygon_bytes: DEFAULT_MAX_GTM_POLYGON_BYTES,
             max_gtm_polygon_vertices: DEFAULT_MAX_GTM_POLYGON_VERTICES,
+            max_cifp_file_bytes: DEFAULT_MAX_CIFP_FILE_BYTES,
         }
     }
 }
@@ -123,6 +135,7 @@ pub enum RegionalSourceKind {
     Dof = 1,
     Metar = 2,
     GtmPolygon = 3,
+    Cifp = 4,
 }
 
 /// Content evidence. `available_at_ms` is zero for non-weather files; weather has the caller's
@@ -151,6 +164,8 @@ pub struct RegionalProvenance {
     pub dof_records: usize,
     pub metar_rows: u64,
     pub metar_stations: u64,
+    pub cifp_source_present: bool,
+    pub cifp_corridors: usize,
 }
 
 /// A7.2: cold startup service container, size guard waived.
@@ -201,6 +216,8 @@ fn checked_limits(l: RegionalDataLimits) -> Result<(), String> {
         || l.max_gtm_polygon_bytes > d.max_gtm_polygon_bytes
         || l.max_gtm_polygon_vertices == 0
         || l.max_gtm_polygon_vertices > d.max_gtm_polygon_vertices
+        || l.max_cifp_file_bytes == 0
+        || l.max_cifp_file_bytes > d.max_cifp_file_bytes
     {
         return Err(
             "regional data limits must be positive and within implementation ceilings".into(),
@@ -222,6 +239,25 @@ fn read_bounded(path: &Path, limit: u64) -> Result<Vec<u8>, String> {
         return Err(format!("{}: source exceeds {limit} bytes", path.display()));
     }
     Ok(bytes)
+}
+
+fn load_cifp(path: &Path, max_bytes: u64) -> Result<(oa_arinc424::Cifp, Vec<u8>), String> {
+    let source = read_bounded(path, max_bytes)?;
+    let is_zip = path
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("zip"));
+    let parsed = if is_zip {
+        let archive = oa_zip::Archive::parse(&source)
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+        let bytes = archive
+            .extract("FAACIFP18")
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+        oa_arinc424::parse_bytes(&bytes, &path.to_string_lossy())
+    } else {
+        oa_arinc424::parse_bytes(&source, &path.to_string_lossy())
+    }
+    .map_err(|error| format!("{}: {error}", path.display()))?;
+    Ok((parsed, source))
 }
 
 fn evidence(
@@ -246,9 +282,10 @@ fn manifest_hash(
     terrain_dir_present: bool,
     dof_file_count: usize,
     metar_file_count: usize,
+    cifp_file_count: usize,
 ) -> [u8; 32] {
     let mut bytes = Vec::new();
-    bytes.extend_from_slice(b"OA-MSAW-REGIONAL-DATA-v1\0");
+    bytes.extend_from_slice(b"OA-MSAW-REGIONAL-DATA-v2\0");
     bytes.extend_from_slice(&cutoff_ms.to_le_bytes());
     bytes.push(u8::from(terrain_dir_present));
     bytes.push(0); // Chart model is not loaded by this data-service increment.
@@ -259,6 +296,11 @@ fn manifest_hash(
     );
     bytes.extend_from_slice(
         &u64::try_from(metar_file_count)
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
+    bytes.extend_from_slice(
+        &u64::try_from(cifp_file_count)
             .unwrap_or(u64::MAX)
             .to_le_bytes(),
     );
@@ -280,6 +322,7 @@ fn manifest_hash(
         limits.max_metar_file_bytes,
         limits.max_metar_total_bytes,
         limits.max_gtm_polygon_bytes,
+        limits.max_cifp_file_bytes,
     ] {
         bytes.extend_from_slice(&value.to_le_bytes());
     }
@@ -463,6 +506,7 @@ fn load_areas(
 
 /// Reads and constructs one bounded regional service. Weather receipt stamps and the issue cutoff
 /// are explicit; later METAR observations are excluded even when the file itself was admitted.
+/// A requested CIFP area margin also requires bounded regional position extents from the caller.
 pub fn load_regional_data(
     paths: &RegionalDataPaths,
     limits: RegionalDataLimits,
@@ -488,10 +532,12 @@ pub fn load_regional_data(
     let config_bytes = read_bounded(&paths.config, limits.max_config_bytes)?;
     let config_text = String::from_utf8(config_bytes.clone())
         .map_err(|_| format!("{}: not UTF-8 text", paths.config.display()))?;
-    let settings =
+    let mut settings =
         parse_config(&config_text).map_err(|e| format!("{}: {e}", paths.config.display()))?;
-    if !settings.cifp_airports.is_empty() || settings.cifp_area_margin_nm.is_some() {
-        return Err("bounded regional data service does not load CIFP; configuration requests CIFP corridors".into());
+    if (!settings.cifp_airports.is_empty() || settings.cifp_area_margin_nm.is_some())
+        && paths.cifp.is_none()
+    {
+        return Err("configuration requests CIFP corridors but no CIFP input was supplied".into());
     }
     let mut sources = vec![evidence(
         RegionalSourceKind::Config,
@@ -499,6 +545,69 @@ pub fn load_regional_data(
         &config_bytes,
         0,
     )];
+    let mut airport_areas = Vec::new();
+    let mut cifp_corridor_count = 0usize;
+    if let Some(path) = &paths.cifp {
+        let (cifp, source_bytes) = load_cifp(path, limits.max_cifp_file_bytes)?;
+        sources.push(evidence(RegionalSourceKind::Cifp, path, &source_bytes, 0));
+        let mut corridors = Vec::new();
+        for airport in &settings.cifp_airports {
+            let made = corridors_from_cifp_with(&cifp, airport, settings.approach_half_width_nm)?;
+            corridors.extend(made.corridors.into_iter().map(|item| item.corridor));
+        }
+        if let Some(margin_nm) = settings.cifp_area_margin_nm {
+            let (south, north, west, east) = paths
+                .cifp_area
+                .ok_or("CIFP area margin requires admitted regional position bounds")?;
+            if ![south, north, west, east].into_iter().all(f64::is_finite)
+                || south < -90.0
+                || north > 90.0
+                || south > north
+                || west < -180.0
+                || east > 180.0
+                || west > east
+            {
+                return Err("CIFP area bounds are invalid".into());
+            }
+            let latitude_margin = margin_nm / 60.0;
+            let longitude_margin =
+                margin_nm / 60.0 / (((south + north) / 2.0).to_radians().cos().max(0.05));
+            let made = corridors_from_cifp_area(
+                &cifp,
+                (
+                    (south - latitude_margin).max(-90.0),
+                    (north + latitude_margin).min(90.0),
+                    (west - longitude_margin).max(-180.0),
+                    (east + longitude_margin).min(180.0),
+                ),
+                &settings.cifp_airports,
+                settings.approach_half_width_nm,
+            )?;
+            corridors.extend(made.corridors.into_iter().map(|item| item.corridor));
+        }
+        if settings
+            .msaw
+            .corridors
+            .len()
+            .saturating_add(corridors.len())
+            > oa_msaw::MAX_CORRIDORS
+        {
+            return Err("configured and CIFP corridors exceed the MSAW corridor capacity".into());
+        }
+        cifp_corridor_count = corridors.len();
+        let mut configured_corridors = settings.msaw.corridors.into_vec();
+        configured_corridors.extend(corridors);
+        settings.msaw.corridors = configured_corridors.into_boxed_slice();
+        for (_, lat, lon, elevation_ft) in airports_with_approach(&cifp) {
+            airport_areas.push(AirportArea {
+                lat,
+                lon,
+                radius_m: settings.airport_area_nm * 1852.0,
+                ceiling_ft: elevation_ft.saturating_add(settings.airport_area_ceiling_ft_agl),
+                clearance_ft: settings.airport_area_clearance_ft,
+            });
+        }
+    }
     let areas = load_areas(&settings, limits, &mut sources)?;
 
     let mut obstacles: Option<ObstacleIndex> = None;
@@ -605,6 +714,7 @@ pub fn load_regional_data(
     });
     floors.set_areas(areas);
     floors.set_corridors(&settings.msaw);
+    floors.set_airports(airport_areas);
 
     let manifest_sha256 = manifest_hash(
         weather.cutoff_ms,
@@ -613,6 +723,7 @@ pub fn load_regional_data(
         paths.terrain_dir.is_some(),
         paths.dof_files.len(),
         paths.metar_files.len(),
+        usize::from(paths.cifp.is_some()),
     );
     let provenance = RegionalProvenance {
         cutoff_ms: weather.cutoff_ms,
@@ -625,6 +736,8 @@ pub fn load_regional_data(
         dof_records: dof_total_records,
         metar_rows: qnh.stats.rows,
         metar_stations: qnh.stats.stations,
+        cifp_source_present: paths.cifp.is_some(),
+        cifp_corridors: cifp_corridor_count,
     };
     Ok(RegionalData {
         settings,

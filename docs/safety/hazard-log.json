@@ -605,6 +605,8 @@
     "OA-MSAW-079",
     "OA-MSAW-080",
     "OA-MSAW-081",
+    "OA-MSAW-083",
+    "OA-MSAW-084",
     "OA-MVA-001",
     "OA-MVA-002",
     "OA-MVA-003",
@@ -13575,6 +13577,11 @@
           "requirement_id": "OA-WS-003",
           "file": "crates/oa-workstation/tests/workstation.rs",
           "test_name": "handoff_and_pointout_have_distinct_shared_state"
+        },
+        {
+          "requirement_id": "OA-REG-013",
+          "file": "tools/oa-regional-session/tests/protocol.rs",
+          "test_name": "v2_preserves_native_adsb_source_quality_without_upgrading_it_to_reliability"
         }
       ],
       "proof_refs": []
@@ -14085,12 +14092,14 @@
         "OA-MSAW-078",
         "OA-MSAW-079",
         "OA-MSAW-080",
-        "OA-MSAW-081"
+        "OA-MSAW-081",
+        "OA-MSAW-083",
+        "OA-MSAW-084"
       ],
       "source_refs": [
         {
           "document": "REQUIREMENTS.md",
-          "locator": "OA-MSAW-001 through OA-MSAW-081 in the owning functional sections"
+          "locator": "OA-MSAW-001 through OA-MSAW-084 in the owning functional sections"
         }
       ],
       "verification_refs": [
@@ -14413,6 +14422,21 @@
           "requirement_id": "OA-MSAW-081",
           "file": "tools/oa-msaw/tests/shell.rs",
           "test_name": "a_lookup_circle_is_the_points_own_radius_with_no_cell_and_no_bucket"
+        },
+        {
+          "requirement_id": "OA-MSAW-083",
+          "file": "tools/oa-regional-session/src/msaw_bridge.rs",
+          "test_name": "regional_aural_area_latches_one_request_per_alert_instance"
+        },
+        {
+          "requirement_id": "OA-MSAW-083",
+          "file": "tools/oa-regional-session/src/msaw_bridge.rs",
+          "test_name": "aural_acknowledgement_is_exact_and_does_not_clear_visual_alert"
+        },
+        {
+          "requirement_id": "OA-MSAW-084",
+          "file": "tools/oa-regional-session/src/runtime.rs",
+          "test_name": "queued_msaw_service_request_is_pinned_audited_and_used_on_the_next_cycle"
         }
       ],
       "proof_refs": [
@@ -23125,6 +23149,18 @@
       "function": "minimum_safe_altitude_warning",
       "hazard_id": "HZ-MSAW-001",
       "rationale": "Engineering safety candidate: this register clause constrains minimum_safe_altitude_warning; failure can contribute to the stated hazard. Register clause: A floor lookup is made at the point itself over its own radius, with no cell and no radius bucket."
+    },
+    {
+      "id": "OA-MSAW-083",
+      "function": "minimum_safe_altitude_warning",
+      "hazard_id": "HZ-MSAW-001",
+      "rationale": "Engineering safety candidate: an incorrect aural alert-instance ledger could omit or repeat an audible request or acknowledge a different episode. The regional tests verify area eligibility, one-request latching, exact-instance acknowledgement and preservation of the visual alert. The backend remains unavailable in this runtime, so this does not establish audio delivery or operational qualification."
+    },
+    {
+      "id": "OA-MSAW-084",
+      "function": "minimum_safe_altitude_warning",
+      "hazard_id": "HZ-MSAW-001",
+      "rationale": "Engineering safety candidate: treating a stale or mismatched service request as current could misstate why an alert basis was selected. The bounded runtime joins the request to the current full identity, generation and identity/address stamps, and the request basis remains alerting. Synthetic tests cover audited activation, revocation, expiry and append refusal; no operational approval or credential authentication is claimed."
     },
     {
       "id": "OA-MSAW-041",

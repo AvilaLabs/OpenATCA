@@ -54,6 +54,7 @@ struct Arguments {
     performance: Option<PathBuf>,
     profile: oa_regional_session::cli::RegionalCliProfile,
     quarantine_release: Option<oa_regional_session::cli::QuarantineReleaseOptions>,
+    msaw_service_audit: Option<oa_regional_session::cli::MsawServiceAuditOptions>,
 }
 
 fn arguments() -> Result<Arguments, CliError> {
@@ -85,10 +86,16 @@ fn arguments() -> Result<Arguments, CliError> {
     let mut audit_principal = None;
     let mut audit_role = None;
     let mut audit_time_ns = None;
+    let mut msaw_audit_registry = None;
+    let mut msaw_audit_registry_pin = None;
+    let mut msaw_audit_log = None;
+    let mut msaw_audit_count = None;
+    let mut msaw_audit_tail = None;
+    let mut msaw_audit_principal = None;
     let mut count = 0;
     while let Some(arg) = args.next() {
         count += 1;
-        if count > 48 {
+        if count > 64 {
             return Err(CliError::Usage);
         }
         match arg.to_str() {
@@ -240,6 +247,47 @@ fn arguments() -> Result<Arguments, CliError> {
                         .ok_or(CliError::Usage)?,
                 );
             }
+            Some("--msaw-service-audit-registry") if execute && msaw_audit_registry.is_none() => {
+                msaw_audit_registry = args.next().map(PathBuf::from);
+            }
+            Some("--msaw-service-audit-registry-sha256")
+                if execute && msaw_audit_registry_pin.is_none() =>
+            {
+                msaw_audit_registry_pin = Some(
+                    args.next()
+                        .and_then(|value| value.into_string().ok())
+                        .and_then(|value| parse_audit_digest(&value).ok())
+                        .ok_or(CliError::Usage)?,
+                );
+            }
+            Some("--msaw-service-audit-log") if execute && msaw_audit_log.is_none() => {
+                msaw_audit_log = args.next().map(PathBuf::from);
+            }
+            Some("--msaw-service-audit-count") if execute && msaw_audit_count.is_none() => {
+                msaw_audit_count = Some(
+                    args.next()
+                        .and_then(|value| value.into_string().ok())
+                        .and_then(|value| value.parse::<u64>().ok())
+                        .ok_or(CliError::Usage)?,
+                );
+            }
+            Some("--msaw-service-audit-tail") if execute && msaw_audit_tail.is_none() => {
+                msaw_audit_tail = Some(
+                    args.next()
+                        .and_then(|value| value.into_string().ok())
+                        .and_then(|value| parse_audit_digest(&value).ok())
+                        .ok_or(CliError::Usage)?,
+                );
+            }
+            Some("--msaw-service-audit-principal") if execute && msaw_audit_principal.is_none() => {
+                msaw_audit_principal = Some(
+                    args.next()
+                        .and_then(|value| value.into_string().ok())
+                        .and_then(|value| value.parse::<u64>().ok())
+                        .filter(|value| *value > 0)
+                        .ok_or(CliError::Usage)?,
+                );
+            }
             _ => return Err(CliError::Usage),
         }
     }
@@ -313,6 +361,40 @@ fn arguments() -> Result<Arguments, CliError> {
     } else {
         None
     };
+    let any_msaw_audit = msaw_audit_registry.is_some()
+        || msaw_audit_registry_pin.is_some()
+        || msaw_audit_log.is_some()
+        || msaw_audit_count.is_some()
+        || msaw_audit_tail.is_some()
+        || msaw_audit_principal.is_some();
+    let msaw_service_audit = if any_msaw_audit {
+        let registry_path = msaw_audit_registry.ok_or(CliError::Usage)?;
+        let registry_pin = msaw_audit_registry_pin.ok_or(CliError::Usage)?;
+        let principal = msaw_audit_principal.ok_or(CliError::Usage)?;
+        let registry =
+            oa_audit_log::shell::load_pinned_principal_registry(&registry_path, registry_pin)
+                .map_err(|error| {
+                    CliError::Runtime(format!("MSAW service registry refused: {error}"))
+                })?;
+        registry
+            .authorize(principal, oa_audit_core::Action::MsawServiceRequest)
+            .map_err(|error| {
+                CliError::Runtime(format!(
+                    "MSAW service principal is not authorized: {error:?}"
+                ))
+            })?;
+        Some(oa_regional_session::cli::MsawServiceAuditOptions {
+            audit_log: msaw_audit_log.ok_or(CliError::Usage)?,
+            audit_checkpoint: oa_audit_core::Checkpoint {
+                count: msaw_audit_count.ok_or(CliError::Usage)?,
+                tail: msaw_audit_tail.ok_or(CliError::Usage)?,
+            },
+            principal_registry: registry,
+            principal,
+        })
+    } else {
+        None
+    };
     Ok(Arguments {
         input,
         output,
@@ -321,6 +403,7 @@ fn arguments() -> Result<Arguments, CliError> {
         performance,
         profile: profile.unwrap_or(oa_regional_session::cli::RegionalCliProfile::Default),
         quarantine_release,
+        msaw_service_audit,
     })
 }
 
@@ -431,7 +514,7 @@ fn parse_input_with_limit(bytes: &[u8], max_events: usize) -> Result<Vec<FrameEv
     let text = std::str::from_utf8(bytes).map_err(|_| CliError::InvalidUtf8)?;
     let mut lines = text.split('\n');
     match lines.next() {
-        Some("OA-RS\t1") => {}
+        Some("OA-RS\t1" | "OA-RS\t2") => {}
         Some(_) => return Err(CliError::BadHeader),
         None => return Err(CliError::MissingHeader),
     }
@@ -578,6 +661,7 @@ fn run() -> Result<(), CliError> {
         performance,
         profile,
         quarantine_release,
+        msaw_service_audit,
     } = arguments()?;
     oa_sealed::refuse_io(&input).map_err(CliError::Io)?;
     oa_sealed::refuse_io(&output).map_err(CliError::Io)?;
@@ -603,14 +687,17 @@ fn run() -> Result<(), CliError> {
     let frames = parse_input_with_limit(&bytes, max_events)?;
     match model {
         Some(source) => {
-            oa_regional_session::cli::run_session_with_profile_options_and_quarantine_release(
+            oa_regional_session::cli::run_session_with_profile_options_and_audit_context(
                 &bytes,
                 &output,
                 &source,
                 &safety,
                 performance.as_deref(),
                 profile,
-                quarantine_release.as_ref(),
+                oa_regional_session::cli::SessionAuditOptions {
+                    quarantine_release: quarantine_release.as_ref(),
+                    msaw_service_audit,
+                },
             )
             .map_err(CliError::Runtime)
         }
@@ -621,7 +708,7 @@ fn run() -> Result<(), CliError> {
 fn main() {
     if let Err(error) = run() {
         let message = match error {
-            CliError::Usage => "usage: oa-regional-session run --input FILE --out NEW_DIR (--snapshot FILE | --synthetic-model | --issued-package DIR --issued-manifest-sha256 PIN --processor-id ID) [--msaw-inputs MANIFEST | --synthetic-msaw] [--performance MANIFEST] [--profile recorded-peak-rendered] [--quarantine-release-source flight-data|surveillance --quarantine-release-instance N --quarantine-release-item N --manual-handoff-ref TEXT --audit-registry FILE --audit-registry-sha256 SHA256 --audit-log FILE --audit-count N --audit-tail SHA256 --audit-principal N [--audit-role operate|configure] --audit-time-ns N]; stage --input FILE --out NEW_DIR".to_owned(),
+            CliError::Usage => "usage: oa-regional-session run --input FILE --out NEW_DIR (--snapshot FILE | --synthetic-model | --issued-package DIR --issued-manifest-sha256 PIN --processor-id ID) [--msaw-inputs MANIFEST | --synthetic-msaw] [--performance MANIFEST] [--profile recorded-peak-rendered] [--quarantine-release-source flight-data|surveillance --quarantine-release-instance N --quarantine-release-item N --manual-handoff-ref TEXT --audit-registry FILE --audit-registry-sha256 SHA256 --audit-log FILE --audit-count N --audit-tail SHA256 --audit-principal N [--audit-role operate|configure] --audit-time-ns N] [--msaw-service-audit-registry FILE --msaw-service-audit-registry-sha256 SHA256 --msaw-service-audit-log FILE --msaw-service-audit-count N --msaw-service-audit-tail SHA256 --msaw-service-audit-principal N]; stage --input FILE --out NEW_DIR".to_owned(),
             CliError::Io(error) => format!("I/O error: {error}"),
             CliError::InputTooLarge => "input exceeds the 16 MiB limit".to_owned(),
             CliError::InvalidUtf8 => "input is not UTF-8".to_owned(),

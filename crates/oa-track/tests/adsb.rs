@@ -9,7 +9,9 @@
 use oa_adsb::{
     reports_push, Reports, Row, F_ALT_GEOM, F_STALE, NONE_I32, NONE_U16, NONE_U8, ROW_EMPTY,
 };
-use oa_track::adsb::{adsb_measurements, check_adsb_config, AdsbConfig};
+use oa_track::adsb::{
+    adsb_measurements, adsb_measurements_with_indices, check_adsb_config, AdsbConfig,
+};
 use oa_track::params::{NACV_BOUND_VEL_SIGMA_MPS, NACV_VEL_SIGMA_MPS};
 use oa_track::{M_ALT_GEOMETRIC, M_HAS_VEL};
 use oa_truth::{build_truth, DEFAULT_CONFIG, REMOVE_NAMES};
@@ -51,6 +53,27 @@ fn reports(rows: &[Row]) -> Reports {
         reports_push(&mut r, x);
     }
     r
+}
+
+// REQ: OA-TRK-018
+#[test]
+fn measurement_indices_preserve_exact_rows_through_quality_filtering_and_ties() {
+    let mut rejected = row(1, 0xABCDEF, 41.9, -88.3);
+    rejected.nac_p = 1;
+    let rows = [
+        row(2, 0xABCDEF, 41.9, -88.2),
+        rejected,
+        row(2, 0x123456, 42.0, -88.1),
+    ];
+    let source = reports(&rows);
+    let (indexed, indices, indexed_stats) =
+        adsb_measurements_with_indices(&source, &AdsbConfig::default());
+    let (plain, plain_stats) = adsb_measurements(&source, &AdsbConfig::default());
+    assert_eq!(indexed, plain);
+    assert_eq!(indexed_stats, plain_stats);
+    assert_eq!(indices, vec![0, 2]);
+    assert_eq!(indexed[0].addr, 0xABCDEF);
+    assert_eq!(indexed[1].addr, 0x123456);
 }
 
 // REQ: OA-TRK-018

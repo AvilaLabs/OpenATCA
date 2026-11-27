@@ -9,6 +9,22 @@ use crate::runtime::FlightEvidence;
 use crate::surveillance::ObservedTrack;
 use oa_display::interaction::{self as ui, FlightIdentity, Intent, InteractionResult, TargetView};
 
+pub struct MsawServiceAuditContext<'a> {
+    pub audit_log: &'a std::path::Path,
+    pub checkpoint: &'a mut oa_audit_core::Checkpoint,
+    pub registry: &'a oa_audit_log::shell::PinnedPrincipalRegistry,
+    pub principal: u64,
+}
+
+pub struct DispatchContext<'a> {
+    pub driver: &'a mut FlightDriver,
+    pub interaction: &'a mut ui::InteractionState,
+    pub surveillance: &'a mut crate::surveillance::Surveillance,
+    pub views: &'a [TargetView],
+    pub observed: &'a [ObservedTrack],
+    pub view_sequence: u32,
+}
+
 /// Development local actor registry, stable across replay. This is explicit local actor input,
 /// not network authentication; no UI request can bootstrap an authoritative owner.
 pub const UNITS: [[u8; 8]; 2] = [*b"SECTOR1\0", *b"SECTOR2\0"];
@@ -160,14 +176,19 @@ fn refuse_queued(
 }
 
 fn apply(
-    driver: &mut FlightDriver,
-    interaction: &mut ui::InteractionState,
-    views: &[TargetView],
-    observed: &[ObservedTrack],
-    view_sequence: u32,
+    context: DispatchContext<'_>,
     event: &NormalizedEvent,
     request: OperatorCommand,
+    msaw_audit: Option<&mut MsawServiceAuditContext<'_>>,
 ) -> Result<FlightApplyOutcome, DispatchError> {
+    let DispatchContext {
+        driver,
+        interaction,
+        surveillance,
+        views,
+        observed,
+        view_sequence,
+    } = context;
     if ui::next_intent(interaction).is_some() {
         return Err(terminal_failure(
             "operator queue was nonempty before dispatch",
@@ -292,56 +313,86 @@ fn apply(
             false,
         );
     }
-    let operation = match request.intent {
-        Intent::SetAssignedAltitude(altitude_ft) if actor == view.owner_unit => {
-            FlightOperation::AssignAltitude { altitude_ft }
+    let aural_ack = match request.intent {
+        Intent::AcknowledgeMsaw { alert_start_ns } if actor == view.owner_unit => {
+            Some(alert_start_ns)
         }
-        Intent::ClearAssignedAltitude if actor == view.owner_unit => {
-            FlightOperation::ClearAssignedAltitude
-        }
-        Intent::SetInterimAltitude(altitude_ft) if actor == view.owner_unit => {
-            FlightOperation::SetInterimAltitude {
-                altitude_ft: Some(altitude_ft),
-            }
-        }
-        Intent::ClearInterimAltitude if actor == view.owner_unit => {
-            FlightOperation::SetInterimAltitude { altitude_ft: None }
-        }
-        Intent::OfferHandoff(to) if actor == view.owner_unit && to != request.actor_unit => {
-            let offered = match unit(to) {
-                Ok(unit) => unit,
-                Err(e) => return queued_refusal(interaction, e, false),
-            };
-            FlightOperation::Handoff {
-                operation: HandoffOperation::Offer,
-                unit: offered,
-            }
-        }
-        Intent::AcceptHandoff(by) if by == request.actor_unit && actor == view.handoff_to => {
-            FlightOperation::Handoff {
-                operation: HandoffOperation::Accept,
-                unit: actor,
-            }
-        }
-        Intent::TakeHandoff(by) if by == request.actor_unit && actor == view.handoff_to => {
-            FlightOperation::Handoff {
-                operation: HandoffOperation::Take,
-                unit: actor,
-            }
-        }
-        Intent::CancelHandoff(by) if by == request.actor_unit && actor == view.owner_unit => {
-            FlightOperation::Handoff {
-                operation: HandoffOperation::Fail,
-                unit: actor,
-            }
-        }
-        _ => {
+        Intent::AcknowledgeMsaw { .. } => {
             return queued_refusal(
                 interaction,
-                "operator unit has no authority for this request".into(),
+                "operator unit does not own the selected flight for MSAW acknowledgement".into(),
                 false,
             )
         }
+        _ => None,
+    };
+    let service_request = match request.intent {
+        Intent::RequestMsawService { expires_at_ns } if actor == view.owner_unit => {
+            Some(expires_at_ns)
+        }
+        Intent::RequestMsawService { .. } => {
+            return queued_refusal(
+                interaction,
+                "operator unit does not own the selected flight for MSAW service request".into(),
+                false,
+            )
+        }
+        _ => None,
+    };
+    let operation = if aural_ack.is_some() || service_request.is_some() {
+        None
+    } else {
+        Some(match request.intent {
+            Intent::SetAssignedAltitude(altitude_ft) if actor == view.owner_unit => {
+                FlightOperation::AssignAltitude { altitude_ft }
+            }
+            Intent::ClearAssignedAltitude if actor == view.owner_unit => {
+                FlightOperation::ClearAssignedAltitude
+            }
+            Intent::SetInterimAltitude(altitude_ft) if actor == view.owner_unit => {
+                FlightOperation::SetInterimAltitude {
+                    altitude_ft: Some(altitude_ft),
+                }
+            }
+            Intent::ClearInterimAltitude if actor == view.owner_unit => {
+                FlightOperation::SetInterimAltitude { altitude_ft: None }
+            }
+            Intent::OfferHandoff(to) if actor == view.owner_unit && to != request.actor_unit => {
+                let offered = match unit(to) {
+                    Ok(unit) => unit,
+                    Err(e) => return queued_refusal(interaction, e, false),
+                };
+                FlightOperation::Handoff {
+                    operation: HandoffOperation::Offer,
+                    unit: offered,
+                }
+            }
+            Intent::AcceptHandoff(by) if by == request.actor_unit && actor == view.handoff_to => {
+                FlightOperation::Handoff {
+                    operation: HandoffOperation::Accept,
+                    unit: actor,
+                }
+            }
+            Intent::TakeHandoff(by) if by == request.actor_unit && actor == view.handoff_to => {
+                FlightOperation::Handoff {
+                    operation: HandoffOperation::Take,
+                    unit: actor,
+                }
+            }
+            Intent::CancelHandoff(by) if by == request.actor_unit && actor == view.owner_unit => {
+                FlightOperation::Handoff {
+                    operation: HandoffOperation::Fail,
+                    unit: actor,
+                }
+            }
+            _ => {
+                return queued_refusal(
+                    interaction,
+                    "operator unit has no authority for this request".into(),
+                    false,
+                )
+            }
+        })
     };
     // Recheck both queue identity and command payload before applying authoritative state.
     if ui::next_intent(interaction).is_none_or(|head| {
@@ -356,18 +407,69 @@ fn apply(
     {
         return queued_refusal(interaction, format!("operator dispatch: {other:?}"), true);
     }
-    let mut authoritative = *event;
-    authoritative.kind = EventKind::Flight(operation);
-    let result = flight::flight_apply_event(driver, &authoritative)
-        .map_err(|e| terminal_failure(format!("operator flight operation after preflight: {e:?}")));
-    let accepted = result.as_ref().is_ok_and(|r| {
-        r.adapter_refusal.is_none()
-            && r.operation.is_some_and(|outcome| {
-                matches!(
-                    outcome,
-                    oa_flight::Outcome::Applied | oa_flight::Outcome::Unchanged
-                )
-            })
+    let result = if let Some(alert_start_ns) = aural_ack {
+        crate::surveillance::surveillance_acknowledge_msaw_aural(
+            surveillance,
+            key.aircraft_address,
+            alert_start_ns,
+            event.source_ns,
+        )
+        .map_err(refusal)
+        .map(|()| FlightApplyOutcome {
+            operation: None,
+            adapter_refusal: None,
+            ignored_non_flight_event: true,
+        })
+    } else if let Some(expires_at_ns) = service_request {
+        let Some(audit) = msaw_audit else {
+            finish_queued(interaction, seq, ui::CommandOutcome::Refused)?;
+            return Err(refusal(
+                "MSAW service request requires pinned registry and durable audit context",
+            ));
+        };
+        let principal = audit.principal;
+        audit_msaw_service_request(
+            audit,
+            surveillance,
+            crate::surveillance::MsawServiceRequestUpdate {
+                identity: key,
+                generation: request.target_generation,
+                identity_stamp: view.identity_stamp,
+                address_stamp: view.address_stamp,
+                expires_at_ns,
+                input_sequence: event.sequence,
+                principal,
+                now_ns: event.receipt_ns,
+                view_sequence: request.view_sequence,
+            },
+        )
+        .map_err(refusal)
+        .map(|()| FlightApplyOutcome {
+            operation: None,
+            adapter_refusal: None,
+            ignored_non_flight_event: true,
+        })
+    } else if let Some(operation) = operation {
+        let mut authoritative = *event;
+        authoritative.kind = EventKind::Flight(operation);
+        flight::flight_apply_event(driver, &authoritative).map_err(|e| {
+            terminal_failure(format!("operator flight operation after preflight: {e:?}"))
+        })
+    } else {
+        Err(terminal_failure(
+            "operator operation was absent after preflight",
+        ))
+    };
+    let accepted = result.as_ref().is_ok_and(|outcome| {
+        aural_ack.is_some()
+            || service_request.is_some()
+            || (outcome.adapter_refusal.is_none()
+                && outcome.operation.is_some_and(|operation| {
+                    matches!(
+                        operation,
+                        oa_flight::Outcome::Applied | oa_flight::Outcome::Unchanged
+                    )
+                }))
     });
     finish_queued(
         interaction,
@@ -382,13 +484,18 @@ fn apply(
 }
 
 pub fn dispatch(
-    driver: &mut FlightDriver,
-    interaction: &mut ui::InteractionState,
-    views: &[TargetView],
-    observed: &[ObservedTrack],
-    view_sequence: u32,
+    context: DispatchContext<'_>,
     event: &NormalizedEvent,
     request: OperatorCommand,
+) -> Dispatch {
+    dispatch_with_msaw_audit(context, event, request, None)
+}
+
+pub fn dispatch_with_msaw_audit(
+    context: DispatchContext<'_>,
+    event: &NormalizedEvent,
+    request: OperatorCommand,
+    msaw_audit: Option<&mut MsawServiceAuditContext<'_>>,
 ) -> Dispatch {
     let mut record = Dispatch {
         input_sequence: event.sequence,
@@ -397,20 +504,14 @@ pub fn dispatch(
         refusal: String::new(),
         terminal_failure: false,
     };
-    let capacity = flight::flight_driver_capacity(driver);
-    if views.len() > capacity || observed.len() > crate::flight::MAX_OFFLINE_DRIVER_FLIGHTS {
+    let capacity = flight::flight_driver_capacity(context.driver);
+    if context.views.len() > capacity
+        || context.observed.len() > crate::flight::MAX_OFFLINE_DRIVER_FLIGHTS
+    {
         record.refusal = "operator input budget exceeded".into();
         return record;
     }
-    match apply(
-        driver,
-        interaction,
-        views,
-        observed,
-        view_sequence,
-        event,
-        request,
-    ) {
+    match apply(context, event, request, msaw_audit) {
         Ok(outcome) => record.outcome = Some(outcome),
         Err(error) => {
             record.refusal = error.reason;
@@ -418,4 +519,82 @@ pub fn dispatch(
         }
     }
     record
+}
+
+fn audit_msaw_service_request(
+    context: &mut MsawServiceAuditContext<'_>,
+    surveillance: &mut crate::surveillance::Surveillance,
+    request: crate::surveillance::MsawServiceRequestUpdate,
+) -> Result<(), String> {
+    if context.principal == 0 || request.now_ns <= 0 || request.principal != context.principal {
+        return Err("MSAW service audit principal/time must be positive".into());
+    }
+    if request.expires_at_ns != 0 {
+        let duration = request
+            .expires_at_ns
+            .checked_sub(request.now_ns)
+            .ok_or("MSAW request expiry overflow")?;
+        if duration <= 0 || duration > crate::surveillance::MAX_MSAW_SERVICE_REQUEST_NS {
+            return Err("MSAW request expiry is outside the five-minute bound".into());
+        }
+    }
+    let role = context
+        .registry
+        .authorize(context.principal, oa_audit_core::Action::MsawServiceRequest)
+        .map_err(|error| format!("MSAW service registry refused: {error:?}"))?;
+    crate::surveillance::surveillance_validate_msaw_service_request(surveillance, request)?;
+    let target_text = format!(
+        "MSAW SERVICE {:032X} {:06X}",
+        u128::from_be_bytes(request.identity.gufi),
+        request.identity.aircraft_address
+    );
+    let (target, target_len) = oa_audit_core::target(target_text.as_bytes())
+        .map_err(|error| format!("MSAW service target: {error:?}"))?;
+    let mut text = String::new();
+    text.try_reserve_exact(384)
+        .map_err(|_| "MSAW service details allocation refused")?;
+    use std::fmt::Write as _;
+    writeln!(text,
+        "MSAW-SERVICE-REQUEST-V1\noperation\t{}\nflight_gufi\t{:032X}\naircraft_address\t{:06X}\ncentre\t{}\nplan_id\t{}\ngeneration\t{}\nidentity_stamp\t{}:{}:{}\naddress_stamp\t{}:{}:{}\nview_sequence\t{}\ninput_sequence\t{}\nexpires_at_ns\t{}",
+        if request.expires_at_ns == 0 { "REVOKE" } else { "ACTIVATE" },
+        u128::from_be_bytes(request.identity.gufi), request.identity.aircraft_address,
+        std::str::from_utf8(&request.identity.centre).unwrap_or("????"),
+        std::str::from_utf8(&request.identity.plan_id).unwrap_or("????????????"),
+        request.generation,
+        request.identity_stamp.ts_ms, request.identity_stamp.avail_ms, request.identity_stamp.msg,
+        request.address_stamp.ts_ms, request.address_stamp.avail_ms, request.address_stamp.msg,
+        request.view_sequence, request.input_sequence, request.expires_at_ns)
+        .map_err(|_| "MSAW service details formatting failed")?;
+    let (details, details_len) = oa_audit_core::details(text.as_bytes())
+        .map_err(|error| format!("MSAW service details: {error:?}"))?;
+    let audit_event = oa_audit_core::Event {
+        principal: context.principal,
+        role,
+        action: oa_audit_core::Action::MsawServiceRequest,
+        target,
+        target_len,
+        time_ns: u64::try_from(request.now_ns).map_err(|_| "invalid MSAW audit timestamp")?,
+        details,
+        details_len,
+    };
+    oa_audit_core::validate_event(&audit_event)
+        .map_err(|error| format!("MSAW service event: {error:?}"))?;
+    let next_sequence = context
+        .checkpoint
+        .count
+        .checked_add(1)
+        .ok_or("MSAW service audit sequence exhausted")?;
+    let (checkpoint, receipt) =
+        oa_audit_log::shell::append_receipt(context.audit_log, *context.checkpoint, audit_event)
+            .map_err(|error| format!("MSAW service audit append failed: {error:?}"))?;
+    if checkpoint.count != next_sequence
+        || checkpoint.tail != receipt.digest()
+        || receipt.sequence() != next_sequence
+        || !oa_audit_core::receipt_matches(&receipt, audit_event)
+    {
+        return Err("MSAW service audit receipt does not match request".into());
+    }
+    crate::surveillance::surveillance_commit_msaw_service_request(surveillance, request)?;
+    *context.checkpoint = checkpoint;
+    Ok(())
 }
