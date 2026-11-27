@@ -74,7 +74,7 @@ mod tests {
             "/../test-support/sealed_guard.rs"
         ));
     }
-    use shared_guard::guard;
+    pub(crate) use shared_guard::guard;
 
     fn tree(tag: &str) -> std::path::PathBuf {
         let base =
