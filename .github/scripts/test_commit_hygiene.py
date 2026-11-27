@@ -118,10 +118,33 @@ class CommitHygieneTests(unittest.TestCase):
             self.assertEqual(module.commit_ids("base", "head", False), ["deadbeef"])
 
     def test_missing_email_configuration_fails_before_git_or_ref_resolution(self):
-        with patch.dict(os.environ, {}, clear=True):
+        head = "a" * 40
+        with patch.dict(os.environ, {
+            "GITHUB_EVENT_NAME": "push", "GITHUB_SHA": head,
+        }, clear=True):
             with self.assertRaises(module.Refusal) as caught:
                 module.main()
         self.assertEqual(caught.exception.rule, "missing-or-invalid-email-variable")
+        self.assertEqual(caught.exception.sha, head[:12])
+
+    def test_failure_output_is_only_valid_short_sha_and_rule(self):
+        head = "b" * 40
+        with patch.dict(os.environ, {"GITHUB_EVENT_NAME": "push", "GITHUB_SHA": head}):
+            self.assertEqual(
+                module.failure_line(module.Refusal("author-email")),
+                f"commit_hygiene_failed sha={head[:12]} rule=author-email",
+            )
+        pr_head = "c" * 40
+        with patch.dict(os.environ, {
+            "GITHUB_EVENT_NAME": "pull_request", "GITHUB_SHA": "d" * 40,
+            "PR_HEAD_SHA": pr_head,
+        }):
+            self.assertEqual(module.Refusal("invalid-range").sha, pr_head[:12])
+        unsafe = "untrusted-value-that-must-not-be-printed"
+        with patch.dict(os.environ, {"GITHUB_EVENT_NAME": "push", "GITHUB_SHA": unsafe}):
+            refusal = module.Refusal("invalid-range", unsafe)
+            self.assertEqual(refusal.sha, "000000000000")
+            self.assertNotIn(unsafe, module.failure_line(refusal))
 
     def test_tracked_user_path_match_is_refused_and_no_match_passes(self):
         with patch.object(module.subprocess, "run", return_value=SimpleNamespace(returncode=0)):
@@ -155,6 +178,7 @@ class CommitHygieneTests(unittest.TestCase):
             with self.assertRaises(module.Refusal) as caught:
                 module.check_tracked_paths(pr_ids, cwd=repo)
             self.assertEqual(caught.exception.rule, "tracked-user-path")
+            self.assertEqual(caught.exception.sha, bad[:12])
             module.check_tracked_paths([fixed], cwd=repo)
             module.check_tracked_paths([archived], cwd=repo)
 

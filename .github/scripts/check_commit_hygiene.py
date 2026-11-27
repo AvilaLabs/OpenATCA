@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 
@@ -17,9 +18,29 @@ PATH_SCAN_CHUNK = 128
 
 
 class Refusal(Exception):
-    def __init__(self, rule: str, sha: str = "range"):
+    def __init__(self, rule: str, sha: str | None = None):
         self.rule = rule
-        self.sha = sha
+        self.sha = short_sha(sha) or event_head_sha() or "000000000000"
+
+
+def short_sha(value: str | None) -> str | None:
+    if value is not None and re.fullmatch(r"[0-9a-fA-F]{7,64}", value):
+        return value[:12].lower()
+    return None
+
+
+def event_head_sha() -> str | None:
+    if os.environ.get("GITHUB_EVENT_NAME") == "pull_request":
+        candidate = os.environ.get("PR_HEAD_SHA", "")
+    else:
+        candidate = os.environ.get("GITHUB_SHA", "")
+    if re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", candidate):
+        return candidate[:12].lower()
+    return None
+
+
+def failure_line(refusal: Refusal) -> str:
+    return f"commit_hygiene_failed sha={refusal.sha} rule={refusal.rule}"
 
 
 def git(*args: str, check: bool = True, cwd=None) -> bytes:
@@ -61,19 +82,19 @@ def check_commit(sha: str, expected_email: str, cwd=None) -> None:
     raw = git("show", "-s", "--format=%an%x00%ae%x00%cn%x00%ce%x00%B", sha, cwd=cwd)
     fields = raw.split(b"\0", 4)
     if len(fields) != 5:
-        raise Refusal("metadata-unreadable", sha[:12])
+        raise Refusal("metadata-unreadable", sha)
     author_name, author_email, committer_name, committer_email, message = fields
     if author_name.decode("utf-8", "replace") != EXPECTED_NAME:
-        raise Refusal("author-name", sha[:12])
+        raise Refusal("author-name", sha)
     if committer_name.decode("utf-8", "replace") != EXPECTED_NAME:
-        raise Refusal("committer-name", sha[:12])
+        raise Refusal("committer-name", sha)
     if author_email.decode("utf-8", "replace") != expected_email:
-        raise Refusal("author-email", sha[:12])
+        raise Refusal("author-email", sha)
     if committer_email.decode("utf-8", "replace") != expected_email:
-        raise Refusal("committer-email", sha[:12])
+        raise Refusal("committer-email", sha)
     lowered = message.decode("utf-8", "replace").lower()
     if any(marker in lowered for marker in BAD_MARKERS):
-        raise Refusal("prohibited-message-marker", sha[:12])
+        raise Refusal("prohibited-message-marker", sha)
 
 
 def check_tracked_paths(commits: list[str], cwd=None) -> None:
@@ -88,7 +109,17 @@ def check_tracked_paths(commits: list[str], cwd=None) -> None:
         if result.returncode not in (0, 1):
             raise Refusal("tracked-path-scan")
         if result.returncode == 0:
-            raise Refusal("tracked-user-path")
+            for sha in commits[start:start + PATH_SCAN_CHUNK]:
+                individual = subprocess.run(
+                    ["git", "grep", "-l", "--fixed-strings", needle, sha, "--", ".",
+                     ":(exclude)docs/archive/**"],
+                    cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                )
+                if individual.returncode == 0:
+                    raise Refusal("tracked-user-path", sha)
+                if individual.returncode != 1:
+                    raise Refusal("tracked-path-scan", sha)
+            raise Refusal("tracked-path-scan")
 
 
 def main() -> int:
@@ -119,9 +150,9 @@ if __name__ == "__main__":
     try:
         result = main()
     except Refusal as refusal:
-        print(f"commit_hygiene_failed sha={refusal.sha} rule={refusal.rule}", file=sys.stderr)
+        print(failure_line(refusal), file=sys.stderr)
         raise SystemExit(1)
     except Exception:
-        print("commit_hygiene_failed sha=range rule=checker-error", file=sys.stderr)
+        print(failure_line(Refusal("checker-error")), file=sys.stderr)
         raise SystemExit(1)
     raise SystemExit(result)
