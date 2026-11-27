@@ -1066,6 +1066,7 @@ mod tests {
         }
     }
 
+    // REQ: OA-FEED-197
     #[test]
     fn stop_on_recording_failure_stops_draining_and_counts_the_cap_frame() {
         let directory = std::env::temp_dir().join(format!(
@@ -1116,6 +1117,7 @@ mod tests {
         std::fs::remove_dir_all(&directory).expect("remove synthetic recording directory");
     }
 
+    // REQ: OA-FEED-197
     #[test]
     fn stop_mode_latches_recording_errors_discovered_only_during_finalization() {
         assert!(should_latch_recording_failure(true, false, true));

@@ -1115,6 +1115,7 @@ under RULESET F6 and is verified by its live run, not by the cargo tests.
   emits aggregate counts and first/last frame times without payloads or IDs, and discloses that edge buckets may be
   partial and capture continuity is unverified. Its observed sample peak is operator-supplied measurement input;
   it does not establish a future traffic maximum or continuous hourly coverage.
+- **OA-FEED-197** In opt-in `--stop-on-recording-failure` mode, a cap, write, flush, or finalization failure latches the recording failure, stops further draining, and exits nonzero; the cap-triggering frame is included in lost-frame counts. The observer wrapper records the failure marker and prevents automatic reconnect after exit 75. A pipe ACK may precede local durable recording, so this does not claim exactly-once delivery, no data loss, or continuous capture completeness.
 - **OA-DEF-001** Compresses to a raw RFC 1951 DEFLATE stream that the oa-zip inflater decodes to
   exactly the input, at levels 1 to 9 (others are clamped), for empty input, one byte, all-same
   bytes, random bytes and data at 32 KiB, 64 KiB and buffer-slide boundaries (each +-1).

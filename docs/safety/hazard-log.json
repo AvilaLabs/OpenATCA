@@ -329,6 +329,7 @@
     "OA-FEED-171",
     "OA-FEED-172",
     "OA-FEED-173",
+    "OA-FEED-197",
     "OA-FIXM-001",
     "OA-FIXM-002",
     "OA-FIXM-003",
@@ -10927,7 +10928,8 @@
         "OA-CERT-007",
         "OA-CERT-008",
         "OA-CERT-009",
-        "OA-CERT-010"
+        "OA-CERT-010",
+        "OA-FEED-197"
       ],
       "source_refs": [
         {
@@ -10961,6 +10963,10 @@
         {
           "document": "REQUIREMENTS.md",
           "locator": "OA-CERT-007 through OA-CERT-010"
+        },
+        {
+          "document": "REQUIREMENTS.md",
+          "locator": "OA-FEED-197"
         }
       ],
       "verification_refs": [
@@ -11468,6 +11474,16 @@
           "requirement_id": "OA-CERT-010",
           "file": "tools/oa-certification/tests/certify_cli.rs",
           "test_name": "certify_cli_commits_all_three_outcomes_from_real_tracker_and_local_digest_inputs"
+        },
+        {
+          "requirement_id": "OA-FEED-197",
+          "file": "crates/oa-feed/src/main.rs",
+          "test_name": "stop_on_recording_failure_stops_draining_and_counts_the_cap_frame"
+        },
+        {
+          "requirement_id": "OA-FEED-197",
+          "file": "crates/oa-feed/src/main.rs",
+          "test_name": "stop_mode_latches_recording_errors_discovered_only_during_finalization"
         }
       ],
       "proof_refs": []
@@ -18187,6 +18203,12 @@
       "function": "surveillance_and_structured_feed_ingestion",
       "hazard_id": "HZ-FEED-001",
       "rationale": "Engineering safety candidate: this register clause constrains surveillance_and_structured_feed_ingestion; failure can contribute to the stated hazard. Register clause: Reading a whole stream (`read_frames`, the loop the ADS-B clip loaders share) ends with `FrameReader::finish`: the frames before a partial frame at the end are all delivered, and the partial frame, whether it stops inside the header or inside the body, is counted once with the damaged frames."
+    },
+    {
+      "id": "OA-FEED-197",
+      "function": "migration_comparison_and_safety_evidence",
+      "hazard_id": "HZ-EVIDENCE-001",
+      "rationale": "Engineering safety candidate: treating a failed recording as continuous evidence could overstate capture completeness. In opt-in stop mode, recording failure halts further draining, counts the triggering cap frame as lost, and latches a nonzero failure through finalization and the observer wrapper. The source pipe may acknowledge before local durability; this does not claim exactly-once delivery, no data loss, or continuous coverage."
     },
     {
       "id": "OA-FIXM-001",
