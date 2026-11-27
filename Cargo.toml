@@ -103,6 +103,8 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)', 'cfg(kani_full_cap
 
 # RULESET E3: no panic paths outside tests. Test modules opt out with a module-level allow.
 [workspace.lints.clippy]
+too_many_lines = "warn"
+too_many_arguments = "warn"
 unwrap_used = "deny"
 expect_used = "deny"
 panic = "deny"

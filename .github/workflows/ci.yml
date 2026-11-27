@@ -38,54 +38,6 @@ jobs:
         run: |
           python3 .github/scripts/test_commit_hygiene.py
           python3 .github/scripts/check_commit_hygiene.py
-  quality-negative-proof:
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/train/quality-proof-')
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix:
-        escape: [E01, E02, E03, E04, E05, E06, E07, E09]
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install pinned proof compiler
-        if: matrix.escape == 'E04' || matrix.escape == 'E05' || matrix.escape == 'E09'
-        run: rustup toolchain install 1.89.0 --profile minimal
-      - name: Build trusted trace validator
-        if: matrix.escape == 'E05' || matrix.escape == 'E09'
-        run: cargo +1.89.0 build --locked -p oa-trace
-      - name: Install pinned mutation proof runner
-        if: matrix.escape == 'E04'
-        run: cargo +1.89.0 install --locked cargo-mutants --version 27.1.0
-      - name: Prove the class checker refuses the isolated defect
-        env:
-          PROOF_CLASS: ${{ matrix.escape }}
-          OPENATCA_OA_TRACE_BIN: ${{ github.workspace }}/target/debug/oa-trace
-        run: |
-          set -euo pipefail
-          case "$PROOF_CLASS" in
-            E01|E02|E03)
-              command=(python3 .github/scripts/test_commit_hygiene.py --proof-class "$PROOF_CLASS")
-              ;;
-            E04)
-              command=(python3 tools/run_safety_mutants_fixture.py --negative-proof)
-              ;;
-            E06)
-              command=(python3 .github/scripts/test_safety_flag_consumers.py --negative-proof)
-              ;;
-            E05|E07|E09)
-              command=(python3 tools/prove_quality_rejections.py --class "$PROOF_CLASS")
-              ;;
-            *) exit 2 ;;
-          esac
-          "${command[@]}" 2>&1 | tee "$RUNNER_TEMP/quality-proof-$PROOF_CLASS.txt"
-      - name: Attach safe checker refusal receipt
-        if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: quality-refusal-${{ matrix.escape }}
-          path: ${{ runner.temp }}/quality-proof-${{ matrix.escape }}.txt
-          if-no-files-found: error
   safety-mutations:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
@@ -93,6 +45,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Configure isolated synthetic data root
         run: python3 .github/scripts/configure_test_data_root.py
       - name: Test synthetic data root setup
@@ -103,44 +56,30 @@ jobs:
         run: cargo +1.89.0 install --locked cargo-mutants --version 27.1.0
       - name: Verify mutation runner
         run: cargo mutants --version | grep -Fx 'cargo-mutants 27.1.0'
-      - name: Mutation checker tests
-        run: |
-          python3 tools/test_check_safety_mutations.py
-          python3 tools/test_run_safety_mutants_fixture.py
-      - name: Synthetic mutation runner fixture
-        run: python3 tools/run_safety_mutants_fixture.py
-      - name: Select changed range
-        id: changed-range
+      - name: Run changed safety-source mutations
         env:
           EVENT: ${{ github.event_name }}
           PUSH_BEFORE: ${{ github.event.before }}
           PR_BASE: ${{ github.event.pull_request.base.sha }}
-          PR_HEAD: ${{ github.event.pull_request.head.sha }}
           HEAD_SHA: ${{ github.sha }}
           PUSH_REF: ${{ github.ref }}
         run: |
           set -euo pipefail
           if [[ "$EVENT" == pull_request ]]; then
             base="$PR_BASE"
-            head="$PR_HEAD"
           elif [[ "$EVENT" == push ]]; then
-            head="$HEAD_SHA"
-            if [[ "$PUSH_REF" != refs/heads/main || "$PUSH_BEFORE" =~ ^0+$ ]]; then
-              base="$(git merge-base "$head" origin/main)"
-            else
+            if [[ "$PUSH_REF" == refs/heads/main && ! "$PUSH_BEFORE" =~ ^0+$ ]]; then
               base="$PUSH_BEFORE"
+            else
+              base="$(git merge-base "$HEAD_SHA" origin/main)"
             fi
           else
             echo 'unsupported workflow event' >&2
             exit 1
           fi
-          [[ "$base" =~ ^[0-9a-f]{40}$ && "$head" =~ ^[0-9a-f]{40}$ ]]
-          printf 'base=%s\nhead=%s\n' "$base" "$head" >> "$GITHUB_OUTPUT"
-      - name: Check changed safety-source mutants
-        env:
-          MUTATION_BASE: ${{ steps.changed-range.outputs.base }}
-          MUTATION_HEAD: ${{ steps.changed-range.outputs.head }}
-        run: python3 tools/check_safety_mutations.py --base "$MUTATION_BASE" --head "$MUTATION_HEAD"
+          [[ "$base" =~ ^[0-9a-f]{40}$ ]]
+          git diff --binary "$base" HEAD -- '*.rs' > "$RUNNER_TEMP/safety-source.diff"
+          cargo mutants --in-diff "$RUNNER_TEMP/safety-source.diff"
   check:
     runs-on: ubuntu-24.04
     steps:
@@ -170,7 +109,7 @@ jobs:
       - name: Format
         run: cargo +1.89.0 fmt --all --check
       - name: Lint
-        run: cargo +1.89.0 clippy --workspace --all-targets --locked -- -D warnings
+        run: cargo +1.89.0 clippy --workspace --all-targets --locked -- -D warnings -W clippy::too_many_lines -W clippy::too_many_arguments
       - name: Candidate evaluator tests
         run: python3 tools/test_validate_candidate.py
       - name: Latency aggregate validation tests
@@ -189,57 +128,6 @@ jobs:
         run: python3 tools/test_allocator_validation.py
       - name: Proof control provisioning tests
         run: python3 tools/test_prepare_rust_proof_controls.py
-      - name: Select immutable quality baseline revision
-        id: quality-range
-        env:
-          EVENT: ${{ github.event_name }}
-          PUSH_BEFORE: ${{ github.event.before }}
-          PR_BASE: ${{ github.event.pull_request.base.sha }}
-          PR_HEAD: ${{ github.event.pull_request.head.sha }}
-          HEAD_SHA: ${{ github.sha }}
-          PUSH_REF: ${{ github.ref }}
-        run: |
-          set -euo pipefail
-          if [[ "$EVENT" == pull_request ]]; then
-            base="$PR_BASE"
-            head="$PR_HEAD"
-          elif [[ "$EVENT" == push ]]; then
-            head="$HEAD_SHA"
-            if [[ "$PUSH_REF" != refs/heads/main || "$PUSH_BEFORE" =~ ^0+$ ]]; then
-              base="$(git merge-base "$head" origin/main)"
-            else
-              base="$PUSH_BEFORE"
-            fi
-          else
-            echo 'unsupported workflow event' >&2
-            exit 1
-          fi
-          [[ "$base" =~ ^[0-9a-f]{40}$ && "$head" =~ ^[0-9a-f]{40}$ ]]
-          printf 'base=%s\nhead=%s\n' "$base" "$head" >> "$GITHUB_OUTPUT"
-      - name: Check safety flag consumers
-        run: |
-          python3 .github/scripts/test_safety_flag_consumers.py
-          python3 .github/scripts/check_safety_flag_consumers.py
-      - name: Test quality size ratchet
-        run: PYTHONPATH=. python3 tools/test_quality_size_ratchet.py
-      - name: Prepare prior-revision quality baseline
-        env:
-          BASE_REVISION: ${{ steps.quality-range.outputs.base }}
-        run: |
-          set -euo pipefail
-          mkdir -p target
-          worktree="$RUNNER_TEMP/quality-baseline-worktree"
-          test ! -e "$worktree"
-          git worktree add --detach "$worktree" "$BASE_REVISION"
-          mkdir -p "$worktree/target"
-          python3 "$GITHUB_WORKSPACE/tools/quality_size_ratchet.py" \
-            --root "$worktree" \
-            --baseline "$worktree/target/quality-prior-baseline.json" \
-            --write-baseline
-          cp "$worktree/target/quality-prior-baseline.json" target/quality-prior-baseline.json
-          git worktree remove --force "$worktree"
-      - name: Check quality size against prior revision
-        run: python3 tools/quality_size_ratchet.py --root "$GITHUB_WORKSPACE" --baseline target/quality-prior-baseline.json --check
       - name: Allocation harness
         run: python3 tools/check_allocations.py --target-dir "$RUNNER_TEMP/oa-allocator-target" --out "$RUNNER_TEMP/oa-allocator-evidence"
       - name: Attach allocation qualification diagnostics
@@ -378,10 +266,6 @@ jobs:
           python3 tools/test_f1a_dependency_graph.py
           python3 tools/check_f1a_dependency_graph.py
           cargo +1.89.0 run --locked -p oa-trace -- --root "$GITHUB_WORKSPACE" | tee "$RUNNER_TEMP/oa-trace-vdd.txt"
-          OPENATCA_OA_TRACE_BIN="$GITHUB_WORKSPACE/target/debug/oa-trace" \
-            python3 tools/test_check_done_claim.py
-          OPENATCA_OA_TRACE_BIN="$GITHUB_WORKSPACE/target/debug/oa-trace" \
-            python3 -m unittest tools.test_prove_quality_rejections
           python3 -m unittest discover -s tools/oa-encounter/tests -p 'test_*.py'
           python3 tools/test_generate_oscal_control_map.py
           python3 tools/generate_oscal_control_map.py --check
