@@ -14,7 +14,6 @@ mod sealed_inputs;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use oa_ca::{
     Alert, AltLost, CycleStats, AF_ALT_UNKNOWN, AF_COAST, AF_ONE_GROUND, AF_RADAR_ONLY, AIRBORNE,

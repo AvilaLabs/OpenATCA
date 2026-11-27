@@ -2,7 +2,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 pub struct SealedInputs {
-    pub root: PathBuf,
     pub raw_sample: PathBuf,
     pub config: PathBuf,
     pub output: PathBuf,
@@ -16,7 +15,6 @@ pub fn sealed_inputs(manifest_dir: &str) -> SealedInputs {
         raw_sample: root.join("raw/adsblol/2026.11.20/a.oaf"),
         config: root.join("scds/stdds-20261119-holdout/k.cfg"),
         output: root.join("scds/stdds-smoke-20261119T1/o"),
-        root,
     }
 }
 

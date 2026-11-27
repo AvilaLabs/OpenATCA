@@ -83,6 +83,14 @@ fn configured_root(
 }
 
 #[cfg(test)]
+fn list_without_window(list: &str) -> String {
+    list.lines()
+        .filter(|line| !line.starts_with("window"))
+        .map(|line| format!("{line}\n"))
+        .collect()
+}
+
+#[cfg(test)]
 mod test_support {
     include!(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -99,7 +107,7 @@ mod test_support {
 )]
 mod data_root_tests {
     use super::test_support;
-    use super::{Sealed, DATA_ROOT_SENTINEL, DEFAULT_DATA_ROOT, LIST};
+    use super::{list_without_window, Sealed, DATA_ROOT_SENTINEL, DEFAULT_DATA_ROOT, LIST};
     use std::path::Path;
 
     fn assert_fail_closed(guard: &Sealed, outside: &Path) {
@@ -1298,7 +1306,6 @@ pub fn window_drop_line() -> String {
     clippy::panic
 )]
 mod tests {
-    use super::test_support;
     use super::*;
 
     fn configured_guard(text: &str) -> Sealed {
@@ -1365,7 +1372,7 @@ mod tests {
         );
         // A list that does not parse, and one with no window line: all time.
         assert_eq!(configured_guard("not a list\n").drop_window(), all);
-        let none = test_support::list_without_window(LIST);
+        let none = list_without_window(LIST);
         let g = configured_guard(&none);
         assert!(g.windows().is_empty());
         assert_eq!(g.drop_window(), all);
@@ -1373,7 +1380,7 @@ mod tests {
 
     #[test]
     fn a_list_that_seals_every_instant_gives_a_start_warning_and_a_good_one_does_not() {
-        let none = test_support::list_without_window(LIST);
+        let none = list_without_window(LIST);
         assert_eq!(
             start_warning(&configured_guard(&none)),
             Some("seal list has no window: every timed row is dropped")
@@ -1389,7 +1396,7 @@ mod tests {
 
     #[test]
     fn a_drop_report_made_on_a_list_that_seals_every_instant_prints_the_warning_once() {
-        let none = test_support::list_without_window(LIST);
+        let none = list_without_window(LIST);
         for (list, line) in [
             (
                 none.as_str(),
@@ -1420,7 +1427,7 @@ mod tests {
     #[test]
     fn the_time_gate_fails_closed_without_a_window_and_a_window_not_aligned_to_a_millisecond_has_no_gap(
     ) {
-        let none = test_support::list_without_window(LIST);
+        let none = list_without_window(LIST);
         let g = configured_guard(&none);
         assert!(g.in_window(0) && g.in_window(1_795_200_000_000_000_000));
         // A window from 0.4 ms after 2026-11-20T00:00:00Z to 0.6 ms after 2026-11-23T00:17:00Z

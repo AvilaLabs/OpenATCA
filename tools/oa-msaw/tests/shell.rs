@@ -101,7 +101,14 @@ fn arguments_are_strict_and_a_sealed_path_exits_2_before_anything_is_opened() {
     let sealed_day = sealed_inputs.raw_sample;
     let sealed_cfg = sealed_inputs.config;
     let sealed_out = sealed_inputs.output;
-    let sealed_terrain = sealed_inputs.root.join("scds/rec-20261119/day2/terrain");
+    let sealed_terrain = sealed_cfg
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("scds/rec-20261119/day2/terrain");
     let o = out.join("o");
     let o = o.to_str().unwrap();
     for argv in [
