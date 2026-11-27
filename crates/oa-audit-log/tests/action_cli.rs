@@ -8,7 +8,7 @@
 use oa_audit_core::{genesis, Checkpoint};
 use oa_audit_log::shell::verify;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -23,8 +23,8 @@ fn fresh_root() -> PathBuf {
 }
 
 fn append(
-    log: &PathBuf,
-    registry: &PathBuf,
+    log: &Path,
+    registry: &Path,
     pin: &str,
     principal: &str,
     action: &str,

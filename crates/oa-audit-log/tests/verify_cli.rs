@@ -8,7 +8,7 @@
 use oa_audit_core::{details, genesis, target, Action, Checkpoint, Event, Role};
 use oa_audit_log::shell::append;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -38,8 +38,8 @@ fn event() -> Event {
 }
 
 fn verify(
-    log: &PathBuf,
-    registry: &PathBuf,
+    log: &Path,
+    registry: &Path,
     pin: &str,
     principal: &str,
     checkpoint: Checkpoint,
