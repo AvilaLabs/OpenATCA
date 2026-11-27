@@ -202,21 +202,16 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p target
-          baseline_path='tools/quality-size-baseline.json'
-          if git cat-file -e "$BASE_REVISION:$baseline_path" 2>/dev/null; then
-            git show "$BASE_REVISION:$baseline_path" > target/quality-prior-baseline.json
-          else
-            worktree="$RUNNER_TEMP/quality-baseline-worktree"
-            test ! -e "$worktree"
-            git worktree add --detach "$worktree" "$BASE_REVISION"
-            mkdir -p "$worktree/target"
-            python3 "$GITHUB_WORKSPACE/tools/quality_size_ratchet.py" \
-              --root "$worktree" \
-              --baseline "$worktree/target/quality-prior-baseline.json" \
-              --write-baseline
-            cp "$worktree/target/quality-prior-baseline.json" target/quality-prior-baseline.json
-            git worktree remove --force "$worktree"
-          fi
+          worktree="$RUNNER_TEMP/quality-baseline-worktree"
+          test ! -e "$worktree"
+          git worktree add --detach "$worktree" "$BASE_REVISION"
+          mkdir -p "$worktree/target"
+          python3 "$GITHUB_WORKSPACE/tools/quality_size_ratchet.py" \
+            --root "$worktree" \
+            --baseline "$worktree/target/quality-prior-baseline.json" \
+            --write-baseline
+          cp "$worktree/target/quality-prior-baseline.json" target/quality-prior-baseline.json
+          git worktree remove --force "$worktree"
       - name: Check quality size against prior revision
         run: python3 tools/quality_size_ratchet.py --root "$GITHUB_WORKSPACE" --baseline target/quality-prior-baseline.json --check
       - name: Allocation harness
