@@ -49,11 +49,11 @@ jobs:
           PUSH_BEFORE: ${{ github.event.before }}
           PR_BASE: ${{ github.event.pull_request.base.sha }}
         run: |
-          # Pushes compare with the previous commit on main; PRs compare with their base.
+          # Train pushes include every change since main, even after a later docs-only push.
           case "$EVENT" in
             push)
               base="$PUSH_BEFORE"
-              if [ "$base" = "0000000000000000000000000000000000000000" ]; then
+              if [[ "$GITHUB_REF" == refs/heads/train/* ]] || [ "$base" = "0000000000000000000000000000000000000000" ]; then
                 base="$(git merge-base "$GITHUB_SHA" origin/main)"
               fi
               echo "changed_from=$base" >> "$GITHUB_OUTPUT"

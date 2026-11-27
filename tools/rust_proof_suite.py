@@ -230,12 +230,17 @@ def changed_files(repo: Path, base: str) -> list[str] | None:
         return None
     try:
         out = subprocess.run(
-            ["git", "diff", "--name-only", "--no-renames", base, "HEAD", "--"], cwd=repo,
-            check=True, capture_output=True, text=True, timeout=60,
+            ["git", "diff", "--name-only", "-z", "--no-renames", base, "HEAD", "--"], cwd=repo,
+            check=True, capture_output=True, timeout=60,
         ).stdout
     except (OSError, subprocess.SubprocessError):
         return None
-    return [line for line in out.splitlines() if line]
+    try:
+        if out and not out.endswith(b"\0"):
+            return None
+        return [path.decode("utf-8", "strict") for path in out.split(b"\0") if path]
+    except UnicodeDecodeError:
+        return None  # Unknown paths select all packages, never an empty affected set.
 
 
 def balance_shards(proofs: list[dict[str, Any]], count: int) -> list[list[dict[str, Any]]]:
