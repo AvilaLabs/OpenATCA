@@ -249,15 +249,19 @@ def changed_files(repo: Path, base: str) -> list[str] | None:
 
 
 def balance_shards(proofs: list[dict[str, Any]], count: int) -> list[list[dict[str, Any]]]:
-    """Split `proofs` into `count` shards of about equal `ci_seconds`: longest first onto the
-    least loaded shard, ties to the lowest shard, each shard in registry order."""
+    """Balance measured runtimes, using external timeout only for unmeasured scheduling weight."""
     shards: list[list[dict[str, Any]]] = [[] for _ in range(count)]
     load = [0] * count
     order = {id(p): i for i, p in enumerate(proofs)}
-    for proof in sorted(proofs, key=lambda p: (-p["ci_seconds"], order[id(p)])):
+    def weight(proof: dict[str, Any]) -> int:
+        if proof.get("ci_seconds_source") == "none":
+            return proof["external_timeout_seconds"]
+        return proof["ci_seconds"]
+
+    for proof in sorted(proofs, key=lambda p: (-weight(p), order[id(p)])):
         target = min(range(count), key=lambda i: (load[i], i))
         shards[target].append(proof)
-        load[target] += proof["ci_seconds"]
+        load[target] += weight(proof)
     for shard in shards:
         shard.sort(key=lambda p: order[id(p)])
     return shards

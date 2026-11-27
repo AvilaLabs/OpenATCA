@@ -806,6 +806,7 @@ class SelectionHardeningTests(unittest.TestCase):
         other.update(id="unrelated-ca-invariant", package="oa-ca")
         files["tools/rust_proofs.json"] = json.dumps(registry_with(tracker, other)) + "\n"
         repo = make_workspace(root, files)
+        git(repo, "config", "core.quotePath", "true")
         main_base = git(repo, "rev-parse", "HEAD")
         git(repo, "update-ref", "refs/remotes/origin/main", main_base)
         return repo, main_base
@@ -868,7 +869,7 @@ class SelectionHardeningTests(unittest.TestCase):
                              ["types::proofs::bounded_example"])
 
     # Kills treating an undecodable changed pathname as an empty change set/SKIPPED run.
-    def test_unrepresentable_git_path_runs_all_proofs_instead_of_skipping(self):
+    def test_unrepresentable_git_path_fails_closed_before_suite_creation(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             repo, base = self.selector_workspace(root)
@@ -885,6 +886,66 @@ class SelectionHardeningTests(unittest.TestCase):
             self.assertIn("cannot bind proof target namespaces", actual.stderr)
             self.assertFalse((output / "suite.json").exists())
             self.assertFalse(invoked.exists())
+
+    # Kills assigning a nonempty incremental comparison base to recurring full-run events.
+    def test_schedule_and_manual_selector_results_run_the_full_registry(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, base = self.selector_workspace(root)
+            for event in ("schedule", "workflow_dispatch"):
+                with self.subTest(event=event):
+                    env = os.environ.copy()
+                    env.update({
+                        "GITHUB_EVENT_NAME": event,
+                        "GITHUB_REF": "refs/heads/train/selector-fixture",
+                        "GITHUB_SHA": base,
+                        "GITHUB_EVENT_BEFORE": base,
+                        "GITHUB_PR_BASE_SHA": "",
+                    })
+                    selected_base = subprocess.run(
+                        ["python3", str(Path(__file__).with_name("select_rust_proof_base.py")),
+                         "--repo", str(repo)],
+                        env=env, capture_output=True, text=True, timeout=30,
+                    )
+                    self.assertEqual(selected_base.returncode, 0, selected_base.stderr)
+                    self.assertEqual(selected_base.stdout.strip(), "")
+                    invoked = root / f"{event}-invocations.txt"
+                    output = root / f"{event}-evidence"
+                    actual = self.run_actual_suite_cli(repo, None, output, invoked)
+                    self.assertEqual(actual.returncode, 0, actual.stderr)
+                    suite = json.loads((output / "suite.json").read_text(encoding="utf-8"))
+                    self.assertEqual(
+                        {row["id"] for row in suite["checks"]},
+                        {"tracker-core-invariant", "unrelated-ca-invariant"},
+                    )
+
+    # Kills comparing a later train cap increase against event.before or the candidate tip.
+    def test_train_merge_base_remains_cap_reference_after_docs_only_push(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, main_base = self.selector_workspace(root)
+            registry_path = repo / "tools/rust_proofs.json"
+            registry = json.loads(registry_path.read_text(encoding="utf-8"))
+            registry["proofs"][0]["external_timeout_seconds"] += 1
+            registry_path.write_text(json.dumps(registry) + "\n", encoding="utf-8")
+            git(repo, "add", "tools/rust_proofs.json")
+            git(repo, "commit", "-q", "-m", "raise synthetic proof timeout")
+            (repo / "docs").mkdir()
+            (repo / "docs/readme.md").write_text("docs-only follow-up\n", encoding="utf-8")
+            git(repo, "add", "docs/readme.md")
+            git(repo, "commit", "-q", "-m", "follow up with docs")
+            immutable_base = git(repo, "merge-base", "refs/remotes/origin/main", "HEAD")
+            self.assertEqual(immutable_base, main_base)
+
+            checked = subprocess.run(
+                ["python3", str(Path(__file__).with_name("check_proof_caps.py")),
+                 "--repo", str(repo), "--base", immutable_base],
+                capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(checked.returncode, 1, checked.stderr)
+            report = json.loads(checked.stdout)
+            self.assertTrue(any(row["field"] == "external_timeout_seconds"
+                                for row in report["violations"]))
 
     # Kills using the already-updated origin/main tip as an empty initial-push diff base.
     def test_initial_main_push_selects_full_registry(self):
@@ -1146,6 +1207,19 @@ class ShardBalanceTests(unittest.TestCase):
         loads = sorted(sum(p["ci_seconds"] for p in s) for s in balance_shards(skewed, 3))
         self.assertEqual(loads[-1], 400)
         self.assertLessEqual(loads[0], 40)
+
+    # Kills scheduling every ci_seconds=0/source=none row onto shard zero.
+    def test_unmeasured_proofs_use_external_timeout_as_weight_without_changing_registry(self):
+        proofs = self.proofs([0] * 16)
+        for proof in proofs:
+            proof["ci_seconds_source"] = "none"
+        before = copy.deepcopy(proofs)
+
+        shards = balance_shards(proofs, 4)
+
+        self.assertEqual([len(shard) for shard in shards], [4, 4, 4, 4])
+        self.assertEqual(proofs, before)
+        self.assertTrue(all(proof["ci_seconds"] == 0 for proof in proofs))
 
     def test_the_real_registry_full_run_is_balanced_over_four_shards(self):
         registry, errors = load_registry(REGISTRY_PATH)
