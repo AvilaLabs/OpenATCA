@@ -1,0 +1,117 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:openatca:schemas:done-claim-v1",
+  "title": "OpenATCA source-bound completion claim inputs",
+  "oneOf": [
+    {"$ref": "#/$defs/manifest"},
+    {"$ref": "#/$defs/claim"},
+    {"$ref": "#/$defs/inventory"}
+  ],
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "span": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start", "end"],
+      "properties": {"start": {"type": "integer", "minimum": 0}, "end": {"type": "integer", "minimum": 1}}
+    },
+    "manifestRow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "text_sha256", "clauses"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "text_sha256": {"$ref": "#/$defs/sha256"},
+          "clauses": {"type": "array", "minItems": 1, "maxItems": 256, "items": {"$ref": "#/$defs/span"}}
+      }
+    },
+    "manifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "source_sha256", "requirements"],
+      "properties": {
+        "schema": {"const": "openatca.required-clause-manifest.v1"},
+        "source_sha256": {"$ref": "#/$defs/sha256"},
+        "requirements": {"type": "array", "minItems": 1, "maxItems": 10000, "items": {"$ref": "#/$defs/manifestRow"}}
+      }
+    },
+    "evidence": {
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false,
+            "required": ["kind", "requirement_id", "path", "line", "symbol", "clause_sha256"],
+          "properties": {
+            "kind": {"const": "test"},
+            "requirement_id": {"type": "string", "pattern": "^OA-[A-Z0-9]+-[0-9]{3}$"},
+            "path": {"type": "string", "minLength": 1},
+            "line": {"type": "integer", "minimum": 1},
+            "symbol": {"type": "string", "minLength": 1},
+            "clause_sha256": {"$ref": "#/$defs/sha256"}
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "path", "start_line", "end_line", "symbol", "sha256"],
+          "properties": {
+            "kind": {"const": "source"},
+            "path": {"type": "string", "minLength": 1},
+            "start_line": {"type": "integer", "minimum": 1},
+            "end_line": {"type": "integer", "minimum": 1},
+            "symbol": {"type": "string", "minLength": 1},
+            "sha256": {"$ref": "#/$defs/sha256"}
+          }
+        }
+      ]
+    },
+    "claimClause": {
+      "type": "object", "additionalProperties": false,
+      "required": ["start", "end", "status", "evidence"],
+      "properties": {
+        "start": {"type": "integer", "minimum": 0},
+        "end": {"type": "integer", "minimum": 1},
+        "status": {"enum": ["covered", "partial", "external", "unmapped"]},
+        "evidence": {"type": "array", "maxItems": 128, "items": {"$ref": "#/$defs/evidence"}}
+      }
+    },
+    "claim": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "source_sha256", "manifest_sha256", "test_inventory_sha256", "row_id", "clauses"],
+      "properties": {
+        "schema": {"const": "openatca.done-claim.v1"},
+        "source_sha256": {"$ref": "#/$defs/sha256"},
+        "manifest_sha256": {"$ref": "#/$defs/sha256"},
+        "test_inventory_sha256": {"$ref": "#/$defs/sha256"},
+        "row_id": {"type": "string", "minLength": 1},
+        "clauses": {"type": "array", "minItems": 1, "maxItems": 256, "items": {"$ref": "#/$defs/claimClause"}}
+      }
+    },
+    "test": {
+      "type": "object", "additionalProperties": false,
+      "required": ["requirement_id", "path", "symbol", "line", "source_sha256", "clause_sha256"],
+      "properties": {
+        "requirement_id": {"type": "string", "pattern": "^OA-[A-Z0-9]+-[0-9]{3}$"},
+        "path": {"type": "string", "minLength": 1},
+        "symbol": {"type": "string", "minLength": 1},
+        "line": {"type": "integer", "minimum": 1},
+        "source_sha256": {"$ref": "#/$defs/sha256"},
+        "clause_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "inventory": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema", "producer", "source_commit", "manifest_sha256", "scope_sha256", "trace_report_path", "trace_report_sha256", "validator_sha256", "tests"],
+      "properties": {
+        "schema": {"const": "openatca.validated-test-inventory.v1"},
+        "producer": {"const": "oa-trace-clause-review"},
+        "source_commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "manifest_sha256": {"$ref": "#/$defs/sha256"},
+        "scope_sha256": {"$ref": "#/$defs/sha256"},
+        "trace_report_path": {"type": "string", "minLength": 1},
+        "trace_report_sha256": {"$ref": "#/$defs/sha256"},
+        "validator_sha256": {"$ref": "#/$defs/sha256"},
+        "tests": {"type": "array", "maxItems": 10000, "items": {"$ref": "#/$defs/test"}}
+      }
+    }
+  }
+}

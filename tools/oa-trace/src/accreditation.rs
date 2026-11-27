@@ -577,6 +577,41 @@ fn contains_test(source: &str, function: &str) -> bool {
     false
 }
 
+/// Validates one named Rust test citation using the same comment/literal-aware parser as the
+/// accreditation citation checker. The path is relative to `root` and must remain inside it.
+pub fn verify_test_reference(root: &Path, reference: &str) -> Result<(), String> {
+    let Some((file, function)) = reference.rsplit_once("::") else {
+        return Err("expected relative/path.rs::test_function".into());
+    };
+    if file.is_empty()
+        || function.is_empty()
+        || !function
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        || Path::new(file)
+            .components()
+            .any(|part| !matches!(part, Component::Normal(_)))
+    {
+        return Err("test reference path or name is invalid".into());
+    }
+    let canonical_root = root
+        .canonicalize()
+        .map_err(|_| "workspace root cannot be resolved".to_string())?;
+    let path = root.join(file);
+    let canonical_path = path
+        .canonicalize()
+        .map_err(|_| "test source cannot be resolved".to_string())?;
+    if !canonical_path.starts_with(&canonical_root) {
+        return Err("test source escapes workspace".into());
+    }
+    let source = read_bounded_utf8(&canonical_path, MAX_CITED_SOURCE_BYTES)
+        .map_err(|_| "test source is not a bounded UTF-8 file".to_string())?;
+    if !contains_test(&source, function) {
+        return Err("citation is not a real #[test] function".into());
+    }
+    Ok(())
+}
+
 /// Blanks Rust comments and string literals while preserving line boundaries for item matching.
 fn strip_comments_and_literals(source: &str) -> String {
     let bytes = source.as_bytes();
@@ -836,6 +871,24 @@ mod tests {
         assert!(check(&root).is_empty());
         fs::write(root.join("tests/example.rs"), "#[test]\nfn other() {}\n").unwrap();
         assert_eq!(check(&root).len(), 4);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn test_reference_api_refuses_comment_raw_string_and_non_test_helpers() {
+        let root = scratch();
+        fs::create_dir_all(root.join("tests")).unwrap();
+        let path = root.join("tests/example.rs");
+        fs::write(
+            &path,
+            "// #[test]\n// fn comment_fake() {}\nconst TEXT: &str = r###\"#[test]\\nfn raw_fake() {}\"###;\nfn helper() {}\n#[test]\nfn real_test() {}\n",
+        )
+        .unwrap();
+        assert!(super::verify_test_reference(&root, "tests/example.rs::real_test").is_ok());
+        assert!(super::verify_test_reference(&root, "tests/example.rs::comment_fake").is_err());
+        assert!(super::verify_test_reference(&root, "tests/example.rs::raw_fake").is_err());
+        assert!(super::verify_test_reference(&root, "tests/example.rs::helper").is_err());
+        assert!(super::verify_test_reference(&root, "../outside.rs::escape").is_err());
         let _ = fs::remove_dir_all(root);
     }
 

@@ -7,13 +7,24 @@ use std::process::ExitCode;
 fn main() -> ExitCode {
     let mut root = PathBuf::from(".");
     let mut markdown: Option<PathBuf> = None;
+    let mut verify_test_refs = Vec::new();
     let mut args = std::env::args_os().skip(1);
     while let Some(a) = args.next() {
+        if a == "--verify-test" {
+            match args.next().and_then(|value| value.into_string().ok()) {
+                Some(value) => verify_test_refs.push(value),
+                None => {
+                    eprintln!("missing UTF-8 value for --verify-test");
+                    return ExitCode::from(2);
+                }
+            }
+            continue;
+        }
         let target = match a.to_str() {
             Some("--root") => &mut root,
             Some("--markdown") => markdown.get_or_insert_with(PathBuf::new),
             _ => {
-                eprintln!("usage: oa-trace [--root <workspace dir>] [--markdown <out.md>]");
+                eprintln!("usage: oa-trace [--root <workspace dir>] [--markdown <out.md>] [--verify-test path::function ...]");
                 return ExitCode::from(2);
             }
         };
@@ -24,6 +35,22 @@ fn main() -> ExitCode {
                 return ExitCode::from(2);
             }
         }
+    }
+    if !verify_test_refs.is_empty() {
+        let mut errors = Vec::new();
+        for reference in &verify_test_refs {
+            if let Err(error) = oa_trace::accreditation::verify_test_reference(&root, reference) {
+                errors.push(format!("{reference}: {error}"));
+            }
+        }
+        if errors.is_empty() {
+            println!("validated {} test reference(s)", verify_test_refs.len());
+            return ExitCode::SUCCESS;
+        }
+        for error in errors {
+            eprintln!("invalid test reference: {error}");
+        }
+        return ExitCode::FAILURE;
     }
     let rep = oa_trace::analyze(&root);
     print!("{}", oa_trace::render_text(&rep));
