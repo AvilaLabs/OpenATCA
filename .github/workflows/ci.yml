@@ -41,20 +41,41 @@ jobs:
   quality-negative-proof:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/train/quality-proof-')
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
-        escape: [E01, E02, E03]
+        escape: [E01, E02, E03, E04, E05, E07, E09]
     steps:
       - uses: actions/checkout@v4
+      - name: Install pinned proof compiler
+        if: matrix.escape == 'E04' || matrix.escape == 'E05' || matrix.escape == 'E09'
+        run: rustup toolchain install 1.89.0 --profile minimal
+      - name: Build trusted trace validator
+        if: matrix.escape == 'E05' || matrix.escape == 'E09'
+        run: cargo +1.89.0 build --locked -p oa-trace
+      - name: Install pinned mutation proof runner
+        if: matrix.escape == 'E04'
+        run: cargo +1.89.0 install --locked cargo-mutants --version 27.1.0
       - name: Prove the class checker refuses the isolated defect
         env:
           PROOF_CLASS: ${{ matrix.escape }}
+          OPENATCA_OA_TRACE_BIN: ${{ github.workspace }}/target/debug/oa-trace
         run: |
           set -euo pipefail
-          python3 .github/scripts/test_commit_hygiene.py --proof-class "$PROOF_CLASS" \
-            | tee "$RUNNER_TEMP/quality-proof-$PROOF_CLASS.txt"
+          case "$PROOF_CLASS" in
+            E01|E02|E03)
+              command=(python3 .github/scripts/test_commit_hygiene.py --proof-class "$PROOF_CLASS")
+              ;;
+            E04)
+              command=(python3 tools/run_safety_mutants_fixture.py --negative-proof)
+              ;;
+            E05|E07|E09)
+              command=(python3 tools/prove_quality_rejections.py --class "$PROOF_CLASS")
+              ;;
+            *) exit 2 ;;
+          esac
+          "${command[@]}" 2>&1 | tee "$RUNNER_TEMP/quality-proof-$PROOF_CLASS.txt"
       - name: Attach safe checker refusal receipt
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -80,7 +101,9 @@ jobs:
       - name: Verify mutation runner
         run: cargo mutants --version | grep -Fx 'cargo-mutants 27.1.0'
       - name: Mutation checker tests
-        run: python3 tools/test_check_safety_mutations.py
+        run: |
+          python3 tools/test_check_safety_mutations.py
+          python3 tools/test_run_safety_mutants_fixture.py
       - name: Synthetic mutation runner fixture
         run: python3 tools/run_safety_mutants_fixture.py
       - name: Select changed range
