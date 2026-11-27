@@ -110,6 +110,7 @@
     "OA-AUDIT-006",
     "OA-AUDIT-007",
     "OA-AUDIT-008",
+    "OA-AUDIT-011",
     "OA-AWC-001",
     "OA-AWC-002",
     "OA-AWC-003",
@@ -10964,6 +10965,7 @@
         "OA-CERT-008",
         "OA-CERT-009",
         "OA-CERT-010",
+        "OA-AUDIT-011",
         "OA-FEED-197"
       ],
       "source_refs": [
@@ -11002,6 +11004,10 @@
         {
           "document": "REQUIREMENTS.md",
           "locator": "OA-FEED-197"
+        },
+        {
+          "document": "REQUIREMENTS.md",
+          "locator": "OA-AUDIT-011"
         }
       ],
       "verification_refs": [
@@ -11519,6 +11525,46 @@
           "requirement_id": "OA-FEED-197",
           "file": "crates/oa-feed/src/main.rs",
           "test_name": "stop_mode_latches_recording_errors_discovered_only_during_finalization"
+        },
+        {
+          "requirement_id": "OA-AUDIT-011",
+          "file": "crates/oa-audit-log/src/bin/oa-audit-verify.rs",
+          "test_name": "watch_inspection_accepts_valid_log_and_classifies_checkpoint_lag_and_lead"
+        },
+        {
+          "requirement_id": "OA-AUDIT-011",
+          "file": "crates/oa-audit-log/src/bin/oa-audit-verify.rs",
+          "test_name": "watch_inspection_separates_tamper_and_truncation_from_checkpoint_race"
+        },
+        {
+          "requirement_id": "OA-AUDIT-011",
+          "file": "crates/oa-audit-log/src/bin/oa-audit-verify.rs",
+          "test_name": "watch_inspection_reports_missing_and_reordered_records"
+        },
+        {
+          "requirement_id": "OA-AUDIT-011",
+          "file": "crates/oa-audit-log/src/shell/mod.rs",
+          "test_name": "verifier_returns_role_denied_for_a_hash_consistent_wrong_role_action"
+        },
+        {
+          "requirement_id": "OA-AUDIT-011",
+          "file": "crates/oa-audit-log/src/bin/oa-audit-verify.rs",
+          "test_name": "watch_classifies_a_role_action_refusal_as_a_distinct_status"
+        },
+        {
+          "requirement_id": "OA-AUDIT-011",
+          "file": "crates/oa-audit-log/src/bin/oa-audit-verify.rs",
+          "test_name": "watch_staleness_requires_an_explicit_generation_refresh_contract"
+        },
+        {
+          "requirement_id": "OA-AUDIT-011",
+          "file": "crates/oa-audit-log/src/bin/oa-audit-verify.rs",
+          "test_name": "techops_alarm_instances_raise_idempotently_and_clear_on_recovery"
+        },
+        {
+          "requirement_id": "OA-AUDIT-011",
+          "file": "crates/oa-audit-log/src/bin/oa-audit-verify.rs",
+          "test_name": "watch_output_limit_refuses_before_emitting_an_oversized_line"
         }
       ],
       "proof_refs": []
@@ -23428,6 +23474,12 @@
       "function": "migration_selector_and_rollback",
       "hazard_id": "HZ-CUTOVER-001",
       "rationale": "Engineering safety candidate: loading an unpinned, changed, oversized or protected role table could undermine the role gate before a migration action. Tests cover external digest pinning, opened-descriptor length stability, bounded parsing and sealed-path refusal; the pin's trusted origin and principal authentication remain external."
+    },
+    {
+      "id": "OA-AUDIT-011",
+      "function": "migration_comparison_and_safety_evidence",
+      "hazard_id": "HZ-EVIDENCE-001",
+      "rationale": "Engineering safety candidate: a broken privileged-action log, invalid role/action record, or stale external checkpoint contract could leave an evidence reviewer without a reliable view of audit integrity. The bounded watcher uses the existing exact-checkpoint verifier, distinguishes checkpoint races and partial writes from proven broken records, and reports role/action refusals separately. It does not gate privileged commits, authenticate the checkpoint publisher or principal, attest identity, or prevent replacement of both log and checkpoint."
     },
     {
       "id": "OA-CERT-001",

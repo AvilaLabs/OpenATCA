@@ -1,5 +1,6 @@
 //! Durable bounded file operations. One fixed-size record is appended per action.
-use crate::encoding::{chain, checkpoint, decode, encode, MAX_RECORDS, RECORD_BYTES};
+pub use crate::encoding::MAX_RECORDS;
+use crate::encoding::{chain, checkpoint, decode, encode, RECORD_BYTES};
 use oa_audit_core::{
     parse_principal_registry, receipt_claim, validate_event, AuditError, AuditReceipt, Checkpoint,
     Digest, Event, PrincipalRegistry, Record, RegistryError, MAX_PRINCIPAL_REGISTRY_BYTES,
@@ -15,6 +16,7 @@ pub enum LogError {
     BrokenRecord { sequence: u64, error: AuditError },
     CheckpointMismatch,
     Truncated { sequence: u64 },
+    IncompleteRecord { sequence: u64 },
 }
 
 #[derive(Debug)]
@@ -126,7 +128,7 @@ fn verify_file(
                     };
                 }
                 0 => {
-                    return Err(LogError::Truncated {
+                    return Err(LogError::IncompleteRecord {
                         sequence: actual.count.saturating_add(1),
                     });
                 }
@@ -491,9 +493,41 @@ mod tests {
         std::fs::write(&file, data.get(..(RECORD_BYTES - 1)).unwrap()).unwrap();
         assert!(matches!(
             verify(&file, checkpoint),
-            Err(LogError::Truncated { .. })
+            Err(LogError::IncompleteRecord { .. })
         ));
         assert_eq!(DETAILS_CAPACITY, 20_480);
+        let _ = std::fs::remove_file(file);
+    }
+
+    // REQ: OA-AUDIT-011
+    #[test]
+    fn verifier_returns_role_denied_for_a_hash_consistent_wrong_role_action() {
+        let file = path("wrong-role");
+        let _ = std::fs::remove_file(&file);
+        let checkpoint = append(
+            &file,
+            oa_audit_core::genesis(),
+            event(Action::Certification),
+        )
+        .unwrap();
+        let mut bytes = std::fs::read(&file).unwrap();
+        let role_offset = b"OA-AUDIT-CHAIN-V1\0".len() + 1 + 8 + 8 + 8;
+        *bytes.get_mut(role_offset).unwrap() = oa_audit_core::Role::Monitor as u8;
+        let digest_start = bytes.len().checked_sub(32).unwrap();
+        bytes.get_mut(digest_start..).unwrap().fill(0);
+        let digest = oa_sha256::core::sha256::sha256(&bytes);
+        bytes
+            .get_mut(digest_start..)
+            .unwrap()
+            .copy_from_slice(&digest);
+        std::fs::write(&file, bytes).unwrap();
+        assert!(matches!(
+            verify(&file, checkpoint),
+            Err(LogError::BrokenRecord {
+                error: AuditError::RoleDenied,
+                ..
+            })
+        ));
         let _ = std::fs::remove_file(file);
     }
 

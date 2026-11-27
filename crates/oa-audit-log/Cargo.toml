@@ -17,6 +17,8 @@ oa-sealed = { path = "../oa-sealed" }
 oa-sha256 = { path = "../oa-sha256" }
 # F1 / steer41: pure event/receipt data and validation live in the zero-dependency core package.
 oa-audit-core = { path = "../oa-audit-core" }
+# F1a: the verifier's optional watch mode uses the existing bounded Tech Ops alarm transition model.
+oa-techops = { path = "../oa-techops" }
 
 [package.metadata.openatca]
 class = "shell"

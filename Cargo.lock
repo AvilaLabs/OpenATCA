@@ -74,6 +74,7 @@ dependencies = [
  "oa-audit-core",
  "oa-sealed",
  "oa-sha256",
+ "oa-techops",
 ]
 
 [[package]]

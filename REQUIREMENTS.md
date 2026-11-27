@@ -8202,3 +8202,21 @@ The L13 role registry is not yet landed; roles below are plain caller-supplied c
   hashes the exact bytes, and compares them with an independently supplied expected SHA-256 pin
   before parsing. The registry bytes do not supply their own trusted pin. Path, descriptor, pin,
   framing, and parse refusals return no registry.
+- **OA-AUDIT-011** The optional `oa-audit-verify --watch` mode polls every second using a bounded
+  `OA-AUDIT-WATCH-V1` config read through the sealed regular-file API. The exact config contains a
+  nonzero generation, expected record count, expected tail digest and `refresh_ms`; it is read twice
+  from one descriptor and refused if its snapshot differs. Every scan uses the existing exact-count,
+  exact-tail verifier against this externally supplied checkpoint; no computed log head is accepted
+  or emitted as trusted. A checkpoint mismatch or a truncated sequence at/before the expected count
+  is pending/unverified; a partial or truncated next record is pending/incomplete; only a malformed,
+  reordered, altered or invalid-role record is reported as a broken record, with role/action refusal
+  distinct from other chain breaks. A count/tail mismatch becomes a checkpoint-divergence alarm only
+  after three stable polls. A quiet log is not stale. Stale-checkpoint alarm behavior is disabled
+  when `refresh_ms=0`; a positive interval requires the publisher to advance generation as a
+  heartbeat even when no audit action occurs. One active Tech Ops alarm instance is kept per class;
+  chain, role/action, checkpoint and monitor-unavailable alarms clear only after a fresh exact-pin
+  verification, and stale clears only after the declared refresh contract is met. The mode is capped
+  at 86,400 polls, 24 hours, 65,536 expected records per scan plus one record to detect an
+  overlong log, and 1 MiB of output. The checkpoint,
+  principal origin and publisher are caller/operator claims, not authenticated or HSM-backed; the
+  watch is not an automatic migration gate or a complete vulnerability monitor.
