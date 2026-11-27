@@ -90,7 +90,7 @@ fn configured_root(
     clippy::panic
 )]
 mod data_root_tests {
-    use super::{Sealed, DEFAULT_DATA_ROOT, LIST};
+    use super::{Sealed, DATA_ROOT_SENTINEL, DEFAULT_DATA_ROOT, LIST};
     use std::path::Path;
 
     #[test]
