@@ -56,6 +56,43 @@ pub const LIST: &str = include_str!("../sealed_paths.txt");
 /// Where [`LIST`] was read from at build time. At run time the guard compares the file there, if
 /// there is one, with the compiled-in text ([`production_guard`]).
 const LIST_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/sealed_paths.txt");
+const DEFAULT_DATA_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../openatca-data");
+
+fn configured_root(root: &Path) -> Result<PathBuf, ()> {
+    if root == Path::new("$OPENATCA_DATA") {
+        return match std::env::var_os("OPENATCA_DATA") {
+            Some(value) if !value.is_empty() => {
+                let path = PathBuf::from(value);
+                path.is_absolute().then_some(path).ok_or(())
+            }
+            Some(_) => Err(()),
+            None => Ok(PathBuf::from(DEFAULT_DATA_ROOT)),
+        };
+    }
+    if root.is_absolute() {
+        Ok(root.to_path_buf())
+    } else {
+        Err(())
+    }
+}
+
+fn resolve_data_root(path: &Path) -> Result<PathBuf, ()> {
+    let resolved = resolve(path, 0)?;
+    let mut existing = path;
+    loop {
+        match fs::symlink_metadata(existing) {
+            Ok(link_metadata) if link_metadata.file_type().is_symlink() => {
+                let metadata = fs::metadata(existing).map_err(|_| ())?;
+                return metadata.is_dir().then_some(resolved).ok_or(());
+            }
+            Ok(metadata) => return metadata.is_dir().then_some(resolved).ok_or(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                existing = existing.parent().ok_or(())?;
+            }
+            Err(_) => return Err(()),
+        }
+    }
+}
 
 /// FNV-1a 64 of `bytes`, in hex: a short name for a list in a warning (not a security hash).
 fn list_hash(bytes: &[u8]) -> String {
@@ -374,8 +411,11 @@ pub fn parse_list(text: &str) -> Result<List, String> {
         }
         match word {
             "root" => {
-                if root.is_some() || !value.starts_with('/') {
-                    return Err(format!("line {}: one absolute root only", i + 1));
+                if root.is_some() || !(value.starts_with('/') || value == "$OPENATCA_DATA") {
+                    return Err(format!(
+                        "line {}: one absolute root or `$OPENATCA_DATA` marker only",
+                        i + 1
+                    ));
                 }
                 root = Some(PathBuf::from(value));
             }
@@ -590,7 +630,19 @@ impl Sealed {
                 if let Some(r) = root {
                     list.root = r.to_path_buf();
                 }
-                let root = resolve(&list.root, 0).unwrap_or_else(|_| list.root.clone());
+                let configured = configured_root(&list.root).unwrap_or_default();
+                let root = if configured.as_os_str().is_empty() {
+                    PathBuf::new()
+                } else {
+                    resolve_data_root(&configured).unwrap_or_default()
+                };
+                if root.as_os_str().is_empty() {
+                    return Sealed {
+                        list,
+                        root,
+                        broken: true,
+                    };
+                }
                 Sealed {
                     list,
                     root,

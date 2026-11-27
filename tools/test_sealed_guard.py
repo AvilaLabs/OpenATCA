@@ -4,6 +4,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -27,6 +28,44 @@ class SealedGuardTests(unittest.TestCase):
         self.base = Path(self._t.name).resolve()
         self.root = fake_root(self.base)
         self.g = sealed_guard.Guard(root=self.root)
+
+    def test_configured_data_root_defaults_to_repository_relative_and_refuses_real_paths(self):
+        with patch.dict(os.environ):
+            os.environ.pop("OPENATCA_DATA", None)
+            guard = sealed_guard.Guard()
+            expected = sealed_guard._resolve(os.fspath(sealed_guard.DEFAULT_DATA_ROOT))
+            self.assertEqual(guard.root, expected)
+            with self.assertRaises(sealed_guard.SealedError):
+                guard.check(Path(guard.root) / "derived/public/2026.11.20.synthetic.oaf")
+
+    def test_configured_data_root_override_is_resolved_before_refusal_check(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            data = Path(temporary) / "data"
+            data.mkdir()
+            alias = Path(temporary) / "data-link"
+            alias.symlink_to(data, target_is_directory=True)
+            with patch.dict(os.environ, {"OPENATCA_DATA": str(data)}):
+                guard = sealed_guard.Guard()
+            candidate = data / "derived/public/2026.11.20.synthetic.oaf"
+            with self.assertRaises(sealed_guard.SealedError):
+                guard.check(candidate)
+            with patch.dict(os.environ, {"OPENATCA_DATA": str(alias)}):
+                linked = sealed_guard.Guard()
+            self.assertEqual(linked.root, str(data.resolve()))
+            with self.assertRaises(sealed_guard.SealedError):
+                linked.check(candidate)
+
+    def test_empty_configured_data_root_fails_closed(self):
+        with patch.dict(os.environ, {"OPENATCA_DATA": ""}):
+            guard = sealed_guard.Guard()
+            self.assertTrue(guard.broken)
+            with self.assertRaises(sealed_guard.SealedError):
+                guard.check(Path("/tmp/ordinary.synthetic"))
+
+    def test_relative_configured_data_root_fails_closed(self):
+        with patch.dict(os.environ, {"OPENATCA_DATA": "relative-data"}):
+            guard = sealed_guard.Guard()
+            self.assertTrue(guard.broken)
 
     def tearDown(self):
         self._t.cleanup()
@@ -301,9 +340,9 @@ class SealedGuardTests(unittest.TestCase):
         self.assertEqual((read, refused), (1, 1))
 
     # REQ: OA-SEAL-004
-    def test_nothing_switches_the_guard_off(self):
+    def test_no_disable_switch_is_accepted(self):
         src = (Path(sealed_guard.__file__)).read_text()
-        for word in ("os.environ", "getenv", "argparse"):
+        for word in ("OPENATCA_SEAL_DISABLE", "OPENATCA_SEAL_BYPASS", "argparse"):
             self.assertNotIn(word, src)
         r = subprocess.run([sys.executable, "-I", sealed_guard.__file__, "--off", "x"],
                            capture_output=True, text=True)
@@ -503,6 +542,9 @@ class SealedGuardTests(unittest.TestCase):
                 sealed_guard.parse_list(bad)
         sealed_guard.parse_list("# any printable ~!@ in a comment\nroot /d\nseal a/b*")
         sealed_guard.parse_list("root /d\nseal a/*b*\nwindow 2026-11-20T00:00:00Z 2026-11-21T00:00:00Z")
+        with self.assertRaises(ValueError):
+            sealed_guard.parse_list("root $OTHER_ROOT\nseal a\n")
+        sealed_guard.parse_list("root $OPENATCA_DATA\nseal a\n")
 
 
 if __name__ == "__main__":

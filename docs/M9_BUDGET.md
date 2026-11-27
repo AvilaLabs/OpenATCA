@@ -149,8 +149,8 @@ What these numbers do and do not show:
 
 ## Commands
 
-Data directory `D=/home/connoravila/Documents/Avila-Labs/openatca-data/derived/nas-hour-20261119`,
-archive `R=/home/connoravila/Documents/Avila-Labs/openatca-data/raw/adsblol/2026.11.19`,
+Data directory `D=$OPENATCA_DATA/derived/nas-hour-20261119`,
+archive `R=$OPENATCA_DATA/raw/adsblol/2026.11.19`,
 `T=$HOME/.cache/avila-night/openatca-nashour/release`. The archive parts are
 `v2026.11.19-planes-readsb-prod-0.tar.aa` and `.ab`. `1795122000` is 2026-11-19T21:00:00Z.
 

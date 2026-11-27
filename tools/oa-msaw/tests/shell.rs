@@ -94,23 +94,39 @@ fn arguments_are_strict_and_a_sealed_path_exits_2_before_anything_is_opened() {
     );
     let exe = env!("CARGO_BIN_EXE_oa-msaw");
     let out = scratch("exit");
-    let data = "/home/connoravila/Documents/Avila-Labs/openatca-data";
-    let sealed_day = format!("{data}/raw/adsblol/2026.11.20/a.oaf");
-    let sealed_cfg = format!("{data}/scds/stdds-20261119-holdout/k.cfg");
-    let sealed_out = format!("{data}/scds/stdds-smoke-20261119T1/o");
-    let sealed_terrain = format!("{data}/scds/rec-20261119/day2/terrain");
+    let data = std::env::var_os("OPENATCA_DATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../openatca-data"));
+    let sealed_day = data.join("raw/adsblol/2026.11.20/a.oaf");
+    let sealed_cfg = data.join("scds/stdds-20261119-holdout/k.cfg");
+    let sealed_out = data.join("scds/stdds-smoke-20261119T1/o");
+    let sealed_terrain = data.join("scds/rec-20261119/day2/terrain");
     let o = out.join("o");
     let o = o.to_str().unwrap();
     for argv in [
-        vec!["--adsb", &sealed_day, "--config", "k.cfg", "--out", o],
-        vec!["--adsb", "fine.oaf", "--config", &sealed_cfg, "--out", o],
+        vec![
+            "--adsb",
+            sealed_day.to_str().unwrap(),
+            "--config",
+            "k.cfg",
+            "--out",
+            o,
+        ],
+        vec![
+            "--adsb",
+            "fine.oaf",
+            "--config",
+            sealed_cfg.to_str().unwrap(),
+            "--out",
+            o,
+        ],
         vec![
             "--adsb",
             "fine.oaf",
             "--config",
             "k.cfg",
             "--out",
-            &sealed_out,
+            sealed_out.to_str().unwrap(),
         ],
         vec![
             "--adsb",
@@ -120,7 +136,7 @@ fn arguments_are_strict_and_a_sealed_path_exits_2_before_anything_is_opened() {
             "--out",
             o,
             "--terrain",
-            &sealed_terrain,
+            sealed_terrain.to_str().unwrap(),
         ],
     ] {
         // seal-allow: runs the tool's own test binary; the run itself goes through the guard

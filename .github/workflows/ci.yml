@@ -6,6 +6,25 @@ on:
 permissions:
   contents: read
 jobs:
+  commit-hygiene:
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/train/')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check commit metadata and tracked path hygiene
+        env:
+          EXPECTED_COMMIT_EMAIL: ${{ vars.COMMIT_EMAIL }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_REF: ${{ github.ref }}
+          GITHUB_SHA: ${{ github.sha }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          python3 .github/scripts/test_commit_hygiene.py
+          python3 .github/scripts/check_commit_hygiene.py
   check:
     runs-on: ubuntu-24.04
     steps:

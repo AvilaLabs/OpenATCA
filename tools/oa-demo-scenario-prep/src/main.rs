@@ -48,7 +48,6 @@ const MAX_AIRWAY_FIX_SCANS: usize = 2_000_000;
 const MAX_ROUTE_LIST_DIAGNOSTIC_BUCKETS: usize = 64;
 const MAX_PERFORMANCE_SPEC: u64 = 32 * 1024 * 1024;
 const SYNTHETIC_EPOCH_NS: i64 = 1_800_000_000_000_000_000;
-const OUTPUT_ROOT: &str = "/home/connoravila/Documents/Avila-Labs/openatca-private/demo-scenarios";
 const PERF_SPEC_URL: &str = "https://asims.cab.mlit.go.jp/fsdb/a_katashikisyoumei.nsf/0/b98da61b29ae7a89492575850030a18c/%24FILE/19756776.pdf/JCAB_TCDS_No.38_Rev.12_737Series_September_24%2C2026.pdf";
 const SCENARIO_LIB_SOURCE: &[u8] = include_bytes!("../../../crates/oa-demo-scenario/src/lib.rs");
 const SCENARIO_RESOLVER_SOURCE: &[u8] =
@@ -2762,13 +2761,19 @@ fn one_char(value: &str) -> Option<char> {
 }
 
 fn safe_output_root(requested: Option<&Path>) -> Result<PathBuf, String> {
-    let root = requested.map_or_else(|| PathBuf::from(OUTPUT_ROOT), Path::to_path_buf);
+    let private = std::env::var_os("OPENATCA_PRIVATE")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .ok_or("OPENATCA_PRIVATE is required to validate the output root")?;
+    let private = fs::canonicalize(private).map_err(|e| format!("private root must exist: {e}"))?;
+    let root = match requested {
+        Some(path) => path.to_path_buf(),
+        None => private.join("demo-scenarios"),
+    };
     oa_sealed::refuse_io(&root).map_err(|e| format!("private output root refused: {e}"))?;
     fs::create_dir_all(&root).map_err(|e| e.to_string())?;
     oa_sealed::refuse_io(&root).map_err(|e| format!("private output root refused: {e}"))?;
     let resolved = fs::canonicalize(&root).map_err(|e| e.to_string())?;
-    let private = fs::canonicalize("/home/connoravila/Documents/Avila-Labs/openatca-private")
-        .map_err(|e| format!("private root must exist: {e}"))?;
     if !resolved.starts_with(private) {
         return Err("output path is outside openatca-private".into());
     }

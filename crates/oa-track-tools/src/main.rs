@@ -2047,9 +2047,11 @@ mod public_window_tests {
             ));
         }
         assert!(oa_sealed::refuse(Path::new("/tmp/scds/rec-20261119/day2/clip.oaf")).is_err());
-        assert!(oa_sealed::refuse(Path::new(
-            "/home/connoravila/Documents/Avila-Labs/openatca-data/derived/public/2026.11.20.oaf"
-        ))
-        .is_err());
+        let data = std::env::var_os("OPENATCA_DATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../openatca-data")
+            });
+        assert!(oa_sealed::refuse(&data.join("derived/public/2026.11.20.oaf")).is_err());
     }
 }

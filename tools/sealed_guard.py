@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 LIST_PATH = Path(__file__).resolve().parent.parent / "crates" / "oa-sealed" / "sealed_paths.txt"
+DEFAULT_DATA_ROOT = LIST_PATH.parent / "../../openatca-data"
 MAX_LINKS = 40
 MAX_WALK_DEPTH = 64
 
@@ -86,8 +87,8 @@ def parse_list(text: str):
         if not value or value.startswith(" ") or value.endswith(" "):
             raise ValueError(f"line {i}: extra white space around the value")
         if word == "root":
-            if root is not None or not value.startswith("/"):
-                raise ValueError(f"line {i}: one absolute root only")
+            if root is not None or not (value.startswith("/") or value == "$OPENATCA_DATA"):
+                raise ValueError(f"line {i}: one absolute root or `$OPENATCA_DATA` marker only")
             root = value
         elif word == "seal":
             parts = value.split("/")
@@ -256,10 +257,42 @@ class Guard:
             r, self.entries, self.days, self.windows, self.broken = "", [], ([], [], []), [], True
         if root is not None:
             r = os.fspath(root)
+        elif r == "$OPENATCA_DATA":
+            configured = os.environ.get("OPENATCA_DATA")
+            if configured == "":
+                self.broken = True
+                self.root = ""
+                return
+            r = configured if configured is not None else os.fspath(DEFAULT_DATA_ROOT)
+            if not os.path.isabs(r):
+                self.broken = True
+                self.root = ""
+                return
         try:
-            self.root = _resolve(r) if r else ""
-        except SealedError:
-            self.root = r
+            if not r:
+                self.root = ""
+                self.broken = True
+                return
+            if not os.path.isabs(r):
+                raise SealedError("data root is not absolute")
+            resolved = _resolve(r)
+            existing = Path(r)
+            while True:
+                try:
+                    if existing.is_symlink() and not existing.exists():
+                        raise SealedError("data root contains an unresolved symlink")
+                    if not stat.S_ISDIR(existing.stat().st_mode):
+                        raise SealedError("data root ancestor is not a directory")
+                    break
+                except FileNotFoundError:
+                    parent = existing.parent
+                    if parent == existing:
+                        raise SealedError("data root has no existing ancestor")
+                    existing = parent
+            self.root = resolved
+        except (SealedError, OSError, ValueError):
+            self.root = ""
+            self.broken = True
 
     def in_window(self, unix_ns: int) -> bool:
         """Whether `unix_ns` (nanoseconds since the Unix epoch, UTC) is in a sealed window

@@ -71,15 +71,36 @@ LIMITS = {
     "min_free_bytes": 64 * 1024**3,
 }
 BUILD_ARGV = {
-    "clipper": ["/home/connoravila/.rustup/toolchains/1.89.0-x86_64-unknown-linux-gnu/bin/cargo", "build", "--release", "--locked", "--offline", "-p", "oa-adsb", "--bin", "oa-adsb-clip", "--message-format=json-render-diagnostics"],
-    "candidate": ["/home/connoravila/.rustup/toolchains/1.89.0-x86_64-unknown-linux-gnu/bin/cargo", "build", "--release", "--locked", "--offline", "-p", "oa-track-tools", "--bin", "oa-track-run", "--message-format=json-render-diagnostics"],
-    "candidate_scorer": ["/home/connoravila/.rustup/toolchains/1.89.0-x86_64-unknown-linux-gnu/bin/cargo", "build", "--release", "--locked", "--offline", "-p", "oa-track-tools", "--example", "p002", "--message-format=json-render-diagnostics"],
-    "replication_scorer": ["/home/connoravila/.rustup/toolchains/1.89.0-x86_64-unknown-linux-gnu/bin/cargo", "build", "--release", "--locked", "--offline", "-p", "oa-track", "--example", "p002", "--message-format=json-render-diagnostics"],
+    "clipper": ["cargo", "build", "--release", "--locked", "--offline", "-p", "oa-adsb", "--bin", "oa-adsb-clip", "--message-format=json-render-diagnostics"],
+    "candidate": ["cargo", "build", "--release", "--locked", "--offline", "-p", "oa-track-tools", "--bin", "oa-track-run", "--message-format=json-render-diagnostics"],
+    "candidate_scorer": ["cargo", "build", "--release", "--locked", "--offline", "-p", "oa-track-tools", "--example", "p002", "--message-format=json-render-diagnostics"],
+    "replication_scorer": ["cargo", "build", "--release", "--locked", "--offline", "-p", "oa-track", "--example", "p002", "--message-format=json-render-diagnostics"],
 }
-TRUSTED_TOOLCHAIN_ROOT = "/home/connoravila/.rustup/toolchains/1.89.0-x86_64-unknown-linux-gnu/bin"
-CARGO_EXECUTABLE = f"{TRUSTED_TOOLCHAIN_ROOT}/cargo"
-RUSTC_EXECUTABLE = f"{TRUSTED_TOOLCHAIN_ROOT}/rustc"
-BUILD_PATH = "/usr/bin:/bin"
+
+
+def rustup_tool(tool: str) -> str:
+    rustup = shutil.which("rustup")
+    if rustup is None:
+        raise RuntimeError("rustup is required to locate the pinned Rust 1.89.0 toolchain")
+    located = subprocess.run(
+        [rustup, "which", "--toolchain", "1.89.0", tool],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    ).stdout.strip()
+    resolved = Path(located).resolve(strict=True)
+    if not resolved.is_file():
+        raise RuntimeError("rustup returned a non-file tool path")
+    return os.fspath(resolved)
+
+
+CARGO_EXECUTABLE = rustup_tool("cargo")
+RUSTC_EXECUTABLE = rustup_tool("rustc")
+TOOLCHAIN_ROOT = os.fspath(Path(CARGO_EXECUTABLE).parent)
+for argv in BUILD_ARGV.values():
+    argv[0] = CARGO_EXECUTABLE
+BUILD_PATH = os.pathsep.join((TOOLCHAIN_ROOT, "/usr/bin", "/bin"))
 TOOLCHAIN_TRUST_ASSUMPTION = (
     "trusted installed Rust 1.89.0 paths; receipt hashes and version probes establish process-time "
     "identity only, not secure-boot or host attestation"

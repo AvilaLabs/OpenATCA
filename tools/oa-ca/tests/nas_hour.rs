@@ -147,11 +147,13 @@ fn the_track_mode_measures_from_the_start_time_and_reports_its_capacity_counters
 #[test]
 fn a_sealed_path_and_a_missing_start_are_refused() {
     // seal-allow: runs the example, which checks every path in the guard before opening it
+    let data = std::env::var_os("OPENATCA_DATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../openatca-data"));
+    let sealed = data.join("raw/adsblol/2026.11.20/a.oaf");
     let o = Command::new(example())
-        .args([
-            "census",
-            "/home/connoravila/Documents/Avila-Labs/openatca-data/raw/adsblol/2026.11.20/a.oaf",
-        ])
+        .arg("census")
+        .arg(sealed)
         .output()
         .unwrap();
     assert_eq!(o.status.code(), Some(1));

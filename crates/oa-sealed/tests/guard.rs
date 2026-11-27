@@ -89,6 +89,7 @@ fn a_list_that_does_not_parse_is_an_error_and_the_guard_then_refuses_everything(
         "root d\nseal a\n",
         "root /d\nseal *\n",
         "root /d\nfoo bar\n",
+        "root $OTHER_ROOT\nseal a\n",
         "root /d\nseal\n",
         "root /d\nseal **\n",
         "root /d\nseal a/*x\n",
@@ -107,6 +108,27 @@ fn a_list_that_does_not_parse_is_an_error_and_the_guard_then_refuses_everything(
     let g = Sealed::with_list("garbage", None);
     let e = g.check(Path::new("/tmp/anything")).unwrap_err().to_string();
     assert!(e.contains("OA-SEAL-001"), "{e}");
+}
+
+#[test]
+fn a_sealed_data_path_is_refused_below_an_independently_resolved_root() {
+    let root = std::env::var_os("OPENATCA_DATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../openatca-data"));
+    let guard = Sealed::production();
+    let synthetic = root.join("derived/public/2026.11.20.synthetic.oaf");
+    assert!(guard.check(&synthetic).is_err());
+}
+
+#[test]
+fn an_invalid_data_root_fails_closed() {
+    let file_root = scratch("file-data-root").join("ordinary-file");
+    fs::write(&file_root, b"synthetic").unwrap();
+    let guard = Sealed::with_list(LIST, Some(&file_root));
+    let refusal = guard
+        .check(Path::new("/tmp/ordinary.synthetic"))
+        .unwrap_err();
+    assert!(refusal.why.contains("OA-SEAL-001"));
 }
 
 // REQ: OA-SEAL-002

@@ -45,7 +45,7 @@ The tool runs on 25 November on the 24 November development day (the clip is the
 for ADS-B day 2026.11.24):
 
 ```
-oa-stdds-census /home/connoravila/Documents/Avila-Labs/openatca-data/scds/day-20261124 \
+oa-stdds-census "${OPENATCA_DATA:?set OPENATCA_DATA}/scds/day-20261124" \
   --adsb CLIP-2026.11.24.oaf > census-20261124.txt
 ```
 
@@ -82,8 +82,8 @@ guard; `read_dir_surface` applies `Sealed::production()` to the provided directo
 traversed/opened file. Keep resulting reports in the private tree:
 
 ```
-env -u RUST_MIN_STACK systemd-run --scope --user -p MemoryMax=6G -p MemorySwapMax=0 --setenv=CARGO_BUILD_JOBS=2 --setenv=MALLOC_ARENA_MAX=1 cargo +1.89.0 run --offline -p oa-stdds-census -- /home/connoravila/Documents/Avila-Labs/openatca-private/agent-plan-20261124/ord-baseline-snapshot --surface-only > /home/connoravila/Documents/Avila-Labs/openatca-private/agent-plan-20261124/ord-stdds-baseline.txt
-env -u RUST_MIN_STACK systemd-run --scope --user -p MemoryMax=6G -p MemorySwapMax=0 --setenv=CARGO_BUILD_JOBS=2 --setenv=MALLOC_ARENA_MAX=1 cargo +1.89.0 run --offline -p oa-stdds-census -- /home/connoravila/Documents/Avila-Labs/openatca-private/agent-plan-20261124/ord-recovery-closed-snapshot --surface-only > /home/connoravila/Documents/Avila-Labs/openatca-private/agent-plan-20261124/ord-stdds-recovery.txt
+env -u RUST_MIN_STACK systemd-run --scope --user -p MemoryMax=6G -p MemorySwapMax=0 --setenv=CARGO_BUILD_JOBS=2 --setenv=MALLOC_ARENA_MAX=1 cargo +1.89.0 run --offline -p oa-stdds-census -- "${OPENATCA_PRIVATE:?set OPENATCA_PRIVATE}/agent-plan-20261124/ord-baseline-snapshot" --surface-only > "${OPENATCA_PRIVATE:?set OPENATCA_PRIVATE}/agent-plan-20261124/ord-stdds-baseline.txt"
+env -u RUST_MIN_STACK systemd-run --scope --user -p MemoryMax=6G -p MemorySwapMax=0 --setenv=CARGO_BUILD_JOBS=2 --setenv=MALLOC_ARENA_MAX=1 cargo +1.89.0 run --offline -p oa-stdds-census -- "${OPENATCA_PRIVATE:?set OPENATCA_PRIVATE}/agent-plan-20261124/ord-recovery-closed-snapshot" --surface-only > "${OPENATCA_PRIVATE:?set OPENATCA_PRIVATE}/agent-plan-20261124/ord-stdds-recovery.txt"
 ```
 
 These counts do not establish when an operational outage started or ended. A capture-directory

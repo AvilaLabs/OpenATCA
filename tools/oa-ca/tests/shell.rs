@@ -10,7 +10,7 @@
 )]
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use oa_ca::{
@@ -102,32 +102,36 @@ fn arguments_are_strict_and_a_sealed_path_exits_2_before_anything_is_opened() {
     .is_err());
     let exe = env!("CARGO_BIN_EXE_oa-ca");
     let out = scratch("exit");
+    let data = std::env::var_os("OPENATCA_DATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../openatca-data"));
+    let sealed_day = data.join("raw/adsblol/2026.11.20/a.oaf");
+    let sealed_cfg = data.join("scds/stdds-20261119-holdout/k.cfg");
+    let sealed_out = data.join("scds/stdds-smoke-20261119T1/o");
     for (adsb, cfg, o) in [
-        ("/home/connoravila/Documents/Avila-Labs/openatca-data/raw/adsblol/2026.11.20/a.oaf", "k.cfg", out.join("o")),
-        (
-            "fine.oaf",
-            "/home/connoravila/Documents/Avila-Labs/openatca-data/scds/stdds-20261119-holdout/k.cfg",
-            out.join("o"),
-        ),
-        (
-            "fine.oaf",
-            "k.cfg",
-            PathBuf::from("/home/connoravila/Documents/Avila-Labs/openatca-data/scds/stdds-smoke-20261119T1/o"),
-        ),
+        (sealed_day.as_path(), Path::new("k.cfg"), out.join("o")),
+        (Path::new("fine.oaf"), sealed_cfg.as_path(), out.join("o")),
+        (Path::new("fine.oaf"), Path::new("k.cfg"), sealed_out),
     ] {
         // seal-allow: runs the tool's own test binary; the run itself goes through the guard
         let r = Command::new(exe)
             .args([
                 "--adsb",
-                adsb,
+                adsb.to_str().unwrap(),
                 "--config",
-                cfg,
+                cfg.as_os_str().to_str().unwrap(),
                 "--out",
                 o.to_str().unwrap(),
             ])
             .output()
             .unwrap();
-        assert_eq!(r.status.code(), Some(2), "{adsb} {cfg}");
+        assert_eq!(
+            r.status.code(),
+            Some(2),
+            "{} {}",
+            adsb.display(),
+            cfg.display()
+        );
         assert!(String::from_utf8_lossy(&r.stderr).contains("sealed"));
     }
     assert!(!out.join("o").exists());
