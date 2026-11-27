@@ -19,6 +19,7 @@
 //! | coasting and uncertain | the diamond with an X through it, the circle; tags `CST UNC`     |
 //! | reacquired             | any of the above plus a 9 px radius circle in [`palette::ALERT`] for [`TrafficStyle::reacquired_s`] seconds after the reacquisition; tag `REACQ` |
 //! | callsign conflict      | the hex address in place of the callsign and the tag `CS?` ([`T_CS_CONFLICT`]) |
+//! | radar disagreement     | the track is retained, with the data block tag `RADAR?`; neither source is declared correct |
 //!
 //! Every target also has a velocity leader (a line from the symbol along the ground track, as long
 //! as the target flies in [`TrafficStyle::leader_min`] minutes, absent without a velocity), a
@@ -26,7 +27,7 @@
 //! and a data block at a fixed offset: line 1 the callsign (the hex address without one, or with
 //! two callsigns heard for the address at one instant), line 2 the altitude in hundreds of feet
 //! and the ground speed in knots over ten (`---` or `--` when absent), line 3 the state tags
-//! above when there are any, in the order `CST UNC CS? R95? REACQ`.
+//! above when there are any, in the order `CST UNC CS? RADAR? R95? REACQ`.
 //!
 //! Data blocks are placed at one fixed offset from the symbol.
 // TODO(LS-401): automatic data block placement without overlap in holding and on final (M8);
@@ -93,8 +94,10 @@ pub const T_UNCERTAIN: u8 = 2;
 /// Two different callsigns were heard for this address at the same instant: the callsign is not
 /// shown (it would be a choice by sort order, E6) and the data block says so.
 pub const T_CS_CONFLICT: u8 = 4;
+/// A radar plot contradicted the address's track; the display preserves the track and marks the disagreement.
+pub const T_RADAR_DISAGREES: u8 = 8;
 /// Every flag bit this module knows; a target with another bit is refused.
-const FLAGS_KNOWN: u8 = T_COAST | T_UNCERTAIN | T_CS_CONFLICT;
+const FLAGS_KNOWN: u8 = T_COAST | T_UNCERTAIN | T_CS_CONFLICT | T_RADAR_DISAGREES;
 
 /// Largest leader, minutes.
 pub const MAX_LEADER_MIN: f64 = 30.0;
@@ -194,7 +197,7 @@ pub struct Target {
     pub reacq_age_s: u16,
     /// Last source-observed Mode 3/A code, or [`NO_IDENT`].
     pub ident: u16,
-    /// [`T_COAST`], [`T_UNCERTAIN`] and [`T_CS_CONFLICT`].
+    /// [`T_COAST`], [`T_UNCERTAIN`], [`T_CS_CONFLICT`] and [`T_RADAR_DISAGREES`].
     pub flags: u8,
     pub trail_len: u8,
     /// [`IDENT_UNKNOWN`], [`IDENT_OBSERVED`] or [`IDENT_CONFLICT`].
@@ -631,6 +634,7 @@ pub fn tags_text(b: &mut TextBuf, flags: u8, reacquired: bool, r95_unknown: bool
         (flags & T_COAST != 0, "CST"),
         (flags & T_UNCERTAIN != 0, "UNC"),
         (flags & T_CS_CONFLICT != 0, "CS?"),
+        (flags & T_RADAR_DISAGREES != 0, "RADAR?"),
         (r95_unknown, "R95?"),
         (reacquired, "REACQ"),
     ] {

@@ -664,7 +664,7 @@ fn an_invalid_target_is_refused_counted_and_said_on_the_frame_never_defaulted() 
     bad_history.trail_len = 1;
     bad_history.trail[0] = (0, 1_800_000_001);
     let mut bad_flags = plain(ORD.0, ORD.1);
-    bad_flags.flags = 8;
+    bad_flags.flags = 16;
     for t in [off_globe, long_trail, bad_history, bad_flags] {
         assert!(matches!(
             targets_push(&mut set, &t),
@@ -723,6 +723,22 @@ fn a_callsign_conflict_shows_the_address_and_the_tag_not_either_callsign() {
 
 // REQ: OA-DSP-046
 #[test]
+fn radar_disagreement_is_a_visible_tag_without_changing_the_track_symbol() {
+    let mut t = plain(ORD.0, ORD.1);
+    t.flags = T_RADAR_DISAGREES;
+    let (l, st) = draw(&[t], &DEFAULT_STYLE);
+    let tx = texts_of(&l);
+    assert_eq!(tx.last().unwrap().0, "RADAR?");
+    assert_eq!((st.drawn, st.uncertain, st.coasting), (1, 0, 0));
+    assert_eq!(
+        traffic_loss(&st),
+        0,
+        "the contradictory evidence remains displayed"
+    );
+}
+
+// REQ: OA-DSP-046
+#[test]
 fn a_track_outside_the_circle_is_counted_not_silently_left_without_a_leader() {
     let mut t = plain(ORD.0, ORD.1);
     t.gs_dkt = 4_000;
@@ -740,7 +756,7 @@ fn a_track_outside_the_circle_is_counted_not_silently_left_without_a_leader() {
 #[test]
 fn the_longest_data_block_fits_the_per_target_text_budget_and_is_never_clipped() {
     let mut t = plain(ORD.0, ORD.1);
-    t.flags = T_COAST | T_UNCERTAIN | T_CS_CONFLICT;
+    t.flags = T_COAST | T_UNCERTAIN | T_CS_CONFLICT | T_RADAR_DISAGREES;
     t.r95_m = f32::NAN;
     t.reacq_age_s = 0;
     t.addr = 0x1FF_FFFF;
@@ -750,7 +766,7 @@ fn the_longest_data_block_fits_the_per_target_text_budget_and_is_never_clipped()
     let tx = texts_of(&l);
     assert_eq!(tx[0].0, "1FFFFFF");
     assert_eq!(tx[1].0, "-99- 655");
-    assert_eq!(tx[2].0, "CST UNC CS? R95? REACQ");
+    assert_eq!(tx[2].0, "CST UNC CS? RADAR? R95? REACQ");
     assert!(l.text.len() <= 64, "{} bytes", l.text.len());
     assert_eq!(st.text_clipped, 0);
 }

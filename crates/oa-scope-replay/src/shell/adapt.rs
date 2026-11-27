@@ -4,15 +4,17 @@
 //! `O_*` bits to the core's `RF_*` bits), with no decision in it.
 
 use crate::core::rows::{
-    CallsignStats, Callsigns, RowColumns, RowsError, RF_COAST, RF_HAS_ALT, RF_REACQUIRED,
-    RF_UNCERTAIN,
+    CallsignStats, Callsigns, RowColumns, RowsError, RF_COAST, RF_HAS_ALT, RF_RADAR_DISAGREES,
+    RF_REACQUIRED, RF_UNCERTAIN,
 };
 use crate::store::callsigns_build;
 use oa_adsb::Reports;
 use oa_display::safety::{FeedState, FeedStatus};
 use oa_feed::health::{FeedHealth, STATE_CONNECTED, STATE_DISCONNECTED, STATE_UNKNOWN};
 use oa_track::fusion::FusionStats;
-use oa_track::{r95_m_of, TrackOutput, O_COAST, O_HAS_ALT, O_REACQUIRED, O_UNCERTAIN};
+use oa_track::{
+    r95_m_of, TrackOutput, O_COAST, O_HAS_ALT, O_RADAR_DISAGREES, O_REACQUIRED, O_UNCERTAIN,
+};
 
 /// Caller-supplied feed freshness limits. The slow threshold is inclusive for `Slow`; the lost
 /// threshold is inclusive for `Lost`. No facility-independent defaults are provided (IF-R4).
@@ -153,6 +155,7 @@ pub fn row_flags(o: u8) -> u8 {
         (O_HAS_ALT, RF_HAS_ALT),
         (O_REACQUIRED, RF_REACQUIRED),
         (O_UNCERTAIN, RF_UNCERTAIN),
+        (O_RADAR_DISAGREES, RF_RADAR_DISAGREES),
     ] {
         if o & from != 0 {
             f |= to;

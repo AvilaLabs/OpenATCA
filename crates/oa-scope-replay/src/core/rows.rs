@@ -29,7 +29,7 @@ use oa_display::core::project::Projection;
 use oa_display::core::traffic::{
     map_position, position_valid, targets_push, MapPos, Target, TargetSet, IDENT_CONFLICT,
     IDENT_OBSERVED, IDENT_UNKNOWN, MAX_REACQ_AGE_S, MAX_TRAIL, NO_ALT, NO_IDENT, NO_IDENT_NS,
-    NO_REACQ, NO_U16, T_COAST, T_CS_CONFLICT, T_UNCERTAIN,
+    NO_REACQ, NO_U16, T_COAST, T_CS_CONFLICT, T_RADAR_DISAGREES, T_UNCERTAIN,
 };
 use std::collections::BTreeMap;
 use std::fmt;
@@ -47,6 +47,8 @@ pub const RF_HAS_ALT: u8 = 2;
 pub const RF_REACQUIRED: u8 = 4;
 /// The position is uncertain.
 pub const RF_UNCERTAIN: u8 = 8;
+/// A radar plot contradicted the track's address association; the track position was not changed.
+pub const RF_RADAR_DISAGREES: u8 = 16;
 
 /// Most distinct addresses the store holds. Analysis: the tracker holds at most 4096 tracks at a
 /// time (`DEFAULT_CONFIG.max_tracks`); a clip window of up to a day can see every address in the
@@ -463,6 +465,9 @@ fn target_of(
     }
     if row.flags & RF_UNCERTAIN != 0 {
         flags |= T_UNCERTAIN;
+    }
+    if row.flags & RF_RADAR_DISAGREES != 0 {
+        flags |= T_RADAR_DISAGREES;
     }
     let call = callsign_at(calls, addr, t_ns);
     if call.conflict {

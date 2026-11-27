@@ -14,7 +14,7 @@ use oa_display::project::projection_new;
 use oa_display::raster::frame_digest;
 use oa_display::traffic::{
     targets_clear, targets_columns, targets_len, targets_new, targets_refused, NO_ALT, NO_REACQ,
-    NO_U16, T_COAST, T_CS_CONFLICT, T_UNCERTAIN,
+    NO_U16, T_COAST, T_CS_CONFLICT, T_RADAR_DISAGREES, T_UNCERTAIN,
 };
 use oa_scope_replay::adapt::{callsigns_from_reports, row_columns, ColumnBuf};
 use oa_scope_replay::cli;
@@ -27,7 +27,10 @@ use oa_scope_replay::raw::{RawObservationColumns, RAW_STALE_CUTOFF_NS};
 use oa_scope_replay::rows::*;
 use oa_scope_replay::store::*;
 use oa_sha256::to_hex;
-use oa_track::{output_new, TrackOutput, O_COAST, O_HAS_ALT, O_REACQUIRED, O_TICK, O_UNCERTAIN};
+use oa_track::{
+    output_new, TrackOutput, O_COAST, O_HAS_ALT, O_RADAR_DISAGREES, O_REACQUIRED, O_TICK,
+    O_UNCERTAIN,
+};
 
 const ORD: (i32, i32) = (419_786_000, -879_048_000);
 const S: i64 = 1_000_000_000;
@@ -307,6 +310,62 @@ fn row_flags_altitude_and_radius_map_to_the_target() {
     let mut set = targets_new(2).unwrap();
     targets_at(&store_of(&o), &c, T0, &DEFAULT_CONVERT, &proj(), &mut set);
     assert_eq!(targets_columns(&set).alt_ft, vec![NO_ALT]);
+}
+
+// REQ: OA-DSP-043
+#[test]
+fn radar_disagreement_survives_tracker_row_adapter_and_is_visible_in_frame() {
+    let mut o = output_new(2);
+    push(
+        &mut o,
+        T0,
+        1,
+        ORD,
+        (0.0, 0.0),
+        f32::NAN,
+        COV,
+        O_TICK | O_RADAR_DISAGREES,
+    );
+    push(
+        &mut o,
+        T0,
+        2,
+        (ORD.0 + 100, ORD.1 + 100),
+        (0.0, 0.0),
+        f32::NAN,
+        COV,
+        O_TICK,
+    );
+    let store = store_of(&o);
+    let mut replay = replay_new(model(), &frame_cfg()).unwrap();
+    let info = replay_build(
+        &mut replay,
+        &store,
+        &Callsigns::default(),
+        T0,
+        "RADAR DISAGREEMENT",
+    )
+    .unwrap();
+
+    assert_eq!(info.traffic.drawn, 2);
+    let shown = targets_columns(&replay.set);
+    assert_eq!(shown.addr, &[1, 2]);
+    assert_eq!(shown.flags, &[T_RADAR_DISAGREES, 0]);
+    assert_eq!(
+        shown.flags[0] & T_UNCERTAIN,
+        0,
+        "disagreement is not relabelled as position uncertainty"
+    );
+
+    replay_raster(&mut replay).unwrap();
+    let texts: Vec<&str> = (0..replay.list.texts.x.len())
+        .map(|i| {
+            let start = replay.list.texts.start[i] as usize;
+            let end = start + replay.list.texts.len[i] as usize;
+            &replay.list.text[start..end]
+        })
+        .collect();
+    assert_eq!(texts.iter().filter(|&&text| text == "RADAR?").count(), 1);
 }
 
 #[test]
