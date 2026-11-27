@@ -138,6 +138,9 @@ class MutationEvidenceTests(unittest.TestCase):
         self.assertEqual(result.total, 0)
         with self.assertRaisesRegex(checker.MutationCheckError, "empty mutant selections"):
             checker.require_complete_selection(set(), result)
+        stale = {"oa-safety::src/example.rs:9:1: removed mutant": "This obsolete exception has rationale text."}
+        with self.assertRaisesRegex(checker.MutationCheckError, "stale identities"):
+            checker.assess_outcomes(0, report_for(), stale, {"oa-safety"})
 
     def test_selected_mutant_list_must_reconcile_with_outcomes(self) -> None:
         """Kills acceptance when selected mutants are absent from final outcomes."""

@@ -580,7 +580,12 @@ def run_check(repo: Path, base_ref: str, head_ref: str) -> dict[str, Any]:
             listed = run_cargo_mutants_list(
                 cargo_mutants_list_command(packages, diff_path), worktree, set(packages)
             )
+            allowlist = allowlist_in_scope(
+                committed_allowlist, changed_scope(source_files)
+            )
             if not listed:
+                if allowlist:
+                    raise MutationCheckError("mutant allowlist contains stale identities in changed scope")
                 return dict(
                     base_result,
                     status="skip-no-mutants-generated",
@@ -594,9 +599,6 @@ def run_check(repo: Path, base_ref: str, head_ref: str) -> dict[str, Any]:
             command = cargo_mutants_command(packages, diff_path, output_parent)
             exit_code = run_cargo_mutants(command, worktree)
             report = bounded_json(output_parent / "mutants.out" / "outcomes.json")
-            allowlist = allowlist_in_scope(
-                committed_allowlist, changed_scope(source_files)
-            )
             summary = assess_outcomes(exit_code, report, allowlist, set(packages))
             require_complete_selection(listed, summary)
             return dict(
