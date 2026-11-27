@@ -142,6 +142,10 @@ class FuzzShardTests(unittest.TestCase):
         end = len(workflow) if boundary is None else start + 1 + boundary.start()
         block = workflow[start:end]
         self.assertIn("fail-fast: false", block)
+        setup = block.find("python3 .github/scripts/configure_test_data_root.py")
+        fuzz_run = block.find("--expected-targets \"${{ matrix.targets }}\"")
+        self.assertGreaterEqual(setup, 0, "fuzz-smoke must configure the synthetic sentinel data root")
+        self.assertGreater(fuzz_run, setup, "the root must be exported before any target is fuzzed")
         matrix = re.search(r"(?ms)^        include:\n(?P<rows>.*?)(?=^    steps:)", block)
         self.assertIsNotNone(matrix)
         row_pairs = re.findall(r"(?m)^          - shard: (\d+)\n            targets: ([a-z0-9,_-]+)$", matrix.group("rows"))
