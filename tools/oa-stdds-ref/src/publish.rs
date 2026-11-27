@@ -242,18 +242,22 @@ mod tests {
         let g = guard(&root);
         let r = report();
         publish_report(&g, &out, &r).unwrap();
+        // seal-allow: reads the summary this test generated in its synthetic temporary output.
         assert_eq!(
             std::fs::read(out.join("stdds_ref.txt")).unwrap(),
             r.summary.as_bytes()
         );
+        // seal-allow: reads the CSV this test generated in its synthetic temporary output.
         assert_eq!(
             std::fs::read(out.join("stdds_ref.csv")).unwrap(),
             r.csv.as_bytes()
         );
+        // seal-allow: reads the JSON this test generated in its synthetic temporary output.
         assert_eq!(
             std::fs::read(out.join("stdds_ref.json")).unwrap(),
             r.json.as_bytes()
         );
+        // seal-allow: reads the commit marker this test generated in its synthetic temporary output.
         assert_eq!(
             std::fs::read(out.join("stdds_ref.complete")).unwrap(),
             r.completion_marker.as_bytes()
