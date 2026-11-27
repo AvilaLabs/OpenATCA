@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+from array import array
 import hashlib
 import io
 import json
@@ -19,7 +20,7 @@ from pathlib import Path
 from typing import Iterable, Iterator
 
 
-ALGORITHM = "tracked-rust-python-fn-v1"
+ALGORITHM = "tracked-rust-python-fn-v2"
 SCOPE = "all git-tracked .rs and .py source files; no path exclusions"
 WINDOW_TOKENS = 24
 MIN_IDENTIFIERS = 6
@@ -28,8 +29,12 @@ MAX_SOURCE_BYTES = 128 * 1024 * 1024
 MAX_SOURCE_FILE_BYTES = 8 * 1024 * 1024
 MAX_BASELINE_BYTES = 64 * 1024 * 1024
 MAX_CODE_TOKENS = 4_000_000
-MAX_DUPLICATE_WINDOWS = 800_000
-MAX_DUPLICATE_BLOCK_GROUPS = 100_000
+# Every qualifying window consumes at least one body token, so the 4M token cap bounds this
+# two-pass scan without a smaller source-content-dependent rejection threshold.
+MAX_DUPLICATE_WINDOWS = MAX_CODE_TOKENS
+# Every counted block needs at least two qualifying source windows.
+MAX_DUPLICATE_BLOCK_GROUPS = MAX_DUPLICATE_WINDOWS // 2
+PACKED_LOCATION_PART_MAX = (1 << 32) - 1
 MAX_DUPLICATE_COMPARISONS = 25_000_000
 MAX_LEX_TOKENS_PER_FILE = 1_000_000
 BASELINE_PATH = Path("tools/quality-size-baseline.json")
@@ -448,17 +453,17 @@ def _read_tracked_sources(root: Path) -> Iterator[tuple[str, str]]:
 
 def _intern_function_bodies(
     functions: list[Function],
-) -> tuple[list[list[int]], list[list[bool]]]:
+) -> tuple[list[array], list[bytearray]]:
     token_total = sum(len(function.body) for function in functions)
     if token_total > MAX_CODE_TOKENS:
         raise RatchetError("code token limit exceeded")
     intern: dict[tuple[str, str, str], int] = {}
-    function_ids: list[list[int]] = []
-    function_identifier: list[list[bool]] = []
+    function_ids: list[array] = []
+    function_identifier: list[bytearray] = []
     for function in functions:
         language = "rust" if function.path.endswith(".rs") else "python"
-        ids: list[int] = []
-        identifiers: list[bool] = []
+        ids = array("Q")
+        identifiers = bytearray()
         for token in function.body:
             key = (language, token.kind, token.value)
             token_id = intern.get(key)
@@ -473,8 +478,8 @@ def _intern_function_bodies(
 
 
 def _index_duplicate_windows(
-    function_ids: list[list[int]], function_identifier: list[list[bool]],
-) -> dict[int, list[tuple[int, int]]]:
+    function_ids: list[array], function_identifier: list[bytearray],
+) -> dict[int, array]:
     """Count bounded rolling hashes, then retain locations only for repeated hashes."""
     counts: Counter[int] = Counter()
     qualifying = 0
@@ -483,16 +488,23 @@ def _index_duplicate_windows(
         if qualifying > MAX_DUPLICATE_WINDOWS:
             raise RatchetError("qualifying duplicate-window limit exceeded")
         counts[rolling] += 1
-    repeated = {fingerprint: [] for fingerprint, count in counts.items() if count > 1}
+    repeated = {fingerprint: array("Q") for fingerprint, count in counts.items() if count > 1}
     for function_index, start, rolling in _qualified_windows(function_ids, function_identifier):
         locations = repeated.get(rolling)
         if locations is not None:
-            locations.append((function_index, start))
+            locations.append(_encode_location(function_index, start))
     return repeated
 
 
+def _encode_location(function_index: int, start: int) -> int:
+    if not (0 <= function_index <= PACKED_LOCATION_PART_MAX and
+            0 <= start <= PACKED_LOCATION_PART_MAX):
+        raise RatchetError("duplicate source location exceeds packed representation")
+    return (function_index << 32) | start
+
+
 def _qualified_windows(
-    function_ids: list[list[int]], function_identifier: list[list[bool]],
+    function_ids: list[array], function_identifier: list[bytearray],
 ) -> Iterator[tuple[int, int, int]]:
     base = 1_099_511_628_211
     mask = (1 << 64) - 1
@@ -527,8 +539,8 @@ def _qualified_windows(
 
 def _expand_duplicate_windows(
     functions: list[Function],
-    function_ids: list[list[int]],
-    window_index: dict[int, list[tuple[int, int]]],
+    function_ids: list[array],
+    window_index: dict[int, array],
 ) -> dict[str, dict[str, object]]:
     blocks: dict[str, dict[str, object]] = {}
     covered: dict[tuple[int, int], list[tuple[int, int, int, int]]] = defaultdict(list)
@@ -537,7 +549,8 @@ def _expand_duplicate_windows(
         # Resolve hash collisions and count each source window once even when an enclosing
         # function body also contains the same nested-function tokens.
         exact_groups: dict[tuple[int, ...], list[tuple[int, int]]] = defaultdict(list)
-        for function_index, start in locations:
+        for encoded in locations:
+            function_index, start = encoded >> 32, encoded & PACKED_LOCATION_PART_MAX
             exact_groups[tuple(function_ids[function_index][start:start + WINDOW_TOKENS])].append(
                 (function_index, start)
             )

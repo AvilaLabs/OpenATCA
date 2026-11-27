@@ -2,6 +2,7 @@ import unittest
 import subprocess
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 from tools import quality_size_ratchet as ratchet
 
@@ -98,6 +99,32 @@ class QualitySizeRatchetTests(unittest.TestCase):
         source = "fn outer(source: Source) {\n    fn inner(source: Source) {\n" + body + "\n    }\n}\n"
         summary = ratchet.analyze_sources([("nested.rs", source)])
         self.assertEqual(summary["duplicate_block_count"], 0)
+
+    def test_window_limit_is_derived_from_total_body_token_limit(self):
+        functions = ratchet._function_tokens("window.rs", "fn sample() {\n" + repeated_block("x") + "\n}\n")
+        ids, identifiers = ratchet._intern_function_bodies(functions)
+        windows = list(ratchet._qualified_windows(ids, identifiers))
+        self.assertLessEqual(len(windows), sum(len(body) for body in ids))
+        self.assertEqual(ratchet.MAX_DUPLICATE_WINDOWS, ratchet.MAX_CODE_TOKENS)
+
+    def test_packed_location_rejects_overflow_and_accepts_boundary(self):
+        largest = ratchet.PACKED_LOCATION_PART_MAX
+        self.assertEqual(ratchet._encode_location(largest, largest), (largest << 32) | largest)
+        with self.assertRaises(ratchet.RatchetError):
+            ratchet._encode_location(largest + 1, 0)
+
+    def test_hash_collision_does_not_create_false_duplicate(self):
+        body = repeated_block("stable")
+        functions = ratchet._function_tokens(
+            "collision.rs",
+            "fn first(source: Source) {\n" + body + "\n}\n"
+            "fn second(source: Source) {\n" + body.replace("source.alpha()", "source.other()") + "\n}\n",
+        )
+        def forced_hashes(function_ids, function_identifier):
+            return iter(((0, 0, 123), (1, 0, 123)))
+        with patch.object(ratchet, "_qualified_windows", side_effect=forced_hashes):
+            duplicate_counts, _ = ratchet._duplicate_inventory(functions)
+        self.assertEqual(duplicate_counts, {})
 
     def test_all_three_ratchets_reject_metric_rises(self):
         base = ratchet.analyze_sources([("base.rs", "fn small() {}\n")])
