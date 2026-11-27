@@ -2,12 +2,13 @@ name: ci
 on:
   push:
     branches: [main, 'train/**', 'wip/**']
+    tags: ['**']
   pull_request:
 permissions:
   contents: read
 jobs:
   commit-hygiene:
-    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/train/')
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/train/') || startsWith(github.ref, 'refs/heads/wip/') || startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-24.04
     env:
       COMMIT_EMAIL_LOG_MASK: ${{ secrets.COMMIT_EMAIL_LOG_MASK }}
