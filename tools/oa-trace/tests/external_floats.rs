@@ -251,6 +251,11 @@ const ALLOW: &[Allow] = &[
         needle: "s.parse::<f64>()",
         reason: "parse_f64 immediately rejects parse errors and non-finite preset minima",
     },
+    Allow {
+        file: "tools/oa-replay-diff/src/diff.rs",
+        needle: "f32::from_bits(word(x)?)",
+        reason: "decodes canonical-row f32 bytes; field_delta checks both values finite before arithmetic and reports nonfinite values explicitly",
+    },
 ];
 
 // REQ: OA-TRC-103
