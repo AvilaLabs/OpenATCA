@@ -18,7 +18,7 @@ from rust_proof_suite import (
     NIGHTLY_OVER_SECONDS, SelectionError, affected_packages, balance_shards, changed_files,
     has_unowned_package_root_changes, load_registry, main, package_directories_at,
     package_graph, proof_target_path, registry_packages_missing, run_suite, select_proofs,
-    select_proof_ids, unmapped_package_paths, validate_registry,
+    unmapped_package_paths, validate_registry,
 )
 from kani_validation import LOOP_UNWIND_PRESETS
 
@@ -31,7 +31,6 @@ REGISTRY_PATH = REPO / "tools" / "rust_proofs.json"
 class SuiteRun:
     mode: str = "pass"
     invoked: Path | None = None
-    proof_ids: tuple[str, ...] | None = None
     changed_from: str | None = None
     shard: tuple[int, int] | None = None
 
@@ -425,7 +424,7 @@ print("fake runner stdout")
         if options.invoked is not None:
             env["FAKE_INVOKED"] = str(options.invoked)
         stdout, stderr = io.StringIO(), io.StringIO()
-        selection = {"proof_ids": list(options.proof_ids)} if options.proof_ids is not None else {}
+        selection = {}
         if options.changed_from is not None:
             selection["changed_from"] = options.changed_from
         if options.shard is not None:
@@ -578,7 +577,7 @@ print("fake runner stdout")
             repo, registry_path, out, target_root, _ = self.fake_workspace(root, proof_count=1)
             registry_path.write_text(json.dumps(registry_with(*proofs), indent=2) + "\n")
             captured = self.run_captured(
-                repo, out, target_root, registry_path, SuiteRun(proof_ids=proof_ids),
+                repo, out, target_root, registry_path,
             )
             suite = captured.suite
             self.assertEqual(captured.result, 0, captured.stderr)
@@ -633,38 +632,6 @@ print("fake runner stdout")
             self.assertEqual([x["status"] for x in suite["checks"]], ["FAIL"] * 2)
             self.assertEqual(len(invoked.read_text().splitlines()), 2)
 
-    def test_manual_exact_id_run_executes_only_requested_proof(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            repo, registry, out, target, _ = self.fake_workspace(root, proof_count=3)
-            invoked = root / "invoked.txt"
-            captured = self.run_captured(
-                repo, out, target, registry,
-                SuiteRun(invoked=invoked, proof_ids=("sample-proof", "second-proof-2")),
-            )
-            self.assertEqual(captured.result, 0, captured.stderr)
-            suite = captured.suite
-            self.assertEqual([entry["id"] for entry in suite["checks"]], ["sample-proof", "second-proof-2"])
-            self.assertEqual(suite["selection"]["requested_proof_ids"], ["sample-proof", "second-proof-2"])
-            self.assertEqual(suite["selection"]["excluded_proofs"][0]["status"], "EXCLUDED")
-            self.assertEqual(invoked.read_text().splitlines(), [
-                proof_entry()["harness"], "types::proofs::example_2_bounded",
-            ])
-
-    def test_manual_exact_id_rejects_unknown_and_changed_selection_combination(self):
-        for proof_ids, changed_from in ((["not-registered"], None), (["sample-proof"], "HEAD")):
-            with self.subTest(proof_ids=proof_ids, changed_from=changed_from), tempfile.TemporaryDirectory() as temp:
-                repo, registry, out, target, _ = self.fake_workspace(Path(temp), proof_count=1)
-                captured = self.run_captured(
-                    repo, out, target, registry,
-                    SuiteRun(proof_ids=tuple(proof_ids), changed_from=changed_from),
-                )
-                self.assertEqual(captured.result, 2)
-                self.assertIn(
-                    "cannot select proofs" if changed_from is None else "cannot be combined",
-                    captured.stderr,
-                )
-
     def test_legacy_fail_fast_cli_flag_is_accepted_with_deprecation_warning(self):
         with tempfile.TemporaryDirectory() as temp:
             repo = Path(temp)
@@ -678,6 +645,17 @@ print("fake runner stdout")
             self.assertEqual(result, 1)
             self.assertIn("deprecated and ignored", stderr.getvalue())
             self.assertNotIn("fail_fast", run_suite_mock.call_args.kwargs)
+
+    def test_manual_proof_id_subset_is_not_a_product_cli_option(self):
+        stderr = io.StringIO()
+        with redirect_stderr(stderr), self.assertRaises(SystemExit) as error:
+            main([
+                "--repo", str(REPO), "--out", str(REPO / "unused-evidence"),
+                "--target-dir", str(REPO / "unused-target"),
+                "--proof-ids", "sample-proof",
+            ])
+        self.assertEqual(error.exception.code, 2)
+        self.assertIn("unrecognized arguments", stderr.getvalue())
 
     def test_shards_split_the_enabled_proofs_between_jobs_without_overlap(self):
         seen = []
@@ -772,19 +750,6 @@ class PushSelectionTests(unittest.TestCase):
         for proof in proofs:
             proof["enabled"] = False
         self.assertEqual(select_proofs(proofs, None), [])
-
-    def test_exact_proof_id_selection_rejects_unknown_duplicate_and_disabled_ids(self):
-        proofs = sample_proofs()
-        self.assertEqual(
-            [p["id"] for p in select_proof_ids(proofs, ["c-nightly", "a-push"])],
-            ["a-push", "c-nightly"],
-        )
-        for request in (["unknown"], ["a-push", "a-push"]):
-            with self.assertRaises(SelectionError):
-                select_proof_ids(proofs, request)
-        proofs[0]["enabled"] = False
-        with self.assertRaises(SelectionError):
-            select_proof_ids(proofs, [proofs[0]["id"]])
 
     def test_the_real_workspace_graph_ties_the_tracker_to_its_dependencies(self):
         graph = package_graph(REPO)
@@ -1097,8 +1062,8 @@ class ShardBalanceTests(unittest.TestCase):
     def test_the_workflow_runs_four_shards(self):
         text = (REPO / ".github" / "workflows" / "rust-proofs.yml").read_text()
         self.assertIn('shard: ["0/4", "1/4", "2/4", "3/4"]', text)
-        self.assertIn("proof_ids:", text)
-        self.assertIn("--proof-ids", text)
+        self.assertNotIn("proof_ids:", text)
+        self.assertNotIn("--proof-ids", text)
         self.assertNotIn("python3 tools/rust_proof_suite.py\n          --fail-fast", text)
 
 

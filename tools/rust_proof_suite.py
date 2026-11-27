@@ -124,6 +124,13 @@ def package_directories_at(repo: Path, revision: str) -> set[str]:
         raise SelectionError("Cargo package path at comparison base is not UTF-8") from exc
 
 
+def _package_root_for_path(path: str) -> str | None:
+    parts = path.split("/")
+    if len(parts) >= 3 and parts[0] in _PACKAGE_ROOTS:
+        return f"{parts[0]}/{parts[1]}/"
+    return None
+
+
 def unmapped_package_paths(
     graph: dict[str, dict[str, Any]], changed: list[str], base_directories: set[str],
 ) -> list[str]:
@@ -131,11 +138,9 @@ def unmapped_package_paths(
     directories = {info["dir"] for info in graph.values()}
     unmapped = set()
     for path in changed:
-        parts = path.split("/")
-        if len(parts) >= 3 and parts[0] in _PACKAGE_ROOTS:
-            directory = f"{parts[0]}/{parts[1]}/"
-            if directory not in directories and directory in base_directories:
-                unmapped.add(directory)
+        directory = _package_root_for_path(path)
+        if directory is not None and directory not in directories and directory in base_directories:
+            unmapped.add(directory)
     return sorted(unmapped)
 
 
@@ -145,11 +150,9 @@ def has_unowned_package_root_changes(
     """Unknown loose source/support under crates/ or tools/ selects every proof conservatively."""
     directories = {info["dir"] for info in graph.values()}
     for path in changed:
-        parts = path.split("/")
-        if len(parts) >= 3 and parts[0] in _PACKAGE_ROOTS:
-            directory = f"{parts[0]}/{parts[1]}/"
-            if directory not in directories and directory not in base_directories:
-                return True
+        directory = _package_root_for_path(path)
+        if directory is not None and directory not in directories and directory not in base_directories:
+            return True
     return False
 
 
@@ -183,26 +186,9 @@ def select_proofs(
     return chosen
 
 
-def select_proof_ids(
-    proofs: list[dict[str, Any]], requested: list[str] | None,
-) -> list[dict[str, Any]]:
-    """Select exact enabled registry IDs in registry order; reject typos and disabled IDs."""
-    if requested is None:
-        return proofs
-    if not requested or len(set(requested)) != len(requested):
-        raise SelectionError("--proof-ids must contain unique enabled proof IDs")
-    by_id = {proof["id"]: proof for proof in proofs if proof["enabled"]}
-    missing = sorted(set(requested) - set(by_id))
-    if missing:
-        raise SelectionError(f"unknown or disabled proof IDs: {', '.join(missing)}")
-    wanted = set(requested)
-    return [proof for proof in proofs if proof["id"] in wanted]
-
-
 def proof_selection_report(
     proofs: list[dict[str, Any]], chosen: list[dict[str, Any]], selected: list[dict[str, Any]],
-    affected: set[str] | None, changed_from: str | None, proof_ids: list[str] | None,
-    changed: list[str] | None,
+    affected: set[str] | None, changed_from: str | None, changed: list[str] | None,
 ) -> dict[str, Any]:
     chosen_ids = {proof["id"] for proof in chosen}
     selected_ids = {proof["id"] for proof in selected}
@@ -217,9 +203,6 @@ def proof_selection_report(
         elif not proof["enabled"]:
             reason = "disabled in registry"
             excluded.append({"id": proof["id"], "status": "EXCLUDED", "reason": reason})
-        elif proof_ids is not None:
-            reason = "not requested by proof ID"
-            excluded.append({"id": proof["id"], "status": "EXCLUDED", "reason": reason})
         elif changed_from is not None and affected is not None and proof["package"] not in affected:
             reason = "package not reached by changed files"
             excluded.append({"id": proof["id"], "status": "EXCLUDED", "reason": reason})
@@ -227,11 +210,10 @@ def proof_selection_report(
             reason = "not selected"
             excluded.append({"id": proof["id"], "status": "EXCLUDED", "reason": reason})
     return {
-        "mode": "proof_ids" if proof_ids is not None else ("changed_packages" if changed_from is not None else "all_enabled"),
+        "mode": "changed_packages" if changed_from is not None else "all_enabled",
         "base": changed_from,
         "changed_files": changed if changed is not None else ("unknown, all packages assumed" if changed_from else None),
         "affected_packages": sorted(affected) if affected is not None else ("all" if changed_from else None),
-        "requested_proof_ids": proof_ids,
         "selected_proof_ids": [proof["id"] for proof in chosen],
         "shard_proof_ids": [proof["id"] for proof in selected],
         "skipped_proofs": skipped,
@@ -660,7 +642,6 @@ def _run_one_proof(
 def run_suite(
     repo: Path, out: Path, target_dir: Path, registry_path: Path,
     shard: tuple[int, int] = (0, 1), changed_from: str | None = None,
-    proof_ids: list[str] | None = None,
 ) -> int:
     try:
         registry_path = registry_path.resolve(strict=True)
@@ -697,13 +678,9 @@ def run_suite(
     # Shard `i` of `n` is the i-th of `n` groups of about equal recorded time: the same registry
     # split across jobs, so that each job finishes within the CI time limit.
     shard_index, shard_count = shard
-    # A changed-package run includes every enabled tier for affected packages. Explicit proof IDs
-    # are for manual diagnosis and cannot be combined with changed-package selection.
+    # A changed-package run includes every enabled tier for affected packages.
     affected: set[str] | None = None
     changed: list[str] | None = None
-    if proof_ids is not None and changed_from is not None:
-        print("--proof-ids cannot be combined with --changed-from", file=sys.stderr)
-        return 2
     if changed_from is not None:
         try:
             graph = package_graph(repo)
@@ -727,14 +704,10 @@ def run_suite(
         affected = None if changed is None or has_unowned_package_root_changes(
             graph, changed, base_directories,
         ) else affected_packages(graph, changed)
-    try:
-        chosen = select_proof_ids(select_proofs(registry["proofs"], affected), proof_ids)
-    except SelectionError as exc:
-        print(f"cannot select proofs: {exc}", file=sys.stderr)
-        return 2
+    chosen = select_proofs(registry["proofs"], affected)
     selected = balance_shards(chosen, shard_count)[shard_index]
     selection_report = proof_selection_report(
-        registry["proofs"], chosen, selected, affected, changed_from, proof_ids, changed,
+        registry["proofs"], chosen, selected, affected, changed_from, changed,
     )
     if not selected:
         report = {
@@ -823,10 +796,6 @@ def main(argv: list[str] | None = None) -> int:
         "--changed-from", metavar="REV",
         help="run every enabled proof for packages changed since REV or depending on a changed package",
     )
-    parser.add_argument(
-        "--proof-ids", metavar="ID[,ID...]",
-        help="run exactly these enabled registry proof IDs (manual diagnostic selection)",
-    )
     args = parser.parse_args(argv)
     if args.fail_fast:
         print("--fail-fast is deprecated and ignored; all selected proofs will run", file=sys.stderr)
@@ -841,7 +810,6 @@ def main(argv: list[str] | None = None) -> int:
     return run_suite(
         repo, args.out, args.target_dir, registry_path,
         shard=(shard_index, shard_count), changed_from=args.changed_from,
-        proof_ids=args.proof_ids.split(",") if args.proof_ids is not None else None,
     )
 
 
