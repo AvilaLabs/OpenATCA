@@ -3,14 +3,11 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "python"))
-from openatca import load
+from openatca import _ErrorInfo, load
 
 library = Path(sys.argv[1]).resolve()
 fixture = Path(sys.argv[2])
 api = load(library)
-
-class ErrorRecord(ctypes.Structure):
-    _fields_ = [("code", ctypes.c_uint32), ("location_kind", ctypes.c_uint32), ("location", ctypes.c_uint64)]
 
 for line in fixture.read_text(encoding="utf-8").splitlines():
     if not line or line.startswith("#"):
@@ -34,7 +31,7 @@ for line in fixture.read_text(encoding="utf-8").splitlines():
     output_length = ctypes.c_uint64(777)
     consumed = ctypes.c_uint64(777)
     actual_level = ctypes.c_uint32(777)
-    error = ErrorRecord()
+    error = _ErrorInfo()
     status = int(api._library.oa_deflate_raw_compress(
         input_buffer, len(source), int(level), int(max_output), output, int(capacity),
         ctypes.byref(output_length), ctypes.byref(consumed), ctypes.byref(actual_level),
@@ -43,7 +40,8 @@ for line in fixture.read_text(encoding="utf-8").splitlines():
     if status == 6:
         assert output_length.value > 0 and consumed.value == int(expected_consumed), name
         assert actual_level.value == int(expected_level), name
-        assert bytes(output) == bytes([0xA5]) * int(capacity), name
+        if output is not None:
+            assert bytes(output) == bytes([0xA5]) * int(capacity), name
         required = output_length.value
         exact_output = (ctypes.c_uint8 * required)()
         exact_length = ctypes.c_uint64(777)

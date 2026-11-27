@@ -25,10 +25,14 @@ int main(int argc, char **argv) {
         ++lineno;
         if (line[0] == '#' || line[0] == '\n') continue;
         char *fields[7] = {0};
-        char *save = NULL;
-        char *token = strtok_r(line, "\t\n", &save);
-        for (size_t i = 0; token && i < 7; ++i) { fields[i] = token; token = strtok_r(NULL, "\t\n", &save); }
-        if (!fields[6]) { fprintf(stderr, "bad vector line %u\n", lineno); return 1; }
+        fields[0] = line;
+        for (size_t i = 0; i < 6; ++i) {
+            char *tab = strchr(fields[i], '\t');
+            if (!tab) { fprintf(stderr, "bad vector line %u\n", lineno); return 1; }
+            *tab = '\0';
+            fields[i + 1] = tab + 1;
+        }
+        fields[6][strcspn(fields[6], "\r\n")] = '\0';
         uint8_t input[32768], output[256], expected_output[256];
         size_t input_n = unhex(fields[1], input);
         size_t expected_n = unhex(fields[5], expected_output);

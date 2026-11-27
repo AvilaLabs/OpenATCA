@@ -895,7 +895,10 @@ class Compression:
             input_buffer, len(data), level, max_output, None, 0,
             ctypes.byref(output_length), ctypes.byref(consumed),
             ctypes.byref(actual_level), ctypes.byref(error)))
-        _raise_if_error(self._library, status, error)
+        if status not in (0, 6):
+            _raise_if_error(self._library, status, error)
+        if status == 0:
+            return RawDeflateResult(b"", consumed.value, actual_level.value)
         output_buffer = (ctypes.c_uint8 * output_length.value)() if output_length.value else None
         status = int(self._library.oa_deflate_raw_compress(
             input_buffer, len(data), level, max_output, output_buffer, output_length.value,

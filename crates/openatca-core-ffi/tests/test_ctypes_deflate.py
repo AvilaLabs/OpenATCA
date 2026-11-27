@@ -3,14 +3,11 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "python"))
-from openatca import OpenAtcaError, load
+from openatca import _ErrorInfo, load
 
 library = Path(sys.argv[1]).resolve()
 fixture = Path(sys.argv[2])
 api = load(library)
-
-class ErrorRecord(ctypes.Structure):
-    _fields_ = [("code", ctypes.c_uint32), ("location_kind", ctypes.c_uint32), ("location", ctypes.c_uint64)]
 
 for line in fixture.read_text(encoding="utf-8").splitlines():
     if not line or line.startswith("#"):
@@ -22,7 +19,7 @@ for line in fixture.read_text(encoding="utf-8").splitlines():
         assert result.output.hex() == output_hex, name
         assert result.consumed == int(consumed), name
     else:
-        error = ErrorRecord()
+        error = _ErrorInfo()
         out_length = ctypes.c_uint64(777)
         used = ctypes.c_uint64(777)
         buffer = (ctypes.c_uint8 * len(source)).from_buffer_copy(source) if source else None
