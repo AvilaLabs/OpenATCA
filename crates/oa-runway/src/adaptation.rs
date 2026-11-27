@@ -68,7 +68,7 @@ fn u32_at(bytes: &[u8], offset: usize) -> Option<u32> {
 }
 
 fn i32_at(bytes: &[u8], offset: usize) -> Option<i32> {
-    u32_at(bytes, offset).map(|value| i32::from_le_bytes(value.to_le_bytes()))
+    u32_at(bytes, offset).map(|value| i32::from_le_bytes(u32::to_le_bytes(value)))
 }
 
 fn parse_pair(bytes: &[u8]) -> Option<AidPairConfig> {
