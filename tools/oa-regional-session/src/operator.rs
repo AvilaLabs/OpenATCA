@@ -909,7 +909,7 @@ impl SessionRunner {
             {
                 format!(
                     "COMMANDS ACCEPTED {accepted} REFUSED {}; SELECT AGAIN",
-                    refused + batch_full_refused
+                    refused
                 )
             } else {
                 format!(
