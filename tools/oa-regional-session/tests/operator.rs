@@ -755,7 +755,7 @@ fn typed_runway_host_queue_applies_issued_assignment_and_ack_on_normal_advances(
     let journal = fs::read_to_string(output.join("operator.tsv")).unwrap();
     let applied: Vec<_> = journal
         .lines()
-        .filter(|line| line.contains("\tRUNWAY_COMMAND\t") && line.contains("\tAPPLIED\t"))
+        .filter(|line| line.starts_with("RUNWAY_COMMAND\t") && line.contains("\tAPPLIED\t"))
         .collect();
     assert_eq!(applied.len(), 2, "both queued actions apply: {journal}");
     assert!(journal.contains("\tAPPLIED\tcheckpoint=1"), "{journal}");
