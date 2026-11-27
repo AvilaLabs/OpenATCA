@@ -354,6 +354,8 @@ jobs:
           cargo +1.89.0 run --locked -p oa-trace -- --root "$GITHUB_WORKSPACE" | tee "$RUNNER_TEMP/oa-trace-vdd.txt"
           OPENATCA_OA_TRACE_BIN="$GITHUB_WORKSPACE/target/debug/oa-trace" \
             python3 tools/test_check_done_claim.py
+          OPENATCA_OA_TRACE_BIN="$GITHUB_WORKSPACE/target/debug/oa-trace" \
+            python3 -m unittest tools.test_prove_quality_rejections
           python3 -m unittest discover -s tools/oa-encounter/tests -p 'test_*.py'
           python3 tools/test_generate_oscal_control_map.py
           python3 tools/generate_oscal_control_map.py --check
