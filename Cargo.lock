@@ -743,6 +743,9 @@ version = "0.0.1"
 [[package]]
 name = "oa-trace"
 version = "0.0.1"
+dependencies = [
+ "oa-sealed",
+]
 
 [[package]]
 name = "oa-track"
