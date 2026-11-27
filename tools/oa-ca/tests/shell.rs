@@ -11,6 +11,10 @@
 
 #[path = "../../test-support/sealed_inputs.rs"]
 mod sealed_inputs;
+#[path = "../../test-support/sealed_output.rs"]
+mod sealed_output;
+#[path = "../../test-support/sealed_refusal.rs"]
+mod sealed_refusal;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -121,10 +125,10 @@ fn arguments_are_strict_and_a_sealed_path_exits_2_before_anything_is_opened() {
             "--out",
             o.to_str().unwrap(),
         ];
-        sealed_inputs::assert_sealed_refusal(exe, &argv);
+        sealed_refusal::assert_sealed_refusal(exe, &argv);
     }
-    sealed_inputs::assert_no_output(&out.join("o"));
-    sealed_inputs::assert_usage_refusal(exe, &["--adsb", "a"]);
+    sealed_output::assert_no_output(&out.join("o"));
+    sealed_refusal::assert_usage_refusal(exe, &["--adsb", "a"]);
     let _ = std::fs::remove_dir_all(&out);
 }
 

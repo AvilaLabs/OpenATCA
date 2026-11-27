@@ -6,8 +6,8 @@
     clippy::panic
 )]
 
-#[path = "../../test-support/sealed_inputs.rs"]
-mod sealed_inputs;
+#[path = "../../test-support/sealed_output.rs"]
+mod sealed_output;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -107,7 +107,7 @@ fn the_program_exits_2_for_a_sealed_path_in_any_argument_and_opens_nothing() {
         assert!(String::from_utf8_lossy(&r.stderr).contains("sealed"));
     }
     // Nothing was created for the refused runs.
-    sealed_inputs::assert_no_output(&out.join("o"));
+    sealed_output::assert_no_output(&out.join("o"));
     // A usage error is also 2.
     let r = Command::new(exe).args(["--adsb", "a"]).output().unwrap();
     assert_eq!(r.status.code(), Some(2));
