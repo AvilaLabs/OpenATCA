@@ -20,8 +20,9 @@ an Experimental feature included in a release.
 | L1 ASTERIX | CAT021, CAT034, CAT048, CAT062 | Scope current source to CAT021 Ed 2.4/2.7, CAT048 Ed 1.32, CAT062 Ed 1.21 and ASTERIX Part 1 Ed 3.1 framing. | Preview for implemented categories. CAT034 codec is absent and outside 0.1 unless implemented. |
 | L1 ARINC 424 / CIFP | ARINC 424 | Narrow to the implemented FAA `FAACIFP18` / ARINC 424-18 record subset. Unsupported sections are skipped or counted as documented. | Preview. Not a general ARINC 424 parser; no encoder. |
 | L1 NASR | NASR | Identify the subscription/schema snapshot and cycle supplied with each input package. | Preview. Do not imply one immutable NASR edition; no encoder. |
-| L1 AIXM NOTAM | AIXM NOTAMs | Narrow to the FAA FNS AIXM 5.1 profile and FAA event extension. | Preview decoder. No encoder, publisher, SWIM envelope or transport. |
-| L1 FIXM/SFDPS | FIXM/SFDPS messages | Narrow to FIXM 3.0 core plus FAA NAS 3.0 `MessageCollection` profile. | Preview decode. No encoder or ACK/REJ publisher; the current crate depends on internal `oa-sealed`, so a public package boundary is not ready. |
+| L1 AIXM NOTAM | AIXM NOTAMs | Narrow to the FAA FNS AIXM 5.1 profile and FAA event extension. | Preview decoder and bounded encoder for the retained Event/feature subset. Emitted-profile structural checks use pinned schemas; this is not full XSD validation or a publisher/SWIM transport. |
+| L1 FIXM/SFDPS | FIXM/SFDPS messages | Narrow to FIXM 3.0 core plus FAA NAS 3.0 `MessageCollection` profile. | Preview decode and bounded encoding for the implemented event subset. No publisher, SWIM transport, or full-profile validator. |
+| L1 IWXXM | METAR, SPECI and TAF | Narrow to WMO IWXXM 2025-2 / METAR-SPECI package 3.2.0 and the documented standalone-report subset. | Preview decoder for METAR/SPECI/TAF; bounded encoder covers METAR/SPECI only and refuses TAF. Structural namespace/order checks use pinned schema material; this is not full XSD/Schematron validation, a TAC translator, or SWIM transport. |
 | L1 GRIB2 winds | GRIB2 winds | Name the current decoder subset: grid 3.0/3.30, product 4.0/4.8 and representations 5.0/5.2/5.3/5.40 with documented bitmap reuse. | Preview subset. No general encoder; general GRIB2 and representation 5.41 are unsupported. |
 | L0 WGS-84 geodesy | distance, azimuth, intersections, point-in-polygon | Include implemented inverse/direct/rhumb operations and bounded polygon containment only. | Preview by operation. Geodesic line/segment intersection API is absent. |
 | Rust/Python | “from Rust and Python” | Preview C/`ctypes` source now covers selected L0 scalar math, integrity, geodesy, XML, JSON, and CSV operations; L1 parser bindings are not present. | Binding API review, independent ABI review, and §8 evidence remain open; no Stable claim. |
@@ -46,8 +47,9 @@ an Experimental feature included in a release.
 | `oa-asterix` | Preview CAT021/048/062; CAT034 out of scope | [asterix.md](formats/asterix.md) | CAT034 codec absent; CAT021 edition must be explicit; category-specific encoder coverage. |
 | `oa-arinc424` | Preview, FAA CIFP profile | [arinc424.md](formats/arinc424.md) | Unsupported sections skipped; no encoder; identify cycle and complete evidence. |
 | `oa-nasr` | Preview, subscription-specific | [nasr.md](formats/nasr.md) | Carry NASR cycle/schema identity with each dataset; no encoder. |
-| `oa-notam` | Preview, FAA FNS profile | [aixm-notam.md](formats/aixm-notam.md) | No encoder or publisher; public synthetic vectors and source-position error policy remain open. |
-| `oa-fixm` | Preview, decode only | [fixm-sfdps.md](formats/fixm-sfdps.md) | No encoder/publisher; source-location errors and internal dependency cut remain open. |
+| `oa-notam` | Preview, FAA FNS profile decoder and retained-subset encoder | [aixm-notam.md](formats/aixm-notam.md) | No publisher or SWIM transport; source-position error policy remains open; checks are finite-profile structural checks, not full XSD validation. |
+| `oa-fixm` | Preview, FIXM/SFDPS decoder and implemented-event encoder | [fixm-sfdps.md](formats/fixm-sfdps.md) | No publisher or SWIM transport; source-location errors and public package-boundary review remain open. |
+| `oa-iwxxm` | Preview, IWXXM 2025-2 METAR/SPECI/TAF decoder subset; METAR/SPECI encoder | [iwxxm-2025-2-metar-speci-profile.json](formats/iwxxm-2025-2-metar-speci-profile.json) | Encoder refuses TAF; no full-edition decoder, full XSD/Schematron validator, TAC translation or SWIM transport. |
 | `oa-grib2` | Preview, decoder subset | [grib2-winds.md](formats/grib2-winds.md) | Partial templates/packing, no public encoder, `f32` cross-platform identity not established. |
 
 ## Later tiers, outside 0.1
