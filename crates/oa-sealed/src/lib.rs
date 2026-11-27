@@ -13,9 +13,9 @@
 //! sealed entry (the data root, `scds`) is refused too: a tool must name something below it.
 //! Nothing inside a sealed directory is listed or read to decide this.
 //!
-//! The in-root and holding-directory rules need the real data root to exist (they compare the
-//! resolved path with the resolved root); the name rule needs nothing, so it still works in CI,
-//! where there is no data root.
+//! The resolved data root must be an existing directory with the exact identity sentinel.
+//! A missing or unverified root breaks the guard and makes all path and time checks refuse.
+//! Tests and CI configure an isolated directory carrying the sentinel before exercising readers.
 //!
 //! [`Sealed::open`] checks, opens, and then asks the kernel which file the descriptor is
 //! (`/proc/self/fd/N`) and checks that path too, so a link swapped in between the check and the
