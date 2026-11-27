@@ -43,7 +43,8 @@ class VddFixture(unittest.TestCase):
             "pub const FORMAT_VERSION: u32 = 3;\npub const FORMAT_VERSION_NOTE: u32 = 4;\n",
         )
         self._write("REQUIREMENTS.md", "- **OA-GEN-001** smoke\n")
-        self._write("docs/safety/hazard-log.json", '{"schema":"test"}\n')
+        self.hazard_bytes = b'{"schema":"test"}\n'
+        self._write("docs/safety/hazard-log.json", self.hazard_bytes.decode("utf-8"))
         self._write("docs/safety/generated/pha.csv", "id\n")
         self._write("docs/safety/generated/osa.csv", "id\n")
         self._write("docs/safety/generated/ssar.csv", "id\n")
@@ -75,6 +76,9 @@ class VddFixture(unittest.TestCase):
         subprocess.run(["git", "-C", str(self.repo), "config", "user.name", "VDD test"], check=True)
         subprocess.run(["git", "-C", str(self.repo), "add", "."], check=True)
         subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "initial baseline"], check=True)
+        self.hazard_commit = subprocess.check_output(
+            ["git", "-C", str(self.repo), "rev-parse", "HEAD"], text=True
+        ).strip()
         subprocess.run(["git", "-C", str(self.repo), "tag", "v1.2.3"], check=True)
         self._write("change.txt", "updated\n")
         subprocess.run(["git", "-C", str(self.repo), "add", "."], check=True)
@@ -180,9 +184,13 @@ class VddFixture(unittest.TestCase):
 
     def test_section_5_hazard_commit_and_generated_table_digests(self):
         text = self.render()
-        self.assertIn("## 5. Hazard record", text)
+        heading = "## 5. Hazard record\n\n"
+        section = text.split(heading, 1)[1].split("\n## ", 1)[0]
+        expected_hazard_sha256 = hashlib.sha256(self.hazard_bytes).hexdigest()
+        self.assertIn(f"- Hazard-log commit: `{self.hazard_commit}`", section)
+        self.assertIn(f"- Hazard-log SHA-256: `{expected_hazard_sha256}`", section)
         for name in ("pha.csv", "osa.csv", "ssar.csv"):
-            self.assertIn(name, text)
+            self.assertIn(f"`docs/safety/generated/{name}`", section)
 
     def test_section_6_only_public_limit_registers_are_used(self):
         text = self.render()
@@ -236,8 +244,15 @@ class VddFixture(unittest.TestCase):
 
     def test_section_8_adaptation_compatibility(self):
         text = self.render()
-        self.assertIn("## 8. Installation and adaptation compatibility", text)
-        self.assertIn("adaptation", text)
+        heading = "## 8. Installation and adaptation compatibility\n\n"
+        section = text.split(heading, 1)[1]
+        for statement in (
+            "- Build from the release commit with the pinned toolchain and committed lockfile.",
+            "- The release workflow records executable outputs; it does not install or activate software on processors.",
+            "- Adaptation snapshot and manifest formats are listed in section 2; verify the target processor's accepted format before installation.",
+            "- Facility-specific adaptation compatibility and approval must be checked against the issued package and its own recorded identity.",
+        ):
+            self.assertIn(statement, section)
 
     def test_dirty_source_refuses_before_render(self):
         (self.repo / "untracked.txt").write_text("dirty\n", encoding="utf-8")
