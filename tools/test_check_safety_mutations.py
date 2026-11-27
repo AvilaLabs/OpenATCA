@@ -127,6 +127,13 @@ class MutationEvidenceTests(unittest.TestCase):
                 with self.subTest(path=str(path)), self.assertRaises(checker.MutationCheckError):
                     checker.read_allowlist(path)
 
+    def test_allowlist_requires_exact_scoped_mutant_identity(self) -> None:
+        with self.assertRaisesRegex(checker.MutationCheckError, "exact scoped mutant name"):
+            checker.parse_allowlist_text(
+                "oa-safety::src/example.rs:line:1: replace old -> bool\t"
+                "Reason is long enough and specific.\n"
+            )
+
     def test_timeout_and_unclassified_success_are_inconclusive(self) -> None:
         for summary, field in (("Timeout", "timeout"), ("Success", "success")):
             with self.subTest(summary=summary):

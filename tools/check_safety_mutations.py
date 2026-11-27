@@ -189,8 +189,20 @@ def parse_allowlist_text(text: str) -> dict[str, str]:
         identity = fields[0].strip()
         if not identity or identity in entries or any(ord(char) < 32 for char in identity):
             raise MutationCheckError(f"allowlist line {line_number} has an invalid/duplicate identity")
+        allowlist_identity_parts(identity)
         entries[identity] = parse_reason(identity, fields[1])
     return entries
+
+
+def allowlist_identity_parts(identity: str) -> tuple[str, str]:
+    match = re.fullmatch(
+        r"(?P<package>[a-z0-9-]+)::(?P<file>(?:[^:/]+/)*[^:/]+\.rs):"
+        r"(?P<line>[1-9][0-9]*):(?P<column>[1-9][0-9]*):\s+\S.*",
+        identity,
+    )
+    if match is None or match.group("package") not in SAFETY_CRATE_ROOTS.values():
+        raise MutationCheckError(f"allowlist identity is not an exact scoped mutant name: {identity}")
+    return match.group("package"), match.group("file")
 
 
 def allowlist_in_scope(
@@ -198,10 +210,7 @@ def allowlist_in_scope(
 ) -> dict[str, str]:
     selected: dict[str, str] = {}
     for identity, reason in allowlist.items():
-        package, separator, name = identity.partition("::")
-        source_file = name.split(":", 1)[0]
-        if not separator or package not in SAFETY_CRATE_ROOTS.values() or not source_file:
-            raise MutationCheckError(f"allowlist identity is not package-scoped: {identity}")
+        package, source_file = allowlist_identity_parts(identity)
         if (package, source_file) in scope:
             selected[identity] = reason
     return selected
