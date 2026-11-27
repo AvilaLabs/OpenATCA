@@ -11,6 +11,60 @@
       }
     },
     {
+      "path": "tools/check_proof_caps.py",
+      "rule": "a",
+      "use": {
+        "kind": "ci",
+        "file": ".github/workflows/rust-proofs.yml",
+        "needle": "python3 tools/check_proof_caps.py --repo \"$GITHUB_WORKSPACE\" --base \"$base\""
+      }
+    },
+    {
+      "path": "tools/select_rust_proof_base.py",
+      "rule": "a",
+      "use": {
+        "kind": "ci",
+        "file": ".github/workflows/rust-proofs.yml",
+        "needle": "python3 tools/select_rust_proof_base.py --repo \"$GITHUB_WORKSPACE\""
+      }
+    },
+    {
+      "path": "tools/proof_source_inventory.py",
+      "rule": "a",
+      "use": {
+        "kind": "ci",
+        "file": ".github/workflows/rust-proofs.yml",
+        "needle": "python3 tools/proof_source_inventory.py --root . --registry tools/rust_proofs.json"
+      }
+    },
+    {
+      "path": "tools/proof_suite_test_support.py",
+      "rule": "a",
+      "use": {
+        "kind": "ci",
+        "file": ".github/workflows/rust-proofs.yml",
+        "needle": "python3 -m py_compile tools/proof_suite_test_support.py"
+      }
+    },
+    {
+      "path": "tools/test_proof_caps.py",
+      "rule": "a",
+      "use": {
+        "kind": "ci",
+        "file": ".github/workflows/rust-proofs.yml",
+        "needle": "python3 tools/test_proof_caps.py"
+      }
+    },
+    {
+      "path": "tools/test_proof_source_inventory.py",
+      "rule": "a",
+      "use": {
+        "kind": "ci",
+        "file": ".github/workflows/rust-proofs.yml",
+        "needle": "python3 tools/test_proof_source_inventory.py"
+      }
+    },
+    {
       "path": "tools/test_rust_proof_resources.py",
       "rule": "a",
       "use": {
