@@ -49,11 +49,12 @@ fn cli_validator_accepts_a_real_test_and_rejects_comment_and_raw_string_fakes() 
     }
     fs::write(
         &source,
-        "#[cfg(any())]\nmod disabled {\n#[test]\nfn disabled_test() {}\n}\n#[test]\nfn enabled_test() {}\n",
+        "#[cfg(any())] mod disabled {\n#[test]\nfn disabled_test() {}\n}\n#[cfg(feature = \"never_enabled\")]\nmod unknown {\n#[test]\nfn conditional_test() {}\n}\n#[cfg(test)] mod enabled {\n#[test]\nfn enabled_test() {}\n}\n",
     )
     .expect("write conditional source fixture");
     for reference in [
         "tests/reference.rs::disabled_test",
+        "tests/reference.rs::conditional_test",
         "tests/reference.rs::enabled_test",
     ] {
         let result = Command::new(binary)
@@ -67,6 +68,22 @@ fn cli_validator_accepts_a_real_test_and_rejects_comment_and_raw_string_fakes() 
             .expect("run conditional verifier");
         assert_eq!(result.success(), reference.ends_with("enabled_test"));
     }
+    let inner_cfg = root.join("tests/crate_gate.rs");
+    fs::write(
+        &inner_cfg,
+        "#![cfg(feature = \"never_enabled\")]\n#[test]\nfn file_gate() {}\n",
+    )
+    .expect("write crate-gated fixture");
+    let invalid = Command::new(binary)
+        .args([
+            "--root",
+            root.to_str().expect("UTF-8 fixture path"),
+            "--verify-test",
+            "tests/crate_gate.rs::file_gate",
+        ])
+        .status()
+        .expect("run crate-gate verifier");
+    assert!(!invalid.success());
     let non_rust = root.join("tests/reference.txt");
     fs::write(&non_rust, "#[test]\nfn text_fake() {}\n").expect("write non-Rust fixture");
     let invalid = Command::new(binary)

@@ -550,36 +550,68 @@ fn as_number(value: Option<&JsonValue>) -> Option<&str> {
 fn contains_test(source: &str, function: &str) -> bool {
     let sanitized = strip_comments_and_literals(source);
     let mut attributes = Vec::<String>::new();
+    let mut pending_attribute: Option<String> = None;
     let mut depth = 0usize;
     let mut disabled_module_depths = Vec::<usize>::new();
+    let mut unverified_file_gate = false;
     for line in sanitized.lines() {
-        let declaration = line.trim_start();
-        if declaration.starts_with("#[") {
-            attributes.push(declaration.trim().to_owned());
-            continue;
+        let mut declaration = line.trim_start();
+        loop {
+            let (attribute, previous_length) = match pending_attribute.take() {
+                Some(mut pending) => {
+                    let previous_length = pending.len();
+                    pending.push_str(declaration);
+                    (pending, previous_length)
+                }
+                None if declaration.starts_with("#[") || declaration.starts_with("#![") => {
+                    (declaration.to_owned(), 0)
+                }
+                None => break,
+            };
+            let Some(close) = attribute.find(']') else {
+                pending_attribute = Some(attribute);
+                declaration = "";
+                break;
+            };
+            let inner = attribute.starts_with("#![");
+            let attr_text = attribute.get(..=close).unwrap_or("").to_owned();
+            if inner {
+                unverified_file_gate |= cfg_is_unverified_gate(&attr_text);
+            } else {
+                attributes.push(attr_text);
+            }
+            let consumed_current = close.saturating_add(1).saturating_sub(previous_length);
+            declaration = declaration
+                .get(consumed_current..)
+                .unwrap_or("")
+                .trim_start();
+            if !declaration.starts_with("#[") && !declaration.starts_with("#![") {
+                break;
+            }
         }
         if declaration.is_empty() {
             continue;
         }
         let has_test_attribute = attributes.iter().any(|attribute| attribute == "#[test]");
-        let disabled_here = attributes
+        let unverified_here = attributes
             .iter()
-            .any(|attribute| cfg_is_statically_empty(attribute));
-        let disabled_parent = disabled_module_depths.iter().any(|base| depth > *base);
+            .any(|attribute| cfg_is_unverified_gate(attribute));
+        let unverified_parent =
+            unverified_file_gate || disabled_module_depths.iter().any(|base| depth > *base);
         if let Some(rest) = declaration.strip_prefix("fn ") {
             let name = rest
                 .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
                 .next()
                 .unwrap_or("");
             if name == function {
-                return has_test_attribute && !disabled_here && !disabled_parent;
+                return has_test_attribute && !unverified_here && !unverified_parent;
             }
         }
-        let module_is_disabled = module_opens_scope(declaration) && disabled_here;
+        let module_has_unverified_gate = module_opens_scope(declaration) && unverified_here;
         attributes.clear();
         let open = line.bytes().filter(|byte| *byte == b'{').count();
         let close = line.bytes().filter(|byte| *byte == b'}').count();
-        if module_is_disabled && open > close {
+        if module_has_unverified_gate && open > close {
             disabled_module_depths.push(depth);
         }
         depth = depth.saturating_add(open).saturating_sub(close);
@@ -588,12 +620,17 @@ fn contains_test(source: &str, function: &str) -> bool {
     false
 }
 
-fn cfg_is_statically_empty(attribute: &str) -> bool {
+fn cfg_is_unverified_gate(attribute: &str) -> bool {
     let compact: String = attribute
         .chars()
         .filter(|character| !character.is_whitespace())
         .collect();
-    compact == "#[cfg(any())]"
+    (compact.starts_with("#[cfg(")
+        || compact.starts_with("#![cfg(")
+        || compact.starts_with("#[cfg_attr(")
+        || compact.starts_with("#![cfg_attr("))
+        && compact != "#[cfg(test)]"
+        && compact != "#![cfg(test)]"
 }
 
 fn module_opens_scope(line: &str) -> bool {
@@ -962,6 +999,34 @@ mod tests {
         assert!(!contains_test(
             "#[cfg(any())]\n#[test]\nfn disabled() {}",
             "disabled"
+        ));
+        assert!(!contains_test(
+            "#[cfg(any())] #[test] fn same_line_disabled() {}",
+            "same_line_disabled"
+        ));
+        assert!(!contains_test(
+            "#![cfg(any())]\n#[test]\nfn file_disabled() {}",
+            "file_disabled"
+        ));
+        assert!(!contains_test(
+            "#[cfg(feature = \"never_enabled\")]\n#[test]\nfn unknown_feature() {}",
+            "unknown_feature"
+        ));
+        assert!(!contains_test(
+            "#![cfg(feature = \"never_enabled\")]\n#[test]\nfn file_feature() {}",
+            "file_feature"
+        ));
+        assert!(!contains_test(
+            "#[cfg(any())] mod same_line_module {\n#[test]\nfn nested_same_line() {}\n}\n",
+            "nested_same_line"
+        ));
+        assert!(!contains_test(
+            "#[cfg(feature = \"never_enabled\")]\nmod unknown {\n#[test]\nfn nested_feature() {}\n}\n",
+            "nested_feature"
+        ));
+        assert!(contains_test(
+            "#[cfg(test)]\nmod test_module {\n#[test]\nfn enabled_in_test_module() {}\n}\n",
+            "enabled_in_test_module"
         ));
         assert!(!contains_test(
             "#[cfg(any())]\nmod disabled {\n#[test]\nfn nested() {}\n}\n",
