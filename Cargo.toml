@@ -117,3 +117,6 @@ overflow-checks = true
 # Tests and debug builds are optimised: the real-data suites are compute-bound and took most of
 # each full test run unoptimised. Debug assertions and overflow checks stay on (dev defaults).
 opt-level = 1
+# Keep full development/test DWARF in external sidecars so test executables remain within the
+# production current-image fingerprint byte bound without stripping diagnostic information.
+split-debuginfo = "unpacked"
