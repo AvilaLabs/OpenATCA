@@ -257,7 +257,7 @@ jobs:
       - name: Validate checked-in conformance vectors (offline)
         run: timeout 10m cargo +1.89.0 run --offline --manifest-path validation/oa-vectors/Cargo.toml --target-dir "$RUNNER_TEMP/oa-vectors-target" --locked
       - name: Test
-        run: cargo +1.89.0 test --workspace --release --locked
+        run: cargo +1.89.0 test --workspace --no-fail-fast --release --locked
       - name: Build release candidate binaries for VDD digests
         run: cargo +1.89.0 build --workspace --release --locked --bins
       - name: Actual WASM engine startup and native frame parity
@@ -457,7 +457,7 @@ jobs:
       - name: Validate checked-in conformance vectors (offline, aarch64)
         run: timeout 10m cargo +1.89.0 run --offline --manifest-path validation/oa-vectors/Cargo.toml --target-dir "$RUNNER_TEMP/oa-vectors-target" --locked
       - name: Test (release, aarch64)
-        run: cargo +1.89.0 test --workspace --release --locked
+        run: cargo +1.89.0 test --workspace --no-fail-fast --release --locked
       - name: Native C and Python FFI vectors (aarch64)
         run: |
           set -euo pipefail
@@ -580,7 +580,7 @@ jobs:
       - name: Remove stale cached example executables
         run: rm -rf target/debug/examples target/release/examples
       - name: Test (dev profile)
-        run: cargo +1.89.0 test --workspace --locked
+        run: cargo +1.89.0 test --workspace --no-fail-fast --locked
   # Short coverage-guided run of every fuzz target (docs/FUZZING.md). fuzz/ is its own workspace
   # with its own Cargo.lock; the root workspace never builds it. The corpus is the committed
   # synthetic seeds (the real-data corpora from make_corpora.py are not redistributable).
