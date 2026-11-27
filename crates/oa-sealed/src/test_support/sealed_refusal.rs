@@ -2,6 +2,7 @@ use std::process::Command;
 
 pub fn assert_sealed_refusal(program: &str, args: &[&str]) {
     // seal-allow: this test executes the consumer and asserts its guard rejects sealed paths.
+    // seal-allow: this test executes the consumer and asserts its guard rejects sealed paths.
     let output = Command::new(program)
         .args(args)
         .output()
@@ -11,6 +12,7 @@ pub fn assert_sealed_refusal(program: &str, args: &[&str]) {
 }
 
 pub fn assert_usage_refusal(program: &str, args: &[&str]) {
+    // seal-allow: this test executes the consumer and asserts invalid CLI input is refused.
     let output = Command::new(program)
         .args(args)
         .output()

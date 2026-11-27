@@ -1111,6 +1111,22 @@ fn harness_files() -> Vec<PathBuf> {
 
 // REQ: OA-SEAL-006
 #[test]
+fn shared_refusal_helper_is_scanned_and_a_bare_read_mutation_is_rejected() {
+    let helper = repo().join("crates/oa-sealed/src/test_support/sealed_refusal.rs");
+    assert!(covered_files().contains(&helper));
+
+    let source = fs::read_to_string(&helper).unwrap();
+    let mutated =
+        format!("{source}\nfn bare_read_mutation() {{ let _ = std::fs::read(\"synthetic\"); }}\n");
+    let result = scan(&mutated, false);
+    assert!(
+        result.calls.iter().any(|(_, _, allowed)| !allowed),
+        "a bare fs::read added to the shared helper must fail the scanner"
+    );
+}
+
+// REQ: OA-SEAL-006
+#[test]
 fn a_bare_open_or_read_in_any_crate_needs_an_allow_comment_with_a_reason_and_no_allow_is_stale() {
     let mut bad = Vec::new();
     let mut allows = 0;

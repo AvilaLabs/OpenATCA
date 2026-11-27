@@ -13,7 +13,7 @@
 mod sealed_inputs;
 #[path = "../../test-support/sealed_output.rs"]
 mod sealed_output;
-#[path = "../../test-support/sealed_refusal.rs"]
+#[path = "../../../crates/oa-sealed/src/test_support/sealed_refusal.rs"]
 mod sealed_refusal;
 
 use std::collections::BTreeMap;
