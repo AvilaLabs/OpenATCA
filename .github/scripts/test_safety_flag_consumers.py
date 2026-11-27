@@ -92,14 +92,17 @@ class SafetyFlagConsumerTests(unittest.TestCase):
             text += f"exclude = [\n{excludes}\n]\n"
         (self.root / "Cargo.toml").write_text(text, encoding="utf-8")
 
+    def assert_violating_names(self, violations, expected_names) -> None:
+        actual_names = {item.flag.name for item in violations}
+        self.assertEqual(actual_names, set(expected_names))
+
     def test_unconsumed_flags_are_reported_and_old_code_would_fail(self) -> None:
         with self.provider_source.open("a", encoding="utf-8") as source:
             source.write("fn only_internal() { let _ = F_ACTIVE | F_VISIBLE; }\n")
         self.write_consumer("pub fn unrelated() {}\n")
         violations, stale = self.findings()
-        self.assertEqual(
-            {item.flag.name for item in violations},
-            {"F_ACTIVE", "F_VISIBLE", "F_ALL_FLAGS", "INPUT_PRESENT"},
+        self.assert_violating_names(
+            violations, ("F_ACTIVE", "F_VISIBLE", "F_ALL_FLAGS", "INPUT_PRESENT")
         )
         self.assertFalse(stale)
 
@@ -118,9 +121,8 @@ class SafetyFlagConsumerTests(unittest.TestCase):
     def test_import_declaration_without_a_code_read_is_not_a_consumer(self) -> None:
         self.write_consumer("use safety_dep::F_ACTIVE;\npub fn unrelated() {}\n")
         violations, _ = self.findings()
-        self.assertEqual(
-            {item.flag.name for item in violations},
-            {"F_ACTIVE", "F_VISIBLE", "F_ALL_FLAGS", "INPUT_PRESENT"},
+        self.assert_violating_names(
+            violations, ("F_ACTIVE", "F_VISIBLE", "F_ALL_FLAGS", "INPUT_PRESENT")
         )
 
     def test_shadowed_parameter_does_not_count_as_flag_consumer(self) -> None:
@@ -171,19 +173,15 @@ class SafetyFlagConsumerTests(unittest.TestCase):
         # A re-export on its own is not an actual consumer.
         self.write_consumer("pub fn unrelated() {}\n")
         violations, _ = self.findings()
-        self.assertEqual(
-            {item.flag.name for item in violations},
-            {"F_ACTIVE", "F_VISIBLE", "F_ALL_FLAGS", "INPUT_PRESENT"},
+        self.assert_violating_names(
+            violations, ("F_ACTIVE", "F_VISIBLE", "F_ALL_FLAGS", "INPUT_PRESENT")
         )
         self.write_consumer(
             "use tracker::EXPORTED_ACTIVE as ACTIVE;\n"
             "pub fn apply(bits: u8) -> bool { bits & ACTIVE != 0 }\n"
         )
         violations, _ = self.findings()
-        self.assertEqual(
-            {item.flag.name for item in violations},
-            {"F_VISIBLE", "F_ALL_FLAGS", "INPUT_PRESENT"},
-        )
+        self.assert_violating_names(violations, ("F_VISIBLE", "F_ALL_FLAGS", "INPUT_PRESENT"))
 
     def test_comments_strings_and_cfg_test_only_references_do_not_count(self) -> None:
         self.write_consumer(
@@ -198,9 +196,8 @@ class SafetyFlagConsumerTests(unittest.TestCase):
             '#[cfg(any())] fn disabled_function() { let _ = safety_dep::F_ALL_FLAGS; }\n'
         )
         violations, _ = self.findings()
-        self.assertEqual(
-            {item.flag.name for item in violations},
-            {"F_ACTIVE", "F_VISIBLE", "F_ALL_FLAGS", "INPUT_PRESENT"},
+        self.assert_violating_names(
+            violations, ("F_ACTIVE", "F_VISIBLE", "F_ALL_FLAGS", "INPUT_PRESENT")
         )
 
     def test_duplicate_flag_basenames_fail_closed_across_modules(self) -> None:

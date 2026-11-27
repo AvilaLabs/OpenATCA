@@ -117,6 +117,17 @@ class ClaimCheckerTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp.cleanup()
 
+    def assert_cli_refused(self, command, env, expected_message=None):
+        result = subprocess.run(command, env=env, capture_output=True, text=True, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        if expected_message is not None:
+            self.assertIn(expected_message, result.stderr)
+        return result
+
+    def assert_claim_refused(self, message, **values):
+        with self.assertRaisesRegex(checker.ClaimError, message):
+            self.validate(**values)
+
     def validate(
         self,
         claim: dict | None = None,
@@ -133,18 +144,18 @@ class ClaimCheckerTests(unittest.TestCase):
             claim_value["source_sha256"] = self.source_digest
             claim_value["manifest_sha256"] = digest(manifest_bytes)
             claim_value["test_inventory_sha256"] = digest(inventory_bytes)
-        checker.validate_row_claim(
-            self.root,
-            self.source_bytes,
-            self.rows,
-            manifest_value,
-            manifest_bytes,
-            claim_value,
-            inventory_value,
-            inventory_bytes,
-            "TEST-A",
-            COMMIT,
-        )
+        checker.validate_row_claim(checker.RowClaimInputs(
+            root=self.root,
+            source_bytes=self.source_bytes,
+            rows_by_id=self.rows,
+            manifest=manifest_value,
+            manifest_bytes=manifest_bytes,
+            claim=claim_value,
+            inventory=inventory_value,
+            inventory_bytes=inventory_bytes,
+            row_id="TEST-A",
+            source_commit=COMMIT,
+        ))
 
     # Mutation: omit or duplicate authoritative row clauses in the required registry.
     def test_manifest_must_cover_all_source_rows_and_all_clause_text(self) -> None:
@@ -178,50 +189,46 @@ class ClaimCheckerTests(unittest.TestCase):
     def test_claim_must_match_every_canonical_clause_and_cover_all(self) -> None:
         claim = json.loads(json.dumps(self.claim))
         claim["clauses"].pop()
-        with self.assertRaisesRegex(checker.ClaimError, "omits or duplicates"):
-            self.validate(claim=claim)
+        self.assert_claim_refused("omits or duplicates", claim=claim)
         claim = json.loads(json.dumps(self.claim))
         claim["clauses"][1]["status"] = "partial"
-        with self.assertRaisesRegex(checker.ClaimError, "refused"):
-            self.validate(claim=claim)
+        self.assert_claim_refused("refused", claim=claim)
         claim["clauses"][1]["status"] = "external"
-        with self.assertRaisesRegex(checker.ClaimError, "refused"):
-            self.validate(claim=claim)
+        self.assert_claim_refused("refused", claim=claim)
         claim["clauses"][1]["status"] = "unmapped"
-        with self.assertRaisesRegex(checker.ClaimError, "refused"):
-            self.validate(claim=claim)
+        self.assert_claim_refused("refused", claim=claim)
 
     # Mutation: cite one valid test for an entire requirement and omit evidence for another clause.
     def test_each_clause_needs_its_own_trace_bound_test(self) -> None:
         claim = json.loads(json.dumps(self.claim))
         claim["clauses"][1]["evidence"] = []
-        with self.assertRaisesRegex(checker.ClaimError, "has no evidence"):
-            self.validate(claim=claim)
+        self.assert_claim_refused("has no evidence", claim=claim)
         claim["clauses"][1]["evidence"] = [claim["clauses"][0]["evidence"][0]]
-        with self.assertRaisesRegex(checker.ClaimError, "binds different wording"):
-            self.validate(claim=claim)
+        self.assert_claim_refused("binds different wording", claim=claim)
 
     # Mutation: accept a fabricated test symbol, mismatched trace, or stale test-source hash.
     def test_test_evidence_must_exist_in_bound_inventory_and_trace(self) -> None:
-        inventory = json.loads(json.dumps(self.inventory))
-        inventory["tests"][0]["symbol"] = "made_up_helper"
-        with self.assertRaisesRegex(checker.ClaimError, "absent from the bound oa-trace"):
-            self.validate(inventory=inventory, rebind=True)
-        inventory = json.loads(json.dumps(self.inventory))
-        inventory["tests"][0]["source_sha256"] = "0" * 64
-        with self.assertRaisesRegex(checker.ClaimError, "source digest mismatch"):
-            self.validate(inventory=inventory, rebind=True)
+        cases = (
+            ("symbol", "made_up_helper", "absent from the bound oa-trace"),
+            ("source_sha256", "0" * 64, "source digest mismatch"),
+        )
+        for field, value, message in cases:
+            with self.subTest(field=field):
+                inventory = json.loads(json.dumps(self.inventory))
+                inventory["tests"][0][field] = value
+                self.assert_claim_refused(message, inventory=inventory, rebind=True)
 
     # Mutation: let an inventory from another commit or row scope support this claim.
     def test_inventory_is_bound_to_commit_manifest_and_exact_row_scope(self) -> None:
-        inventory = json.loads(json.dumps(self.inventory))
-        inventory["source_commit"] = "2" * 40
-        with self.assertRaisesRegex(checker.ClaimError, "current source commit"):
-            self.validate(inventory=inventory, rebind=True)
-        inventory = json.loads(json.dumps(self.inventory))
-        inventory["scope_sha256"] = "0" * 64
-        with self.assertRaisesRegex(checker.ClaimError, "row and clause scope"):
-            self.validate(inventory=inventory, rebind=True)
+        cases = (
+            ("source_commit", "2" * 40, "current source commit"),
+            ("scope_sha256", "0" * 64, "row and clause scope"),
+        )
+        for field, value, message in cases:
+            with self.subTest(field=field):
+                inventory = json.loads(json.dumps(self.inventory))
+                inventory[field] = value
+                self.assert_claim_refused(message, inventory=inventory, rebind=True)
 
     # Mutation: allow a removed row-claim file or absent canonical inputs to silently skip checking.
     def test_cli_requires_manifest_claim_inventory_and_requested_row(self) -> None:
@@ -322,29 +329,21 @@ class ClaimCheckerTests(unittest.TestCase):
             "--test-inventory", "inventory.json", "--row", "TEST-A", "--source-commit", COMMIT,
             "--oa-trace-bin", "/missing/oa-trace",
         ]
-        env = os.environ.copy()
-        env.pop("OPENATCA_PRIVATE", None)
-        missing = subprocess.run(command, env=env, capture_output=True, text=True, check=False)
-        self.assertNotEqual(missing.returncode, 0)
-        self.assertIn("OPENATCA_PRIVATE is required", missing.stderr)
-        env["OPENATCA_PRIVATE"] = "/"
-        root_value = subprocess.run(command, env=env, capture_output=True, text=True, check=False)
-        self.assertNotEqual(root_value.returncode, 0)
-        self.assertIn("allowed private data root", root_value.stderr)
         wrong = self.root / "wrong-private-root"
         wrong.mkdir()
         (wrong / "FAA_ACCEPTANCE_LIST.md").write_text("no acceptance table\n", encoding="utf-8")
-        env["OPENATCA_PRIVATE"] = str(wrong)
-        missing_pin = subprocess.run(command, env=env, capture_output=True, text=True, check=False)
-        self.assertNotEqual(missing_pin.returncode, 0)
-        self.assertIn("independently supplied source digest", missing_pin.stderr)
+        envs = []
+        missing = os.environ.copy()
+        missing.pop("OPENATCA_PRIVATE", None)
+        envs.append((command, missing, "OPENATCA_PRIVATE is required"))
+        envs.append((command, {**os.environ, "OPENATCA_PRIVATE": "/"}, "allowed private data root"))
+        envs.append((command, {**os.environ, "OPENATCA_PRIVATE": str(wrong)}, "independently supplied digest"))
         command.extend(["--expected-source-sha256", self.source_digest])
-        wrong_value = subprocess.run(command, env=env, capture_output=True, text=True, check=False)
-        self.assertNotEqual(wrong_value.returncode, 0)
-        self.assertIn("source differs", wrong_value.stderr)
-        bad_hash = command[:-1] + ["0" * 64]
-        wrong_hash = subprocess.run(bad_hash, env=env, capture_output=True, text=True, check=False)
-        self.assertNotEqual(wrong_hash.returncode, 0)
+        envs.append((command, {**os.environ, "OPENATCA_PRIVATE": str(wrong)}, "source differs"))
+        envs.append((command[:-1] + ["0" * 64], {**os.environ, "OPENATCA_PRIVATE": str(wrong)}, None))
+        for args, env, message in envs:
+            with self.subTest(message=message):
+                self.assert_cli_refused(args, env, message)
 
     def test_bounded_reader_stops_before_reading_past_cap(self) -> None:
         evidence = self.root / "large.txt"

@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 import tempfile
+from contextlib import contextmanager
 import unittest
 from dataclasses import dataclass
 from pathlib import Path
@@ -77,6 +78,16 @@ def git_bytes(repo: Path, *args: str, input_bytes: bytes | None = None) -> bytes
     return result.stdout.strip()
 
 
+@contextmanager
+def temporary_repo():
+    with tempfile.TemporaryDirectory() as temporary:
+        yield Path(temporary)
+
+
+def initialize_repo(repo: Path) -> None:
+    subprocess.run(["git", "init", "--quiet"], cwd=repo, check=True,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
 def make_tree(repo: Path, files: dict[str, bytes]) -> str:
     root: dict = {}
     for path, contents in files.items():
@@ -115,8 +126,7 @@ def make_commit(repo: Path, tree: str, fixture: CommitFixture, parent: str | Non
 
 
 def make_event_graph(repo: Path) -> EventGraph:
-    subprocess.run(["git", "init", "--quiet"], cwd=repo, check=True,
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    initialize_repo(repo)
     safe_tree = make_tree(repo, {"fixture.txt": b"safe"})
     root_bad = make_commit(
         repo,
@@ -231,10 +241,8 @@ def proof_cases() -> dict[str, tuple[ProofCase, ...]]:
 
 def run_proof_case(case: ProofCase) -> ProofReceipt:
     try:
-        with tempfile.TemporaryDirectory() as temporary:
-            repo = Path(temporary)
-            subprocess.run(["git", "init", "--quiet"], cwd=repo, check=True,
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        with temporary_repo() as repo:
+            initialize_repo(repo)
             base_tree = make_tree(repo, {"fixture.txt": b"baseline"})
             base = make_commit(repo, base_tree, CommitFixture("synthetic safe baseline"))
             safe_head = make_commit(
@@ -303,6 +311,18 @@ def proof_command(class_id: str) -> int:
 
 
 class CommitHygieneTests(unittest.TestCase):
+    def assert_process(self, result, expected_code, *, stdout=None, stderr=None):
+        self.assertEqual(result.returncode, expected_code)
+        if stdout is not None:
+            self.assertEqual(result.stdout, stdout)
+        if stderr is not None:
+            self.assertEqual(result.stderr, stderr)
+
+    def assert_refused_receipts(self, receipts, expected_rules):
+        self.assertEqual(tuple(item.refusal for item in receipts), tuple(expected_rules))
+        self.assertTrue(all(item.baseline_exit == 0 for item in receipts))
+        self.assertTrue(all(item.checker_exit == 1 for item in receipts))
+
     def test_message_markers_are_case_insensitive(self):
         for marker in module.BAD_MARKERS:
             with self.subTest(marker=marker), patch.object(module, "git", return_value=(
@@ -367,9 +387,8 @@ class CommitHygieneTests(unittest.TestCase):
         self.assertEqual(caught.exception.sha, head[:12])
 
     def test_preflight_masks_actual_head_author_and_committer_emails(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            repo = Path(temporary)
-            subprocess.run(["git", "init", "--quiet"], cwd=repo, check=True)
+        with temporary_repo() as repo:
+            initialize_repo(repo)
             tree = make_tree(repo, {"fixture.txt": b"synthetic"})
             head = make_commit(
                 repo,
@@ -387,11 +406,10 @@ class CommitHygieneTests(unittest.TestCase):
                 "GITHUB_SHA": head,
             }
             result = run_mask_preflight(repo, env)
-        self.assertEqual(result.returncode, 0)
-        self.assertEqual(result.stderr, "")
-        self.assertEqual(
-            result.stdout,
-            "::add-mask::author@example.invalid\n::add-mask::committer@example.invalid\n",
+        self.assert_process(
+            result, 0,
+            stdout="::add-mask::author@example.invalid\n::add-mask::committer@example.invalid\n",
+            stderr="",
         )
 
     def test_preflight_refuses_missing_head_or_invalid_git_email(self):
@@ -462,9 +480,8 @@ class CommitHygieneTests(unittest.TestCase):
             module.check_tracked_paths(["0123456789abcdef"])
 
     def test_git_range_metadata_and_every_tree_are_checked_without_identity_configuration(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            repo = Path(temporary)
-            subprocess.run(["git", "init", "--quiet"], cwd=repo, check=True)
+        with temporary_repo() as repo:
+            initialize_repo(repo)
             root_commit = make_commit(
                 repo, make_tree(repo, {"source.txt": b"ancestor"}), CommitFixture("base")
             )
@@ -498,8 +515,7 @@ class CommitHygieneTests(unittest.TestCase):
             self.assertEqual(caught.exception.rule, PATH_RULE)
 
     def test_actual_cli_checks_main_train_wip_and_diverged_pr_ranges(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            repo = Path(temporary)
+        with temporary_repo() as repo:
             graph = make_event_graph(repo)
             cases = (
                 ("push", "refs/heads/train/52", graph.feature_head,
@@ -529,8 +545,7 @@ class CommitHygieneTests(unittest.TestCase):
                     self.assertEqual(result.stdout, "")
 
     def test_main_zero_before_sha_checks_all_reachable_history(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            repo = Path(temporary)
+        with temporary_repo() as repo:
             graph = make_event_graph(repo)
             result = run_checker(repo, checker_env(
                 "push", "refs/heads/main", graph.main_head,
@@ -543,8 +558,7 @@ class CommitHygieneTests(unittest.TestCase):
             )
 
     def test_empty_event_ranges_pass_and_tag_push_refuses(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            repo = Path(temporary)
+        with temporary_repo() as repo:
             graph = make_event_graph(repo)
             empty_cases = (
                 checker_env("push", "refs/heads/main", graph.main_head, before=graph.main_head),
@@ -556,34 +570,29 @@ class CommitHygieneTests(unittest.TestCase):
             for env in empty_cases:
                 with self.subTest(ref=env["GITHUB_REF"], event=env["GITHUB_EVENT_NAME"]):
                     result = run_checker(repo, env)
-                    self.assertEqual(result.returncode, 0)
-                    self.assertEqual((result.stdout, result.stderr), ("", ""))
+                    self.assert_process(result, 0, stdout="", stderr="")
             tag_env = checker_env("push", "refs/tags/v1", graph.main_head)
             tag_result = run_checker(repo, tag_env)
-            self.assertEqual(tag_result.returncode, 1)
-            self.assertEqual(
-                tag_result.stderr,
-                f"commit_hygiene_failed sha={graph.main_head[:12]} rule=unsupported-event-range\n",
+            self.assert_process(
+                tag_result, 1,
+                stderr=f"commit_hygiene_failed sha={graph.main_head[:12]} rule=unsupported-event-range\n",
             )
 
     def test_runner_masks_validated_email_before_checker_refusal(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            repo = Path(temporary)
+        with temporary_repo() as repo:
             graph = make_event_graph(repo)
             env = checker_env("push", "refs/heads/main", graph.main_bad,
                               before=graph.main_head)
             env["GITHUB_ACTIONS"] = "true"
             result = run_checker(repo, env, merge_output=True)
-            self.assertEqual(result.returncode, 1)
-            self.assertEqual(
-                result.stdout,
-                f"::add-mask::{FIXTURE_EMAIL}\n"
-                f"commit_hygiene_failed sha={graph.main_bad[:12]} rule={MESSAGE_RULE}\n",
+            self.assert_process(
+                result, 1,
+                stdout=(f"::add-mask::{FIXTURE_EMAIL}\n"
+                        f"commit_hygiene_failed sha={graph.main_bad[:12]} rule={MESSAGE_RULE}\n"),
             )
 
     def test_malformed_expected_email_is_refused_without_mask_command(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            repo = Path(temporary)
+        with temporary_repo() as repo:
             graph = make_event_graph(repo)
             env = checker_env("push", "refs/heads/main", graph.main_head,
                               before=graph.main_base)
@@ -591,14 +600,13 @@ class CommitHygieneTests(unittest.TestCase):
             env["EXPECTED_COMMIT_EMAIL"] = invalid
             env["GITHUB_ACTIONS"] = "true"
             result = run_checker(repo, env, merge_output=True)
-            self.assertEqual(result.returncode, 1)
+            self.assert_process(result, 1)
             self.assertTrue(result.stdout.startswith("commit_hygiene_failed "))
             self.assertNotIn("::add-mask::", result.stdout)
             self.assertNotIn(invalid, result.stdout)
 
     def test_cli_fails_closed_for_missing_invalid_and_root_email_configuration(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            repo = Path(temporary)
+        with temporary_repo() as repo:
             graph = make_event_graph(repo)
             base_env = checker_env(
                 "push", "refs/heads/main", graph.main_head, before=graph.main_base
@@ -615,30 +623,22 @@ class CommitHygieneTests(unittest.TestCase):
             for env, rule in cases:
                 with self.subTest(rule=rule):
                     result = run_checker(repo, env, merge_output=True)
-                    self.assertEqual(result.returncode, 1)
-                    self.assertEqual(
-                        result.stdout,
-                        f"commit_hygiene_failed sha={graph.main_head[:12]} rule={rule}\n",
+                    self.assert_process(
+                        result, 1,
+                        stdout=f"commit_hygiene_failed sha={graph.main_head[:12]} rule={rule}\n",
                     )
 
     def test_E01_synthetic_author_and_committer_email_mutations_are_refused(self):
         receipts = run_proof_class("E01")
-        self.assertEqual(tuple(receipt.refusal for receipt in receipts),
-                         (AUTHOR_EMAIL_RULE, COMMITTER_EMAIL_RULE))
-        self.assertTrue(all(receipt.baseline_exit == 0 for receipt in receipts))
-        self.assertTrue(all(receipt.checker_exit == 1 for receipt in receipts))
+        self.assert_refused_receipts(receipts, (AUTHOR_EMAIL_RULE, COMMITTER_EMAIL_RULE))
 
     def test_E02_synthetic_attribution_message_mutation_is_refused(self):
         receipts = run_proof_class("E02")
-        self.assertEqual(tuple(receipt.refusal for receipt in receipts), (MESSAGE_RULE,) * 9)
-        self.assertTrue(all(receipt.baseline_exit == 0 for receipt in receipts))
-        self.assertTrue(all(receipt.checker_exit == 1 for receipt in receipts))
+        self.assert_refused_receipts(receipts, (MESSAGE_RULE,) * 9)
 
     def test_E03_synthetic_archive_path_mutation_is_refused(self):
         receipts = run_proof_class("E03")
-        self.assertEqual(tuple(receipt.refusal for receipt in receipts), (PATH_RULE,))
-        self.assertTrue(all(receipt.baseline_exit == 0 for receipt in receipts))
-        self.assertTrue(all(receipt.checker_exit == 1 for receipt in receipts))
+        self.assert_refused_receipts(receipts, (PATH_RULE,))
 
     def test_proof_command_propagates_checker_refusal_only_after_validated_receipt(self):
         from contextlib import redirect_stdout

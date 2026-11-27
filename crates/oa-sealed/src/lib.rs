@@ -93,6 +93,20 @@ mod data_root_tests {
     use super::{Sealed, DATA_ROOT_SENTINEL, DEFAULT_DATA_ROOT, LIST};
     use std::path::Path;
 
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let parent = std::env::temp_dir().join(format!("oa-sealed-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&parent);
+        std::fs::create_dir_all(&parent).unwrap();
+        parent
+    }
+
+    fn assert_fail_closed(guard: &Sealed, outside: &Path) {
+        assert!(guard.broken);
+        assert!(guard.check(outside).is_err());
+        assert!(guard.in_window(i64::MIN) && guard.in_window(i64::MAX));
+        assert_eq!(guard.drop_window(), oa_time_window::DropWindow::all_time());
+    }
+
     #[test]
     fn default_root_is_relative_to_the_repository_sibling() {
         assert_eq!(
@@ -110,25 +124,17 @@ mod data_root_tests {
 
     #[test]
     fn configured_root_without_sentinel_keeps_embedded_guard_closed() {
-        let parent =
-            std::env::temp_dir().join(format!("oa-sealed-invalid-root-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&parent);
-        std::fs::create_dir_all(&parent).unwrap();
+        let parent = scratch("invalid-root");
         let root = parent.join("sentinelless");
         std::fs::create_dir(&root).unwrap();
         let guard = Sealed::with_list_using_data_root(LIST, None, Some(root.into_os_string()));
-        assert!(guard.check(&parent.join("outside-unsealed-path")).is_err());
-        assert!(guard.in_window(i64::MIN) && guard.in_window(i64::MAX));
-        assert_eq!(guard.drop_window(), oa_time_window::DropWindow::all_time());
+        assert_fail_closed(&guard, &parent.join("outside-unsealed-path"));
         std::fs::remove_dir_all(parent).unwrap();
     }
 
     #[test]
     fn an_unset_root_uses_the_supplied_fallback_through_full_guard_validation() {
-        let parent =
-            std::env::temp_dir().join(format!("oa-sealed-fallback-root-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&parent);
-        std::fs::create_dir_all(&parent).unwrap();
+        let parent = scratch("fallback-root");
 
         let missing = parent.join("missing-default");
         let markerless = parent.join("wrong-default");
@@ -136,10 +142,7 @@ mod data_root_tests {
         let outside = parent.join("ordinary-outside-path");
         for fallback in [missing.as_path(), markerless.as_path(), Path::new("/")] {
             let guard = Sealed::with_list_using_data_root_and_default(LIST, None, None, fallback);
-            assert!(guard.broken);
-            assert!(guard.check(&outside).is_err());
-            assert!(guard.in_window(i64::MIN) && guard.in_window(i64::MAX));
-            assert_eq!(guard.drop_window(), oa_time_window::DropWindow::all_time());
+            assert_fail_closed(&guard, &outside);
         }
 
         let valid = parent.join("valid-default");

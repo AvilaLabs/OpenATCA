@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 import hashlib
 import json
 import os
@@ -33,6 +34,20 @@ MAX_EVIDENCE_PER_CLAUSE = 128
 
 class ClaimError(ValueError):
     pass
+
+
+@dataclass(frozen=True)
+class RowClaimInputs:
+    root: Path
+    source_bytes: bytes
+    rows_by_id: dict[str, str]
+    manifest: dict[str, Any]
+    manifest_bytes: bytes
+    claim: dict[str, Any]
+    inventory: dict[str, Any]
+    inventory_bytes: bytes
+    row_id: str
+    source_commit: str
 
 
 def sha256(data: bytes) -> str:
@@ -396,12 +411,18 @@ def _validate_claim_clauses(
             raise ClaimError(f"{row_id}: clause {index} lacks per-clause oa-trace test evidence")
 
 
-def validate_row_claim(
-    root: Path, source_bytes: bytes, rows_by_id: dict[str, str], manifest: dict[str, Any],
-    manifest_bytes: bytes, claim: dict[str, Any], inventory: dict[str, Any], inventory_bytes: bytes,
-    row_id: str, source_commit: str,
-) -> None:
+def validate_row_claim(inputs: RowClaimInputs) -> None:
     """Check one requested row against source, all-row manifest, claim, and trace inventory."""
+    root = inputs.root
+    source_bytes = inputs.source_bytes
+    rows_by_id = inputs.rows_by_id
+    manifest = inputs.manifest
+    manifest_bytes = inputs.manifest_bytes
+    claim = inputs.claim
+    inventory = inputs.inventory
+    inventory_bytes = inputs.inventory_bytes
+    row_id = inputs.row_id
+    source_commit = inputs.source_commit
     source_digest, manifest_digest = sha256(source_bytes), sha256(manifest_bytes)
     inventory_digest = sha256(inventory_bytes)
     if manifest.get("source_sha256") != source_digest:
@@ -479,18 +500,18 @@ def main() -> int:
             raise ClaimError("manifest, claim, and inventory roots must be objects")
         if _current_commit(root) != args.source_commit:
             raise ClaimError("requested source commit differs from the clean repository snapshot")
-        validate_row_claim(
-            root,
-            source_bytes,
-            rows_by_id,
-            manifest,
-            manifest_bytes,
-            claim,
-            inventory,
-            inventory_bytes,
-            args.row,
-            args.source_commit,
-        )
+        validate_row_claim(RowClaimInputs(
+            root=root,
+            source_bytes=source_bytes,
+            rows_by_id=rows_by_id,
+            manifest=manifest,
+            manifest_bytes=manifest_bytes,
+            claim=claim,
+            inventory=inventory,
+            inventory_bytes=inventory_bytes,
+            row_id=args.row,
+            source_commit=args.source_commit,
+        ))
         _verify_test_refs(root, inventory, args.oa_trace_bin)
     except (OSError, UnicodeError, json.JSONDecodeError, ClaimError) as exc:
         print(f"claim rejected: {exc}", file=sys.stderr)

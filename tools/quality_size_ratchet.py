@@ -451,8 +451,7 @@ def _read_tracked_sources(root: Path) -> Iterator[tuple[str, str]]:
             payload = stream.read(remaining + 1)
             after = os.fstat(stream.fileno())
         if (len(payload) != before.st_size or
-                (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) !=
-                (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)):
+                _file_identity(before) != _file_identity(after)):
             raise RatchetError(f"tracked source changed while reading: {relative}")
         total_bytes += len(payload)
         try:
@@ -717,6 +716,28 @@ def analyze_sources(sources: Iterable[tuple[str, str]]) -> dict[str, object]:
     }
 
 
+def _expected_limits() -> dict[str, int]:
+    return {
+        "long_function_lines_exceeds": 150,
+        "argument_count_exceeds": 7,
+        "duplicate_window_tokens": WINDOW_TOKENS,
+        "duplicate_minimum_distinct_identifiers": MIN_IDENTIFIERS,
+        "tracked_source_files_max": MAX_SOURCE_FILES,
+        "tracked_source_bytes_max": MAX_SOURCE_BYTES,
+        "tracked_source_file_bytes_max": MAX_SOURCE_FILE_BYTES,
+        "baseline_bytes_max": MAX_BASELINE_BYTES,
+        "function_body_tokens_max": MAX_CODE_TOKENS,
+        "duplicate_windows_max": MAX_DUPLICATE_WINDOWS,
+        "duplicate_block_groups_max": MAX_DUPLICATE_BLOCK_GROUPS,
+        "duplicate_comparisons_max": MAX_DUPLICATE_COMPARISONS,
+        "lexer_tokens_per_file_max": MAX_LEX_TOKENS_PER_FILE,
+    }
+
+
+def _file_identity(info: os.stat_result) -> tuple[int, int, int, int, int]:
+    return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
+
+
 def build_baseline(root: Path) -> dict[str, object]:
     root = _validate_workspace(root)
     summary = analyze_sources(_read_tracked_sources(root))
@@ -727,21 +748,8 @@ def build_baseline(root: Path) -> dict[str, object]:
         "algorithm": ALGORITHM,
         "scope": SCOPE,
         "workspace_binding": WORKSPACE_BINDING,
-        "limits": {
-            "long_function_lines_exceeds": 150,
-            "argument_count_exceeds": 7,
-            "duplicate_window_tokens": WINDOW_TOKENS,
-            "duplicate_minimum_distinct_identifiers": MIN_IDENTIFIERS,
-            "tracked_source_files_max": MAX_SOURCE_FILES,
-            "tracked_source_bytes_max": MAX_SOURCE_BYTES,
-            "tracked_source_file_bytes_max": MAX_SOURCE_FILE_BYTES,
-            "baseline_bytes_max": MAX_BASELINE_BYTES,
-            "function_body_tokens_max": MAX_CODE_TOKENS,
-            "duplicate_windows_max": MAX_DUPLICATE_WINDOWS,
-            "duplicate_block_groups_max": MAX_DUPLICATE_BLOCK_GROUPS,
-            "duplicate_comparisons_max": MAX_DUPLICATE_COMPARISONS,
-            "lexer_tokens_per_file_max": MAX_LEX_TOKENS_PER_FILE,
-        },
+        "limits": _expected_limits(),
+
         "seed_revision": subprocess.run(
             ["git", "rev-parse", "HEAD"], cwd=root, check=True,
             capture_output=True, text=True,
@@ -789,8 +797,7 @@ def _read_baseline(path: Path) -> dict[str, object]:
         payload = stream.read(MAX_BASELINE_BYTES + 1)
         after = os.fstat(stream.fileno())
     if (len(payload) != before.st_size or len(payload) > MAX_BASELINE_BYTES or
-            (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) !=
-            (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)):
+            _file_identity(before) != _file_identity(after)):
         raise RatchetError("baseline changed while reading")
     try:
         value = json.loads(payload.decode("utf-8"))
@@ -810,21 +817,7 @@ def compare(current: dict[str, object], baseline: dict[str, object]) -> dict[str
     if not isinstance(revision, str) or len(revision) != 40 or any(ch not in "0123456789abcdef" for ch in revision):
         raise RatchetError("baseline seed revision is malformed")
     limits = baseline.get("limits")
-    expected_limits = {
-        "long_function_lines_exceeds": 150,
-        "argument_count_exceeds": 7,
-        "duplicate_window_tokens": WINDOW_TOKENS,
-        "duplicate_minimum_distinct_identifiers": MIN_IDENTIFIERS,
-        "tracked_source_files_max": MAX_SOURCE_FILES,
-        "tracked_source_bytes_max": MAX_SOURCE_BYTES,
-        "tracked_source_file_bytes_max": MAX_SOURCE_FILE_BYTES,
-        "baseline_bytes_max": MAX_BASELINE_BYTES,
-        "function_body_tokens_max": MAX_CODE_TOKENS,
-        "duplicate_windows_max": MAX_DUPLICATE_WINDOWS,
-        "duplicate_block_groups_max": MAX_DUPLICATE_BLOCK_GROUPS,
-        "duplicate_comparisons_max": MAX_DUPLICATE_COMPARISONS,
-        "lexer_tokens_per_file_max": MAX_LEX_TOKENS_PER_FILE,
-    }
+    expected_limits = _expected_limits()
     if limits != expected_limits:
         raise RatchetError("baseline metric limits do not match the pinned checker")
     base_summary = baseline.get("summary")
