@@ -11,7 +11,7 @@ import re
 import subprocess
 import sys
 import unittest
-from contextlib import ExitStack, redirect_stderr, redirect_stdout
+from contextlib import ExitStack, contextmanager, redirect_stderr, redirect_stdout
 from dataclasses import dataclass
 from unittest import mock
 
@@ -812,6 +812,13 @@ class SelectionHardeningTests(unittest.TestCase):
         git(repo, "update-ref", "refs/remotes/origin/main", main_base)
         return repo, main_base
 
+    @contextmanager
+    def temporary_selector_workspace(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, base = self.selector_workspace(root)
+            yield root, repo, base
+
     def run_actual_suite_cli(self, repo, base, output, invoked):
         command = [
             "python3", str(Path(__file__).with_name("rust_proof_suite.py")),
@@ -825,7 +832,7 @@ class SelectionHardeningTests(unittest.TestCase):
         env["FAKE_INVOKED"] = str(invoked)
         return subprocess.run(command, env=env, capture_output=True, text=True, timeout=60)
 
-    def run_workflow_base(self, repo, event, ref, tip, before):
+    def run_workflow_base(self, repo, event, ref, tip, before, expected_base):
         env = os.environ.copy()
         env.update({
             "GITHUB_EVENT_NAME": event,
@@ -839,24 +846,27 @@ class SelectionHardeningTests(unittest.TestCase):
             env=env, capture_output=True, text=True, timeout=30,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        return result.stdout.strip()
+        selected_base = result.stdout.strip()
+        self.assertEqual(selected_base, expected_base)
+        return selected_base
 
-    def run_full_registry_event(self, repo, root, event, ref, tip, before):
-        selected_base = self.run_workflow_base(repo, event, ref, tip, before)
-        self.assertEqual(selected_base, "")
-        invoked = root / f"{event}-invocations.txt"
-        output = root / f"{event}-evidence"
-        actual = self.run_actual_suite_cli(repo, None, output, invoked)
+    def run_actual_suite_and_read(self, repo, root, label, base):
+        invoked = root / f"{label}-invocations.txt"
+        output = root / f"{label}-evidence"
+        actual = self.run_actual_suite_cli(repo, base, output, invoked)
         self.assertEqual(actual.returncode, 0, actual.stderr)
         suite = json.loads((output / "suite.json").read_text(encoding="utf-8"))
+        return suite, invoked
+
+    def run_full_registry_event(self, repo, root, event, ref, tip, before):
+        self.run_workflow_base(repo, event, ref, tip, before, "")
+        suite, _ = self.run_actual_suite_and_read(repo, root, event, None)
         self.assertEqual({row["id"] for row in suite["checks"]}, self.FULL_REGISTRY_IDS)
         return suite
 
     # Kills using event.before for a later train push and newline-delimited Git path parsing.
     def test_train_push_uses_cumulative_main_base_and_reaches_tracker_after_docs_push(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            repo, main_base = self.selector_workspace(root)
+        with self.temporary_selector_workspace() as (root, repo, main_base):
             source = repo / "crates/b/src/modél.rs"
             source.write_text("pub fn changed_tracker_source() {}\n", encoding="utf-8")
             git(repo, "add", "crates/b/src/modél.rs")
@@ -870,15 +880,10 @@ class SelectionHardeningTests(unittest.TestCase):
             git(repo, "branch", "train/selector-fixture", tip)
 
             selected_base = self.run_workflow_base(
-                repo, "push", "refs/heads/train/selector-fixture", tip, tracker_commit,
+                repo, "push", "refs/heads/train/selector-fixture", tip, tracker_commit, main_base,
             )
-            self.assertEqual(selected_base, main_base)
 
-            invoked = root / "proof-invocations.txt"
-            output = root / "evidence"
-            actual = self.run_actual_suite_cli(repo, selected_base, output, invoked)
-            self.assertEqual(actual.returncode, 0, actual.stderr)
-            suite = json.loads((output / "suite.json").read_text(encoding="utf-8"))
+            suite, invoked = self.run_actual_suite_and_read(repo, root, "proof", selected_base)
             self.assertEqual(suite["selection"]["base"], main_base)
             self.assertIn("crates/b/src/modél.rs", suite["selection"]["changed_files"])
             self.assertEqual([row["id"] for row in suite["checks"]], ["tracker-core-invariant"])
@@ -887,9 +892,7 @@ class SelectionHardeningTests(unittest.TestCase):
 
     # Kills treating an undecodable changed pathname as an empty change set/SKIPPED run.
     def test_unrepresentable_git_path_fails_closed_before_suite_creation(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            repo, base = self.selector_workspace(root)
+        with self.temporary_selector_workspace() as (root, repo, base):
             raw_path = os.fsencode(repo) + b"/crates/b/src/" + bytes([0xFF]) + b".rs"
             descriptor = os.open(raw_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             os.close(descriptor)
@@ -906,9 +909,7 @@ class SelectionHardeningTests(unittest.TestCase):
 
     # Kills assigning a nonempty incremental comparison base to recurring full-run events.
     def test_schedule_and_manual_selector_results_run_the_full_registry(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            repo, base = self.selector_workspace(root)
+        with self.temporary_selector_workspace() as (root, repo, base):
             for event in ("schedule", "workflow_dispatch"):
                 with self.subTest(event=event):
                     self.run_full_registry_event(
@@ -917,9 +918,7 @@ class SelectionHardeningTests(unittest.TestCase):
 
     # Kills comparing a later train cap increase against event.before or the candidate tip.
     def test_train_merge_base_remains_cap_reference_after_docs_only_push(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            repo, main_base = self.selector_workspace(root)
+        with self.temporary_selector_workspace() as (root, repo, main_base):
             registry_path = repo / "tools/rust_proofs.json"
             registry = json.loads(registry_path.read_text(encoding="utf-8"))
             registry["proofs"][0]["external_timeout_seconds"] += 1
@@ -945,9 +944,7 @@ class SelectionHardeningTests(unittest.TestCase):
 
     # Kills using the already-updated origin/main tip as an empty initial-push diff base.
     def test_initial_main_push_selects_full_registry(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            repo, _ = self.selector_workspace(root)
+        with self.temporary_selector_workspace() as (root, repo, _):
             (repo / "crates/b/src/new.rs").write_text("pub fn first_main_change() {}\n")
             git(repo, "add", "crates/b/src/new.rs")
             git(repo, "commit", "-q", "-m", "initial main change")
