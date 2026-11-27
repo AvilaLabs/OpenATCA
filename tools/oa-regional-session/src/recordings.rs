@@ -2404,7 +2404,7 @@ pub fn serialize_recorded_events(events: &[NormalizedEvent]) -> Result<String, A
                 write!(
                     out,
                     "\t{}\t{}",
-                    evidence.row_flags,
+                    source_evidence_field(evidence.row_flags),
                     source_squawk_field(evidence.squawk)
                 )
                 .map_err(|_| AdapterError::CountOverflow)?;
