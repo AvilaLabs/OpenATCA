@@ -363,6 +363,8 @@ oa-sha256 = {{ path = "../oa-sha256" }}
 oa-csv = {{ path = "../oa-csv" }}
 oa-json = {{ path = "../oa-json" }}
 oa-xml = {{ path = "../oa-xml" }}
+oa-zip = {{ path = "../oa-zip" }}
+oa-deflate = {{ path = "../oa-deflate" }}
 [lints.rust]
 unsafe_code = "{unsafe_lint}"
 [lints.clippy]
@@ -377,7 +379,7 @@ indexing_slicing = "deny"
     write(crate / "src/lib.rs", "#![deny(unsafe_code)]\nmod ffi;\nmod text;\n")
     write(crate / "src/ffi.rs", "#![allow(unsafe_code)]\nfn boundary() {}\n")
     write(crate / "src/text.rs", "#![forbid(unsafe_code)]\n")
-    for dep in ("oa-geo", "oa-ieee", "oa-math", "oa-sha256", "oa-csv", "oa-json", "oa-xml"):
+    for dep in ("oa-geo", "oa-ieee", "oa-math", "oa-sha256", "oa-csv", "oa-json", "oa-xml", "oa-zip", "oa-deflate"):
         write(root / "crates" / dep / "Cargo.toml", f'[package]\nname = "{dep}"\nversion = "0.1.0"\n')
 
 

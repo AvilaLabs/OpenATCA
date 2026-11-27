@@ -51,6 +51,13 @@ BLOCKED_PACKAGES = {"oa-sealed"}
 MAX_SOURCE_FILE = 32 * 1024 * 1024
 MAX_SOURCE_TOTAL = 512 * 1024 * 1024
 TEST_ASSETS = {
+    # Public AIXM schemas and their checked-in source records used by encoder conformance tests.
+    "oa-notam": {
+        "testdata/schema/aixm_5_1_1_xsd.source.json": "bc23f5e53625195a5e33cbb0d79259cceb91f82d505a9c89d63fb491414dc0ed",
+        "testdata/schema/aixm_5_1_1_xsd.zip": "6794fd3ac9b9b4f23f9040cd6fcc7d61cf8415c9cca6a6ec13c6979e225c2b0a",
+        "testdata/schema/aixm_5_1_xsd.source.json": "5bb90d1dc5572f6d3e705c1b50aa54c6b51f179e022b9891e35f6d845cd9e3ec",
+        "testdata/schema/aixm_5_1_xsd.zip": "e14090244c66c38bd459b954b896faeeb7f7828f135164cf0546ae1c1f69c221",
+    },
     "oa-sha256": {
         "tests/fixtures/SHA256LongMsg.rsp": "6fac36f37360bcf74ffcf4465c18e30d6d5a04cc90885b901fc3130c16060974",
         "tests/fixtures/SHA256Monte.rsp": "29ea30c6bb4b84e425fb8c1d731c6bb852dac935825f2bd1143e5d3c4f10bfb9",
@@ -546,6 +553,8 @@ def git_files(repo: Path, revision: str, crate_relative: str) -> tuple[list[tupl
         elif path.startswith(f"{crate_relative}/examples/"):
             if not path.endswith(".rs"):
                 raise StageError(f"non-Rust example needs explicit review: {path}")
+            records.append((path, mode))
+        elif path[len(crate_relative) + 1:] in TEST_ASSETS.get(Path(crate_relative).name, {}):
             records.append((path, mode))
         elif path.startswith(f"{crate_relative}/tests/"):
             inside = path[len(crate_relative) + 1:]

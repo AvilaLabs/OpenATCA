@@ -12,8 +12,9 @@ mod ffi;
 mod text;
 
 pub use ffi::{
-    oa_core_abi_version, oa_core_error_message, oa_csv_parse, oa_geo_polygon_contains_wgs84,
-    oa_geo_polygon_edge_count, oa_geo_polygon_free, oa_geo_polygon_new_wgs84, oa_geo_wgs84_direct,
+    oa_core_abi_version, oa_core_error_message, oa_csv_parse, oa_deflate_raw_compress,
+    oa_deflate_raw_inflate, oa_geo_polygon_contains_wgs84, oa_geo_polygon_edge_count,
+    oa_geo_polygon_free, oa_geo_polygon_new_wgs84, oa_geo_wgs84_direct,
     oa_geo_wgs84_geodesic_rhumb_separation, oa_geo_wgs84_inverse, oa_geo_wgs84_rhumb_direct,
     oa_geo_wgs84_rhumb_inverse, oa_geo_wgs84_rhumb_point_at_fraction, oa_json_parse,
     oa_math_f32_binary, oa_math_f32_compare, oa_math_f32_is_sign_negative, oa_math_f32_ternary,

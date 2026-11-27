@@ -532,7 +532,7 @@ impl Ws {
         ws.put(BUDGET, "");
         ws.put(
             "crates/openatca-core-ffi/Cargo.toml",
-            "[package]\nname = \"openatca-core-ffi\"\n\n[package.metadata.openatca]\nclass = \"shell\"\n\n[dependencies]\noa-geo = { path = \"../oa-geo\" }\noa-ieee = { path = \"../oa-ieee\" }\noa-math = { path = \"../oa-math\" }\noa-sha256 = { path = \"../oa-sha256\" }\noa-csv = { path = \"../oa-csv\" }\noa-json = { path = \"../oa-json\" }\noa-xml = { path = \"../oa-xml\" }\n\n[lints.rust]\nunsafe_code = \"deny\"\n\n[lints.clippy]\nunwrap_used = \"deny\"\nexpect_used = \"deny\"\npanic = \"deny\"\nindexing_slicing = \"deny\"\n",
+            "[package]\nname = \"openatca-core-ffi\"\n\n[package.metadata.openatca]\nclass = \"shell\"\n\n[dependencies]\noa-geo = { path = \"../oa-geo\" }\noa-ieee = { path = \"../oa-ieee\" }\noa-math = { path = \"../oa-math\" }\noa-sha256 = { path = \"../oa-sha256\" }\noa-csv = { path = \"../oa-csv\" }\noa-json = { path = \"../oa-json\" }\noa-xml = { path = \"../oa-xml\" }\noa-zip = { path = \"../oa-zip\" }\noa-deflate = { path = \"../oa-deflate\" }\n\n[lints.rust]\nunsafe_code = \"deny\"\n\n[lints.clippy]\nunwrap_used = \"deny\"\nexpect_used = \"deny\"\npanic = \"deny\"\nindexing_slicing = \"deny\"\n",
         );
         ws.put(
             "crates/openatca-core-ffi/src/lib.rs",
@@ -674,6 +674,8 @@ fn ffi_fixture_source() -> String {
         "oa_xml_parse",
         "oa_xml_decode_span",
         "oa_csv_parse",
+        "oa_deflate_raw_inflate",
+        "oa_deflate_raw_compress",
     ];
     let mut source = String::from("#![allow(unsafe_code)]\n");
     for name in EXPORTS {

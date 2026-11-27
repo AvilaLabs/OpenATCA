@@ -124,14 +124,27 @@ jobs:
           cc -std=c11 -Wall -Wextra -Werror -I include \
             crates/openatca-core-ffi/tests/ffi_text_vectors.c "$ffi_lib" \
             "-Wl,-rpath,$(dirname "$ffi_lib")" -lm -o "$RUNNER_TEMP/oa-ffi-text"
+          cc -std=c11 -Wall -Wextra -Werror -I include \
+            crates/openatca-core-ffi/tests/ffi_deflate_vectors.c "$ffi_lib" \
+            "-Wl,-rpath,$(dirname "$ffi_lib")" -lm -o "$RUNNER_TEMP/oa-ffi-deflate"
+          cc -std=c11 -Wall -Wextra -Werror -I include \
+            crates/openatca-core-ffi/tests/ffi_deflate_encode_vectors.c "$ffi_lib" \
+            "-Wl,-rpath,$(dirname "$ffi_lib")" -lm -o "$RUNNER_TEMP/oa-ffi-deflate-encode"
           "$RUNNER_TEMP/oa-ffi-geodesy" crates/openatca-core-ffi/tests/fixtures/wgs84.csv
           "$RUNNER_TEMP/oa-ffi-l0" crates/openatca-core-ffi/tests/fixtures/l0.csv \
             crates/openatca-core-ffi/tests/fixtures/polygon.csv
           "$RUNNER_TEMP/oa-ffi-text" crates/openatca-core-ffi/tests/fixtures/text-v1.tsv
+          "$RUNNER_TEMP/oa-ffi-deflate" crates/openatca-core-ffi/tests/fixtures/raw-deflate-v1.tsv
+          "$RUNNER_TEMP/oa-ffi-deflate-encode" \
+            crates/openatca-core-ffi/tests/fixtures/raw-deflate-encode-v1.tsv
           python3 crates/openatca-core-ffi/tests/test_ctypes_vectors.py "$ffi_lib"
           python3 crates/openatca-core-ffi/tests/test_ctypes_l0.py "$ffi_lib"
           python3 crates/openatca-core-ffi/tests/test_ctypes_text.py "$ffi_lib" \
             crates/openatca-core-ffi/tests/fixtures/text-v1.tsv
+          python3 crates/openatca-core-ffi/tests/test_ctypes_deflate.py "$ffi_lib" \
+            crates/openatca-core-ffi/tests/fixtures/raw-deflate-v1.tsv
+          python3 crates/openatca-core-ffi/tests/test_ctypes_deflate_encode.py "$ffi_lib" \
+            crates/openatca-core-ffi/tests/fixtures/raw-deflate-encode-v1.tsv
           python3 crates/openatca-core-ffi/tests/test_polygon_thread_safety.py
           test "$library_sha" = "$(sha256sum "$ffi_lib" | cut -d' ' -f1)"
       - name: Diagnostic example regressions
@@ -274,14 +287,27 @@ jobs:
           cc -std=c11 -Wall -Wextra -Werror -I include \
             crates/openatca-core-ffi/tests/ffi_text_vectors.c "$ffi_lib" \
             "-Wl,-rpath,$(dirname "$ffi_lib")" -lm -o "$RUNNER_TEMP/oa-ffi-text"
+          cc -std=c11 -Wall -Wextra -Werror -I include \
+            crates/openatca-core-ffi/tests/ffi_deflate_vectors.c "$ffi_lib" \
+            "-Wl,-rpath,$(dirname "$ffi_lib")" -lm -o "$RUNNER_TEMP/oa-ffi-deflate"
+          cc -std=c11 -Wall -Wextra -Werror -I include \
+            crates/openatca-core-ffi/tests/ffi_deflate_encode_vectors.c "$ffi_lib" \
+            "-Wl,-rpath,$(dirname "$ffi_lib")" -lm -o "$RUNNER_TEMP/oa-ffi-deflate-encode"
           "$RUNNER_TEMP/oa-ffi-geodesy" crates/openatca-core-ffi/tests/fixtures/wgs84.csv
           "$RUNNER_TEMP/oa-ffi-l0" crates/openatca-core-ffi/tests/fixtures/l0.csv \
             crates/openatca-core-ffi/tests/fixtures/polygon.csv
           "$RUNNER_TEMP/oa-ffi-text" crates/openatca-core-ffi/tests/fixtures/text-v1.tsv
+          "$RUNNER_TEMP/oa-ffi-deflate" crates/openatca-core-ffi/tests/fixtures/raw-deflate-v1.tsv
+          "$RUNNER_TEMP/oa-ffi-deflate-encode" \
+            crates/openatca-core-ffi/tests/fixtures/raw-deflate-encode-v1.tsv
           python3 crates/openatca-core-ffi/tests/test_ctypes_vectors.py "$ffi_lib"
           python3 crates/openatca-core-ffi/tests/test_ctypes_l0.py "$ffi_lib"
           python3 crates/openatca-core-ffi/tests/test_ctypes_text.py "$ffi_lib" \
             crates/openatca-core-ffi/tests/fixtures/text-v1.tsv
+          python3 crates/openatca-core-ffi/tests/test_ctypes_deflate.py "$ffi_lib" \
+            crates/openatca-core-ffi/tests/fixtures/raw-deflate-v1.tsv
+          python3 crates/openatca-core-ffi/tests/test_ctypes_deflate_encode.py "$ffi_lib" \
+            crates/openatca-core-ffi/tests/fixtures/raw-deflate-encode-v1.tsv
           python3 crates/openatca-core-ffi/tests/test_polygon_thread_safety.py
           test "$library_sha" = "$(sha256sum "$ffi_lib" | cut -d' ' -f1)"
   # The dev profile (opt-level 1, debug assertions and overflow checks on). The debug_assert! checks

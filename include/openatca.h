@@ -40,8 +40,17 @@ enum {
     OA_STATUS_LENGTH_TOO_LARGE = 9,
     OA_STATUS_BAD_OPERATION = 10,
     OA_STATUS_ALLOCATION_FAILED = 11,
-    OA_STATUS_PARSE_ERROR = 12
+    OA_STATUS_PARSE_ERROR = 12,
+    OA_STATUS_DEFLATE_ERROR = 13,
+    OA_STATUS_DEFLATE_TRUNCATED = 14,
+    OA_STATUS_DEFLATE_OUTPUT_LIMIT = 15,
+    OA_STATUS_DEFLATE_RATIO_LIMIT = 16,
+    OA_STATUS_DEFLATE_ENCODE_OUTPUT_LIMIT = 17
 };
+
+#define OA_DEFLATE_MAX_INPUT_BYTES UINT64_C(67108864)
+#define OA_DEFLATE_MAX_OUTPUT_BYTES UINT64_C(268435456)
+#define OA_DEFLATE_ENCODE_MAX_OUTPUT_BYTES UINT64_C(134217728)
 
 typedef uint32_t OaLocationKind;
 enum {
@@ -187,6 +196,34 @@ void oa_geo_polygon_free(OaPolygon *polygon);
 /* One-shot integrity digest. Empty input permits a NULL pointer; other pointers have fixed extents. */
 uint32_t oa_sha256_digest(const uint8_t *input, uint64_t length, uint8_t digest[32], OaErrorInfo *error);
 uint32_t oa_sha256_hex(const uint8_t digest[32], uint8_t output[64], OaErrorInfo *error);
+
+/*
+ * Inflates one raw DEFLATE stream with an explicit output limit. Input is capped at 64 MiB,
+ * output at 256 MiB, and the existing ZIP 200:1 ratio limit applies above its 1 MiB exemption.
+ * Bytes after the final block are not consumed. Output is transactional: malformed, truncated,
+ * output-limit, ratio-limit, allocation and invalid-argument failures write no decoded bytes.
+ * A zero output capacity with a null output pointer queries the exact output length and consumed
+ * input; this returns BUFFER_TOO_SMALL when the stream produces bytes. On that result the exact
+ * lengths are written; on success they describe the copied output. Other failures leave length
+ * outputs unchanged. Input, output, length records and error must be valid and pairwise disjoint.
+ */
+uint32_t oa_deflate_raw_inflate(const uint8_t *input, uint64_t input_length,
+                                uint64_t max_output, uint8_t *output,
+                                uint64_t output_capacity, uint64_t *output_length,
+                                uint64_t *consumed, OaErrorInfo *error);
+
+/*
+ * Compresses one raw DEFLATE stream using oa-deflate's existing level clamp policy: requested
+ * levels below 1 use 1, above 9 use 9. actual_level reports the applied value. Input is capped
+ * at 64 MiB and output at 128 MiB. A zero output capacity queries the exact output length. Output
+ * bytes are copied only after compression completes and passes max_output; failures preserve the
+ * output buffer and length metadata. Success and BUFFER_TOO_SMALL consume all input bytes.
+ */
+uint32_t oa_deflate_raw_compress(const uint8_t *input, uint64_t input_length,
+                                 uint32_t requested_level, uint64_t max_output,
+                                 uint8_t *output, uint64_t output_capacity,
+                                 uint64_t *output_length, uint64_t *consumed,
+                                 uint32_t *actual_level, OaErrorInfo *error);
 
 /*
  * Bounded text parsers. Call once with zero capacities to query exact counts; this returns
