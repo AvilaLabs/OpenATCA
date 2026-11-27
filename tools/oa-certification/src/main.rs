@@ -8,6 +8,15 @@ use std::process::ExitCode;
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.as_slice() {
+        [command, ..] if command == "techops-status" => {
+            let mut output = std::io::stdout().lock();
+            args.get(1..).map_or_else(
+                || Err("missing technician status arguments".to_owned()),
+                |status_args| {
+                    oa_certification::audit_status::run_techops_status(status_args, &mut output)
+                },
+            )
+        }
         [command, mode, package_root, manifest_pin] if command == "pver" => {
             let mode = match mode.as_str() {
                 "full" => oa_certification::PverMode::Full,
@@ -28,7 +37,12 @@ fn main() -> ExitCode {
                     digest_text(result.adaptation_sha256()), digest_text(result.profile_binding_sha256()));
                 println!("tracker_config_sha256={} runner_build_claim_sha256={} runner_artifact_state={:?} runner_artifact_sha256={}", oa_sha256::to_hex(&result.tracker_config_sha256()), oa_sha256::to_hex(&result.runner_build_claim_sha256()), result.runner_artifact_state(), digest_text(result.runner_artifact_sha256()));
                 for target in result.target_results() {
-                    println!("target={} state={:?} output_time_ns={:?} position_error_um={:?} position_tolerance_um={} velocity_error_um_s={:?} velocity_tolerance_um_s={}", target.target_id, target.state, target.output_time_ns, target.position_error_um, target.position_tolerance_um, target.velocity_error_um_s, target.velocity_tolerance_um_s);
+                    let map = target.target_map;
+                    println!("target={} state={:?} output_time_ns={:?} position_error_um={:?} position_tolerance_um={} velocity_error_um_s={:?} velocity_tolerance_um_s={} registration_qc=target_lat_e7:{},target_lon_e7:{},expected_lat_e7:{:?},expected_lon_e7:{:?},observed_lat_e7:{:?},observed_lon_e7:{:?},expected_east_um_s:{},expected_north_um_s:{},observed_east_um_s:{:?},observed_north_um_s:{:?},east_position_residual_um:{:?},north_position_residual_um:{:?},east_velocity_residual_um_s:{:?},north_velocity_residual_um_s:{:?}", target.target_id, target.state, target.output_time_ns, target.position_error_um, target.position_tolerance_um, target.velocity_error_um_s, target.velocity_tolerance_um_s,
+                        map.target_lat_e7, map.target_lon_e7, map.expected_lat_e7, map.expected_lon_e7,
+                        map.observed_lat_e7, map.observed_lon_e7, map.expected_east_um_s, map.expected_north_um_s,
+                        map.observed_east_um_s, map.observed_north_um_s, map.east_position_residual_um,
+                        map.north_position_residual_um, map.east_velocity_residual_um_s, map.north_velocity_residual_um_s);
                 }
                 result.passed().then_some(()).ok_or_else(|| "synthetic PVER checks did not pass".to_owned())
             })
@@ -131,7 +145,36 @@ fn main() -> ExitCode {
                     request,
                 )
                 .map_err(|error| error.to_string())?;
-                println!("outcome={:?} checkpoint_count={} checkpoint_tail={} audit_sequence={} audit_digest={} audit_durable=true", committed.outcome, committed.checkpoint.count, oa_sha256::to_hex(&committed.checkpoint.tail), committed.receipt.sequence(), oa_sha256::to_hex(&committed.receipt.digest()));
+                let mut target_rows = [None; oa_techops::MAX_CERTIFICATION_TARGET_ROWS];
+                let mut processor_rows = [None; oa_techops::MAX_CERTIFICATION_PROCESSOR_ROWS];
+                let committed_view = committed
+                    .service_view(&mut target_rows, &mut processor_rows)
+                    .map_err(|error| error.to_string())?;
+                let view = committed_view.view();
+                let exceptions = view
+                    .exceptions
+                    .chars()
+                    .flat_map(char::escape_default)
+                    .collect::<String>();
+                println!("outcome={:?} checkpoint_count={} checkpoint_tail={} audit_sequence={} audit_digest={} audit_durable=true", committed.outcome(), committed.checkpoint().count, oa_sha256::to_hex(&committed.checkpoint().tail), committed.receipt().sequence(), oa_sha256::to_hex(&committed.receipt().digest()));
+                println!("techops_certification_view=committed outcome={:?} mode={:?} pver_passed={} targets={}/{} tracker_loss_rows={} tracker_refusals={} catalog_version={} catalog_sha256={} adaptation_version={:?} adaptation_state={:?} adaptation_sha256={} profile_binding_sha256={} tracker_config_sha256={} runner_build_claim_sha256={} runner_artifact_state={:?} runner_artifact_sha256={} expected_inventory_sha256={} processors_expected={} observed={} missing={} duplicate={} unexpected={} principal_id_claim={} authorization_registry_sha256={} authorization_level_claim={} time_ns_claim={} service_id={} exceptions={}",
+                    view.outcome, view.mode, view.pver_passed, view.targets_passed, view.targets_checked,
+                    view.tracker_loss_rows, view.tracker_refusals, view.catalog_version,
+                    oa_sha256::to_hex(&view.catalog_sha256), view.adaptation_version,
+                    view.adaptation.state, digest_text(view.adaptation.sha256),
+                    digest_text(view.profile_binding_sha256), oa_sha256::to_hex(&view.tracker_config_sha256),
+                    oa_sha256::to_hex(&view.runner_build_claim_sha256), view.runner_artifact.state,
+                    digest_text(view.runner_artifact.sha256), oa_sha256::to_hex(&view.expected_inventory_sha256),
+                    view.expected_processor_count, view.observed_processor_count, view.missing_processor_count,
+                    view.duplicate_processor_count, view.unexpected_processor_count, view.principal_id_claim,
+                    oa_sha256::to_hex(&view.authorization_registry_sha256), view.authorization_level_claim,
+                    view.time_ns_claim, view.service_id, exceptions);
+                for row in view.target_rows.iter().flatten() {
+                    println!("techops_target_map={row:?}");
+                }
+                for row in view.processor_rows.iter().flatten() {
+                    println!("techops_processor_evidence={row:?}");
+                }
                 Ok(())
             })();
             prepared
@@ -155,7 +198,7 @@ fn digest_text(value: Option<oa_sha256::Digest>) -> String {
 }
 
 fn usage() {
-    eprintln!("usage: oa-certification pver <full|abbreviated> <g2-package-dir> <manifest-sha256> | report <log> <count> <tail-hex> | certify <log> <count> <tail-hex> <local-registry> <registry-sha256-pin> <principal-claim> <time-ns-claim> <service> <full|abbreviated> <expected-roster.tsv> <observations.tsv> <exceptions> <artifact-cap>");
+    eprintln!("usage: oa-certification pver <full|abbreviated> <g2-package-dir> <manifest-sha256> | report <log> <count> <tail-hex> | certify <log> <count> <tail-hex> <local-registry> <registry-sha256-pin> <principal-claim> <time-ns-claim> <service> <full|abbreviated> <expected-roster.tsv> <observations.tsv> <exceptions> <artifact-cap> | techops-status <audit-log> <checkpoint-config> <max-polls 1..86400> <max-records 1..65536>");
 }
 
 fn parse_checkpoint(count: &str, tail: &str) -> Option<oa_audit_core::Checkpoint> {

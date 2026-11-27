@@ -2,6 +2,8 @@
 //! Shell (B1): bounded synthetic PVER execution, digest comparison, and append-only certification
 //! audit integration. This lane never runs live stimuli and never authenticates caller identities.
 
+pub mod audit_status;
+
 use oa_track::{
     output_clear, output_len, output_new, tracker_new, tracker_stats, tracker_update, Measurement,
     OutRow, TrackerConfig, M_HAS_VEL,
@@ -27,6 +29,7 @@ const DETAILS_MAGIC: &[u8; 8] = b"OACERT03";
 const DETAILS_MAGIC_V4: &[u8; 8] = b"OACERT04";
 const DETAILS_MAGIC_V5: &[u8; 8] = b"OACERT05";
 const DETAILS_MAGIC_V6: &[u8; 8] = b"OACERT06";
+const DETAILS_MAGIC_V7: &[u8; 8] = b"OACERT07";
 const MAX_PROCESSORS: usize = 128;
 const MAX_REQUEST_SOURCES: usize = 128;
 const MAX_SOFTWARE_ARTIFACT_BYTES: u64 = oa_build_info::MAX_ARTIFACT_BYTES;
@@ -45,6 +48,7 @@ pub enum PverMode {
 }
 
 /// Versioned target row from the externally stored synthetic performance catalog.
+// A7.2: one-shot catalog row; parser enforces a fixed six-target maximum.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SyntheticTarget {
     pub id: String,
@@ -57,6 +61,7 @@ pub struct SyntheticTarget {
 }
 
 /// Verified synthetic target catalog. Its digest is included in the audit details.
+// A7.2: one-shot catalog wrapper; both vectors are bounded to six validated rows.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SyntheticCatalog {
     pub version: String,
@@ -66,7 +71,20 @@ pub struct SyntheticCatalog {
     abbreviated: Vec<SyntheticTarget>,
 }
 
+// A7.2: one-shot fixed target identity; at most six full and six abbreviated rows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CatalogTargetIdentity {
+    id: String,
+    latitude_e7: i32,
+    longitude_e7: i32,
+    east_um_s: i64,
+    north_um_s: i64,
+    position_tolerance_um: u64,
+    velocity_tolerance_um_s: u64,
+}
+
 /// Output measurements and their target-specific comparison results.
+// A7.2: one-shot report; catalog and target result vectors are capped at six rows.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PverResult {
     mode: PverMode,
@@ -78,8 +96,8 @@ pub struct PverResult {
     tracker_config_sha256: oa_sha256::Digest,
     runner_build_claim_sha256: oa_sha256::Digest,
     profile_binding_sha256: Option<oa_sha256::Digest>,
-    full_catalog_targets: Vec<(String, u64, u64)>,
-    abbreviated_catalog_targets: Vec<(String, u64, u64)>,
+    full_catalog_targets: Vec<CatalogTargetIdentity>,
+    abbreviated_catalog_targets: Vec<CatalogTargetIdentity>,
     target_results: Vec<TargetResult>,
     targets_checked: usize,
     targets_passed: usize,
@@ -125,6 +143,10 @@ impl PverResult {
     pub fn target_results(&self) -> &[TargetResult] {
         &self.target_results
     }
+    /// Iterate over the fixed target-map packet rows for the Tech Ops display adapter.
+    pub fn registration_qc_rows(&self) -> impl Iterator<Item = &oa_techops::PverTargetMapRow> {
+        self.target_results.iter().map(|target| &target.target_map)
+    }
     pub fn targets_checked(&self) -> usize {
         self.targets_checked
     }
@@ -143,6 +165,7 @@ impl PverResult {
 }
 
 /// One per-target result retained in the audit event; all distances use micro-units.
+// A7.2: one-shot report row; maximum six rows and core display payload has an exact size bound.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TargetResult {
     pub target_id: String,
@@ -152,6 +175,8 @@ pub struct TargetResult {
     pub position_tolerance_um: u64,
     pub velocity_error_um_s: Option<u64>,
     pub velocity_tolerance_um_s: u64,
+    /// Fixed-point packet and residual fields for the existing Tech Ops target-map model.
+    pub target_map: oa_techops::PverTargetMapRow,
 }
 
 /// Per-target observable outcome retained in the PVER record.
@@ -269,6 +294,18 @@ fn digest_evidence_consistent(evidence: DigestEvidence) -> bool {
     }
 }
 
+fn service_digest_evidence(evidence: DigestEvidence) -> oa_techops::CertificationDigestEvidence {
+    oa_techops::CertificationDigestEvidence {
+        state: match evidence.state {
+            EvidenceState::Present => oa_techops::CertificationEvidenceState::Present,
+            EvidenceState::Missing => oa_techops::CertificationEvidenceState::Missing,
+            EvidenceState::Refused => oa_techops::CertificationEvidenceState::Refused,
+            EvidenceState::Invalid => oa_techops::CertificationEvidenceState::Invalid,
+        },
+        sha256: evidence.sha256,
+    }
+}
+
 /// Human certification decision. Principal and timestamp remain caller-supplied claims.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Certification {
@@ -289,13 +326,217 @@ pub struct Certification {
     exceptions: String,
 }
 
+impl Certification {
+    /// Fixed target-map rows underlying the generated registration/QC report.
+    pub fn registration_qc_rows(&self) -> impl Iterator<Item = &oa_techops::PverTargetMapRow> {
+        self.pver.registration_qc_rows()
+    }
+}
+
 /// Result exposed only after the append has been synced by `oa-audit-log`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CommittedCertification {
-    pub outcome: CertificationOutcome,
-    pub checkpoint: oa_audit_core::Checkpoint,
-    pub receipt: oa_audit_core::AuditReceipt,
-    pub record: Certification,
+    outcome: CertificationOutcome,
+    checkpoint: oa_audit_core::Checkpoint,
+    receipt: oa_audit_core::AuditReceipt,
+    record: Certification,
+}
+
+/// Opaque Tech Ops view tied to the exact durable certification event returned by the append.
+///
+/// The contained core view is plain data; this wrapper records which durable audit receipt
+/// authorizes presenting it as a committed record. Its fields are private so callers cannot
+/// attach a made-up certification claim to an unrelated receipt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CommittedCertificationView<'a> {
+    view: oa_techops::CertificationServiceView<'a>,
+    checkpoint: oa_audit_core::Checkpoint,
+    receipt: oa_audit_core::AuditReceipt,
+}
+
+impl CommittedCertificationView<'_> {
+    pub const fn view(&self) -> &oa_techops::CertificationServiceView<'_> {
+        &self.view
+    }
+
+    pub const fn checkpoint(&self) -> oa_audit_core::Checkpoint {
+        self.checkpoint
+    }
+
+    pub const fn receipt(&self) -> oa_audit_core::AuditReceipt {
+        self.receipt
+    }
+}
+
+impl CommittedCertification {
+    pub const fn outcome(&self) -> CertificationOutcome {
+        self.outcome
+    }
+
+    pub const fn checkpoint(&self) -> oa_audit_core::Checkpoint {
+        self.checkpoint
+    }
+
+    pub const fn receipt(&self) -> oa_audit_core::AuditReceipt {
+        self.receipt
+    }
+
+    /// Project the just-appended record into the bounded Tech Ops query model.
+    ///
+    /// Both caller buffers are capacity-checked before any writes. This method verifies that
+    /// the append receipt binds the exact record and checkpoint, then copies the stored PVER
+    /// rows and processor artifact evidence without recomputation or zero substitution.
+    pub fn service_view<'a>(
+        &'a self,
+        target_rows: &'a mut [Option<oa_techops::PverTargetMapRow>],
+        processor_rows: &'a mut [Option<oa_techops::CertificationProcessorRow>],
+    ) -> Result<CommittedCertificationView<'a>, CertificationError> {
+        let target_count = self.record.pver.target_results.len();
+        let processor_count = self.record.processors.len();
+        if target_count == 0
+            || target_count > oa_techops::MAX_CERTIFICATION_TARGET_ROWS
+            || processor_count == 0
+            || processor_count > oa_techops::MAX_CERTIFICATION_PROCESSOR_ROWS
+            || target_count > target_rows.len()
+            || processor_count > processor_rows.len()
+        {
+            return Err(CertificationError::Invalid(
+                "certification service-view caller buffer is too small or source exceeds bound",
+            ));
+        }
+        let target_output =
+            target_rows
+                .get_mut(..target_count)
+                .ok_or(CertificationError::Invalid(
+                    "target output slice is truncated",
+                ))?;
+        let processor_output =
+            processor_rows
+                .get_mut(..processor_count)
+                .ok_or(CertificationError::Invalid(
+                    "processor output slice is truncated",
+                ))?;
+        if self.checkpoint.count != self.receipt.sequence()
+            || self.checkpoint.tail != self.receipt.digest()
+            || self.receipt.action() != oa_audit_core::Action::Certification
+            || self.receipt.role() != oa_audit_core::Role::Configure
+            || self.receipt.principal() != self.record.principal_id
+            || self.receipt.event.time_ns != self.record.time_ns
+        {
+            return Err(CertificationError::Invalid(
+                "certification receipt does not bind the committed record checkpoint",
+            ));
+        }
+        let mut expected_event = self.receipt.event;
+        let details = encode_details(&self.record)?;
+        let (target, target_len) = oa_audit_core::target(self.record.service_id.as_bytes())
+            .map_err(|_| CertificationError::Invalid("service ID exceeds audit target limit"))?;
+        let (details, details_len) = oa_audit_core::details(&details).map_err(|_| {
+            CertificationError::Invalid("certification details exceed audit record limit")
+        })?;
+        expected_event.target = target;
+        expected_event.target_len = target_len;
+        expected_event.details = details;
+        expected_event.details_len = details_len;
+        if !oa_audit_core::receipt_matches(&self.receipt, expected_event) {
+            return Err(CertificationError::Invalid(
+                "certification receipt does not bind the stored record contents",
+            ));
+        }
+        let targets_checked = u8::try_from(self.record.pver.targets_checked)
+            .map_err(|_| CertificationError::Invalid("PVER target count exceeds view bound"))?;
+        let targets_passed = u8::try_from(self.record.pver.targets_passed)
+            .map_err(|_| CertificationError::Invalid("PVER pass count exceeds view bound"))?;
+        let expected_processor_count = u16::try_from(self.record.expected_processor_ids.len())
+            .map_err(|_| {
+                CertificationError::Invalid("expected processor count exceeds view bound")
+            })?;
+        let observed_processor_count = u16::try_from(self.record.observed_processor_ids.len())
+            .map_err(|_| {
+                CertificationError::Invalid("observed processor count exceeds view bound")
+            })?;
+        let missing_processor_count = u16::try_from(self.record.missing_processor_ids.len())
+            .map_err(|_| {
+                CertificationError::Invalid("missing processor count exceeds view bound")
+            })?;
+        let duplicate_processor_count = u16::try_from(self.record.duplicate_processor_ids.len())
+            .map_err(|_| {
+                CertificationError::Invalid("duplicate processor count exceeds view bound")
+            })?;
+        let unexpected_processor_count = u16::try_from(self.record.unexpected_processor_ids.len())
+            .map_err(|_| {
+                CertificationError::Invalid("unexpected processor count exceeds view bound")
+            })?;
+
+        for (slot, result) in target_output
+            .iter_mut()
+            .zip(&self.record.pver.target_results)
+        {
+            *slot = Some(result.target_map);
+        }
+        for (slot, processor) in processor_output.iter_mut().zip(&self.record.processors) {
+            *slot = Some(oa_techops::CertificationProcessorRow {
+                processor_id: processor.processor_id,
+                expected_software: service_digest_evidence(processor.expected_software),
+                observed_software: service_digest_evidence(processor.observed_software),
+                expected_adaptation: service_digest_evidence(processor.expected_adaptation),
+                observed_adaptation: service_digest_evidence(processor.observed_adaptation),
+            });
+        }
+        let view = oa_techops::CertificationServiceView {
+            outcome: match self.record.outcome {
+                CertificationOutcome::Certified => oa_techops::CertificationViewOutcome::Certified,
+                CertificationOutcome::CertifiedWithExceptions => {
+                    oa_techops::CertificationViewOutcome::CertifiedWithExceptions
+                }
+                CertificationOutcome::NotCertified => {
+                    oa_techops::CertificationViewOutcome::NotCertified
+                }
+            },
+            mode: match self.record.pver.mode {
+                PverMode::Full => oa_techops::CertificationViewMode::Full,
+                PverMode::Abbreviated => oa_techops::CertificationViewMode::Abbreviated,
+            },
+            pver_passed: self.record.pver.passed,
+            targets_checked,
+            targets_passed,
+            tracker_loss_rows: self.record.pver.tracker_loss_rows,
+            tracker_refusals: self.record.pver.tracker_refusals,
+            catalog_version: &self.record.pver.catalog_version,
+            catalog_sha256: self.record.pver.catalog_sha256,
+            adaptation_version: self.record.pver.adaptation_version,
+            adaptation: service_digest_evidence(self.record.pver.adaptation_evidence),
+            profile_binding_sha256: self.record.pver.profile_binding_sha256,
+            tracker_config_sha256: self.record.pver.tracker_config_sha256,
+            runner_build_claim_sha256: self.record.pver.runner_build_claim_sha256,
+            runner_artifact: service_digest_evidence(self.record.pver.runner_artifact_evidence),
+            expected_inventory_sha256: self.record.expected_inventory_sha256,
+            expected_processor_count,
+            observed_processor_count,
+            missing_processor_count,
+            duplicate_processor_count,
+            unexpected_processor_count,
+            principal_id_claim: self.record.principal_id,
+            authorization_registry_sha256: self.record.authorization_registry_sha256,
+            authorization_level_claim: match self.record.authorization_level_claim {
+                AuthorizationLevelClaim::Configure => 1,
+            },
+            time_ns_claim: self.record.time_ns,
+            service_id: &self.record.service_id,
+            exceptions: &self.record.exceptions,
+            audit_sequence: self.receipt.sequence(),
+            audit_digest: self.receipt.digest(),
+            checkpoint_count: self.checkpoint.count,
+            checkpoint_tail: self.checkpoint.tail,
+            target_rows: target_output,
+            processor_rows: processor_output,
+        };
+        Ok(CommittedCertificationView {
+            view,
+            checkpoint: self.checkpoint,
+            receipt: self.receipt,
+        })
+    }
 }
 
 /// Inputs for one expected processor in an on-demand certification attempt. Paths are local
@@ -536,6 +777,11 @@ fn parse_pver_catalog(
             velocity_tolerance_mps: parse_field(fields.get(8).copied(), "velocity tolerance")?,
         };
         if target.id.is_empty()
+            || target.id.len() > 32
+            || target
+                .id
+                .bytes()
+                .any(|byte| !byte.is_ascii_alphanumeric() && byte != b'-')
             || !(-900_000_000..=900_000_000).contains(&target.latitude_e7)
             || !(-1_800_000_000..=1_800_000_000).contains(&target.longitude_e7)
             || !target.east_mps.is_finite()
@@ -544,10 +790,31 @@ fn parse_pver_catalog(
             || target.position_tolerance_m <= 0.0
             || !target.velocity_tolerance_mps.is_finite()
             || target.velocity_tolerance_mps <= 0.0
+            || signed_micro_units(target.east_mps).is_err()
+            || signed_micro_units(target.north_mps).is_err()
         {
             return Err(CertificationError::Catalog(
                 "target values are out of range",
             ));
+        }
+        let cos_lat = (target.latitude_e7 as f64 / 10_000_000.0)
+            .to_radians()
+            .cos();
+        for second in 0..FULL_REPORTS_PER_TARGET {
+            let elapsed = second as f64;
+            let latitude_e7 = target.latitude_e7 as f64
+                + target.north_mps / METERS_PER_DEGREE * 10_000_000.0 * elapsed;
+            let longitude_e7 = target.longitude_e7 as f64
+                + target.east_mps / (METERS_PER_DEGREE * cos_lat) * 10_000_000.0 * elapsed;
+            if !latitude_e7.is_finite()
+                || !longitude_e7.is_finite()
+                || !(-900_000_000.0..=900_000_000.0).contains(&latitude_e7)
+                || !(-1_800_000_000.0..=1_800_000_000.0).contains(&longitude_e7)
+            {
+                return Err(CertificationError::Catalog(
+                    "target trajectory exceeds coordinate domain",
+                ));
+            }
         }
         match mode {
             "full" => full.push(target),
@@ -602,12 +869,18 @@ fn parse_field<T: std::str::FromStr>(
         .map_err(|_| CertificationError::Catalog(label))
 }
 
-fn catalog_target_identity(target: &SyntheticTarget) -> (String, u64, u64) {
-    (
-        target.id.clone(),
-        micro_units(target.position_tolerance_m).unwrap_or(0),
-        micro_units(target.velocity_tolerance_mps).unwrap_or(0),
-    )
+fn catalog_target_identity(
+    target: &SyntheticTarget,
+) -> Result<CatalogTargetIdentity, CertificationError> {
+    Ok(CatalogTargetIdentity {
+        id: target.id.clone(),
+        latitude_e7: target.latitude_e7,
+        longitude_e7: target.longitude_e7,
+        east_um_s: signed_micro_units(target.east_mps)?,
+        north_um_s: signed_micro_units(target.north_mps)?,
+        position_tolerance_um: micro_units(target.position_tolerance_m)?,
+        velocity_tolerance_um_s: micro_units(target.velocity_tolerance_mps)?,
+    })
 }
 
 /// Execute fixed synthetic target trajectories through the production `oa-track` tracker.
@@ -635,6 +908,33 @@ fn run_catalog(
     mode: PverMode,
     adaptation_evidence: DigestEvidence,
 ) -> Result<PverResult, CertificationError> {
+    run_catalog_impl(catalog, mode, adaptation_evidence, None, [0, 0])
+}
+
+#[cfg(test)]
+fn run_catalog_with_test_input_variation(
+    catalog: &SyntheticCatalog,
+    mode: PverMode,
+    adaptation_evidence: DigestEvidence,
+    omitted_target: Option<&str>,
+    position_offset_e7: [i32; 2],
+) -> Result<PverResult, CertificationError> {
+    run_catalog_impl(
+        catalog,
+        mode,
+        adaptation_evidence,
+        omitted_target,
+        position_offset_e7,
+    )
+}
+
+fn run_catalog_impl(
+    catalog: &SyntheticCatalog,
+    mode: PverMode,
+    adaptation_evidence: DigestEvidence,
+    omitted_target: Option<&str>,
+    position_offset_e7: [i32; 2],
+) -> Result<PverResult, CertificationError> {
     let targets = match mode {
         PverMode::Full => &catalog.full,
         PverMode::Abbreviated => &catalog.abbreviated,
@@ -654,6 +954,9 @@ fn run_catalog(
     let mut output_overflow = 0u64;
     for second in 0..FULL_REPORTS_PER_TARGET {
         for target in targets {
+            if omitted_target.is_some_and(|target_id| target.id == target_id) {
+                continue;
+            }
             let time_ns = BASE_TIME_NS
                 .checked_add(
                     (second as i64)
@@ -661,7 +964,19 @@ fn run_catalog(
                         .ok_or(CertificationError::Invalid("synthetic time overflow"))?,
                 )
                 .ok_or(CertificationError::Invalid("synthetic time overflow"))?;
-            let m = measurement(target, time_ns, second as f64);
+            let mut m = measurement(target, time_ns, second as f64);
+            m.lat_e7 =
+                m.lat_e7
+                    .checked_add(position_offset_e7[0])
+                    .ok_or(CertificationError::Invalid(
+                        "PVER input latitude offset overflow",
+                    ))?;
+            m.lon_e7 =
+                m.lon_e7
+                    .checked_add(position_offset_e7[1])
+                    .ok_or(CertificationError::Invalid(
+                        "PVER input longitude offset overflow",
+                    ))?;
             output_clear(&mut output);
             tracker_update(&mut tracker, &m, &mut output);
             output_overflow = output_overflow.saturating_add(output.overflow);
@@ -714,6 +1029,9 @@ fn run_catalog(
     for (index, target) in targets.iter().enumerate() {
         let tolerance_pos = micro_units(target.position_tolerance_m)?;
         let tolerance_vel = micro_units(target.velocity_tolerance_mps)?;
+        let (target_id, target_id_len) = target_id_bytes(&target.id)?;
+        let expected_east_um_s = signed_micro_units(target.east_mps)?;
+        let expected_north_um_s = signed_micro_units(target.north_mps)?;
         let evidence = match latest.get(index).copied().flatten() {
             None => TargetResult {
                 target_id: target.id.clone(),
@@ -723,6 +1041,30 @@ fn run_catalog(
                 position_tolerance_um: tolerance_pos,
                 velocity_error_um_s: None,
                 velocity_tolerance_um_s: tolerance_vel,
+                target_map: oa_techops::PverTargetMapRow {
+                    target_id,
+                    target_id_len,
+                    state: oa_techops::PverTargetMapState::MissingOutput,
+                    output_time_ns: None,
+                    target_lat_e7: target.latitude_e7,
+                    target_lon_e7: target.longitude_e7,
+                    expected_lat_e7: None,
+                    expected_lon_e7: None,
+                    observed_lat_e7: None,
+                    observed_lon_e7: None,
+                    expected_east_um_s,
+                    expected_north_um_s,
+                    observed_east_um_s: None,
+                    observed_north_um_s: None,
+                    east_position_residual_um: None,
+                    north_position_residual_um: None,
+                    east_velocity_residual_um_s: None,
+                    north_velocity_residual_um_s: None,
+                    position_error_um: None,
+                    position_tolerance_um: tolerance_pos,
+                    velocity_error_um_s: None,
+                    velocity_tolerance_um_s: tolerance_vel,
+                },
             },
             Some(row) => {
                 let elapsed = (row.t_ns.saturating_sub(BASE_TIME_NS)) as f64 / NS_PER_SECOND as f64;
@@ -748,6 +1090,24 @@ fn run_catalog(
                 }
                 let position_error_um = micro_units(position_error_m)?;
                 let velocity_error_um_s = micro_units(velocity_error_mps)?;
+                let expected_lat_e7 = coordinate_e7(expected_lat)?;
+                let expected_lon_e7 = coordinate_e7(expected_lon)?;
+                let east_position_residual_um = signed_micro_units(
+                    (row.lon_e7 as f64 - expected_lon) / 10_000_000.0 * METERS_PER_DEGREE * cos_lat,
+                )?;
+                let north_position_residual_um = signed_micro_units(
+                    (row.lat_e7 as f64 - expected_lat) / 10_000_000.0 * METERS_PER_DEGREE,
+                )?;
+                let observed_east_um_s = signed_micro_units(f64::from(row.vel_east_mps))?;
+                let observed_north_um_s = signed_micro_units(f64::from(row.vel_north_mps))?;
+                let east_velocity_residual_um_s =
+                    observed_east_um_s.checked_sub(expected_east_um_s).ok_or(
+                        CertificationError::Invalid("east velocity residual overflow"),
+                    )?;
+                let north_velocity_residual_um_s =
+                    observed_north_um_s.checked_sub(expected_north_um_s).ok_or(
+                        CertificationError::Invalid("north velocity residual overflow"),
+                    )?;
                 let position_ok = within_micro_tolerance(position_error_um, tolerance_pos);
                 let velocity_ok = within_micro_tolerance(velocity_error_um_s, tolerance_vel);
                 let state = match (position_ok, velocity_ok) {
@@ -769,6 +1129,44 @@ fn run_catalog(
                     position_tolerance_um: tolerance_pos,
                     velocity_error_um_s: Some(velocity_error_um_s),
                     velocity_tolerance_um_s: tolerance_vel,
+                    target_map: oa_techops::PverTargetMapRow {
+                        target_id,
+                        target_id_len,
+                        state: match state {
+                            TargetResultState::Passed => oa_techops::PverTargetMapState::Passed,
+                            TargetResultState::PositionExceeded => {
+                                oa_techops::PverTargetMapState::PositionExceeded
+                            }
+                            TargetResultState::VelocityExceeded => {
+                                oa_techops::PverTargetMapState::VelocityExceeded
+                            }
+                            TargetResultState::BothExceeded => {
+                                oa_techops::PverTargetMapState::BothExceeded
+                            }
+                            TargetResultState::MissingOutput => {
+                                oa_techops::PverTargetMapState::MissingOutput
+                            }
+                        },
+                        output_time_ns: Some(row.t_ns),
+                        target_lat_e7: target.latitude_e7,
+                        target_lon_e7: target.longitude_e7,
+                        expected_lat_e7: Some(expected_lat_e7),
+                        expected_lon_e7: Some(expected_lon_e7),
+                        observed_lat_e7: Some(row.lat_e7),
+                        observed_lon_e7: Some(row.lon_e7),
+                        expected_east_um_s,
+                        expected_north_um_s,
+                        observed_east_um_s: Some(observed_east_um_s),
+                        observed_north_um_s: Some(observed_north_um_s),
+                        east_position_residual_um: Some(east_position_residual_um),
+                        north_position_residual_um: Some(north_position_residual_um),
+                        east_velocity_residual_um_s: Some(east_velocity_residual_um_s),
+                        north_velocity_residual_um_s: Some(north_velocity_residual_um_s),
+                        position_error_um: Some(position_error_um),
+                        position_tolerance_um: tolerance_pos,
+                        velocity_error_um_s: Some(velocity_error_um_s),
+                        velocity_tolerance_um_s: tolerance_vel,
+                    },
                 }
             }
         };
@@ -799,12 +1197,16 @@ fn run_catalog(
         tracker_config_sha256,
         runner_build_claim_sha256,
         profile_binding_sha256,
-        full_catalog_targets: catalog.full.iter().map(catalog_target_identity).collect(),
+        full_catalog_targets: catalog
+            .full
+            .iter()
+            .map(catalog_target_identity)
+            .collect::<Result<_, _>>()?,
         abbreviated_catalog_targets: catalog
             .abbreviated
             .iter()
             .map(catalog_target_identity)
-            .collect(),
+            .collect::<Result<_, _>>()?,
         target_results,
         targets_checked: count,
         targets_passed,
@@ -838,6 +1240,50 @@ fn micro_units(value: f64) -> Result<u64, CertificationError> {
         ));
     }
     Ok(scaled as u64)
+}
+
+fn signed_micro_units(value: f64) -> Result<i64, CertificationError> {
+    if !value.is_finite() {
+        return Err(CertificationError::Invalid("PVER residual is not finite"));
+    }
+    let scaled = (value * 1_000_000.0).round();
+    if !scaled.is_finite() || scaled < i64::MIN as f64 || scaled > i64::MAX as f64 {
+        return Err(CertificationError::Invalid(
+            "PVER residual exceeds fixed-point range",
+        ));
+    }
+    Ok(scaled as i64)
+}
+
+fn coordinate_e7(value: f64) -> Result<i32, CertificationError> {
+    if !value.is_finite() || value < i32::MIN as f64 || value > i32::MAX as f64 {
+        return Err(CertificationError::Invalid(
+            "PVER coordinate exceeds fixed-point range",
+        ));
+    }
+    Ok(value.round() as i32)
+}
+
+fn target_id_bytes(id: &str) -> Result<([u8; 32], u8), CertificationError> {
+    if id.is_empty()
+        || id.len() > 32
+        || !id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    {
+        return Err(CertificationError::Catalog(
+            "target ID is invalid for display packet",
+        ));
+    }
+    let mut out = [0; 32];
+    out.get_mut(..id.len())
+        .ok_or(CertificationError::Invalid("target ID range is invalid"))?
+        .copy_from_slice(id.as_bytes());
+    Ok((
+        out,
+        u8::try_from(id.len())
+            .map_err(|_| CertificationError::Invalid("target ID length overflow"))?,
+    ))
 }
 
 fn within_micro_tolerance(error_um: u64, tolerance_um: u64) -> bool {
@@ -1222,11 +1668,69 @@ fn decide_certification(
     };
     let mut checked_target_results = 0usize;
     let target_results_valid = pver.target_results.len() == expected_targets
-        && pver.target_results.iter().zip(catalog_targets).all(
-            |(result, (target_id, expected_position, expected_velocity))| {
-                result.target_id == *target_id
-                    && result.position_tolerance_um == *expected_position
-                    && result.velocity_tolerance_um_s == *expected_velocity
+        && pver
+            .target_results
+            .iter()
+            .zip(catalog_targets)
+            .all(|(result, identity)| {
+                let map = result.target_map;
+                let id_len = usize::from(map.target_id_len);
+                let map_id = map.target_id.get(..id_len).unwrap_or(&[]);
+                let expected_map_state = match result.state {
+                    TargetResultState::MissingOutput => {
+                        oa_techops::PverTargetMapState::MissingOutput
+                    }
+                    TargetResultState::Passed => oa_techops::PverTargetMapState::Passed,
+                    TargetResultState::PositionExceeded => {
+                        oa_techops::PverTargetMapState::PositionExceeded
+                    }
+                    TargetResultState::VelocityExceeded => {
+                        oa_techops::PverTargetMapState::VelocityExceeded
+                    }
+                    TargetResultState::BothExceeded => oa_techops::PverTargetMapState::BothExceeded,
+                };
+                let map_presence_valid = if result.state == TargetResultState::MissingOutput {
+                    map.output_time_ns.is_none()
+                        && map.expected_lat_e7.is_none()
+                        && map.expected_lon_e7.is_none()
+                        && map.observed_lat_e7.is_none()
+                        && map.observed_lon_e7.is_none()
+                        && map.observed_east_um_s.is_none()
+                        && map.observed_north_um_s.is_none()
+                        && map.east_position_residual_um.is_none()
+                        && map.north_position_residual_um.is_none()
+                        && map.east_velocity_residual_um_s.is_none()
+                        && map.north_velocity_residual_um_s.is_none()
+                        && map.position_error_um.is_none()
+                        && map.velocity_error_um_s.is_none()
+                } else {
+                    map.output_time_ns == result.output_time_ns
+                        && map.expected_lat_e7.is_some()
+                        && map.expected_lon_e7.is_some()
+                        && map.observed_lat_e7.is_some()
+                        && map.observed_lon_e7.is_some()
+                        && map.observed_east_um_s.is_some()
+                        && map.observed_north_um_s.is_some()
+                        && map.east_position_residual_um.is_some()
+                        && map.north_position_residual_um.is_some()
+                        && map.east_velocity_residual_um_s.is_some()
+                        && map.north_velocity_residual_um_s.is_some()
+                        && map.position_error_um == result.position_error_um
+                        && map.velocity_error_um_s == result.velocity_error_um_s
+                };
+                result.target_id == identity.id
+                    && id_len == identity.id.len()
+                    && map_id == identity.id.as_bytes()
+                    && map.state == expected_map_state
+                    && map.target_lat_e7 == identity.latitude_e7
+                    && map.target_lon_e7 == identity.longitude_e7
+                    && map.expected_east_um_s == identity.east_um_s
+                    && map.expected_north_um_s == identity.north_um_s
+                    && map.position_tolerance_um == result.position_tolerance_um
+                    && map.velocity_tolerance_um_s == result.velocity_tolerance_um_s
+                    && map_presence_valid
+                    && result.position_tolerance_um == identity.position_tolerance_um
+                    && result.velocity_tolerance_um_s == identity.velocity_tolerance_um_s
                     && match result.state {
                         TargetResultState::MissingOutput => {
                             result.output_time_ns.is_none()
@@ -1263,8 +1767,7 @@ fn decide_certification(
                             true
                         }
                     }
-            },
-        );
+            });
     if !digest_evidence_consistent(pver.adaptation_evidence)
         || pver.full_catalog_targets.len() != MAX_CATALOG_TARGETS
         || pver.abbreviated_catalog_targets.len() != 3
@@ -1486,7 +1989,7 @@ fn encode_details(c: &Certification) -> Result<Vec<u8>, CertificationError> {
     let duplicate_count = u16::try_from(c.duplicate_processor_ids.len())
         .map_err(|_| CertificationError::Invalid("duplicate processor inventory is too large"))?;
     let mut out = Vec::with_capacity(20_480);
-    out.extend_from_slice(DETAILS_MAGIC_V6);
+    out.extend_from_slice(DETAILS_MAGIC_V7);
     out.push(match c.outcome {
         CertificationOutcome::Certified => 1,
         CertificationOutcome::CertifiedWithExceptions => 2,
@@ -1532,6 +2035,41 @@ fn encode_details(c: &Certification) -> Result<Vec<u8>, CertificationError> {
         out.extend_from_slice(&target.position_tolerance_um.to_le_bytes());
         out.extend_from_slice(&target.velocity_error_um_s.unwrap_or(0).to_le_bytes());
         out.extend_from_slice(&target.velocity_tolerance_um_s.to_le_bytes());
+        let map = target.target_map;
+        out.extend_from_slice(&map.target_lat_e7.to_le_bytes());
+        out.extend_from_slice(&map.target_lon_e7.to_le_bytes());
+        out.extend_from_slice(&map.expected_east_um_s.to_le_bytes());
+        out.extend_from_slice(&map.expected_north_um_s.to_le_bytes());
+        let map_present = map.output_time_ns.is_some();
+        out.push(u8::from(map_present));
+        if map_present {
+            for value in [
+                map.expected_lat_e7,
+                map.expected_lon_e7,
+                map.observed_lat_e7,
+                map.observed_lon_e7,
+            ] {
+                out.extend_from_slice(
+                    &value
+                        .ok_or(CertificationError::Invalid("target map coordinate missing"))?
+                        .to_le_bytes(),
+                );
+            }
+            for value in [
+                map.observed_east_um_s,
+                map.observed_north_um_s,
+                map.east_position_residual_um,
+                map.north_position_residual_um,
+                map.east_velocity_residual_um_s,
+                map.north_velocity_residual_um_s,
+            ] {
+                out.extend_from_slice(
+                    &value
+                        .ok_or(CertificationError::Invalid("target map residual missing"))?
+                        .to_le_bytes(),
+                );
+            }
+        }
     }
     append_digest_evidence(&mut out, c.pver.adaptation_evidence);
     match c.pver.profile_binding_sha256 {
@@ -1593,7 +2131,8 @@ fn append_digest_evidence(out: &mut Vec<u8>, evidence: DigestEvidence) {
 fn decode_details(bytes: &[u8]) -> Result<String, CertificationError> {
     let mut cursor = 0usize;
     let magic = take(bytes, &mut cursor, DETAILS_MAGIC.len())?;
-    let schema_v6 = magic == DETAILS_MAGIC_V6;
+    let schema_v7 = magic == DETAILS_MAGIC_V7;
+    let schema_v6 = schema_v7 || magic == DETAILS_MAGIC_V6;
     let schema_v5 = schema_v6 || magic == DETAILS_MAGIC_V5;
     let schema_v4 = schema_v5 || magic == DETAILS_MAGIC_V4;
     let schema_v3 = schema_v4 || magic == DETAILS_MAGIC;
@@ -1736,6 +2275,44 @@ fn decode_details(bytes: &[u8]) -> Result<String, CertificationError> {
             let velocity_error_um_s = read_u64(bytes, &mut cursor)?;
             let velocity_tolerance_um_s = read_u64(bytes, &mut cursor)?;
             let missing = state == "missing_output";
+            let map_report = if schema_v7 {
+                let target_lat_e7 = read_i32(bytes, &mut cursor)?;
+                let target_lon_e7 = read_i32(bytes, &mut cursor)?;
+                let expected_east_um_s = read_i64(bytes, &mut cursor)?;
+                let expected_north_um_s = read_i64(bytes, &mut cursor)?;
+                let present = match read_u8(bytes, &mut cursor)? {
+                    0 => false,
+                    1 => true,
+                    _ => {
+                        return Err(CertificationError::Invalid(
+                            "target map presence marker is invalid",
+                        ))
+                    }
+                };
+                if present == missing {
+                    return Err(CertificationError::Invalid(
+                        "target map presence disagrees with PVER state",
+                    ));
+                }
+                if present {
+                    let expected_lat_e7 = read_i32(bytes, &mut cursor)?;
+                    let expected_lon_e7 = read_i32(bytes, &mut cursor)?;
+                    let observed_lat_e7 = read_i32(bytes, &mut cursor)?;
+                    let observed_lon_e7 = read_i32(bytes, &mut cursor)?;
+                    let observed_east_um_s = read_i64(bytes, &mut cursor)?;
+                    let observed_north_um_s = read_i64(bytes, &mut cursor)?;
+                    let east_position_residual_um = read_i64(bytes, &mut cursor)?;
+                    let north_position_residual_um = read_i64(bytes, &mut cursor)?;
+                    let east_velocity_residual_um_s = read_i64(bytes, &mut cursor)?;
+                    let north_velocity_residual_um_s = read_i64(bytes, &mut cursor)?;
+                    format!(
+                        "target_lat_e7={target_lat_e7},target_lon_e7={target_lon_e7},expected_lat_e7={expected_lat_e7},expected_lon_e7={expected_lon_e7},observed_lat_e7={observed_lat_e7},observed_lon_e7={observed_lon_e7},expected_east_um_s={expected_east_um_s},expected_north_um_s={expected_north_um_s},observed_east_um_s={observed_east_um_s},observed_north_um_s={observed_north_um_s},east_position_residual_um={east_position_residual_um},north_position_residual_um={north_position_residual_um},east_velocity_residual_um_s={east_velocity_residual_um_s},north_velocity_residual_um_s={north_velocity_residual_um_s}")
+                } else {
+                    format!("target_lat_e7={target_lat_e7},target_lon_e7={target_lon_e7},expected_lat_e7=absent,expected_lon_e7=absent,observed_lat_e7=absent,observed_lon_e7=absent,expected_east_um_s={expected_east_um_s},expected_north_um_s={expected_north_um_s},observed_east_um_s=absent,observed_north_um_s=absent,east_position_residual_um=absent,north_position_residual_um=absent,east_velocity_residual_um_s=absent,north_velocity_residual_um_s=absent")
+                }
+            } else {
+                String::from("target_map=unavailable_legacy")
+            };
             if position_tolerance_um == 0
                 || velocity_tolerance_um_s == 0
                 || (missing
@@ -1749,7 +2326,7 @@ fn decode_details(bytes: &[u8]) -> Result<String, CertificationError> {
             use std::fmt::Write as _;
             let _ = writeln!(
                 &mut lines,
-                "pver_target={id},state={state},output_time_ns={},position_error_um={},position_tolerance_um={},velocity_error_um_s={},velocity_tolerance_um_s={}",
+                "pver_target={id},state={state},output_time_ns={},position_error_um={},position_tolerance_um={},velocity_error_um_s={},velocity_tolerance_um_s={},registration_qc={map_report}",
                 if missing { "absent".to_owned() } else { output_time_ns.to_string() },
                 if missing { "absent".to_owned() } else { position_error_um.to_string() },
                 position_tolerance_um,
@@ -1926,7 +2503,7 @@ fn decode_details(bytes: &[u8]) -> Result<String, CertificationError> {
         let adaptation = read_digest_evidence(bytes, &mut cursor)?;
         let _ = writeln!(
             &mut report,
-            "processor={processor},software_expected_state={:?},software_expected_sha256={},software_observed_state={:?},software_observed_sha256={},adaptation_expected_state={:?},adaptation_expected_sha256={},adaptation_observed_state={:?},adaptation_observed_sha256={}",
+            "processor={processor},software_expected_state={:?},software_expected_sha256={},software_observed_state={:?},software_observed_sha256={},software_observed_source=local_artifact_file,adaptation_expected_state={:?},adaptation_expected_sha256={},adaptation_observed_state={:?},adaptation_observed_sha256={},adaptation_observed_source=verified_local_g2_snapshot,runtime_loaded_image=unavailable,runtime_loaded_adaptation=unavailable,runtime_disk_adaptation=unavailable",
             expected_software.state, digest_text(expected_software.sha256),
             software.state, digest_text(software.sha256),
             expected_adaptation.state, digest_text(expected_adaptation.sha256),
@@ -1995,6 +2572,13 @@ fn read_i64(bytes: &[u8], cursor: &mut usize) -> Result<i64, CertificationError>
     let mut out = [0u8; 8];
     out.copy_from_slice(raw);
     Ok(i64::from_le_bytes(out))
+}
+
+fn read_i32(bytes: &[u8], cursor: &mut usize) -> Result<i32, CertificationError> {
+    let raw: [u8; 4] = take(bytes, cursor, 4)?
+        .try_into()
+        .map_err(|_| CertificationError::Invalid("audit i32 field is truncated"))?;
+    Ok(i32::from_le_bytes(raw))
 }
 
 fn read_digest(bytes: &[u8], cursor: &mut usize) -> Result<oa_sha256::Digest, CertificationError> {
@@ -2149,6 +2733,121 @@ mod tests {
         .expect("synthetic tracker run")
     }
 
+    fn assert_target_map_matches_catalog(
+        result: &PverResult,
+        catalog: &SyntheticCatalog,
+        targets: &[SyntheticTarget],
+    ) {
+        assert_eq!(result.target_results().len(), targets.len());
+        assert_eq!(result.registration_qc_rows().count(), targets.len());
+        assert_eq!(result.catalog_sha256(), catalog.sha256);
+        assert!(result.adaptation_sha256().is_some());
+        assert!(result.profile_binding_sha256().is_some());
+        for (target, row) in targets.iter().zip(result.target_results()) {
+            let map = row.target_map;
+            assert_eq!(row.target_id, target.id);
+            assert_eq!(map.target_id_len as usize, target.id.len());
+            assert_eq!(
+                &map.target_id[..usize::from(map.target_id_len)],
+                target.id.as_bytes()
+            );
+            assert_eq!(map.target_lat_e7, target.latitude_e7);
+            assert_eq!(map.target_lon_e7, target.longitude_e7);
+            assert_eq!(
+                map.expected_east_um_s,
+                signed_micro_units(target.east_mps).unwrap()
+            );
+            assert_eq!(
+                map.expected_north_um_s,
+                signed_micro_units(target.north_mps).unwrap()
+            );
+            assert_eq!(
+                map.position_tolerance_um,
+                micro_units(target.position_tolerance_m).unwrap()
+            );
+            assert_eq!(
+                map.velocity_tolerance_um_s,
+                micro_units(target.velocity_tolerance_mps).unwrap()
+            );
+            assert_eq!(map.position_tolerance_um, row.position_tolerance_um);
+            assert_eq!(map.velocity_tolerance_um_s, row.velocity_tolerance_um_s);
+            assert_eq!(map.output_time_ns, row.output_time_ns);
+            assert_eq!(map.position_error_um, row.position_error_um);
+            assert_eq!(map.velocity_error_um_s, row.velocity_error_um_s);
+            match row.state {
+                TargetResultState::MissingOutput => {
+                    assert_eq!(map.state, oa_techops::PverTargetMapState::MissingOutput);
+                    assert!(map.expected_lat_e7.is_none());
+                    assert!(map.expected_lon_e7.is_none());
+                    assert!(map.observed_lat_e7.is_none());
+                    assert!(map.observed_lon_e7.is_none());
+                    assert!(map.observed_east_um_s.is_none());
+                    assert!(map.observed_north_um_s.is_none());
+                    assert!(map.position_error_um.is_none());
+                    assert!(map.east_position_residual_um.is_none());
+                    assert!(map.north_position_residual_um.is_none());
+                }
+                TargetResultState::Passed
+                | TargetResultState::PositionExceeded
+                | TargetResultState::VelocityExceeded
+                | TargetResultState::BothExceeded => {
+                    assert_eq!(map.state as u8, row.state as u8);
+                    let observed_lat = map.observed_lat_e7.expect("actual tracker latitude");
+                    let observed_lon = map.observed_lon_e7.expect("actual tracker longitude");
+                    let time_ns = map.output_time_ns.expect("actual tracker output time");
+                    let elapsed =
+                        (time_ns.saturating_sub(BASE_TIME_NS)) as f64 / NS_PER_SECOND as f64;
+                    let expected_lat = target.latitude_e7 as f64
+                        + target.north_mps * elapsed / METERS_PER_DEGREE * 10_000_000.0;
+                    let cos_lat = (target.latitude_e7 as f64 / 10_000_000.0)
+                        .to_radians()
+                        .cos();
+                    let expected_lon = target.longitude_e7 as f64
+                        + target.east_mps * elapsed / (METERS_PER_DEGREE * cos_lat) * 10_000_000.0;
+                    assert_eq!(
+                        map.expected_lat_e7,
+                        Some(coordinate_e7(expected_lat).unwrap())
+                    );
+                    assert_eq!(
+                        map.expected_lon_e7,
+                        Some(coordinate_e7(expected_lon).unwrap())
+                    );
+                    let observed_east = map.observed_east_um_s.expect("tracker east velocity");
+                    let observed_north = map.observed_north_um_s.expect("tracker north velocity");
+                    assert_eq!(
+                        map.east_position_residual_um,
+                        Some(
+                            signed_micro_units(
+                                (observed_lon as f64 - expected_lon) / 10_000_000.0
+                                    * METERS_PER_DEGREE
+                                    * cos_lat,
+                            )
+                            .unwrap()
+                        )
+                    );
+                    assert_eq!(
+                        map.north_position_residual_um,
+                        Some(
+                            signed_micro_units(
+                                (observed_lat as f64 - expected_lat) / 10_000_000.0
+                                    * METERS_PER_DEGREE,
+                            )
+                            .unwrap()
+                        )
+                    );
+                    assert_eq!(
+                        map.east_velocity_residual_um_s,
+                        Some(observed_east.checked_sub(map.expected_east_um_s).unwrap())
+                    );
+                    assert_eq!(
+                        map.north_velocity_residual_um_s,
+                        Some(observed_north.checked_sub(map.expected_north_um_s).unwrap())
+                    );
+                }
+            }
+        }
+    }
+
     fn log_path() -> std::path::PathBuf {
         std::env::temp_dir().join(format!(
             "oa-certification-{}-{}.audit",
@@ -2223,6 +2922,45 @@ mod tests {
         );
     }
 
+    // REQ: OA-CERT-009
+    #[test]
+    fn registration_qc_rows_bind_coordinates_and_refuse_missing_sentinel_mismatch() {
+        let pver = test_pver(PverMode::Full);
+        let first = pver.target_results.first().expect("one fixed target row");
+        let map = first.target_map;
+        assert_eq!(map.target_id_len as usize, first.target_id.len());
+        assert_eq!(map.output_time_ns, first.output_time_ns);
+        assert!(map.expected_lat_e7.is_some());
+        assert!(map.observed_lat_e7.is_some());
+        assert!(map.east_position_residual_um.is_some());
+        assert!(map.east_velocity_residual_um_s.is_some());
+
+        let mut invalid = pver;
+        if let Some(row) = invalid.target_results.first_mut() {
+            row.target_map.observed_lat_e7 = None;
+        }
+        assert!(decide_certification(
+            11,
+            1_800_000_000_000_000_000,
+            "synthetic-service".to_owned(),
+            invalid,
+            vec![7],
+            vec![processor()],
+            String::new(),
+        )
+        .is_err());
+
+        let catalog = synthetic_catalog().expect("catalog");
+        let malformed = include_bytes!("../data/synthetic-pver-v1.csv")
+            .windows(b"42.0".len())
+            .position(|window| window == b"42.0");
+        let mut nonfinite = include_bytes!("../data/synthetic-pver-v1.csv").to_vec();
+        let offset = malformed.expect("expected first velocity field");
+        nonfinite.splice(offset..offset + 4, b"NaN".iter().copied());
+        assert!(parse_pver_catalog(&nonfinite, Some(1)).is_err());
+        assert_eq!(catalog.abbreviated.len(), 3);
+    }
+
     // REQ: OA-CERT-002
     #[test]
     fn pver_thresholds_use_rounded_micro_units_at_the_boundary() {
@@ -2243,6 +2981,7 @@ mod tests {
     #[test]
     fn full_and_abbreviated_pver_measure_real_tracker_position_and_velocity_outputs() {
         let full = test_pver(PverMode::Full);
+        let catalog = synthetic_catalog().expect("catalog validates");
         assert!(full.passed(), "full PVER: {full:?}");
         assert_eq!(full.targets_checked(), 6);
         assert_eq!(full.targets_passed(), 6);
@@ -2256,11 +2995,86 @@ mod tests {
             .target_results()
             .iter()
             .all(|row| row.output_time_ns.is_some()));
+        assert_target_map_matches_catalog(&full, &catalog, &catalog.full);
 
         let abbreviated = test_pver(PverMode::Abbreviated);
         assert!(abbreviated.passed(), "abbreviated PVER: {abbreviated:?}");
         assert_eq!(abbreviated.targets_checked(), 3);
         assert_eq!(abbreviated.targets_passed(), 3);
+        assert_target_map_matches_catalog(&abbreviated, &catalog, &catalog.abbreviated);
+    }
+
+    // REQ: OA-CERT-002, OA-CERT-003, OA-CERT-004, OA-CERT-009
+    #[test]
+    fn shifted_tracker_target_fails_qc_and_missing_output_stays_explicit() {
+        let catalog = synthetic_catalog().expect("catalog validates");
+        let shifted = run_catalog_with_test_input_variation(
+            &catalog,
+            PverMode::Full,
+            DigestEvidence::present([2; 32]),
+            None,
+            [200_000, 0],
+        )
+        .expect("shifted synthetic tracker run completes");
+        assert!(!shifted.passed());
+        let shifted_row = shifted.target_results().first().expect("first target");
+        assert_eq!(shifted_row.state, TargetResultState::PositionExceeded);
+        assert_eq!(
+            shifted_row.target_map.state,
+            oa_techops::PverTargetMapState::PositionExceeded
+        );
+        assert_ne!(
+            shifted_row.target_map.observed_lat_e7,
+            shifted_row.target_map.expected_lat_e7
+        );
+        assert!(shifted_row
+            .target_map
+            .position_error_um
+            .is_some_and(|error| error > shifted_row.target_map.position_tolerance_um));
+        assert_eq!(
+            certification(shifted, "").outcome,
+            CertificationOutcome::NotCertified
+        );
+
+        let omitted_id = catalog
+            .full
+            .first()
+            .expect("first fixed target")
+            .id
+            .as_str();
+        let missing = run_catalog_with_test_input_variation(
+            &catalog,
+            PverMode::Full,
+            DigestEvidence::present([2; 32]),
+            Some(omitted_id),
+            [0, 0],
+        )
+        .expect("missing-output run completes with an explicit row");
+        let missing_row = missing
+            .target_results()
+            .first()
+            .expect("missing target row");
+        assert_eq!(missing_row.target_id, omitted_id);
+        assert_eq!(missing_row.state, TargetResultState::MissingOutput);
+        let map = missing_row.target_map;
+        assert_eq!(map.state, oa_techops::PverTargetMapState::MissingOutput);
+        assert!(map.output_time_ns.is_none());
+        assert!(map.expected_lat_e7.is_none());
+        assert!(map.expected_lon_e7.is_none());
+        assert!(map.observed_lat_e7.is_none());
+        assert!(map.observed_lon_e7.is_none());
+        assert!(map.observed_east_um_s.is_none());
+        assert!(map.observed_north_um_s.is_none());
+        assert!(map.east_position_residual_um.is_none());
+        assert!(map.north_position_residual_um.is_none());
+        assert!(map.east_velocity_residual_um_s.is_none());
+        assert!(map.north_velocity_residual_um_s.is_none());
+        assert!(map.position_error_um.is_none());
+        assert!(map.velocity_error_um_s.is_none());
+        assert_eq!(
+            certification(missing, "").outcome,
+            CertificationOutcome::NotCertified
+        );
     }
 
     // REQ: OA-CERT-002
@@ -2482,6 +3296,71 @@ mod tests {
                 "verified package has no issued PVER catalog"
             ))
         ));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    // REQ: OA-CERT-001, OA-CERT-002, OA-CERT-009
+    #[test]
+    fn issued_package_catalog_binds_qc_rows_to_verified_adaptation_and_artifact() {
+        let legacy_snapshot = include_bytes!("../../oa-ca/tests/fixtures/a3-empty-synthetic.oag2");
+        let model = oa_airspace::snapshot::decode(legacy_snapshot)
+            .expect("legacy synthetic snapshot decodes");
+        let snapshot =
+            oa_airspace::snapshot::encode(&model).expect("current canonical synthetic snapshot");
+        let root = std::env::temp_dir().join(format!(
+            "oa-cert-issued-pver-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let previous_root = root.join("previous");
+        let issued_root = root.join("issued");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir(&root).expect("synthetic package test root");
+        let previous_pin = oa_adapt::manifest::write_new_package(
+            &previous_root,
+            &snapshot,
+            "release",
+            "ZAU",
+            "previous-synthetic-package",
+        )
+        .expect("previous synthetic package");
+        let (version, manifest_pin) = oa_adapt::manifest::issue_new_package_with_pver_catalog(
+            &issued_root,
+            &snapshot,
+            CATALOG_BYTES,
+            None,
+            "release",
+            "ZAU",
+            "issued-synthetic-PVER-map",
+            &previous_root,
+            previous_pin,
+            oa_adapt::manifest::ChangeClass::Initial,
+            "issuer-claim",
+            "approver-claim",
+            "fixed synthetic registration and QC targets",
+        )
+        .expect("issued v4 package with fixed PVER catalog");
+        assert_eq!(version, 1);
+
+        let result = run_bound_performance(PverMode::Full, &issued_root, manifest_pin)
+            .expect("verified issued package drives tracker PVER");
+        let catalog = parse_pver_catalog(CATALOG_BYTES, Some(version)).expect("issued catalog");
+        assert!(result.passed(), "bound full PVER: {result:?}");
+        assert_eq!(result.catalog_sha256(), oa_sha256::sha256(CATALOG_BYTES));
+        assert_eq!(result.adaptation_version(), Some(version));
+        assert_eq!(
+            result.adaptation_sha256(),
+            Some(
+                oa_adapt::manifest::verify_current(&issued_root, manifest_pin)
+                    .expect("issued package re-verifies")
+                    .identity()
+                    .snapshot_sha256
+            )
+        );
+        assert_ne!(result.runner_artifact_sha256(), Some([0; 32]));
+        assert!(result.profile_binding_sha256().is_some());
+        assert_target_map_matches_catalog(&result, &catalog, &catalog.full);
+
         let _ = std::fs::remove_dir_all(root);
     }
 

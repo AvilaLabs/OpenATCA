@@ -418,3 +418,62 @@ fn metric_contract_refuses_open_invalid_and_oversized_windows() {
         Err(StatusError::PerformanceSamplesOverCapacity)
     );
 }
+
+// REQ: OA-CERT-009
+#[test]
+fn fixed_target_map_retains_packet_coordinates_and_explicit_missing_values() {
+    let mut target_id = [0; 32];
+    target_id[..6].copy_from_slice(b"TGT-01");
+    let missing = PverTargetMapRow {
+        target_id,
+        target_id_len: 6,
+        state: PverTargetMapState::MissingOutput,
+        output_time_ns: None,
+        target_lat_e7: 400_000_000,
+        target_lon_e7: -750_000_000,
+        expected_lat_e7: None,
+        expected_lon_e7: None,
+        observed_lat_e7: None,
+        observed_lon_e7: None,
+        expected_east_um_s: 42_000_000,
+        expected_north_um_s: 12_000_000,
+        observed_east_um_s: None,
+        observed_north_um_s: None,
+        east_position_residual_um: None,
+        north_position_residual_um: None,
+        east_velocity_residual_um_s: None,
+        north_velocity_residual_um_s: None,
+        position_error_um: None,
+        position_tolerance_um: 1_500_000_000,
+        velocity_error_um_s: None,
+        velocity_tolerance_um_s: 35_000_000,
+    };
+    assert_eq!(missing.state, PverTargetMapState::MissingOutput);
+    assert_eq!(
+        (missing.target_lat_e7, missing.target_lon_e7),
+        (400_000_000, -750_000_000)
+    );
+    assert_eq!(missing.observed_lat_e7, None);
+    assert_eq!(missing.position_error_um, None);
+
+    let emitted = PverTargetMapRow {
+        output_time_ns: Some(1_800_000_000_000_000_000),
+        expected_lat_e7: Some(400_000_000),
+        expected_lon_e7: Some(-750_000_000),
+        observed_lat_e7: Some(400_000_001),
+        observed_lon_e7: Some(-749_999_999),
+        observed_east_um_s: Some(42_000_000),
+        observed_north_um_s: Some(12_000_000),
+        east_position_residual_um: Some(10_000),
+        north_position_residual_um: Some(10_000),
+        east_velocity_residual_um_s: Some(0),
+        north_velocity_residual_um_s: Some(0),
+        position_error_um: Some(14_142),
+        velocity_error_um_s: Some(0),
+        state: PverTargetMapState::Passed,
+        ..missing
+    };
+    assert_eq!(emitted.state, PverTargetMapState::Passed);
+    assert_eq!(emitted.observed_lat_e7, Some(400_000_001));
+    assert_eq!(emitted.east_velocity_residual_um_s, Some(0));
+}

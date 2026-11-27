@@ -1,4 +1,5 @@
 //! Durable bounded file operations. One fixed-size record is appended per action.
+pub mod watch;
 pub use crate::encoding::MAX_RECORDS;
 use crate::encoding::{chain, checkpoint, decode, encode, RECORD_BYTES};
 use oa_audit_core::{

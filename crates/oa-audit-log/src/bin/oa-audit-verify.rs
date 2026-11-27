@@ -1,32 +1,48 @@
 //! Bounded audit log verifier shell, with an opt-in operator-configured watch mode.
 use oa_audit_core::{AuditError, Checkpoint};
+use oa_audit_log::shell::watch::WatchPoller;
 use oa_audit_log::shell::{self, LogError, MAX_RECORDS};
+#[cfg(test)]
 use oa_techops::{
     record_alarm_transition, Alarm, AlarmSeverity, AlarmState, AlarmTime, AlarmTransition,
     ClockDomainId, ResourceKey, ResourceKind,
 };
+#[cfg(test)]
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 const MAX_ARGUMENT_BYTES: usize = 4096;
-const MAX_CONFIG_BYTES: usize = 256;
 const MAX_WATCH_POLLS: u64 = 86_400;
 const MAX_WATCH_RUNTIME: Duration = Duration::from_secs(86_400);
 const MAX_OUTPUT_BYTES: usize = 1_048_576;
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
+#[cfg(test)]
+const MAX_CONFIG_BYTES: usize = 256;
+#[cfg(test)]
 const ALARM_COUNT: usize = 5;
+#[cfg(test)]
 const ALARM_CHAIN_BROKEN: u64 = 1;
+#[cfg(test)]
 const ALARM_ROLE_ACTION: u64 = 2;
+#[cfg(test)]
 const ALARM_STALE_CONFIG: u64 = 3;
+#[cfg(test)]
 const ALARM_CHECKPOINT_DIVERGED: u64 = 4;
+#[cfg(test)]
 const ALARM_MONITOR_UNAVAILABLE: u64 = 5;
+#[cfg(test)]
 const REASON_CHAIN_BROKEN: u16 = 0xA101;
+#[cfg(test)]
 const REASON_ROLE_ACTION: u16 = 0xA102;
+#[cfg(test)]
 const REASON_STALE_CONFIG: u16 = 0xA103;
+#[cfg(test)]
 const REASON_CHECKPOINT_DIVERGED: u16 = 0xA104;
+#[cfg(test)]
 const REASON_MONITOR_UNAVAILABLE: u16 = 0xA105;
 
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct WatchConfig {
     generation: u64,
@@ -34,12 +50,10 @@ struct WatchConfig {
     refresh_ms: u64,
 }
 
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum WatchStatus {
     Valid,
-    GenerationRegression,
-    GenerationChangedWithoutAdvance,
-    GenerationAdvancedUnverified,
     CheckpointAhead,
     CheckpointUnmatched,
     IncompleteRecord,
@@ -49,6 +63,7 @@ enum WatchStatus {
     VerificationUnavailable,
 }
 
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct WatchSample {
     status: WatchStatus,
@@ -56,8 +71,7 @@ struct WatchSample {
     expected: Option<Checkpoint>,
 }
 
-type MismatchSignature = (u64, WatchStatus, Option<Checkpoint>);
-
+#[cfg(test)]
 #[derive(Clone, Copy)]
 struct AlarmSpec {
     instance: u64,
@@ -65,6 +79,7 @@ struct AlarmSpec {
     severity: AlarmSeverity,
 }
 
+#[cfg(test)]
 const ALARM_SPECS: [AlarmSpec; ALARM_COUNT] = [
     AlarmSpec {
         instance: ALARM_CHAIN_BROKEN,
@@ -93,6 +108,7 @@ const ALARM_SPECS: [AlarmSpec; ALARM_COUNT] = [
     },
 ];
 
+#[cfg(test)]
 const EMPTY_ALARM: Alarm = Alarm {
     instance_id: 0,
     resource: ResourceKey {
@@ -194,143 +210,45 @@ fn run_watch(args: &[String]) -> Result<(), String> {
         "max records",
     )?;
     let started = Instant::now();
-    let mut alarms = [EMPTY_ALARM; ALARM_COUNT];
-    let mut alarm_generations = [0u32; ALARM_COUNT];
+    let mut poller =
+        WatchPoller::new(max_records).map_err(|error| format!("watch setup refused: {error:?}"))?;
     let mut output_bytes = 0usize;
-    let mut accepted_config: Option<WatchConfig> = None;
-    let mut generation_seen_at = started;
-    let mut mismatch_signature: Option<(MismatchSignature, u8)> = None;
-    let mut mismatch_count: u8;
-    let mut active_alarms = [false; ALARM_COUNT];
 
     for poll in 0..max_polls {
         if started.elapsed() > MAX_WATCH_RUNTIME {
             return Err("watch exceeded the 24-hour runtime limit".into());
         }
-        let now = Instant::now();
-        let now_ns = elapsed_ns(started, now)?;
-        let config_result = read_watch_config(&config_path);
-        let config_value = config_result.as_ref().ok().copied();
-        let (sample, generation, config_refused) = match config_result {
-            Ok(config) => {
-                let sample = inspect_log(&log_path, config, max_records);
-                (sample, Some(config.generation), false)
-            }
-            Err(error) => {
-                write_bounded_line(
-                    &mut output_bytes,
-                    &format!("poll\t{}\tconfig_refused\t{}", poll + 1, error),
-                )?;
-                (
-                    WatchSample {
-                        status: WatchStatus::VerificationUnavailable,
-                        verified_checkpoint: None,
-                        expected: None,
-                    },
-                    None,
-                    true,
-                )
-            }
-        };
-
-        let sample = if let Some(config) = config_value {
-            let rejected = rejected_config_status(accepted_config, config, sample.status);
-            if let Some(status) = rejected {
-                WatchSample {
-                    status,
-                    verified_checkpoint: None,
-                    expected: Some(config.checkpoint),
-                }
+        let now_ns = elapsed_ns(started, Instant::now())?;
+        let snapshot = poller
+            .poll(&log_path, &config_path, now_ns)
+            .map_err(|error| format!("watch poll refused: {error:?}"))?;
+        for transition in snapshot.transitions.iter().flatten() {
+            let state = if transition.raised {
+                "raised"
             } else {
-                if sample.status == WatchStatus::Valid
-                    && accepted_config
-                        .is_none_or(|accepted| config.generation > accepted.generation)
-                {
-                    accepted_config = Some(config);
-                    generation_seen_at = now;
-                }
-                sample
-            }
-        } else {
-            sample
-        };
-
-        let stale = is_stale(
-            accepted_config
-                .filter(|config| config.refresh_ms > 0)
-                .map(|config| config.refresh_ms),
-            generation_seen_at,
-            now,
-        );
-        if let Some(config) = config_value {
-            if let Some((signature, count)) = mismatch_signature {
-                let current_signature = (config.generation, sample.status, sample.expected);
-                if signature == current_signature {
-                    mismatch_count = count.saturating_add(1);
-                } else {
-                    mismatch_signature = Some((current_signature, 1));
-                    mismatch_count = 1;
-                }
-            } else if matches!(
-                sample.status,
-                WatchStatus::CheckpointAhead | WatchStatus::CheckpointUnmatched
-            ) {
-                mismatch_signature = Some(((config.generation, sample.status, sample.expected), 1));
-                mismatch_count = 1;
-            } else {
-                mismatch_signature = None;
-                mismatch_count = 0;
-            }
-        } else {
-            mismatch_signature = None;
-            mismatch_count = 0;
+                "cleared"
+            };
+            write_bounded_line(
+                &mut output_bytes,
+                &format!(
+                    "alarm\t{}\t{}\t{}",
+                    transition.instance_id, state, transition.reason_code
+                ),
+            )?;
         }
-        let divergence = mismatch_count >= 3;
-        let chain_broken = sample.status == WatchStatus::ChainBroken;
-        let wrong_role = sample.status == WatchStatus::WrongRoleAction;
-        let unavailable = config_refused
-            || matches!(
-                sample.status,
-                WatchStatus::VerificationUnavailable
-                    | WatchStatus::LimitReached
-                    | WatchStatus::GenerationRegression
-                    | WatchStatus::GenerationChangedWithoutAdvance
-                    | WatchStatus::GenerationAdvancedUnverified
-            );
-        let verified_fresh_pin = sample.status == WatchStatus::Valid;
-        let [old_chain, old_role, old_stale, old_divergence, old_unavailable] = active_alarms;
-        active_alarms = [
-            chain_broken || (!verified_fresh_pin && old_chain),
-            wrong_role || (!verified_fresh_pin && old_role),
-            stale
-                || (config_refused
-                    || sample.status == WatchStatus::GenerationRegression
-                    || sample.status == WatchStatus::GenerationChangedWithoutAdvance
-                    || sample.status == WatchStatus::GenerationAdvancedUnverified)
-                    && old_stale,
-            divergence || (!verified_fresh_pin && old_divergence),
-            unavailable || (!verified_fresh_pin && old_unavailable),
-        ];
-        update_alarms(
-            &mut alarms,
-            &mut alarm_generations,
-            active_alarms,
-            now_ns,
-            &mut output_bytes,
-        )?;
-        let status = if stale {
+        let status = if snapshot.stale_checkpoint {
             "stale_checkpoint_contract"
-        } else if divergence {
+        } else if snapshot.checkpoint_diverged {
             "checkpoint_diverged"
         } else {
-            status_name(sample.status)
+            shared_status_name(snapshot.status)
         };
-        let verified_count = sample
-            .verified_checkpoint
-            .map_or_else(|| "-".into(), |cp| cp.count.to_string());
-        let expected_count = sample
-            .expected
-            .map_or_else(|| "-".into(), |cp| cp.count.to_string());
+        let verified_count = snapshot
+            .verified_count
+            .map_or_else(|| "-".into(), |count| count.to_string());
+        let expected_count = snapshot
+            .expected_count
+            .map_or_else(|| "-".into(), |count| count.to_string());
         write_bounded_line(
             &mut output_bytes,
             &format!(
@@ -339,7 +257,9 @@ fn run_watch(args: &[String]) -> Result<(), String> {
                 status,
                 verified_count,
                 expected_count,
-                generation.map_or_else(|| "-".into(), |value| value.to_string())
+                snapshot
+                    .generation
+                    .map_or_else(|| "-".into(), |value| value.to_string())
             ),
         )?;
         if poll + 1 < max_polls {
@@ -349,51 +269,66 @@ fn run_watch(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-fn inspect_log(log_path: &Path, config: WatchConfig, max_records: u64) -> WatchSample {
-    if config.checkpoint.count > max_records {
-        return WatchSample {
-            status: WatchStatus::LimitReached,
-            verified_checkpoint: None,
-            expected: Some(config.checkpoint),
-        };
-    }
-    let result = shell::verify(log_path, config.checkpoint);
-    match result {
-        Ok(verified_checkpoint) => WatchSample {
-            status: WatchStatus::Valid,
-            verified_checkpoint: Some(verified_checkpoint),
-            expected: Some(config.checkpoint),
-        },
-        Err(LogError::IncompleteRecord { .. }) => WatchSample {
-            status: WatchStatus::IncompleteRecord,
-            verified_checkpoint: None,
-            expected: Some(config.checkpoint),
-        },
-        Err(LogError::Truncated { sequence }) if sequence <= config.checkpoint.count => {
-            WatchSample {
-                status: WatchStatus::CheckpointAhead,
-                verified_checkpoint: None,
-                expected: Some(config.checkpoint),
-            }
-        }
-        Err(LogError::Truncated { .. }) => WatchSample {
-            status: WatchStatus::IncompleteRecord,
-            verified_checkpoint: None,
-            expected: Some(config.checkpoint),
-        },
-        Err(LogError::CheckpointMismatch) => WatchSample {
-            status: WatchStatus::CheckpointUnmatched,
-            verified_checkpoint: None,
-            expected: Some(config.checkpoint),
-        },
-        Err(error) => WatchSample {
-            status: status_from_log_error(&error),
-            verified_checkpoint: None,
-            expected: Some(config.checkpoint),
-        },
+fn shared_status_name(status: oa_audit_log::shell::watch::WatchStatus) -> &'static str {
+    use oa_audit_log::shell::watch::WatchStatus as Status;
+    match status {
+        Status::Valid => "valid",
+        Status::GenerationRegression => "generation_regression_unverified",
+        Status::GenerationChangedWithoutAdvance => "generation_change_without_advance",
+        Status::GenerationAdvancedUnverified => "generation_advance_unverified",
+        Status::CheckpointAhead => "checkpoint_ahead_pending",
+        Status::CheckpointUnmatched => "checkpoint_unmatched_pending",
+        Status::IncompleteRecord => "incomplete_record_pending",
+        Status::ChainBroken => "chain_broken",
+        Status::WrongRoleAction => "wrong_role_action",
+        Status::LimitReached => "limit_reached",
+        Status::VerificationUnavailable => "verification_unavailable",
     }
 }
 
+#[cfg(test)]
+fn inspect_log(log_path: &Path, config: WatchConfig, max_records: u64) -> WatchSample {
+    let sample = oa_audit_log::shell::watch::inspect_log(
+        log_path,
+        oa_audit_log::shell::watch::WatchConfig {
+            generation: config.generation,
+            checkpoint: config.checkpoint,
+            refresh_ms: config.refresh_ms,
+        },
+        max_records,
+    );
+    WatchSample {
+        status: match sample.status {
+            oa_audit_log::shell::watch::WatchStatus::Valid => WatchStatus::Valid,
+            oa_audit_log::shell::watch::WatchStatus::CheckpointAhead => {
+                WatchStatus::CheckpointAhead
+            }
+            oa_audit_log::shell::watch::WatchStatus::CheckpointUnmatched => {
+                WatchStatus::CheckpointUnmatched
+            }
+            oa_audit_log::shell::watch::WatchStatus::IncompleteRecord => {
+                WatchStatus::IncompleteRecord
+            }
+            oa_audit_log::shell::watch::WatchStatus::ChainBroken => WatchStatus::ChainBroken,
+            oa_audit_log::shell::watch::WatchStatus::WrongRoleAction => {
+                WatchStatus::WrongRoleAction
+            }
+            oa_audit_log::shell::watch::WatchStatus::LimitReached => WatchStatus::LimitReached,
+            oa_audit_log::shell::watch::WatchStatus::VerificationUnavailable => {
+                WatchStatus::VerificationUnavailable
+            }
+            oa_audit_log::shell::watch::WatchStatus::GenerationRegression
+            | oa_audit_log::shell::watch::WatchStatus::GenerationChangedWithoutAdvance
+            | oa_audit_log::shell::watch::WatchStatus::GenerationAdvancedUnverified => {
+                WatchStatus::VerificationUnavailable
+            }
+        },
+        verified_checkpoint: sample.verified_checkpoint,
+        expected: sample.expected_checkpoint,
+    }
+}
+
+#[cfg(test)]
 fn status_from_log_error(error: &LogError) -> WatchStatus {
     match error {
         LogError::BrokenRecord {
@@ -413,6 +348,7 @@ fn status_from_log_error(error: &LogError) -> WatchStatus {
     }
 }
 
+#[cfg(test)]
 fn read_watch_config(path: &Path) -> Result<WatchConfig, String> {
     let (mut file, _) = oa_sealed::Sealed::production()
         .open_regular(path)
@@ -460,6 +396,7 @@ fn read_watch_config(path: &Path) -> Result<WatchConfig, String> {
     parse_watch_config(text)
 }
 
+#[cfg(test)]
 fn parse_watch_config(text: &str) -> Result<WatchConfig, String> {
     let mut lines = text.lines();
     if lines.next() != Some("OA-AUDIT-WATCH-V1") {
@@ -485,6 +422,7 @@ fn parse_watch_config(text: &str) -> Result<WatchConfig, String> {
     })
 }
 
+#[cfg(test)]
 fn parse_config_field(line: Option<&str>, name: &str) -> Result<u64, String> {
     let prefix = format!("{name}=");
     let value = line
@@ -495,6 +433,7 @@ fn parse_config_field(line: Option<&str>, name: &str) -> Result<u64, String> {
         .map_err(|_| format!("checkpoint config {name} must be unsigned integer"))
 }
 
+#[cfg(test)]
 fn update_alarms(
     alarms: &mut [Alarm; ALARM_COUNT],
     generations: &mut [u32; ALARM_COUNT],
@@ -571,6 +510,7 @@ fn elapsed_ns(started: Instant, now: Instant) -> Result<i64, String> {
         .map_err(|_| "watch monotonic timestamp exceeds signed nanoseconds".into())
 }
 
+#[cfg(test)]
 fn is_stale(refresh_ms: Option<u64>, seen: Instant, now: Instant) -> bool {
     refresh_ms.is_some_and(|limit| {
         limit > 0 && now.saturating_duration_since(seen) > Duration::from_millis(limit)
@@ -615,44 +555,6 @@ fn nibble(byte: u8) -> Result<u8, String> {
         b'0'..=b'9' => Ok(byte - b'0'),
         b'a'..=b'f' => Ok(byte - b'a' + 10),
         _ => Err("tail digest must use lowercase hexadecimal".into()),
-    }
-}
-
-fn status_name(status: WatchStatus) -> &'static str {
-    match status {
-        WatchStatus::Valid => "valid",
-        WatchStatus::GenerationRegression => "generation_regression_unverified",
-        WatchStatus::GenerationChangedWithoutAdvance => "generation_change_without_advance",
-        WatchStatus::GenerationAdvancedUnverified => "generation_advance_unverified",
-        WatchStatus::CheckpointAhead => "checkpoint_ahead_pending",
-        WatchStatus::CheckpointUnmatched => "checkpoint_unmatched_pending",
-        WatchStatus::IncompleteRecord => "incomplete_record_pending",
-        WatchStatus::ChainBroken => "chain_broken",
-        WatchStatus::WrongRoleAction => "wrong_role_action",
-        WatchStatus::LimitReached => "limit_reached",
-        WatchStatus::VerificationUnavailable => "verification_unavailable",
-    }
-}
-
-fn rejected_config_status(
-    accepted: Option<WatchConfig>,
-    proposed: WatchConfig,
-    observed_status: WatchStatus,
-) -> Option<WatchStatus> {
-    match accepted {
-        Some(previous) if proposed.generation < previous.generation => {
-            Some(WatchStatus::GenerationRegression)
-        }
-        Some(previous) if proposed.generation == previous.generation && proposed != previous => {
-            Some(WatchStatus::GenerationChangedWithoutAdvance)
-        }
-        Some(previous)
-            if proposed.generation > previous.generation
-                && observed_status != WatchStatus::Valid =>
-        {
-            Some(WatchStatus::GenerationAdvancedUnverified)
-        }
-        _ => None,
     }
 }
 
@@ -721,65 +623,6 @@ mod tests {
             oa_sha256::to_hex(&checkpoint.tail)
         );
         std::fs::write(path, text).expect("config write");
-    }
-
-    // REQ: OA-AUDIT-011
-    #[test]
-    fn watch_generation_requires_verified_strict_advance_and_immutable_same_generation_pin() {
-        let checkpoint = genesis();
-        let accepted = WatchConfig {
-            generation: 5,
-            checkpoint,
-            refresh_ms: 1,
-        };
-        assert_eq!(
-            rejected_config_status(None, accepted, WatchStatus::Valid),
-            None
-        );
-        assert_eq!(
-            rejected_config_status(
-                Some(accepted),
-                WatchConfig {
-                    generation: 4,
-                    ..accepted
-                },
-                WatchStatus::Valid,
-            ),
-            Some(WatchStatus::GenerationRegression)
-        );
-        assert_eq!(
-            rejected_config_status(
-                Some(accepted),
-                WatchConfig {
-                    refresh_ms: 0,
-                    ..accepted
-                },
-                WatchStatus::Valid,
-            ),
-            Some(WatchStatus::GenerationChangedWithoutAdvance)
-        );
-        assert_eq!(
-            rejected_config_status(
-                Some(accepted),
-                WatchConfig {
-                    generation: 6,
-                    ..accepted
-                },
-                WatchStatus::CheckpointUnmatched,
-            ),
-            Some(WatchStatus::GenerationAdvancedUnverified)
-        );
-        assert_eq!(
-            rejected_config_status(
-                Some(accepted),
-                WatchConfig {
-                    generation: 6,
-                    ..accepted
-                },
-                WatchStatus::Valid,
-            ),
-            None
-        );
     }
 
     // REQ: OA-AUDIT-011

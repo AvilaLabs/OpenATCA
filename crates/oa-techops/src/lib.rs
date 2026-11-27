@@ -39,6 +39,59 @@ pub const MAX_SEQUENCE_SLOTS: u64 = 4_096;
 pub const SEQUENCE_WORDS: usize = (MAX_SEQUENCE_SLOTS as usize) / 64;
 /// Bound for performance samples in one metric window (C2/C7).
 pub const MAX_PERFORMANCE_SAMPLES: usize = 65_536;
+/// Fixed maximum number of target-map rows in one PVER report.
+pub const MAX_PVER_TARGET_ROWS: usize = 6;
+
+mod certification;
+pub use certification::{
+    CertificationDigestEvidence, CertificationEvidenceState, CertificationProcessorRow,
+    CertificationServiceView, CertificationViewMode, CertificationViewOutcome,
+    MAX_CERTIFICATION_PROCESSOR_ROWS, MAX_CERTIFICATION_TARGET_ROWS,
+};
+
+/// Result state for one fixed target-map quality-control packet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum PverTargetMapState {
+    MissingOutput = 1,
+    Passed = 2,
+    PositionExceeded = 3,
+    VelocityExceeded = 4,
+    BothExceeded = 5,
+}
+
+/// One bounded target-map row with explicit absent observations and fixed-point units.
+///
+/// Coordinates use signed degrees multiplied by 1e7; velocity and residual values use
+/// micrometres per second. East/north position residuals use signed micrometres. `None` means
+/// the tracker emitted no comparable packet; it is never encoded as a numeric sentinel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(C)]
+pub struct PverTargetMapRow {
+    pub target_id: [u8; 32],
+    pub target_id_len: u8,
+    pub state: PverTargetMapState,
+    pub output_time_ns: Option<i64>,
+    pub target_lat_e7: i32,
+    pub target_lon_e7: i32,
+    pub expected_lat_e7: Option<i32>,
+    pub expected_lon_e7: Option<i32>,
+    pub observed_lat_e7: Option<i32>,
+    pub observed_lon_e7: Option<i32>,
+    pub expected_east_um_s: i64,
+    pub expected_north_um_s: i64,
+    pub observed_east_um_s: Option<i64>,
+    pub observed_north_um_s: Option<i64>,
+    pub east_position_residual_um: Option<i64>,
+    pub north_position_residual_um: Option<i64>,
+    pub east_velocity_residual_um_s: Option<i64>,
+    pub north_velocity_residual_um_s: Option<i64>,
+    pub position_error_um: Option<u64>,
+    pub position_tolerance_um: u64,
+    pub velocity_error_um_s: Option<u64>,
+    pub velocity_tolerance_um_s: u64,
+}
+const _: () = assert!(core::mem::size_of::<PverTargetMapRow>() == 256);
 
 /// Stable processor identity from the expected inventory, not an authenticated identity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -111,6 +111,7 @@
     "OA-AUDIT-007",
     "OA-AUDIT-008",
     "OA-AUDIT-011",
+    "OA-AUDIT-012",
     "OA-AWC-001",
     "OA-AWC-002",
     "OA-AWC-003",
@@ -10994,6 +10995,7 @@
         "OA-CERT-009",
         "OA-CERT-010",
         "OA-AUDIT-011",
+        "OA-AUDIT-012",
         "OA-FEED-197"
       ],
       "source_refs": [
@@ -11036,6 +11038,10 @@
         {
           "document": "REQUIREMENTS.md",
           "locator": "OA-AUDIT-011"
+        },
+        {
+          "document": "REQUIREMENTS.md",
+          "locator": "OA-AUDIT-012"
         }
       ],
       "verification_refs": [
@@ -11593,6 +11599,31 @@
           "requirement_id": "OA-AUDIT-011",
           "file": "crates/oa-audit-log/src/bin/oa-audit-verify.rs",
           "test_name": "watch_output_limit_refuses_before_emitting_an_oversized_line"
+        },
+        {
+          "requirement_id": "OA-AUDIT-012",
+          "file": "crates/oa-audit-log/src/shell/watch.rs",
+          "test_name": "audit_watch_poll_api_debounces_divergence_and_latches_then_clears_alarm"
+        },
+        {
+          "requirement_id": "OA-AUDIT-012",
+          "file": "crates/oa-audit-log/src/shell/watch.rs",
+          "test_name": "audit_watch_path_replacement_uses_new_pin_without_claiming_verification"
+        },
+        {
+          "requirement_id": "OA-AUDIT-012",
+          "file": "crates/oa-audit-log/src/shell/watch.rs",
+          "test_name": "audit_watch_accepts_symlink_to_valid_unsealed_regular_checkpoint"
+        },
+        {
+          "requirement_id": "OA-AUDIT-012",
+          "file": "tools/oa-certification/src/audit_status.rs",
+          "test_name": "techops_status_query_reports_exact_pinned_audit_state_and_alarm_rows"
+        },
+        {
+          "requirement_id": "OA-AUDIT-012",
+          "file": "tools/oa-certification/src/audit_status.rs",
+          "test_name": "techops_status_query_refuses_unbounded_poll_and_record_limits"
         }
       ],
       "proof_refs": []
@@ -23520,6 +23551,12 @@
       "function": "migration_comparison_and_safety_evidence",
       "hazard_id": "HZ-EVIDENCE-001",
       "rationale": "Engineering safety candidate: a broken privileged-action log, invalid role/action record, or stale external checkpoint contract could leave an evidence reviewer without a reliable view of audit integrity. The bounded watcher uses the existing exact-checkpoint verifier, distinguishes checkpoint races and partial writes from proven broken records, and reports role/action refusals separately. It does not gate privileged commits, authenticate the checkpoint publisher or principal, attest identity, or prevent replacement of both log and checkpoint."
+    },
+    {
+      "id": "OA-AUDIT-012",
+      "function": "migration_comparison_and_safety_evidence",
+      "hazard_id": "HZ-EVIDENCE-001",
+      "rationale": "Engineering safety candidate: if a running technician status view does not consume the audit verifier result, an operator may see stale or incomplete integrity status. The bounded shell poller reuses exact externally pinned verification and the existing Tech Ops alarm transitions; it emits no computed head and remains unauthenticated, process-local, and outside any migration gate."
     },
     {
       "id": "OA-CERT-001",

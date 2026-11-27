@@ -8236,3 +8236,14 @@ The L13 role registry is not yet landed; roles below are plain caller-supplied c
   overlong log, and 1 MiB of output. The checkpoint,
   principal origin and publisher are caller/operator claims, not authenticated or HSM-backed; the
   watch is not an automatic migration gate or a complete vulnerability monitor.
+- **OA-AUDIT-012** The technician-shell `oa-certification techops-status` command uses the same
+  bounded `WatchPoller` as `oa-audit-verify --watch` to poll the audit log against the exact
+  operator-supplied sealed checkpoint config. It emits the typed verification state, active alarm
+  rows and existing Tech Ops alarm transitions in bounded output; only exact count-and-tail
+  verification reports a verified count, and no computed tail is accepted or emitted. One process
+  retains the fixed poll,
+  heartbeat, divergence and alarm-instance state; each invocation is limited to 86,400 polls,
+  24 hours, 65,536 expected records per poll plus one overflow-detection record, and 1 MiB output.
+  A one-shot query is an observation, not continuous monitoring. The checkpoint publisher and
+  principal origin remain unauthenticated caller claims, and this feature provides no RMM
+  transport, persistent alarm history, authenticated identity, or migration gate.
