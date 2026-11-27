@@ -9,6 +9,9 @@
     clippy::panic
 )]
 
+#[path = "../../test-support/sealed_inputs.rs"]
+mod sealed_inputs;
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -102,44 +105,27 @@ fn arguments_are_strict_and_a_sealed_path_exits_2_before_anything_is_opened() {
     .is_err());
     let exe = env!("CARGO_BIN_EXE_oa-ca");
     let out = scratch("exit");
-    let data = std::env::var_os("OPENATCA_DATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../openatca-data")
-        });
-    let sealed_day = data.join("raw/adsblol/2026.11.20/a.oaf");
-    let sealed_cfg = data.join("scds/stdds-20261119-holdout/k.cfg");
-    let sealed_out = data.join("scds/stdds-smoke-20261119T1/o");
+    let sealed_inputs = sealed_inputs::sealed_inputs(env!("CARGO_MANIFEST_DIR"));
+    let sealed_day = sealed_inputs.raw_sample;
+    let sealed_cfg = sealed_inputs.config;
+    let sealed_out = sealed_inputs.output;
     for (adsb, cfg, o) in [
         (sealed_day.as_path(), Path::new("k.cfg"), out.join("o")),
         (Path::new("fine.oaf"), sealed_cfg.as_path(), out.join("o")),
         (Path::new("fine.oaf"), Path::new("k.cfg"), sealed_out),
     ] {
-        // seal-allow: runs the tool's own test binary; the run itself goes through the guard
-        let r = Command::new(exe)
-            .args([
-                "--adsb",
-                adsb.to_str().unwrap(),
-                "--config",
-                cfg.as_os_str().to_str().unwrap(),
-                "--out",
-                o.to_str().unwrap(),
-            ])
-            .output()
-            .unwrap();
-        assert_eq!(
-            r.status.code(),
-            Some(2),
-            "{} {}",
-            adsb.display(),
-            cfg.display()
-        );
-        assert!(String::from_utf8_lossy(&r.stderr).contains("sealed"));
+        let argv = [
+            "--adsb",
+            adsb.to_str().unwrap(),
+            "--config",
+            cfg.to_str().unwrap(),
+            "--out",
+            o.to_str().unwrap(),
+        ];
+        sealed_inputs::assert_sealed_refusal(exe, &argv);
     }
-    assert!(!out.join("o").exists());
-    // seal-allow: runs the tool's own test binary; the run itself goes through the guard
-    let r = Command::new(exe).args(["--adsb", "a"]).output().unwrap();
-    assert_eq!(r.status.code(), Some(2));
+    sealed_inputs::assert_no_output(&out.join("o"));
+    sealed_inputs::assert_usage_refusal(exe, &["--adsb", "a"]);
     let _ = std::fs::remove_dir_all(&out);
 }
 

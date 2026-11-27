@@ -8,8 +8,11 @@
     clippy::panic
 )]
 
+#[path = "../../test-support/sealed_inputs.rs"]
+mod sealed_inputs;
+
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// The built example, next to the test binary's `deps` directory.
@@ -22,6 +25,20 @@ fn example() -> PathBuf {
         .join("examples")
         .join("nas_hour")
 }
+
+fn assert_command_refused(output: &std::process::Output, code: i32, reason: &str) {
+    assert_eq!(output.status.code(), Some(code));
+    assert!(String::from_utf8_lossy(&output.stderr).contains(reason));
+}
+
+fn run_example_with_path(mode: &str, path: &Path) -> std::process::Output {
+    Command::new(example())
+        .arg(mode)
+        .arg(path)
+        .output()
+        .unwrap()
+}
+
 
 /// 2026-11-19T21:00:00Z, Unix seconds.
 const HOUR: i64 = 1_795_122_000;
@@ -146,31 +163,16 @@ fn the_track_mode_measures_from_the_start_time_and_reports_its_capacity_counters
 // REQ: OA-CA-032
 #[test]
 fn a_sealed_path_and_a_missing_start_are_refused() {
-    let data = std::env::var_os("OPENATCA_DATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../openatca-data")
-        });
-    let sealed = data.join("raw/adsblol/2026.11.20/a.oaf");
+    let sealed = sealed_inputs::sealed_inputs(env!("CARGO_MANIFEST_DIR")).raw_sample;
     // seal-allow: runs the example, which checks every path in the guard before opening it.
-    let o = Command::new(example())
-        .arg("census")
-        .arg(sealed)
-        .output()
-        .unwrap();
-    assert_eq!(o.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&o.stderr).contains("sealed"));
+    let o = run_example_with_path("census", &sealed);
+    assert_command_refused(&o, 1, "sealed");
     let t = scratch("nas-hour-args");
     let c = t.join("c.oaf");
     clip(&c, HOUR, 5, 2);
     // seal-allow: runs the example, which checks every path in the guard before opening it
-    let o = Command::new(example())
-        .arg("track")
-        .arg(&c)
-        .output()
-        .unwrap();
-    assert_eq!(o.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&o.stderr).contains("--start is required"));
+    let o = run_example_with_path("track", &c);
+    assert_command_refused(&o, 1, "--start is required");
     let _ = fs::remove_dir_all(&t);
 }
 

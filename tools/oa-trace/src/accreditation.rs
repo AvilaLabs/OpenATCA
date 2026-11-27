@@ -63,14 +63,9 @@ pub fn check(root: &Path) -> Vec<String> {
                 ));
                 continue;
             };
-            if function.is_empty()
-                || !function
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+            if !is_ascii_identifier(function)
                 || !is_test_source_path(file)
-                || Path::new(file)
-                    .components()
-                    .any(|part| !matches!(part, Component::Normal(_)))
+                || !is_normal_relative_path(file)
             {
                 errors.push(format!(
                     "{record}:{}: invalid test citation path/name",
@@ -357,11 +352,7 @@ fn check_evidence_ref(root: &Path, canonical_root: &Path, value: &JsonValue) -> 
     let reference = as_object(value).ok_or_else(|| "reference must be an object".to_string())?;
     let kind = as_string(reference.get("kind")).unwrap_or("");
     let file = as_string(reference.get("path")).unwrap_or("");
-    if file.is_empty()
-        || Path::new(file)
-            .components()
-            .any(|part| !matches!(part, Component::Normal(_)))
-    {
+    if !is_normal_relative_path(file) {
         return Err("path must be a nonempty relative path without traversal".to_string());
     }
     let source_path = root.join(file);
@@ -644,6 +635,20 @@ fn module_opens_scope(line: &str) -> bool {
         || head.starts_with("pub(super) mod ")
 }
 
+fn is_normal_relative_path(file: &str) -> bool {
+    !file.is_empty()
+        && Path::new(file)
+            .components()
+            .all(|part| matches!(part, Component::Normal(_)))
+}
+
+fn is_ascii_identifier(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
 fn is_test_source_path(file: &str) -> bool {
     Path::new(file).extension().is_some_and(|extension| extension == "rs")
         && Path::new(file).components().any(|component| {
@@ -657,15 +662,9 @@ pub fn verify_test_reference(root: &Path, reference: &str) -> Result<(), String>
     let Some((file, function)) = reference.rsplit_once("::") else {
         return Err("expected relative/path.rs::test_function".into());
     };
-    if file.is_empty()
-        || function.is_empty()
-        || !function
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    if !is_normal_relative_path(file)
+        || !is_ascii_identifier(function)
         || !is_test_source_path(file)
-        || Path::new(file)
-            .components()
-            .any(|part| !matches!(part, Component::Normal(_)))
     {
         return Err("test reference path or name is invalid".into());
     }

@@ -7,6 +7,9 @@
     clippy::panic
 )]
 
+#[path = "../../test-support/sealed_inputs.rs"]
+mod sealed_inputs;
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -107,7 +110,7 @@ fn the_program_exits_2_for_a_sealed_path_and_opens_and_creates_nothing() {
         assert_eq!(r.status.code(), Some(2), "{adsb:?} {o:?}");
         assert!(String::from_utf8_lossy(&r.stderr).contains("sealed"));
     }
-    assert!(!out.join("o").exists());
+    sealed_inputs::assert_no_output(&out.join("o"));
     let r = Command::new(exe).args(["--adsb", "a"]).output().unwrap();
     assert_eq!(r.status.code(), Some(2));
     let _ = std::fs::remove_dir_all(&out);

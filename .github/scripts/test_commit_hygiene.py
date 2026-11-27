@@ -179,10 +179,13 @@ def checker_env(event: str, ref: str, head: str, **range_values: str) -> dict[st
     }
 
 
-def run_checker(repo: Path, env: dict[str, str], merge_output: bool = False):
-    checker = Path(__file__).with_name("check_commit_hygiene.py").resolve()
+def checker_script() -> Path:
+    return Path(__file__).with_name("check_commit_hygiene.py").resolve()
+
+
+def run_checker_process(repo: Path, env: dict[str, str], arguments: list[str], merge_output: bool):
     return subprocess.run(
-        [sys.executable, str(checker)],
+        [sys.executable, str(checker_script()), *arguments],
         cwd=repo,
         env=env,
         stdout=subprocess.PIPE,
@@ -191,16 +194,27 @@ def run_checker(repo: Path, env: dict[str, str], merge_output: bool = False):
     )
 
 
+def diverged_range_run(args, **_kwargs):
+    if "--is-ancestor" in args:
+        return SimpleNamespace(returncode=1, stdout=b"")
+    return SimpleNamespace(returncode=0, stdout=b"merge-base\n")
+
+def run_diverged_commit_ids(base: str, head: str, require_ancestor: bool, git_output: bytes):
+    with patch.object(module, "is_commit", return_value=True), patch.object(
+        module.subprocess, "run", side_effect=diverged_range_run
+    ), patch.object(module, "git", return_value=git_output):
+        return module.commit_ids(base, head, require_ancestor)
+
+def run_checker(repo: Path, env: dict[str, str], merge_output: bool = False):
+    return run_checker_process(repo, env, [], merge_output)
+
+
 def run_mask_preflight(repo: Path, env: dict[str, str]):
-    checker = Path(__file__).with_name("check_commit_hygiene.py").resolve()
-    return subprocess.run(
-        [sys.executable, str(checker), "--mask-preflight"],
-        cwd=repo,
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
+    return run_checker_process(repo, env, ["--mask-preflight"], False)
+
+def run_action_checker(repo: Path, env: dict[str, str]):
+    env["GITHUB_ACTIONS"] = "true"
+    return run_checker(repo, env, merge_output=True)
 
 
 def proof_cases() -> dict[str, tuple[ProofCase, ...]]:
@@ -258,19 +272,13 @@ def run_proof_case(case: ProofCase) -> ProofReceipt:
                 "GITHUB_SHA": safe_head,
                 "PUSH_BEFORE_SHA": base,
             }
-            checker = Path(__file__).with_name("check_commit_hygiene.py").resolve()
-            baseline = subprocess.run(
-                [sys.executable, str(checker)], cwd=repo, env=test_env,
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-            )
+            checker = checker_script()
+            baseline = run_checker_process(repo, test_env, [], False)
             if baseline.returncode != 0 or baseline.stdout or baseline.stderr:
                 raise ProofHarnessFailure("positive-control")
             test_env["GITHUB_SHA"] = head
             test_env["PUSH_BEFORE_SHA"] = safe_head
-            result = subprocess.run(
-                [sys.executable, str(checker)], cwd=repo, env=test_env,
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-            )
+            result = run_checker_process(repo, test_env, [], False)
             expected_line = f"commit_hygiene_failed sha={head[:12]} rule={case.expected_rule}"
             captured = result.stdout + result.stderr
             if result.returncode != 1:
@@ -323,14 +331,23 @@ class CommitHygieneTests(unittest.TestCase):
         self.assertTrue(all(item.baseline_exit == 0 for item in receipts))
         self.assertTrue(all(item.checker_exit == 1 for item in receipts))
 
+    def refusal(self, operation):
+        with self.assertRaises(module.Refusal) as caught:
+            operation()
+        return caught.exception
+
+    def assert_refusal_rule(self, operation, expected_rule):
+        self.assertEqual(self.refusal(operation).rule, expected_rule)
+
     def test_message_markers_are_case_insensitive(self):
         for marker in module.BAD_MARKERS:
             with self.subTest(marker=marker), patch.object(module, "git", return_value=(
                 b"Connor Avila\0x@example.org\0Connor Avila\0x@example.org\0subject " + marker.upper().encode()
             )):
-                with self.assertRaises(module.Refusal) as caught:
-                    module.check_commit("0123456789abcdef", "x@example.org")
-                self.assertEqual(caught.exception.rule, "prohibited-message-marker")
+                self.assert_refusal_rule(
+                    lambda: module.check_commit("0123456789abcdef", "x@example.org"),
+                    "prohibited-message-marker",
+                )
 
     def test_names_and_both_emails_are_checked(self):
         good = b"Connor Avila\0x@example.org\0Connor Avila\0x@example.org\0safe\n"
@@ -343,38 +360,25 @@ class CommitHygieneTests(unittest.TestCase):
             (b"Connor Avila\0x@example.org\0Connor Avila\0y@example.org\0safe", "committer-email"),
         ]:
             with self.subTest(rule=rule), patch.object(module, "git", return_value=fields):
-                with self.assertRaises(module.Refusal) as caught:
-                    module.check_commit("0123456789abcdef", "x@example.org")
-                self.assertEqual(caught.exception.rule, rule)
+                self.assert_refusal_rule(
+                    lambda: module.check_commit("0123456789abcdef", "x@example.org"), rule
+                )
 
     def test_bad_range_is_refused_and_empty_range_passes(self):
         with patch.object(module, "is_commit", return_value=False):
             with self.assertRaises(module.Refusal):
                 module.commit_ids("missing", "head", True)
-        def range_run(args, **_kwargs):
-            if "--is-ancestor" in args:
-                return SimpleNamespace(returncode=1, stdout=b"")
-            return SimpleNamespace(returncode=0, stdout=b"merge-base\n")
-        with patch.object(module, "is_commit", return_value=True), patch.object(
-            module.subprocess, "run", side_effect=range_run
-        ), patch.object(module, "git", return_value=b"1234567890abcdef\n"):
-            with self.assertRaises(module.Refusal) as caught:
-                module.commit_ids("base", "head", True)
-            self.assertEqual(caught.exception.rule, "non-ancestor-range")
-        with patch.object(module, "is_commit", return_value=True), patch.object(
-            module.subprocess, "run", side_effect=range_run
-        ), patch.object(module, "git", return_value=b""):
-            self.assertEqual(module.commit_ids("base", "head", False), [])
+        caught = self.refusal(
+            lambda: run_diverged_commit_ids("base", "head", True, b"1234567890abcdef\n")
+        )
+        self.assertEqual(caught.rule, "non-ancestor-range")
+        self.assertEqual(run_diverged_commit_ids("base", "head", False, b""), [])
 
     def test_pull_request_range_allows_a_diverged_branch_with_a_common_base(self):
-        def range_run(args, **_kwargs):
-            if "--is-ancestor" in args:
-                return SimpleNamespace(returncode=1, stdout=b"")
-            return SimpleNamespace(returncode=0, stdout=b"merge-base\n")
-        with patch.object(module, "is_commit", return_value=True), patch.object(
-            module.subprocess, "run", side_effect=range_run
-        ), patch.object(module, "git", return_value=b"deadbeef\n"):
-            self.assertEqual(module.commit_ids("base", "head", False), ["deadbeef"])
+        self.assertEqual(
+            run_diverged_commit_ids("base", "head", False, b"deadbeef\n"),
+            ["deadbeef"],
+        )
 
     def test_missing_email_configuration_fails_before_git_or_ref_resolution(self):
         head = "a" * 40
@@ -416,9 +420,8 @@ class CommitHygieneTests(unittest.TestCase):
         with patch.dict(os.environ, {"GITHUB_EVENT_NAME": "push"}, clear=True), patch.object(
             module, "git"
         ) as git_call:
-            with self.assertRaises(module.Refusal) as caught:
-                module.main(mask_preflight=True)
-        self.assertEqual(caught.exception.rule, "invalid-range")
+            caught = self.refusal(lambda: module.main(mask_preflight=True))
+        self.assertEqual(caught.rule, "invalid-range")
         git_call.assert_not_called()
         with patch.dict(os.environ, {
             "GITHUB_ACTIONS": "true",
@@ -431,9 +434,8 @@ class CommitHygieneTests(unittest.TestCase):
         ), patch(
             "sys.stdout", new_callable=io.StringIO
         ) as output:
-            with self.assertRaises(module.Refusal) as caught:
-                module.main(mask_preflight=True)
-        self.assertEqual(caught.exception.rule, "head-email-invalid")
+            caught = self.refusal(lambda: module.main(mask_preflight=True))
+        self.assertEqual(caught.rule, "head-email-invalid")
         self.assertEqual(output.getvalue(), "")
 
     def test_workflow_masks_checkout_identity_before_vars_only_validation(self):
@@ -583,8 +585,7 @@ class CommitHygieneTests(unittest.TestCase):
             graph = make_event_graph(repo)
             env = checker_env("push", "refs/heads/main", graph.main_bad,
                               before=graph.main_head)
-            env["GITHUB_ACTIONS"] = "true"
-            result = run_checker(repo, env, merge_output=True)
+            result = run_action_checker(repo, env)
             self.assert_process(
                 result, 1,
                 stdout=(f"::add-mask::{FIXTURE_EMAIL}\n"
@@ -598,8 +599,7 @@ class CommitHygieneTests(unittest.TestCase):
                               before=graph.main_base)
             invalid = "bad\n::warning::synthetic@example.invalid"
             env["EXPECTED_COMMIT_EMAIL"] = invalid
-            env["GITHUB_ACTIONS"] = "true"
-            result = run_checker(repo, env, merge_output=True)
+            result = run_action_checker(repo, env)
             self.assert_process(result, 1)
             self.assertTrue(result.stdout.startswith("commit_hygiene_failed "))
             self.assertNotIn("::add-mask::", result.stdout)

@@ -576,6 +576,29 @@ def _workspace_member_paths(workspace: Path, reader: BoundedReader) -> tuple[set
     return member_paths, excluded_patterns
 
 
+def _dependency_aliases(values: object, deps: dict[str, str]) -> None:
+    if not isinstance(values, dict):
+        return
+    for key, value in values.items():
+        target_name = value.get("package", key) if isinstance(value, dict) else key
+        deps[key.replace("-", "_")] = target_name.replace("-", "_")
+
+
+def _package_aliases(package: Package, crate_to_package: dict[str, str]) -> dict[str, str]:
+    return {
+        alias: target
+        for alias, crate_name in package.dependencies.items()
+        if (target := crate_to_package.get(crate_name)) is not None
+    }
+
+
+def _reexport_name(statement: list[str], index: int, name: str) -> str:
+    return (
+        statement[index + 2]
+        if statement[index + 1 : index + 2] == ["as"] and index + 2 < len(statement)
+        else name
+    )
+
 def _package_roots(workspace: Path, reader: BoundedReader) -> list[Package]:
     roots: list[Package] = []
     member_paths, excluded_patterns = _workspace_member_paths(workspace, reader)
@@ -625,20 +648,12 @@ def _package_roots(workspace: Path, reader: BoundedReader) -> list[Package]:
             crate_name = lib.get("name", name.replace("-", "_")) if isinstance(lib, dict) else name.replace("-", "_")
             deps: dict[str, str] = {}
             for section in ("dependencies", "build-dependencies"):
-                values = doc.get(section, {})
-                if isinstance(values, dict):
-                    for key, value in values.items():
-                        target_name = value.get("package", key) if isinstance(value, dict) else key
-                        deps[key.replace("-", "_")] = target_name.replace("-", "_")
+                _dependency_aliases(doc.get(section, {}), deps)
             target_sections = doc.get("target", {})
             if isinstance(target_sections, dict):
                 for target in target_sections.values():
                     if isinstance(target, dict):
-                        values = target.get("dependencies", {})
-                        if isinstance(values, dict):
-                            for key, value in values.items():
-                                target_name = value.get("package", key) if isinstance(value, dict) else key
-                                deps[key.replace("-", "_")] = target_name.replace("-", "_")
+                        _dependency_aliases(target.get("dependencies", {}), deps)
             roots.append(Package(name, crate_name, manifest.parent, deps))
             if len(roots) > MAX_PACKAGE_COUNT:
                 raise ValueError("workspace package count exceeds its configured cap")
@@ -809,11 +824,7 @@ def _consumer_references(
     while changed:
         changed = False
         for package in relevant_packages:
-            alias_to_package: dict[str, str] = {}
-            for alias, target_crate in package.dependencies.items():
-                target = crate_to_package.get(target_crate)
-                if target is not None:
-                    alias_to_package[alias] = target
+            alias_to_package = _package_aliases(package, crate_to_package)
             for _, statements in source_cache[package.name]:
                 _extend_module_aliases(alias_to_package, statements, exports)
                 for _, _, is_public, stmt in statements:
@@ -829,11 +840,7 @@ def _consumer_references(
                         pairs = []
                         for index, name in enumerate(stmt):
                             if name in source_exports:
-                                exported_name = (
-                                    stmt[index + 2]
-                                    if stmt[index + 1 : index + 2] == ["as"] and index + 2 < len(stmt)
-                                    else name
-                                )
+                                exported_name = _reexport_name(stmt, index, name)
                                 pairs.append((name, exported_name, source_exports[name]))
                     package_exports = exports.setdefault(package.name, {})
                     for _, exported_name, keys in pairs:
@@ -846,11 +853,7 @@ def _consumer_references(
         (flag.package, flag.name, flag.declaration): set() for flag in flags
     }
     for package in relevant_packages:
-        alias_to_package: dict[str, str] = {}
-        for alias, target_crate in package.dependencies.items():
-            target_package = crate_to_package.get(target_crate)
-            if target_package is not None:
-                alias_to_package[alias] = target_package
+        alias_to_package = _package_aliases(package, crate_to_package)
         # The use scan also needs public re-export aliases, which may not contain the original
         # constant name. Build a per-package prefilter from the symbols exposed by its direct
         # dependencies after the re-export closure above.
@@ -888,7 +891,7 @@ def _consumer_references(
                         globs.setdefault(name, set()).update(keys)
                 for index, name in enumerate(stmt):
                     if name in target_exports:
-                        alias = stmt[index + 2] if stmt[index + 1 : index + 2] == ["as"] and index + 2 < len(stmt) else name
+                        alias = _reexport_name(stmt, index, name)
                         imported.setdefault(alias, set()).update(target_exports[name])
 
             shadowed = _shadowed_import_names(tokens, set(imported) | set(globs))

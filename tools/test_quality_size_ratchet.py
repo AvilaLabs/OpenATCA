@@ -23,6 +23,11 @@ def repeated_block(prefix: str) -> str:
 
 
 class QualitySizeRatchetTests(unittest.TestCase):
+    def assert_single_function(self, path, source, name, argument_count):
+        functions = ratchet._function_tokens(path, source)
+        self.assertEqual(len(functions), 1)
+        self.assertEqual(functions[0].name, name)
+        self.assertEqual(functions[0].argument_count, argument_count)
     def baseline_for(self, summary):
         return {
             "schema": 1,
@@ -60,16 +65,11 @@ class QualitySizeRatchetTests(unittest.TestCase):
     eighth: i32,
 ) -> Result<T, Error> { Ok(first) }
 """
-        functions = ratchet._function_tokens("sample.rs", source)
-        self.assertEqual(len(functions), 1)
-        self.assertEqual(functions[0].name, "bounded")
-        self.assertEqual(functions[0].argument_count, 8)
+        self.assert_single_function("sample.rs", source, "bounded", 8)
 
     def test_rust_trait_declarations_are_counted_without_a_body(self):
         source = "trait Wide { fn inspect(a,b,c,d,e,f,g,h); }\n"
-        functions = ratchet._function_tokens("sample.rs", source)
-        self.assertEqual(len(functions), 1)
-        self.assertEqual(functions[0].argument_count, 8)
+        self.assert_single_function("sample.rs", source, "inspect", 8)
 
     def test_python_multiline_parameters_and_async_functions_are_counted(self):
         source = """async def bounded(
@@ -84,9 +84,7 @@ class QualitySizeRatchetTests(unittest.TestCase):
 ):
     return first
 """
-        functions = ratchet._function_tokens("sample.py", source)
-        self.assertEqual(len(functions), 1)
-        self.assertEqual(functions[0].argument_count, 8)
+        self.assert_single_function("sample.py", source, "bounded", 8)
 
     def test_function_line_limit_counts_physical_lines_including_comments(self):
         source = "fn long() {\n" + "\n".join("    // retained line" for _ in range(149)) + "\n}\n"

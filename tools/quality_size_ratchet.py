@@ -177,17 +177,11 @@ def _rust_tokens(text: str) -> list[Token]:
             advance(cursor)
             continue
 
-        if char == "r" and text.startswith("r#", i) and i + 2 < n and _ident_start(text[i + 2]):
-            cursor = i + 3
-            while cursor < n and _ident_continue(text[cursor]):
-                cursor += 1
-            emit(Token("identifier", text[i:cursor], start_line, start_column))
-            advance(cursor)
-            continue
-        if _ident_start(char):
-            cursor = i + 1
-            while cursor < n and _ident_continue(text[cursor]):
-                cursor += 1
+        raw_identifier = (
+            char == "r" and text.startswith("r#", i) and i + 2 < n and _ident_start(text[i + 2])
+        )
+        if raw_identifier or _ident_start(char):
+            cursor = _identifier_end(text, i + 3 if raw_identifier else i + 1)
             emit(Token("identifier", text[i:cursor], start_line, start_column))
             advance(cursor)
             continue
@@ -217,6 +211,11 @@ def _ident_start(char: str) -> bool:
 def _ident_continue(char: str) -> bool:
     return char == "_" or char.isalnum()
 
+def _identifier_end(text: str, cursor: int) -> int:
+    while cursor < len(text) and _ident_continue(text[cursor]):
+        cursor += 1
+    return cursor
+
 
 _ITEM_PREFIXES = {"pub", "async", "unsafe", "const", "extern", "default", "auto"}
 _ITEM_BOUNDARIES = {"{", "}", ";", "]"}
@@ -243,34 +242,24 @@ def _is_rust_item_fn(tokens: list[Token], index: int) -> bool:
     return previous < 0 or tokens[previous].value in _ITEM_BOUNDARIES
 
 
-def _matching(tokens: list[Token], opening: int, left: str, right: str) -> int | None:
-    depth = 0
-    for index in range(opening, len(tokens)):
-        value = tokens[index].value
-        if value == left:
-            depth += 1
-        elif value == right:
-            depth -= 1
-            if depth == 0:
-                return index
-    return None
-
-
-def _matching_generics(tokens: list[Token], opening: int) -> int | None:
+def _matching(
+    tokens: list[Token], opening: int, left: str, right: str, *, skip_braced: bool = False
+) -> int | None:
     depth = 0
     brace_depth = 0
     for index in range(opening, len(tokens)):
         value = tokens[index].value
-        if value == "{":
+        if skip_braced and value == "{":
             brace_depth += 1
-        elif value == "}":
+        elif skip_braced and value == "}":
             brace_depth -= 1
-        elif brace_depth == 0 and value == "<":
-            depth += 1
-        elif brace_depth == 0 and value == ">":
-            depth -= 1
-            if depth == 0:
-                return index
+        elif not skip_braced or brace_depth == 0:
+            if value == left:
+                depth += 1
+            elif value == right:
+                depth -= 1
+                if depth == 0:
+                    return index
     return None
 
 
@@ -330,7 +319,7 @@ def _rust_functions(path: str, text: str, tokens: list[Token]) -> list[Function]
         name = tokens[index + 1].value.removeprefix("r#")
         cursor = index + 2
         if cursor < len(tokens) and tokens[cursor].value == "<":
-            generic_close = _matching_generics(tokens, cursor)
+            generic_close = _matching(tokens, cursor, "<", ">", skip_braced=True)
             if generic_close is None:
                 raise RatchetError(f"{path}:{token.line}: unterminated function generics")
             cursor = generic_close + 1
@@ -430,6 +419,26 @@ def _function_tokens(path: str, text: str) -> list[Function]:
     return _rust_functions(path, text, tokens)
 
 
+def _read_bounded_regular_file(
+    path: Path, maximum_bytes: int, regular_error: str, size_error: str, changed_error: str
+) -> bytes:
+    before = path.stat(follow_symlinks=False)
+    if not stat.S_ISREG(before.st_mode) or path.is_symlink():
+        raise RatchetError(regular_error)
+    if before.st_size < 0 or before.st_size > maximum_bytes:
+        raise RatchetError(size_error)
+    with path.open("rb") as stream:
+        payload = stream.read(maximum_bytes + 1)
+        after = os.fstat(stream.fileno())
+    if (
+        len(payload) != before.st_size
+        or len(payload) > maximum_bytes
+        or _file_identity(before) != _file_identity(after)
+    ):
+        raise RatchetError(changed_error)
+    return payload
+
+
 def _read_tracked_sources(root: Path) -> Iterator[tuple[str, str]]:
     process = subprocess.run(
         ["git", "ls-files", "-z", "--", "*.rs", "*.py"],
@@ -441,18 +450,14 @@ def _read_tracked_sources(root: Path) -> Iterator[tuple[str, str]]:
     total_bytes = 0
     for relative in paths:
         source = root / relative
-        before = source.stat(follow_symlinks=False)
-        if not stat.S_ISREG(before.st_mode) or source.is_symlink():
-            raise RatchetError(f"tracked source is not a regular file: {relative}")
         remaining = MAX_SOURCE_BYTES - total_bytes
-        if before.st_size < 0 or before.st_size > MAX_SOURCE_FILE_BYTES or before.st_size > remaining:
-            raise RatchetError("tracked source byte limit exceeded")
-        with source.open("rb") as stream:
-            payload = stream.read(remaining + 1)
-            after = os.fstat(stream.fileno())
-        if (len(payload) != before.st_size or
-                _file_identity(before) != _file_identity(after)):
-            raise RatchetError(f"tracked source changed while reading: {relative}")
+        payload = _read_bounded_regular_file(
+            source,
+            min(MAX_SOURCE_FILE_BYTES, remaining),
+            f"tracked source is not a regular file: {relative}",
+            "tracked source byte limit exceeded",
+            f"tracked source changed while reading: {relative}",
+        )
         total_bytes += len(payload)
         try:
             text = payload.decode("utf-8")
@@ -788,17 +793,13 @@ def _validate_workspace(root: Path) -> Path:
 
 
 def _read_baseline(path: Path) -> dict[str, object]:
-    before = path.stat(follow_symlinks=False)
-    if not stat.S_ISREG(before.st_mode) or path.is_symlink():
-        raise RatchetError("baseline must be a regular non-symlink file")
-    if before.st_size < 0 or before.st_size > MAX_BASELINE_BYTES:
-        raise RatchetError("baseline byte limit exceeded")
-    with path.open("rb") as stream:
-        payload = stream.read(MAX_BASELINE_BYTES + 1)
-        after = os.fstat(stream.fileno())
-    if (len(payload) != before.st_size or len(payload) > MAX_BASELINE_BYTES or
-            _file_identity(before) != _file_identity(after)):
-        raise RatchetError("baseline changed while reading")
+    payload = _read_bounded_regular_file(
+        path,
+        MAX_BASELINE_BYTES,
+        "baseline must be a regular non-symlink file",
+        "baseline byte limit exceeded",
+        "baseline changed while reading",
+    )
     try:
         value = json.loads(payload.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as error:

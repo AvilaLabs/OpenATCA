@@ -92,12 +92,14 @@ fn configured_root(
 mod data_root_tests {
     use super::{Sealed, DATA_ROOT_SENTINEL, DEFAULT_DATA_ROOT, LIST};
     use std::path::Path;
+    #[path = "../tests/common/test_support.rs"]
+    mod test_support;
 
-    fn scratch(name: &str) -> std::path::PathBuf {
-        let parent = std::env::temp_dir().join(format!("oa-sealed-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&parent);
-        std::fs::create_dir_all(&parent).unwrap();
-        parent
+    fn list_without_window() -> String {
+        LIST.lines()
+            .filter(|line| !line.starts_with("window"))
+            .map(|line| format!("{line}\n"))
+            .collect()
     }
 
     fn assert_fail_closed(guard: &Sealed, outside: &Path) {
@@ -124,7 +126,7 @@ mod data_root_tests {
 
     #[test]
     fn configured_root_without_sentinel_keeps_embedded_guard_closed() {
-        let parent = scratch("invalid-root");
+        let parent = test_support::scratch("invalid-root");
         let root = parent.join("sentinelless");
         std::fs::create_dir(&root).unwrap();
         let guard = Sealed::with_list_using_data_root(LIST, None, Some(root.into_os_string()));
@@ -134,7 +136,7 @@ mod data_root_tests {
 
     #[test]
     fn an_unset_root_uses_the_supplied_fallback_through_full_guard_validation() {
-        let parent = scratch("fallback-root");
+        let parent = test_support::scratch("fallback-root");
 
         let missing = parent.join("missing-default");
         let markerless = parent.join("wrong-default");
@@ -1362,11 +1364,7 @@ mod tests {
         );
         // A list that does not parse, and one with no window line: all time.
         assert_eq!(configured_guard("not a list\n").drop_window(), all);
-        let none: String = LIST
-            .lines()
-            .filter(|l| !l.starts_with("window"))
-            .map(|l| format!("{l}\n"))
-            .collect();
+        let none = list_without_window();
         let g = configured_guard(&none);
         assert!(g.windows().is_empty());
         assert_eq!(g.drop_window(), all);
@@ -1374,11 +1372,7 @@ mod tests {
 
     #[test]
     fn a_list_that_seals_every_instant_gives_a_start_warning_and_a_good_one_does_not() {
-        let none: String = LIST
-            .lines()
-            .filter(|l| !l.starts_with("window"))
-            .map(|l| format!("{l}\n"))
-            .collect();
+        let none = list_without_window();
         assert_eq!(
             start_warning(&configured_guard(&none)),
             Some("seal list has no window: every timed row is dropped")
@@ -1394,11 +1388,7 @@ mod tests {
 
     #[test]
     fn a_drop_report_made_on_a_list_that_seals_every_instant_prints_the_warning_once() {
-        let none: String = LIST
-            .lines()
-            .filter(|l| !l.starts_with("window"))
-            .map(|l| format!("{l}\n"))
-            .collect();
+        let none = list_without_window();
         for (list, line) in [
             (
                 none.as_str(),
@@ -1429,11 +1419,7 @@ mod tests {
     #[test]
     fn the_time_gate_fails_closed_without_a_window_and_a_window_not_aligned_to_a_millisecond_has_no_gap(
     ) {
-        let none: String = LIST
-            .lines()
-            .filter(|l| !l.starts_with("window"))
-            .map(|l| format!("{l}\n"))
-            .collect();
+        let none = list_without_window();
         let g = configured_guard(&none);
         assert!(g.in_window(0) && g.in_window(1_795_200_000_000_000_000));
         // A window from 0.4 ms after 2026-11-20T00:00:00Z to 0.6 ms after 2026-11-23T00:17:00Z

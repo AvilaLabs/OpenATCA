@@ -12,17 +12,12 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use oa_sealed::{parse_list, Sealed, LIST};
-
-fn scratch(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("oa-sealed-{name}-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&d);
-    fs::create_dir_all(&d).unwrap();
-    d
-}
+#[path = "common/test_support.rs"]
+mod test_support;
 
 /// A fake data root with the three sealed folders and one development folder.
 fn fake_root(name: &str) -> PathBuf {
-    let root = scratch(name).join("data");
+    let root = test_support::scratch(name).join("data");
     for d in [
         "scds/rec-20261119/day2/sfdps",
         "scds/rec-20261119/day1",
@@ -42,7 +37,7 @@ fn fake_root(name: &str) -> PathBuf {
 // REQ: OA-SEAL-004
 #[test]
 fn root_identity_sentinel_is_required_and_checked_before_path_or_time_clearance() {
-    let parent = scratch("root-identity");
+    let parent = test_support::scratch("root-identity");
     let missing = parent.join("missing");
     let empty = parent.join("empty");
     let wrong = parent.join("wrong");
@@ -179,7 +174,7 @@ fn a_sealed_data_path_is_refused_below_an_independently_resolved_root() {
 
 #[test]
 fn an_invalid_data_root_fails_closed() {
-    let file_root = scratch("file-data-root").join("ordinary-file");
+    let file_root = test_support::scratch("file-data-root").join("ordinary-file");
     fs::write(&file_root, b"synthetic").unwrap();
     let guard = Sealed::with_list(LIST, Some(&file_root));
     let refusal = guard
@@ -359,7 +354,7 @@ fn the_window_is_half_open_and_both_parsers_read_it_the_same() {
     );
     assert_eq!(l2.windows[1].from_ns, 1_000_000_000 - 900_000_000_000);
     let py = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/sealed_guard.py");
-    let f = scratch("window-parity").join("two.txt");
+    let f = test_support::scratch("window-parity").join("two.txt");
     fs::write(&f, two).unwrap();
     // seal-allow: this parses a temporary synthetic window list, not an input dataset.
     let out = Command::new("python3")
@@ -436,7 +431,7 @@ fn the_drop_counter_adds_up_and_the_line_has_the_fixed_text() {
 // REQ: OA-SEAL-012, OA-SEAL-003
 #[test]
 fn read_and_read_to_string_go_through_the_opener() {
-    let dir = scratch("readers");
+    let dir = test_support::scratch("readers");
     fs::write(dir.join("a.txt"), "hello").unwrap();
     fs::write(dir.join("b.bin"), [0xff, 0xfe]).unwrap();
     assert_eq!(oa_sealed::read(dir.join("a.txt")).unwrap(), b"hello");
@@ -668,7 +663,7 @@ fn a_file_opened_after_a_swapped_in_link_is_caught_on_the_descriptor() {
 // REQ: OA-SEAL-008
 #[test]
 fn odd_list_files_are_refused_by_both_parsers_and_good_ones_read_the_same() {
-    let dir = scratch("parity");
+    let dir = test_support::scratch("parity");
     let py = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/sealed_guard.py");
     let cases: Vec<(&str, bool)> = vec![
         ("root /d\nseal a/b\n", true),

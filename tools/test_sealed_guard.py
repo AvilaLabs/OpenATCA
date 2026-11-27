@@ -110,11 +110,9 @@ class SealedGuardTests(unittest.TestCase):
                 with self.subTest(root=bad_root):
                     with patch.dict(os.environ, {"OPENATCA_DATA": str(bad_root)}):
                         guard = sealed_guard.Guard()
-                    self.assertTrue(guard.broken)
-                    self.assertTrue(guard.in_window(-(1 << 63)))
-                    self.assertTrue(guard.in_window((1 << 63) - 1))
-                    with self.assertRaises(sealed_guard.SealedError):
-                        guard.check(base / "outside-configured-root.txt")
+                    self.assert_broken_guard_refuses(
+                        guard, base / "outside-configured-root.txt"
+                    )
 
     def test_production_guard_refuses_paths_and_timestamps_for_an_invalid_root(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -123,11 +121,9 @@ class SealedGuardTests(unittest.TestCase):
             try:
                 with patch.dict(os.environ, {"OPENATCA_DATA": str(missing)}):
                     guard = sealed_guard.production()
-                self.assertTrue(guard.broken)
-                self.assertTrue(guard.in_window(-(1 << 63)))
-                self.assertTrue(guard.in_window((1 << 63) - 1))
-                with self.assertRaises(sealed_guard.SealedError):
-                    guard.check(Path(temporary) / "outside-root.txt")
+                self.assert_broken_guard_refuses(
+                    guard, Path(temporary) / "outside-root.txt"
+                )
             finally:
                 sealed_guard.production.cache_clear()
 
@@ -139,6 +135,13 @@ class SealedGuardTests(unittest.TestCase):
 
     def tearDown(self):
         self._t.cleanup()
+
+    def assert_broken_guard_refuses(self, guard, outside):
+        self.assertTrue(guard.broken)
+        self.assertTrue(guard.in_window(-(1 << 63)))
+        self.assertTrue(guard.in_window((1 << 63) - 1))
+        with self.assertRaises(sealed_guard.SealedError):
+            guard.check(outside)
 
     def refused(self, p):
         with self.assertRaises(sealed_guard.SealedError) as c:

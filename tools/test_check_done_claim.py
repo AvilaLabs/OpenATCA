@@ -28,6 +28,9 @@ COMMIT = "1" * 40
 def digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
+def canonical_json_bytes(value) -> bytes:
+    return json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+
 
 class ClaimCheckerTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -60,23 +63,12 @@ class ClaimCheckerTests(unittest.TestCase):
             "source_sha256": self.source_digest,
             "requirements": manifest_rows,
         }
-        self.manifest_bytes = json.dumps(self.manifest, sort_keys=True, separators=(",", ":")).encode()
+        self.manifest_bytes = canonical_json_bytes(self.manifest)
         self.manifest_digest = digest(self.manifest_bytes)
         self.spans = self.manifest["requirements"][0]["clauses"]
-        clause_digests = [
-            digest(self.rows["TEST-A"][span["start"] : span["end"]].encode()) for span in self.spans
-        ]
-        self.test_entries = [
-            {
-                "requirement_id": "OA-GEN-001",
-                "path": "tests.rs",
-                "symbol": name,
-                "line": line,
-                "source_sha256": digest(self.test_path.read_bytes()),
-                "clause_sha256": clause_digests[index],
-            }
-            for index, (name, line) in enumerate((("test_alpha", 2), ("test_beta", 4)))
-        ]
+        clause_digests, self.test_entries, self.claim_clauses = self.bound_test_rows(
+            "tests.rs", ["test_alpha", "test_beta"], [2, 4], digest(self.test_path.read_bytes())
+        )
         self.inventory = {
             "schema": checker.INVENTORY_SCHEMA,
             "producer": "oa-trace-clause-review",
@@ -88,37 +80,67 @@ class ClaimCheckerTests(unittest.TestCase):
             "validator_sha256": "0" * 64,
             "tests": self.test_entries,
         }
-        self.inventory_bytes = json.dumps(self.inventory, sort_keys=True, separators=(",", ":")).encode()
+        self.inventory_bytes = canonical_json_bytes(self.inventory)
         self.claim = {
             "schema": checker.CLAIM_SCHEMA,
             "source_sha256": self.source_digest,
             "manifest_sha256": self.manifest_digest,
             "test_inventory_sha256": digest(self.inventory_bytes),
             "row_id": "TEST-A",
-            "clauses": [
-                {
-                    **span,
-                    "status": "covered",
-                    "evidence": [
-                        {
-                            "kind": "test",
-                            "requirement_id": "OA-GEN-001",
-                            "path": "tests.rs",
-                            "line": 2 if index == 0 else 4,
-                            "symbol": "test_alpha" if index == 0 else "test_beta",
-                            "clause_sha256": clause_digests[index],
-                        }
-                    ],
-                }
-                for index, span in enumerate(self.spans)
-            ],
+            "clauses": self.claim_clauses,
         }
+
+    def bound_test_rows(self, path, symbols, lines, source_sha256):
+        clause_digests = [
+            digest(self.rows["TEST-A"][span["start"] : span["end"]].encode())
+            for span in self.spans
+        ]
+        entries = []
+        claims = []
+        for index, span in enumerate(self.spans):
+            entry = {
+                "requirement_id": "OA-GEN-001",
+                "path": path,
+                "symbol": symbols[index],
+                "line": lines[index],
+                "source_sha256": source_sha256,
+                "clause_sha256": clause_digests[index],
+            }
+            entries.append(entry)
+            evidence = {
+                "kind": "test",
+                "requirement_id": "OA-GEN-001",
+                "path": path,
+                "line": lines[index],
+                "symbol": symbols[index],
+                "clause_sha256": clause_digests[index],
+            }
+            claims.append({**span, "status": "covered", "evidence": [evidence]})
+        return clause_digests, entries, claims
 
     def tearDown(self) -> None:
         self.temp.cleanup()
 
+    def cli_command(self, paths, source_commit, validator, expected_source_sha256=None):
+        repo, manifest, claim, inventory = paths
+        command = [
+            sys.executable, str(Path(checker.__file__)), "--source-kind", "faa",
+            "--repo", str(repo), "--manifest", str(manifest), "--claim", str(claim),
+            "--test-inventory", str(inventory), "--row", "TEST-A", "--source-commit", source_commit,
+            "--oa-trace-bin", str(validator),
+        ]
+        if expected_source_sha256 is not None:
+            command.extend(["--expected-source-sha256", expected_source_sha256])
+        return command
+
+    def write_claim(self, path, value):
+        path.write_text(json.dumps(value), encoding="utf-8")
+
+    def run_cli(self, command, env):
+        return subprocess.run(command, env=env, capture_output=True, text=True, check=False)
+
     def assert_cli_refused(self, command, env, expected_message=None):
-        result = subprocess.run(command, env=env, capture_output=True, text=True, check=False)
+        result = self.run_cli(command, env)
         self.assertNotEqual(result.returncode, 0)
         if expected_message is not None:
             self.assertIn(expected_message, result.stderr)
@@ -127,6 +149,14 @@ class ClaimCheckerTests(unittest.TestCase):
     def assert_claim_refused(self, message, **values):
         with self.assertRaisesRegex(checker.ClaimError, message):
             self.validate(**values)
+
+    def assert_inventory_mutations_refused(self, cases, *, nested_tests=False):
+        for field, value, message in cases:
+            with self.subTest(field=field):
+                inventory = json.loads(json.dumps(self.inventory))
+                target = inventory["tests"][0] if nested_tests else inventory
+                target[field] = value
+                self.assert_claim_refused(message, inventory=inventory, rebind=True)
 
     def validate(
         self,
@@ -137,8 +167,8 @@ class ClaimCheckerTests(unittest.TestCase):
     ) -> None:
         manifest_value = manifest or self.manifest
         inventory_value = inventory or self.inventory
-        manifest_bytes = json.dumps(manifest_value, sort_keys=True, separators=(",", ":")).encode()
-        inventory_bytes = json.dumps(inventory_value, sort_keys=True, separators=(",", ":")).encode()
+        manifest_bytes = canonical_json_bytes(manifest_value)
+        inventory_bytes = canonical_json_bytes(inventory_value)
         claim_value = json.loads(json.dumps(claim or self.claim))
         if rebind:
             claim_value["source_sha256"] = self.source_digest
@@ -212,11 +242,7 @@ class ClaimCheckerTests(unittest.TestCase):
             ("symbol", "made_up_helper", "absent from the bound oa-trace"),
             ("source_sha256", "0" * 64, "source digest mismatch"),
         )
-        for field, value, message in cases:
-            with self.subTest(field=field):
-                inventory = json.loads(json.dumps(self.inventory))
-                inventory["tests"][0][field] = value
-                self.assert_claim_refused(message, inventory=inventory, rebind=True)
+        self.assert_inventory_mutations_refused(cases, nested_tests=True)
 
     # Mutation: let an inventory from another commit or row scope support this claim.
     def test_inventory_is_bound_to_commit_manifest_and_exact_row_scope(self) -> None:
@@ -224,11 +250,7 @@ class ClaimCheckerTests(unittest.TestCase):
             ("source_commit", "2" * 40, "current source commit"),
             ("scope_sha256", "0" * 64, "row and clause scope"),
         )
-        for field, value, message in cases:
-            with self.subTest(field=field):
-                inventory = json.loads(json.dumps(self.inventory))
-                inventory[field] = value
-                self.assert_claim_refused(message, inventory=inventory, rebind=True)
+        self.assert_inventory_mutations_refused(cases)
 
     # Mutation: allow a removed row-claim file or absent canonical inputs to silently skip checking.
     def test_cli_requires_manifest_claim_inventory_and_requested_row(self) -> None:
@@ -259,16 +281,9 @@ class ClaimCheckerTests(unittest.TestCase):
         trace_path = repo / "target/e05-claim-checker-fixture/trace.md"
         trace_path.parent.mkdir(parents=True, exist_ok=True)
         trace_path.write_bytes(fixture_trace)
-        clause_digests = [
-            digest(self.rows["TEST-A"][span["start"] : span["end"]].encode()) for span in self.spans
-        ]
-        test_entries = [
-            {
-                "requirement_id": "OA-GEN-001", "path": source_path, "symbol": symbol,
-                "line": source_line, "source_sha256": digest(source_file), "clause_sha256": clause_digest,
-            }
-            for clause_digest in clause_digests
-        ]
+        clause_digests, test_entries, claim_clauses = self.bound_test_rows(
+            source_path, [symbol] * len(self.spans), [source_line] * len(self.spans), digest(source_file)
+        )
         validator_value = os.environ.get("OPENATCA_OA_TRACE_BIN", "/missing/oa-trace")
         validator_path = Path(validator_value)
         validator_digest = digest(validator_path.read_bytes()) if validator_path.is_file() else "0" * 64
@@ -280,45 +295,34 @@ class ClaimCheckerTests(unittest.TestCase):
             "trace_report_sha256": digest(fixture_trace),
             "validator_sha256": validator_digest,
         }
-        inventory_bytes = json.dumps(inventory, sort_keys=True, separators=(",", ":")).encode()
+        inventory_bytes = canonical_json_bytes(inventory)
         claim = {
             **self.claim,
             "test_inventory_sha256": digest(inventory_bytes),
-            "clauses": [
-                {
-                    **span,
-                    "status": "covered",
-                    "evidence": [{
-                        "kind": "test", "requirement_id": "OA-GEN-001", "path": source_path,
-                        "line": source_line, "symbol": symbol, "clause_sha256": clause_digests[index],
-                    }],
-                }
-                for index, span in enumerate(self.spans)
-            ],
+            "clauses": claim_clauses,
         }
         claim_path = private / "claim.json"
-        claim_path.write_text(json.dumps(claim), encoding="utf-8")
+        self.write_claim(claim_path, claim)
         inventory_path = private / "inventory.json"
         inventory_path.write_bytes(inventory_bytes)
-        command = [
-            sys.executable, str(Path(checker.__file__)), "--source-kind", "faa", "--repo", str(repo),
-            "--manifest", str(manifest_path), "--claim", str(claim_path),
-            "--test-inventory", str(inventory_path), "--row", "TEST-A", "--source-commit", source_commit,
-            "--expected-source-sha256", self.source_digest,
-            "--oa-trace-bin", str(validator_path),
-        ]
+        command = self.cli_command(
+            (repo, manifest_path, claim_path, inventory_path),
+            source_commit,
+            validator_path,
+            self.source_digest,
+        )
         env = os.environ.copy()
         env["OPENATCA_PRIVATE"] = str(private)
         data_root = self.root / "synthetic-data-root"
         data_root.mkdir()
         (data_root / ".openatca-data-root").write_bytes(b"openatca-data-root-v1\n")
         env["OPENATCA_DATA"] = str(data_root)
-        result = subprocess.run(command, env=env, capture_output=True, text=True, check=False)
+        result = self.run_cli(command, env)
         if validator_path.is_file() and os.access(validator_path, os.X_OK):
             self.assertEqual(result.returncode, 0, result.stderr)
             claim["clauses"][1]["status"] = "external"
-            claim_path.write_text(json.dumps(claim), encoding="utf-8")
-            refused = subprocess.run(command, env=env, capture_output=True, text=True, check=False)
+            self.write_claim(claim_path, claim)
+            refused = self.run_cli(command, env)
             self.assertNotEqual(refused.returncode, 0)
             self.assertIn("refused", refused.stderr)
         else:
@@ -327,12 +331,9 @@ class ClaimCheckerTests(unittest.TestCase):
 
     # Mutation: let absent, wrong, or root-valued private path configuration fall through.
     def test_faa_cli_fails_closed_on_private_root_configuration(self) -> None:
-        command = [
-            sys.executable, str(Path(checker.__file__)), "--source-kind", "faa",
-            "--repo", str(self.root), "--manifest", "manifest.json", "--claim", "claim.json",
-            "--test-inventory", "inventory.json", "--row", "TEST-A", "--source-commit", COMMIT,
-            "--oa-trace-bin", "/missing/oa-trace",
-        ]
+        paths = (self.root, "manifest.json", "claim.json", "inventory.json")
+        validator = "/missing/oa-trace"
+        command = self.cli_command(paths, COMMIT, validator)
         wrong = self.root / "wrong-private-root"
         wrong.mkdir()
         (wrong / "FAA_ACCEPTANCE_LIST.md").write_text("no acceptance table\n", encoding="utf-8")

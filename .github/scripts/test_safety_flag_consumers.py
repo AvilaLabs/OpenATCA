@@ -80,6 +80,17 @@ class SafetyFlagConsumerTests(unittest.TestCase):
     def findings(self) -> tuple[list[object], list[object]]:
         return CHECKER.check(self.root, self.allowlist)
 
+    def violating_names(self) -> set[str]:
+        violations, _ = self.findings()
+        return {item.flag.name for item in violations}
+
+    def run_cli(self, root: Path, *, stderr: bool = False) -> tuple[int, str]:
+        output = io.StringIO()
+        redirect = redirect_stderr if stderr else redirect_stdout
+        with redirect(output):
+            code = CHECKER.main(["--root", str(root), "--allowlist", str(self.allowlist)])
+        return code, output.getvalue()
+
     def write_consumer(self, source: str) -> None:
         self.consumer_source.write_text(source, encoding="utf-8")
 
@@ -132,8 +143,7 @@ class SafetyFlagConsumerTests(unittest.TestCase):
             "use safety_dep::F_ACTIVE;\n"
             "pub fn consume(F_ACTIVE: u8) -> bool { F_ACTIVE != 0 }\n"
         )
-        violations, _ = self.findings()
-        self.assertIn("F_ACTIVE", {item.flag.name for item in violations})
+        self.assertIn("F_ACTIVE", self.violating_names())
 
     def test_shadowed_local_binding_does_not_count_as_flag_consumer(self) -> None:
         # Kills the same basename false pass for a local `let` binding.
@@ -141,8 +151,7 @@ class SafetyFlagConsumerTests(unittest.TestCase):
             "use safety_dep::F_ACTIVE;\n"
             "pub fn consume() -> bool { let F_ACTIVE = 3; F_ACTIVE != 0 }\n"
         )
-        violations, _ = self.findings()
-        self.assertIn("F_ACTIVE", {item.flag.name for item in violations})
+        self.assertIn("F_ACTIVE", self.violating_names())
 
     def test_qualified_flag_path_survives_same_name_parameter(self) -> None:
         self.write_consumer(
@@ -151,8 +160,7 @@ class SafetyFlagConsumerTests(unittest.TestCase):
             "    F_ACTIVE != 0 || bits & safety::F_ACTIVE != 0\n"
             "}\n"
         )
-        violations, _ = self.findings()
-        self.assertNotIn("F_ACTIVE", {item.flag.name for item in violations})
+        self.assertNotIn("F_ACTIVE", self.violating_names())
 
     def test_real_downstream_use_through_public_reexport_counts(self) -> None:
         middle = self.root / "crates" / "oa-track"
@@ -225,11 +233,9 @@ class SafetyFlagConsumerTests(unittest.TestCase):
         self.allowlist.write_text(json.dumps({"version": 1, "entries": allow_entries}), encoding="utf-8")
         violations, _ = self.findings()
         self.assertTrue(all(item.ambiguous_name for item in violations if item.flag.name == "F_SHARED"))
-        output = io.StringIO()
-        with redirect_stdout(output):
-            exit_code = CHECKER.main(["--root", str(self.root), "--allowlist", str(self.allowlist)])
+        exit_code, output = self.run_cli(self.root)
         self.assertEqual(exit_code, 1)
-        self.assertIn("ambiguous_safety_flag_name package=oa-safety constant=F_SHARED", output.getvalue())
+        self.assertIn("ambiguous_safety_flag_name package=oa-safety constant=F_SHARED", output)
 
     def test_exact_allowlist_entry_suppresses_one_flag_and_stale_entry_fails(self) -> None:
         self.write_consumer("pub fn unrelated() {}\n")
@@ -274,15 +280,11 @@ class SafetyFlagConsumerTests(unittest.TestCase):
 
     def test_cli_missing_wrong_and_root_configurations_refuse(self) -> None:
         for root in (self.root / "missing-workspace", Path("/tmp"), Path("/")):
-            errors = io.StringIO()
-            with redirect_stderr(errors):
-                code = CHECKER.main(["--root", str(root), "--allowlist", str(self.allowlist)])
+            code, errors = self.run_cli(root, stderr=True)
             self.assertEqual(code, 2)
-            self.assertIn("safety_flag_consumer_check_failed:", errors.getvalue())
+            self.assertIn("safety_flag_consumer_check_failed:", errors)
         self.allowlist.unlink()
-        errors = io.StringIO()
-        with redirect_stderr(errors):
-            code = CHECKER.main(["--root", str(self.root), "--allowlist", str(self.allowlist)])
+        code, _ = self.run_cli(self.root, stderr=True)
         self.assertEqual(code, 2)
 
     def test_bounded_reader_rejects_oversize_and_symlink_source(self) -> None:
@@ -339,8 +341,7 @@ class SafetyFlagConsumerTests(unittest.TestCase):
         )
         self.write_workspace_manifest(exclude=["tools/excluded-root"])
         self.write_consumer("pub fn unrelated() {}\n")
-        violations, _ = self.findings()
-        self.assertIn("F_ACTIVE", {item.flag.name for item in violations})
+        self.assertIn("F_ACTIVE", self.violating_names())
 
         self.write_workspace_manifest()
         with self.assertRaisesRegex(ValueError, "not a declared workspace member"):
