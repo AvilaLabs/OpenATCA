@@ -11,6 +11,7 @@ declarations with flag-style names or flag/bit documentation, then requires a no
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import os
 import json
 import re
@@ -53,12 +54,20 @@ MAX_PACKAGE_COUNT = 512
 MAX_SOURCE_FILES_PER_PACKAGE = 8192
 MAX_TOTAL_SOURCE_FILES = 65536
 MAX_PACKAGE_SCAN_DIRECTORIES = 32768
+MAX_WORKSPACE_MEMBER_PATTERNS = 4096
 TOKEN_RE = re.compile(
     r"[A-Za-z_][A-Za-z0-9_]*|(?:0[xX][0-9A-Fa-f_]+|0[bB][01_]+|0[oO][0-7_]+|[0-9][0-9_]*)"
     r"(?:[ui](?:8|16|32|64|128|size))?|::|<<|>>|&&|\|\||==|!=|<=|>=|=>|[^\s]"
 )
 RAW_STRING_RE = re.compile(r"(?:b)?r(#{0,255})\"")
 INTEGER_RE = re.compile(r"^(0[xX][0-9A-Fa-f_]+|0[bB][01_]+|0[oO][0-7_]+|[0-9][0-9_]*)(?:[ui](?:8|16|32|64|128|size))?$")
+
+
+def _matches_workspace_exclude(path: str, pattern: str) -> bool:
+    if any(char in pattern for char in "*?["):
+        return fnmatch.fnmatchcase(path, pattern)
+    normalized = pattern.rstrip("/")
+    return path == normalized or path.startswith(normalized + "/")
 
 
 @dataclass(frozen=True)
@@ -532,8 +541,45 @@ def _decls(package: Package, workspace: Path, files: list[Path], reader: Bounded
     return found
 
 
+def _workspace_member_paths(workspace: Path, reader: BoundedReader) -> tuple[set[str], list[str]]:
+    try:
+        document = tomllib.loads(reader.read_text(workspace / "Cargo.toml"))
+    except tomllib.TOMLDecodeError as exc:
+        raise ValueError("workspace Cargo manifest is malformed") from exc
+    workspace_table = document.get("workspace")
+    if not isinstance(workspace_table, dict):
+        raise ValueError("workspace Cargo manifest has no workspace table")
+    members = workspace_table.get("members")
+    excluded = workspace_table.get("exclude", [])
+    if not isinstance(members, list) or not members or not isinstance(excluded, list):
+        raise ValueError("workspace members/exclude configuration is missing or malformed")
+    if len(members) + len(excluded) > MAX_WORKSPACE_MEMBER_PATTERNS:
+        raise ValueError("workspace member/exclude pattern count exceeds its cap")
+    excluded_patterns: list[str] = []
+    for pattern in excluded:
+        if not isinstance(pattern, str) or not pattern or Path(pattern).is_absolute() or ".." in Path(pattern).parts:
+            raise ValueError("workspace exclude entry is invalid")
+        excluded_patterns.append(pattern)
+    member_paths: set[str] = set()
+    for member in members:
+        if not isinstance(member, str) or not member or any(ch in member for ch in "*?["):
+            raise ValueError("wildcard or malformed workspace member entries are refused")
+        path = Path(member)
+        normalized = path.as_posix()
+        if path.is_absolute() or ".." in path.parts or normalized != member:
+            raise ValueError("workspace member path is not canonical and relative")
+        if any(_matches_workspace_exclude(member, pattern) for pattern in excluded_patterns):
+            raise ValueError("workspace member is also excluded")
+        if member in member_paths:
+            raise ValueError("workspace contains a duplicate member path")
+        member_paths.add(member)
+    return member_paths, excluded_patterns
+
+
 def _package_roots(workspace: Path, reader: BoundedReader) -> list[Package]:
     roots: list[Package] = []
+    member_paths, excluded_patterns = _workspace_member_paths(workspace, reader)
+    discovered_members: set[str] = set()
     manifest_count = 0
     visited_directories = 0
     for base in (workspace / "crates", workspace / "tools"):
@@ -568,6 +614,12 @@ def _package_roots(workspace: Path, reader: BoundedReader) -> list[Package]:
             meta = doc.get("package")
             if not isinstance(meta, dict) or not isinstance(meta.get("name"), str):
                 continue
+            relative_root = manifest.parent.relative_to(workspace).as_posix()
+            if relative_root not in member_paths:
+                if any(_matches_workspace_exclude(relative_root, pattern) for pattern in excluded_patterns):
+                    continue
+                raise ValueError(f"discovered Cargo package is not a declared workspace member: {relative_root}")
+            discovered_members.add(relative_root)
             name = meta["name"]
             lib = doc.get("lib", {})
             crate_name = lib.get("name", name.replace("-", "_")) if isinstance(lib, dict) else name.replace("-", "_")
@@ -590,6 +642,11 @@ def _package_roots(workspace: Path, reader: BoundedReader) -> list[Package]:
             roots.append(Package(name, crate_name, manifest.parent, deps))
             if len(roots) > MAX_PACKAGE_COUNT:
                 raise ValueError("workspace package count exceeds its configured cap")
+    scoped_members = {
+        member for member in member_paths if member.startswith("crates/") or member.startswith("tools/")
+    }
+    if scoped_members != discovered_members:
+        raise ValueError("workspace member package roots do not match discovered crates/tools manifests")
     return roots
 
 
@@ -684,6 +741,36 @@ def _extend_module_aliases(
             # `use dep as LOCAL` are namespace aliases usable in qualified paths.
             if imported_name not in exports.get(target, {}):
                 aliases[local_name] = target
+
+
+def _shadowed_import_names(tokens: list[str], names: set[str]) -> set[str]:
+    """Conservatively exclude bare imported names that are also local bindings.
+
+    This lexical checker does not resolve Rust scopes. If an imported flag spelling is used as
+    any parameter/local binding in a source file, bare occurrences in that file are ambiguous and
+    cannot establish consumption. Qualified `crate_alias::FLAG` references remain independently
+    resolvable.
+    """
+    shadowed: set[str] = set()
+    for index, token in enumerate(tokens):
+        if token not in names:
+            continue
+        following = tokens[index + 1 : index + 2]
+        if following == [":"]:
+            previous = tokens[index - 1] if index else ""
+            if previous in {"(", ",", "mut", "ref", "&"}:
+                shadowed.add(token)
+                continue
+        if following == ["="]:
+            cursor = index - 1
+            while cursor >= 0 and tokens[cursor] in {"mut", "ref", "&"}:
+                cursor -= 1
+            if cursor >= 0 and tokens[cursor] == "let":
+                shadowed.add(token)
+                continue
+        if index and tokens[index - 1] == "for" and following == ["in"]:
+            shadowed.add(token)
+    return shadowed
 
 
 def _consumer_references(
@@ -804,10 +891,13 @@ def _consumer_references(
                         alias = stmt[index + 2] if stmt[index + 1 : index + 2] == ["as"] and index + 2 < len(stmt) else name
                         imported.setdefault(alias, set()).update(target_exports[name])
 
+            shadowed = _shadowed_import_names(tokens, set(imported) | set(globs))
+
             for index, token in enumerate(tokens):
                 if index in excluded:
                     continue
-                for key in imported.get(token, set()) | globs.get(token, set()):
+                bare_keys = set() if token in shadowed else imported.get(token, set()) | globs.get(token, set())
+                for key in bare_keys:
                     if package.name != key[0]:
                         consumers_by_key[key].add(package.name)
                 if index >= 2 and tokens[index - 1] == "::":

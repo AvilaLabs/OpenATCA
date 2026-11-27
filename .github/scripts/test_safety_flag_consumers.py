@@ -63,6 +63,12 @@ class SafetyFlagConsumerTests(unittest.TestCase):
             '[package]\nname="oa-adapt"\nversion="0.1.0"\n', encoding="utf-8"
         )
         (adapt_root / "src" / "lib.rs").write_text("", encoding="utf-8")
+        self.members = sorted(
+            path.parent.relative_to(self.root).as_posix()
+            for base in (self.root / "crates", self.root / "tools")
+            for path in base.rglob("Cargo.toml")
+        )
+        self.write_workspace_manifest()
         self.consumer_source = self.consumer / "src" / "lib.rs"
         self.allowlist = self.root / ".github" / "safety-flag-consumer-allowlist.json"
         self.allowlist.parent.mkdir()
@@ -76,6 +82,15 @@ class SafetyFlagConsumerTests(unittest.TestCase):
 
     def write_consumer(self, source: str) -> None:
         self.consumer_source.write_text(source, encoding="utf-8")
+
+    def write_workspace_manifest(self, exclude: list[str] | None = None) -> None:
+        members = ",\n".join(f'    "{member}"' for member in self.members)
+        excluded = exclude or []
+        excludes = ",\n".join(f'    "{member}"' for member in excluded)
+        text = f"[workspace]\nmembers = [\n{members}\n]\n"
+        if excluded:
+            text += f"exclude = [\n{excludes}\n]\n"
+        (self.root / "Cargo.toml").write_text(text, encoding="utf-8")
 
     def test_unconsumed_flags_are_reported_and_old_code_would_fail(self) -> None:
         with self.provider_source.open("a", encoding="utf-8") as source:
@@ -107,6 +122,35 @@ class SafetyFlagConsumerTests(unittest.TestCase):
             {item.flag.name for item in violations},
             {"F_ACTIVE", "F_VISIBLE", "F_ALL_FLAGS", "INPUT_PRESENT"},
         )
+
+    def test_shadowed_parameter_does_not_count_as_flag_consumer(self) -> None:
+        # Kills the old behavior that counted an imported spelling even when the function
+        # parameter shadows it: `use F_ACTIVE; fn consume(F_ACTIVE: u8) { F_ACTIVE }`.
+        self.write_consumer(
+            "use safety_dep::F_ACTIVE;\n"
+            "pub fn consume(F_ACTIVE: u8) -> bool { F_ACTIVE != 0 }\n"
+        )
+        violations, _ = self.findings()
+        self.assertIn("F_ACTIVE", {item.flag.name for item in violations})
+
+    def test_shadowed_local_binding_does_not_count_as_flag_consumer(self) -> None:
+        # Kills the same basename false pass for a local `let` binding.
+        self.write_consumer(
+            "use safety_dep::F_ACTIVE;\n"
+            "pub fn consume() -> bool { let F_ACTIVE = 3; F_ACTIVE != 0 }\n"
+        )
+        violations, _ = self.findings()
+        self.assertIn("F_ACTIVE", {item.flag.name for item in violations})
+
+    def test_qualified_flag_path_survives_same_name_parameter(self) -> None:
+        self.write_consumer(
+            "use safety_dep as safety;\n"
+            "pub fn consume(F_ACTIVE: u8, bits: u8) -> bool {\n"
+            "    F_ACTIVE != 0 || bits & safety::F_ACTIVE != 0\n"
+            "}\n"
+        )
+        violations, _ = self.findings()
+        self.assertNotIn("F_ACTIVE", {item.flag.name for item in violations})
 
     def test_real_downstream_use_through_public_reexport_counts(self) -> None:
         middle = self.root / "crates" / "oa-track"
@@ -279,7 +323,30 @@ class SafetyFlagConsumerTests(unittest.TestCase):
             '[package]\nname="oa-safety"\nversion="0.2.0"\n', encoding="utf-8"
         )
         (duplicate / "src" / "lib.rs").write_text("", encoding="utf-8")
+        self.members.append("tools/oa-safety-duplicate")
+        self.write_workspace_manifest()
         with self.assertRaisesRegex(ValueError, "duplicate package metadata"):
+            self.findings()
+
+    def test_excluded_and_nonmember_packages_cannot_consume_flags(self) -> None:
+        excluded = self.root / "tools" / "excluded-root" / "nested-consumer"
+        (excluded / "src").mkdir(parents=True)
+        (excluded / "Cargo.toml").write_text(
+            '[package]\nname="excluded-consumer"\nversion="0.1.0"\n'
+            '[dependencies]\nsafety_dep={package="oa-safety",path="../../crates/oa-safety"}\n',
+            encoding="utf-8",
+        )
+        (excluded / "src" / "lib.rs").write_text(
+            "use safety_dep::F_ACTIVE;\npub fn consumes(bits: u8) -> bool { bits & F_ACTIVE != 0 }\n",
+            encoding="utf-8",
+        )
+        self.write_workspace_manifest(exclude=["tools/excluded-root"])
+        self.write_consumer("pub fn unrelated() {}\n")
+        violations, _ = self.findings()
+        self.assertIn("F_ACTIVE", {item.flag.name for item in violations})
+
+        self.write_workspace_manifest()
+        with self.assertRaisesRegex(ValueError, "not a declared workspace member"):
             self.findings()
 
     def test_package_discovery_refuses_symlink_directories(self) -> None:
