@@ -54,6 +54,11 @@ const MAX_ARC_POINTS: usize = 20_000;
 /// Most sample points one boundary may produce (OA-ASP-074); a boundary that would need more is
 /// refused before any point is made.
 pub const MAX_BOUNDARY_SAMPLES: usize = 1 << 20;
+/// Maximum rings accepted by the public Vec-based area constructor.
+pub const MAX_AREA_RINGS: usize = 32;
+/// Maximum aggregate input edges accepted by the public Vec-based area constructor. This matches
+/// the existing per-ring Polygon vertex ceiling, while permitting a single maximum-size ring.
+pub const MAX_AREA_EDGES: usize = 100_000;
 /// Most edge tests one [`samples_touch_area`] call may make (samples times the area's edges,
 /// dense edges and vertices); a call that would pass it is refused before any test is made.
 pub const MAX_TOUCH_WORK: u64 = 1 << 34;
@@ -359,12 +364,16 @@ pub fn area_edge_count(area: &Area) -> usize {
     area.edges.len()
 }
 
-/// Builds the area from rings of vertices. Each ring must be a valid geodesic polygon for
-/// `oa-geo`; the error says which limit it broke.
+/// Builds an area from rings of vertices. There may be at most [`MAX_AREA_RINGS`] rings and
+/// [`MAX_AREA_EDGES`] aggregate input vertices, and all rings together may produce at most
+/// [`MAX_BOUNDARY_SAMPLES`] dense points. The count limits are checked before geometry
+/// allocations; dense sampling uses one shared budget across the rings. Each ring must also be a
+/// valid geodesic polygon for `oa-geo`; the error says which limit it broke.
 pub fn build_area(rings: Vec<Vec<LatLon>>, buffer_m: f64) -> Result<Area, GeoError> {
+    let edge_count = preflight_area_counts(rings.iter().map(Vec::len))?;
     let ell = wgs84();
     let mut polys = Vec::with_capacity(rings.len());
-    let mut edges = Vec::new();
+    let mut edges = Vec::with_capacity(edge_count);
     let (mut min_lat, mut max_lat) = (f64::INFINITY, f64::NEG_INFINITY);
     let reference = rings.iter().flatten().next().map_or(0.0, |v| v.lon());
     let (mut min_lon, mut max_lon) = (f64::INFINITY, f64::NEG_INFINITY);
@@ -387,8 +396,9 @@ pub fn build_area(rings: Vec<Vec<LatLon>>, buffer_m: f64) -> Result<Area, GeoErr
         }
     }
     let mut dense = Vec::new();
+    let mut dense_remaining = MAX_BOUNDARY_SAMPLES;
     for ring in &rings {
-        let pts = dense_ring_samples(&ell, ring)?;
+        let pts = dense_ring_samples_within(&ell, ring, &mut dense_remaining)?;
         dense.extend(closed_edges(&pts));
     }
     let dense_half = dense
@@ -419,6 +429,27 @@ pub fn build_area(rings: Vec<Vec<LatLon>>, buffer_m: f64) -> Result<Area, GeoErr
         buffer_m,
         bbox,
     })
+}
+
+/// Validate the aggregate input shape without allocating geometry storage.
+fn preflight_area_counts(ring_lengths: impl IntoIterator<Item = usize>) -> Result<usize, GeoError> {
+    let mut ring_count = 0usize;
+    let mut edge_count = 0usize;
+    for ring_length in ring_lengths {
+        ring_count = ring_count
+            .checked_add(1)
+            .ok_or(GeoError::BadParameter("area ring count overflow"))?;
+        if ring_count > MAX_AREA_RINGS {
+            return Err(GeoError::BadParameter("too many area rings"));
+        }
+        edge_count = edge_count
+            .checked_add(ring_length)
+            .ok_or(GeoError::BadParameter("area edge count overflow"))?;
+        if edge_count > MAX_AREA_EDGES {
+            return Err(GeoError::BadParameter("too many area edges"));
+        }
+    }
+    Ok(edge_count)
 }
 
 /// Build a bounded geometry from the model's E7 coordinate representation. This cold adapter
@@ -556,7 +587,8 @@ pub fn area_edge_distance_m(area: &Area, p: LatLon) -> Result<f64, GeoError> {
     Ok(best)
 }
 
-/// True when `p` is inside a polygon or within the buffer of an edge.
+/// True when `p` is inside a polygon or within the buffer of an edge. The estimate and exact
+/// refinement passes scan the prepared edges without allocating query-sized temporary storage.
 pub fn area_contains(area: &Area, p: LatLon) -> Result<bool, GeoError> {
     if !in_bbox(area, p) {
         return Ok(false);
@@ -565,21 +597,22 @@ pub fn area_contains(area: &Area, p: LatLon) -> Result<bool, GeoError> {
         return Ok(true);
     }
     let p3 = unit(p);
-    let approx: Vec<f64> = area.edges.iter().map(|e| approx_edge_m(e, p3)).collect();
     let mut undecided = false;
-    for (e, est) in area.edges.iter().zip(&approx) {
-        let g = grey_m(e, area.buffer_m);
-        if *est < area.buffer_m - g {
+    for e in &area.edges {
+        let estimate = approx_edge_m(e, p3);
+        let grey = grey_m(e, area.buffer_m);
+        if estimate < area.buffer_m - grey {
             return Ok(true);
         }
-        undecided |= *est <= area.buffer_m + g;
+        undecided |= estimate <= area.buffer_m + grey;
     }
     if !undecided {
         return Ok(false);
     }
     // Within the grey band: measure the edges that could be that close exactly.
-    for (e, est) in area.edges.iter().zip(&approx) {
-        if *est <= area.buffer_m + 2.0 * grey_m(e, area.buffer_m)
+    for e in &area.edges {
+        let estimate = approx_edge_m(e, p3);
+        if estimate <= area.buffer_m + 2.0 * grey_m(e, area.buffer_m)
             && exact_edge_m(&area.ell, e.a, e.b, p)? <= area.buffer_m
         {
             return Ok(true);
@@ -640,11 +673,21 @@ pub fn ring_samples(ell: &Ellipsoid, ring: &[LatLon]) -> Result<Vec<LatLon>, Geo
 
 /// The points of a ring's geodesic edges `step_m` apart, within the sample budget.
 fn ring_samples_at(ell: &Ellipsoid, ring: &[LatLon], step_m: f64) -> Result<Vec<LatLon>, GeoError> {
-    let mut out = Vec::new();
     let mut remaining = MAX_BOUNDARY_SAMPLES;
+    ring_samples_within(ell, ring, step_m, &mut remaining)
+}
+
+/// Samples a ring while consuming a caller-shared bound.
+fn ring_samples_within(
+    ell: &Ellipsoid,
+    ring: &[LatLon],
+    step_m: f64,
+    remaining: &mut usize,
+) -> Result<Vec<LatLon>, GeoError> {
+    let mut out = Vec::new();
     for (i, a) in ring.iter().enumerate() {
         let b = ring.get((i + 1) % ring.len()).copied().unwrap_or(*a);
-        out.extend(edge_samples_within(ell, *a, b, step_m, &mut remaining)?);
+        out.extend(edge_samples_within(ell, *a, b, step_m, remaining)?);
     }
     Ok(out)
 }
@@ -653,6 +696,14 @@ fn ring_samples_at(ell: &Ellipsoid, ring: &[LatLon], step_m: f64) -> Result<Vec<
 /// included): the points are [`DENSE_STEP_M`] apart.
 pub fn dense_ring_samples(ell: &Ellipsoid, ring: &[LatLon]) -> Result<Vec<LatLon>, GeoError> {
     ring_samples_at(ell, ring, DENSE_STEP_M)
+}
+
+fn dense_ring_samples_within(
+    ell: &Ellipsoid,
+    ring: &[LatLon],
+    remaining: &mut usize,
+) -> Result<Vec<LatLon>, GeoError> {
+    ring_samples_within(ell, ring, DENSE_STEP_M, remaining)
 }
 
 /// Points along the rhumb line from `a` to `b`, from `a` up to but not including `b`, at most
@@ -730,47 +781,53 @@ fn arc_sweep(
 /// centres, with the arc's ends at the stored points. Only used to test whether the volume
 /// touches the area; the model keeps the exact description.
 pub fn segment_samples(ell: &Ellipsoid, segs: &[SegIn]) -> Result<Vec<LatLon>, GeoError> {
+    let mut remaining = MAX_BOUNDARY_SAMPLES;
+    segment_samples_within(ell, segs, &mut remaining)
+}
+
+/// [`segment_samples`] using the caller's already-accounted boundary sample budget.
+fn segment_samples_within(
+    ell: &Ellipsoid,
+    segs: &[SegIn],
+    remaining: &mut usize,
+) -> Result<Vec<LatLon>, GeoError> {
     use crate::core::model::via;
     let mut out = Vec::new();
-    let mut remaining = MAX_BOUNDARY_SAMPLES;
     for (i, s) in segs.iter().enumerate() {
         let next = segs.get((i + 1) % segs.len()).and_then(|n| n.pos);
         match s.via {
             via::CIRCLE => {
                 if let Some(c) = s.centre {
-                    out.extend(arc_samples(ell, c, s.radius_m, 0.0, 360.0, &mut remaining)?);
+                    out.extend(arc_samples(ell, c, s.radius_m, 0.0, 360.0, remaining)?);
                 }
             }
             via::ARC_CW | via::ARC_CCW => {
                 if let (Some(a), Some(b), Some(c)) = (s.pos, next, s.centre) {
                     let (from, sweep) = arc_sweep(ell, s.via, c, a, b)?;
-                    let mut arc = arc_samples(ell, c, s.radius_m, from, sweep, &mut remaining)?;
+                    let mut arc = arc_samples(ell, c, s.radius_m, from, sweep, remaining)?;
                     // The stored start point, not the point at the coded radius on its bearing.
                     if let Some(first) = arc.first_mut() {
                         *first = a;
                     }
                     out.extend(arc);
                 } else if let Some(a) = s.pos {
+                    take_samples(remaining, 1)?;
                     out.push(a);
                 }
             }
             via::RHUMB => {
                 if let (Some(a), Some(b)) = (s.pos, next) {
-                    out.extend(rhumb_samples(ell, a, b, DENSE_STEP_M, &mut remaining)?);
+                    out.extend(rhumb_samples(ell, a, b, DENSE_STEP_M, remaining)?);
                 } else if let Some(a) = s.pos {
+                    take_samples(remaining, 1)?;
                     out.push(a);
                 }
             }
             _ => {
                 if let (Some(a), Some(b)) = (s.pos, next) {
-                    out.extend(edge_samples_within(
-                        ell,
-                        a,
-                        b,
-                        DENSE_STEP_M,
-                        &mut remaining,
-                    )?);
+                    out.extend(edge_samples_within(ell, a, b, DENSE_STEP_M, remaining)?);
                 } else if let Some(a) = s.pos {
+                    take_samples(remaining, 1)?;
                     out.push(a);
                 }
             }
@@ -1053,6 +1110,145 @@ pub fn distance_m(ell: &Ellipsoid, a: LatLon, b: LatLon) -> Result<f64, GeoError
 #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn public_area_preflight_enforces_ring_and_aggregate_edge_caps() {
+        assert_eq!(
+            preflight_area_counts(std::iter::repeat_n(3, MAX_AREA_RINGS)),
+            Ok(MAX_AREA_RINGS * 3)
+        );
+        assert_eq!(preflight_area_counts([MAX_AREA_EDGES]), Ok(MAX_AREA_EDGES));
+        assert_eq!(
+            preflight_area_counts(std::iter::repeat_n(0, MAX_AREA_RINGS + 1)),
+            Err(GeoError::BadParameter("too many area rings"))
+        );
+        assert_eq!(
+            preflight_area_counts([MAX_AREA_EDGES, 1]),
+            Err(GeoError::BadParameter("too many area edges"))
+        );
+        assert_eq!(
+            preflight_area_counts([1, usize::MAX]),
+            Err(GeoError::BadParameter("area edge count overflow"))
+        );
+    }
+
+    #[test]
+    fn area_constructor_rejects_oversized_shape_before_polygon_validation() {
+        let point = LatLon::new(0.0, 0.0).unwrap();
+        let too_many_rings = vec![Vec::new(); MAX_AREA_RINGS + 1];
+        assert!(matches!(
+            build_area(too_many_rings, 0.0),
+            Err(GeoError::BadParameter("too many area rings"))
+        ));
+        let too_many_edges = vec![vec![point; MAX_AREA_EDGES + 1]];
+        assert!(matches!(
+            build_area(too_many_edges, 0.0),
+            Err(GeoError::BadParameter("too many area edges"))
+        ));
+    }
+
+    #[test]
+    fn ring_sampler_refuses_when_the_shared_area_budget_is_empty() {
+        let ell = wgs84();
+        let ring = [
+            LatLon::new(0.0, 0.0).unwrap(),
+            LatLon::new(0.0, 1.0).unwrap(),
+            LatLon::new(1.0, 0.0).unwrap(),
+        ];
+        let mut remaining = 0;
+        assert_eq!(
+            dense_ring_samples_within(&ell, &ring, &mut remaining),
+            Err(GeoError::BadParameter(
+                "boundary sample count exceeds the work budget"
+            ))
+        );
+        assert_eq!(remaining, 0);
+    }
+
+    // REQ: OA-ASP-074
+    #[test]
+    fn incomplete_segment_fallbacks_debit_the_shared_sample_budget() {
+        use crate::core::model::via;
+
+        let ell = wgs84();
+        let a = LatLon::new(12.0, -40.0).unwrap();
+        let incomplete = |via, pos| SegIn {
+            via,
+            pos,
+            centre: None,
+            radius_m: 0.0,
+        };
+        let cases = [
+            ("arc", vec![incomplete(via::ARC_CW, Some(a))]),
+            (
+                "rhumb",
+                vec![
+                    incomplete(via::RHUMB, Some(a)),
+                    incomplete(via::GEODESIC, None),
+                ],
+            ),
+            (
+                "default",
+                vec![
+                    incomplete(via::MAX + 1, Some(a)),
+                    incomplete(via::GEODESIC, None),
+                ],
+            ),
+        ];
+        for (name, segs) in cases {
+            let mut remaining = 0;
+            assert_eq!(
+                segment_samples_within(&ell, &segs, &mut remaining),
+                Err(GeoError::BadParameter(
+                    "boundary sample count exceeds the work budget"
+                )),
+                "the {name} fallback must charge its single sample before appending"
+            );
+            assert_eq!(
+                remaining, 0,
+                "the {name} refusal does not underflow the budget"
+            );
+        }
+    }
+
+    // REQ: OA-ASP-074
+    #[test]
+    fn incomplete_segment_fallback_refuses_after_valid_sampling_exhausts_budget() {
+        use crate::core::model::via;
+
+        let ell = wgs84();
+        let a = LatLon::new(12.0, -40.0).unwrap();
+        let b = LatLon::new(12.0, -39.9).unwrap();
+        let segs = [
+            SegIn {
+                via: via::GEODESIC,
+                pos: Some(a),
+                centre: None,
+                radius_m: 0.0,
+            },
+            SegIn {
+                via: via::RHUMB,
+                pos: Some(b),
+                centre: None,
+                radius_m: 0.0,
+            },
+            SegIn {
+                via: via::GEODESIC,
+                pos: None,
+                centre: None,
+                radius_m: 0.0,
+            },
+        ];
+        let expected_first_edge = edge_samples(&ell, a, b, DENSE_STEP_M).unwrap().len();
+        let mut remaining = expected_first_edge;
+        assert_eq!(
+            segment_samples_within(&ell, &segs, &mut remaining),
+            Err(GeoError::BadParameter(
+                "boundary sample count exceeds the work budget"
+            ))
+        );
+        assert_eq!(remaining, 0);
+    }
 
     // REQ: OA-ASP-002
     #[test]

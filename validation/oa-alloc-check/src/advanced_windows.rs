@@ -620,6 +620,56 @@ pub fn runway_window(inject: bool) -> Result<WindowEvidence, &'static str> {
 mod tests {
     use super::*;
 
+    #[allow(clippy::expect_used)]
+    // E3: assertions are confined to this synthetic allocation regression test.
+    // REQ: OA-ASP-002
+    #[test]
+    fn prepared_area_contains_is_allocation_free_for_geometry_queries() {
+        use oa_airspace::geom::{area_contains, build_area};
+        use oa_geo::wgs84;
+        use oa_geo::LatLon;
+
+        let _guard = allocator::lock_test_measurements();
+        let point = |lat, lon| LatLon::new(lat, lon).expect("synthetic coordinate");
+        let ring = vec![
+            point(41.0, -89.0),
+            point(41.0, -87.0),
+            point(43.0, -87.0),
+            point(43.0, -89.0),
+        ];
+        let area = build_area(vec![ring], 1_000.0).expect("synthetic area");
+        let ell = wgs84();
+        let near_edge = ell
+            .direct(point(43.0, -88.0), 0.0, 999.0)
+            .expect("near edge")
+            .position;
+        let outside_buffer = ell
+            .direct(point(43.0, -88.0), 0.0, 1_001.0)
+            .expect("outside buffer")
+            .position;
+        let inside = point(42.0, -88.0);
+
+        std::hint::black_box(area_contains(&area, near_edge));
+        std::hint::black_box(area_contains(&area, outside_buffer));
+        std::hint::black_box(area_contains(&area, inside));
+        assert!(
+            allocator::start(),
+            "area query allocation window did not arm"
+        );
+        let near = std::hint::black_box(area_contains(&area, near_edge));
+        let outside = std::hint::black_box(area_contains(&area, outside_buffer));
+        let interior = std::hint::black_box(area_contains(&area, inside));
+        let counts = allocator::stop().expect("area query window did not disarm");
+
+        assert!(near.is_ok_and(|value| value));
+        assert!(outside.is_ok_and(|value| !value));
+        assert!(interior.is_ok_and(|value| value));
+        assert_eq!(counts.alloc, 0);
+        assert_eq!(counts.zeroed, 0);
+        assert_eq!(counts.realloc, 0);
+        assert!(!counts.overflow);
+    }
+
     fn assert_zero_counts(evidence: WindowEvidence) {
         assert_eq!(evidence.counts.alloc, 0);
         assert_eq!(evidence.counts.zeroed, 0);

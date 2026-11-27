@@ -9342,6 +9342,16 @@
           "requirement_id": "OA-ADAPT-003",
           "file": "tools/oa-adapt/src/fleet_cli.rs",
           "test_name": "g2_field_change_end_to_end"
+        },
+        {
+          "requirement_id": "OA-ASP-074",
+          "file": "crates/oa-airspace/src/core/geom.rs",
+          "test_name": "incomplete_segment_fallbacks_debit_the_shared_sample_budget"
+        },
+        {
+          "requirement_id": "OA-ASP-074",
+          "file": "crates/oa-airspace/src/core/geom.rs",
+          "test_name": "incomplete_segment_fallback_refuses_after_valid_sampling_exhausts_budget"
         }
       ],
       "proof_refs": []

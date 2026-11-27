@@ -8,7 +8,7 @@
 )]
 
 use oa_airspace::geom::*;
-use oa_geo::{wgs84, LatLon};
+use oa_geo::{wgs84, GeoError, LatLon};
 
 fn ll(lat: f64, lon: f64) -> LatLon {
     LatLon::new(lat, lon).expect("valid coordinate")
@@ -115,6 +115,47 @@ fn area_membership_agrees_with_the_exact_distance_around_the_buffer() {
         assert!((exact - metres).abs() < 1_500.0, "{exact}");
         assert_eq!(area_contains(&area, p).expect("contains"), want, "{metres}");
     }
+}
+
+// REQ: OA-ASP-002
+#[test]
+fn area_membership_keeps_inside_buffer_edge_and_outside_decisions() {
+    let buffer_m = 1_000.0;
+    let area = build_area(vec![square()], buffer_m).expect("area");
+    let ell = wgs84();
+    let edge_midpoint = ll(43.0, -88.0);
+
+    assert!(area_contains(&area, ll(42.0, -88.0)).expect("inside"));
+    for offset_m in [999.0, 1_000.0, 1_001.0] {
+        let point = ell
+            .direct(edge_midpoint, 0.0, offset_m)
+            .expect("offset")
+            .position;
+        let exact = area_edge_distance_m(&area, point).expect("exact edge distance");
+        assert_eq!(
+            area_contains(&area, point).expect("area membership"),
+            exact <= buffer_m,
+            "offset {offset_m}, exact {exact}"
+        );
+    }
+    let outside = ll(44.0, -88.0);
+    assert!(!area_contains(&area, outside).expect("outside"));
+}
+
+#[test]
+fn public_build_area_rejects_oversized_inputs_before_ring_validation() {
+    let too_many_rings = vec![Vec::new(); oa_airspace::geom::MAX_AREA_RINGS + 1];
+    assert!(matches!(
+        build_area(too_many_rings, 0.0),
+        Err(GeoError::BadParameter("too many area rings"))
+    ));
+
+    let point = ll(0.0, 0.0);
+    let too_many_edges = vec![vec![point; oa_airspace::geom::MAX_AREA_EDGES + 1]];
+    assert!(matches!(
+        build_area(too_many_edges, 0.0),
+        Err(GeoError::BadParameter("too many area edges"))
+    ));
 }
 
 // REQ: OA-ASP-002
