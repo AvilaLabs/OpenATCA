@@ -76,6 +76,40 @@ class ProofSourceInventoryTests(unittest.TestCase):
         self.assertEqual([(item.package, item.harness) for item in source],
                          [("sample", "wire::proofs::wire_case")])
 
+    def test_conventional_nested_modules_map_to_their_file_path(self):
+        self._write("crates/sample/src/lib.rs", "mod navigation;\n")
+        self._write("crates/sample/src/proofs.rs", "")
+        self._write("crates/sample/src/navigation.rs", "pub mod checks;\n")
+        self._write("crates/sample/src/navigation/checks.rs",
+                    "#[kani::proof]\nfn nested_case() {}\n")
+        source = inventory.discover_source_proofs(self.root)
+        self.assertEqual([(item.package, item.harness) for item in source],
+                         [("sample", "navigation::checks::nested_case")])
+
+    def test_inline_and_cfg_disabled_module_proofs_are_still_inventory_entries(self):
+        self._write(
+            "crates/sample/src/lib.rs",
+            "#[cfg(any())]\nmod disabled { mod proofs { #[kani::proof] fn hidden_case() {} } }\n",
+        )
+        self._write("crates/sample/src/proofs.rs", "")
+        source = inventory.discover_source_proofs(self.root)
+        self.assertEqual([(item.package, item.harness) for item in source],
+                         [("sample", "disabled::proofs::hidden_case")])
+
+    def test_ambiguous_same_name_module_paths_refuse_inventory(self):
+        self._write(
+            "crates/sample/src/lib.rs",
+            "mod duplicate { #[kani::proof] fn same_case() {} }\n"
+            "mod duplicate { #[kani::proof] fn same_case() {} }\n",
+        )
+        with self.assertRaisesRegex(inventory.InventoryError, "duplicate source package/harness"):
+            inventory.discover_source_proofs(self.root)
+
+    def test_path_attribute_cannot_escape_package_root(self):
+        self._write("crates/sample/src/lib.rs", '#[path = "../../../outside.rs"]\nmod proofs;\n')
+        with self.assertRaisesRegex(inventory.InventoryError, "escapes its package"):
+            inventory.discover_source_proofs(self.root)
+
     def test_stale_registry_identity_fails_closed(self):
         self._registry([{"package": "sample", "harness": "proofs::renamed_case"}])
         result = inventory.check_paths(self.root, self.root / "tools/rust_proofs.json")
