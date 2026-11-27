@@ -640,18 +640,24 @@ mod tests {
         let area = build_area(vec![ring], 1_000.0).expect("synthetic area");
         let ell = wgs84();
         let near_edge = ell
-            .direct(point(43.0, -88.0), 0.0, 999.0)
+            // The top edge is a geodesic and bows north of its equal-latitude endpoints.
+            // 1,200 m north is still within the 1,000 m edge buffer after that bow.
+            .direct(point(43.0, -88.0), 0.0, 1_200.0)
             .expect("near edge")
             .position;
         let outside_buffer = ell
-            .direct(point(43.0, -88.0), 0.0, 1_001.0)
+            // Leave ample clearance beyond both the curved edge and its buffer.
+            .direct(point(43.0, -88.0), 0.0, 5_000.0)
             .expect("outside buffer")
             .position;
         let inside = point(42.0, -88.0);
 
-        std::hint::black_box(area_contains(&area, near_edge));
-        std::hint::black_box(area_contains(&area, outside_buffer));
-        std::hint::black_box(area_contains(&area, inside));
+        assert!(
+            std::hint::black_box(area_contains(&area, near_edge)).expect("warm-up near-edge query")
+        );
+        assert!(!std::hint::black_box(area_contains(&area, outside_buffer))
+            .expect("warm-up outside-buffer query"));
+        assert!(std::hint::black_box(area_contains(&area, inside)).expect("warm-up interior query"));
         assert!(
             allocator::start(),
             "area query allocation window did not arm"
@@ -661,9 +667,9 @@ mod tests {
         let interior = std::hint::black_box(area_contains(&area, inside));
         let counts = allocator::stop().expect("area query window did not disarm");
 
-        assert!(near.is_ok_and(|value| value));
-        assert!(outside.is_ok_and(|value| !value));
-        assert!(interior.is_ok_and(|value| value));
+        assert!(near.expect("measured near-edge query"));
+        assert!(!outside.expect("measured outside-buffer query"));
+        assert!(interior.expect("measured interior query"));
         assert_eq!(counts.alloc, 0);
         assert_eq!(counts.zeroed, 0);
         assert_eq!(counts.realloc, 0);
