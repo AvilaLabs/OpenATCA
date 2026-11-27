@@ -290,6 +290,46 @@ fn spawn_bridge(env: &PathBuf, jar: &Option<PathBuf>, java: &Option<PathBuf>) ->
 }
 
 fn live(cfg: &Live) -> Result<ExitCode, String> {
+    let mut recorder = match &cfg.record {
+        Some(dir) => {
+            let format = if cfg.record_raw {
+                Format::Raw
+            } else {
+                Format::Gzip
+            };
+            let recorder = match (cfg.sync_closed_segments, &cfg.retention) {
+                (true, Some(policy)) => Recorder::open_retained_sync_closed_segments(
+                    dir,
+                    &cfg.feed,
+                    cfg.rotate_bytes,
+                    policy.clone(),
+                    format,
+                ),
+                (true, None) => Recorder::open_sync_closed_segments(
+                    dir,
+                    &cfg.feed,
+                    cfg.rotate_bytes,
+                    cfg.max_bytes,
+                    format,
+                ),
+                (false, Some(policy)) => Recorder::open_retained(
+                    dir,
+                    &cfg.feed,
+                    cfg.rotate_bytes,
+                    policy.clone(),
+                    format,
+                ),
+                (false, None) => {
+                    Recorder::open(dir, &cfg.feed, cfg.rotate_bytes, cfg.max_bytes, format)
+                }
+            };
+            match recorder {
+                Ok(recorder) => Some(recorder),
+                Err(error) => return Err(format!("cannot open recording directory: {error}")),
+            }
+        }
+        None => None,
+    };
     let mut child: Option<Child> = None;
     let mut src: Box<dyn Read + Send> = match &cfg.source {
         // seal-allow: `oa-feed < file` copies frames as given; the path guard cannot see standard input, and that route is the operator's deliberate choice
@@ -334,44 +374,6 @@ fn live(cfg: &Live) -> Result<ExitCode, String> {
         }
     });
 
-    let mut recorder = match &cfg.record {
-        Some(dir) => {
-            let format = if cfg.record_raw {
-                Format::Raw
-            } else {
-                Format::Gzip
-            };
-            let recorder = match (cfg.sync_closed_segments, &cfg.retention) {
-                (true, Some(policy)) => Recorder::open_retained_sync_closed_segments(
-                    dir,
-                    &cfg.feed,
-                    cfg.rotate_bytes,
-                    policy.clone(),
-                    format,
-                ),
-                (true, None) => Recorder::open_sync_closed_segments(
-                    dir,
-                    &cfg.feed,
-                    cfg.rotate_bytes,
-                    cfg.max_bytes,
-                    format,
-                ),
-                (false, Some(policy)) => Recorder::open_retained(
-                    dir,
-                    &cfg.feed,
-                    cfg.rotate_bytes,
-                    policy.clone(),
-                    format,
-                ),
-                (false, None) => {
-                    Recorder::open(dir, &cfg.feed, cfg.rotate_bytes, cfg.max_bytes, format)
-                }
-            }
-            .map_err(|e| format!("cannot open recording directory: {e}"))?;
-            Some(recorder)
-        }
-        None => None,
-    };
     let mut storage = vec![0u8; 2 * MAX_FRAME_LEN];
     let mut reader = FrameReader::new(&mut storage).map_err(|e| format!("{e:?}"))?;
     let mut health = FeedHealth::new();
@@ -403,6 +405,8 @@ fn live(cfg: &Live) -> Result<ExitCode, String> {
     let mut deferred_mono = 0u64;
     let mut work_deferrals = 0u64;
     let mut pending_peak_bytes = 0usize;
+    let mut recording_stop_reason: Option<String> = None;
+    let mut recording_failure_stop = false;
     let fresh_work_profile = FrameWorkBudget::for_capacity(MAX_FRAME_LEN * 2);
 
     'service: loop {
@@ -463,6 +467,14 @@ fn live(cfg: &Live) -> Result<ExitCode, String> {
                          saved, the feed is still consumed, the exit status will be failure",
                         cfg.feed
                     );
+                    if cfg.stop_on_recording_failure {
+                        terminal_error = Some(format!("recording failed during idle flush: {e}"));
+                        recording_failure_stop = true;
+                        exit = ExitCode::FAILURE;
+                        let cutoff = abort_recording_source(&mut child, &rx, source_gate.as_ref());
+                        eprintln!("oa-feed: recording_failure_cutoff queued_chunks={} queued_bytes={} sender_held_bytes={} reader_bytes={} pending_input_bytes={}", cutoff.queued_chunks, cutoff.queued_bytes, cutoff.sender_held_bytes, reader.buffered_len(), pending_input_bytes(&pending_data));
+                        break 'service;
+                    }
                 }
             }
             let mut work = fresh_work_profile;
@@ -473,10 +485,25 @@ fn live(cfg: &Live) -> Result<ExitCode, String> {
                     &mut recorder,
                     &cfg.feed,
                     deferred_mono,
-                    &mut stamped,
-                    &mut work,
+                    DrainOptions {
+                        stamped: &mut stamped,
+                        work: &mut work,
+                        stop_on_recording_failure: cfg.stop_on_recording_failure,
+                        recording_stop_reason: &mut recording_stop_reason,
+                    },
                 ) {
-                    Ok(()) => deferred_drain = false,
+                    Ok(()) => {
+                        deferred_drain = false;
+                        if let Some(reason) = recording_stop_reason.take() {
+                            terminal_error = Some(reason);
+                            recording_failure_stop = true;
+                            exit = ExitCode::FAILURE;
+                            let cutoff =
+                                abort_recording_source(&mut child, &rx, source_gate.as_ref());
+                            eprintln!("oa-feed: recording_failure_cutoff queued_chunks={} queued_bytes={} sender_held_bytes={} reader_bytes={} pending_input_bytes={}", cutoff.queued_chunks, cutoff.queued_bytes, cutoff.sender_held_bytes, reader.buffered_len(), pending_input_bytes(&pending_data));
+                            break 'service;
+                        }
+                    }
                     Err(refusal) => {
                         match judge(
                             Work::DrainRefused(refusal),
@@ -560,10 +587,24 @@ fn live(cfg: &Live) -> Result<ExitCode, String> {
                         &mut recorder,
                         &cfg.feed,
                         *mono,
-                        &mut stamped,
-                        &mut work,
+                        DrainOptions {
+                            stamped: &mut stamped,
+                            work: &mut work,
+                            stop_on_recording_failure: cfg.stop_on_recording_failure,
+                            recording_stop_reason: &mut recording_stop_reason,
+                        },
                     ) {
-                        Ok(()) => {}
+                        Ok(()) => {
+                            if let Some(reason) = recording_stop_reason.take() {
+                                terminal_error = Some(reason);
+                                recording_failure_stop = true;
+                                exit = ExitCode::FAILURE;
+                                let cutoff =
+                                    abort_recording_source(&mut child, &rx, source_gate.as_ref());
+                                eprintln!("oa-feed: recording_failure_cutoff queued_chunks={} queued_bytes={} sender_held_bytes={} reader_bytes={} pending_input_bytes={}", cutoff.queued_chunks, cutoff.queued_bytes, cutoff.sender_held_bytes, reader.buffered_len(), pending_input_bytes(&pending_data));
+                                break 'service;
+                            }
+                        }
                         Err(refusal) => {
                             match judge(
                                 Work::DrainRefused(refusal),
@@ -618,6 +659,16 @@ fn live(cfg: &Live) -> Result<ExitCode, String> {
                              saved, the feed is still consumed, the exit status will be failure",
                             cfg.feed
                         );
+                        if cfg.stop_on_recording_failure {
+                            terminal_error =
+                                Some(format!("recording failed during idle flush: {e}"));
+                            recording_failure_stop = true;
+                            exit = ExitCode::FAILURE;
+                            let cutoff =
+                                abort_recording_source(&mut child, &rx, source_gate.as_ref());
+                            eprintln!("oa-feed: recording_failure_cutoff queued_chunks={} queued_bytes={} sender_held_bytes={} reader_bytes={} pending_input_bytes={}", cutoff.queued_chunks, cutoff.queued_bytes, cutoff.sender_held_bytes, reader.buffered_len(), pending_input_bytes(&pending_data));
+                            break 'service;
+                        }
                     }
                 }
             }
@@ -670,7 +721,28 @@ fn live(cfg: &Live) -> Result<ExitCode, String> {
     if let Some(r) = &recorder {
         println!("{}", format_recording(&cfg.feed, r));
     }
-    Ok(exit)
+    let final_recording_error = recorder
+        .as_ref()
+        .is_some_and(|recording| recording.exit_reason().is_some());
+    if should_latch_recording_failure(
+        cfg.stop_on_recording_failure,
+        recording_failure_stop,
+        final_recording_error,
+    ) {
+        // B5 supervisor uses this distinct code to latch the collector before any restart can
+        // reconnect and acknowledge messages while recording is unavailable.
+        Ok(ExitCode::from(75))
+    } else {
+        Ok(exit)
+    }
+}
+
+fn should_latch_recording_failure(
+    stop_on_recording_failure: bool,
+    detected_during_run: bool,
+    final_recording_error: bool,
+) -> bool {
+    stop_on_recording_failure && (detected_during_run || final_recording_error)
 }
 
 /// What the top of a live-loop turn does (the pure part of the decision, B2-style: inputs in,
@@ -820,15 +892,27 @@ fn finalize_reader(
     error
 }
 
+struct DrainOptions<'a> {
+    stamped: &'a mut Vec<u8>,
+    work: &'a mut FrameWorkBudget,
+    stop_on_recording_failure: bool,
+    recording_stop_reason: &'a mut Option<String>,
+}
+
 fn drain(
     reader: &mut FrameReader<'_>,
     health: &mut FeedHealth,
     recorder: &mut Option<Recorder>,
     feed: &str,
     mono: u64,
-    stamped: &mut Vec<u8>,
-    work: &mut FrameWorkBudget,
+    options: DrainOptions<'_>,
 ) -> Result<(), oa_feed::FrameWorkRefusal> {
+    let DrainOptions {
+        stamped,
+        work,
+        stop_on_recording_failure,
+        recording_stop_reason,
+    } = options;
     loop {
         let event = match reader.next_with_remaining_budget(work) {
             Ok(event) => event,
@@ -874,17 +958,33 @@ fn drain(
                         now_ns().div_euclid(1_000_000_000),
                     ) {
                         Ok(Outcome::Written | Outcome::Stopped | Outcome::Failed) => {}
-                        Ok(Outcome::StoppedNow) => eprintln!(
-                            "oa-feed: WARNING feed={feed} recording stopped: --max-bytes cap reached \
-                             ({} bytes); nothing deleted, frames are no longer saved",
-                            r.total_bytes()
-                        ),
+                        Ok(Outcome::StoppedNow) => {
+                            eprintln!(
+                                "oa-feed: WARNING feed={feed} recording stopped: --max-bytes cap reached \
+                                 ({} bytes); nothing deleted, frames are no longer saved",
+                                r.total_bytes()
+                            );
+                            if stop_on_recording_failure {
+                                *recording_stop_reason = Some(format!(
+                                    "recording reached --max-bytes cap at {} bytes; source stopped before further frame processing",
+                                    r.total_bytes()
+                                ));
+                                return Ok(());
+                            }
+                        }
                         // The recorder keeps the failure and counts the frames lost from here
                         // on; the final summary and the exit status report it.
-                        Err(e) => eprintln!(
-                            "oa-feed: ERROR feed={feed} recording failed: {e}; frames are no \
-                             longer saved, the feed is still consumed, the exit status will be failure"
-                        ),
+                        Err(e) => {
+                            eprintln!(
+                                "oa-feed: ERROR feed={feed} recording failed: {e}; frames are no \
+                                 longer saved, the feed is still consumed, the exit status will be failure"
+                            );
+                            if stop_on_recording_failure {
+                                *recording_stop_reason =
+                                    Some(format!("recording write failed: {e}"));
+                                return Ok(());
+                            }
+                        }
                     }
                 }
             }
@@ -904,6 +1004,20 @@ fn print_summary(feed: &str, h: &FeedHealth) {
         utc_iso(now.div_euclid(1_000_000_000)).unwrap_or_else(|| "unrepresentable".to_string()),
         format_summary(h, now)
     );
+}
+
+/// Stops the bridge before closing source acceptance when recording is no longer possible.
+/// Bytes already delivered through the bridge pipe are counted locally but are not described as durable.
+fn abort_recording_source(
+    child: &mut Option<Child>,
+    rx: &Receiver<Msg>,
+    gate: &Mutex<SourceGate>,
+) -> CutoffInput {
+    if let Some(source) = child.as_mut() {
+        let _ = source.kill();
+        let _ = source.wait();
+    }
+    cutoff_source(rx, gate)
 }
 
 /// Asks the bridge JVM to exit (SIGTERM via `kill`), so it closes the broker session cleanly.
@@ -930,9 +1044,11 @@ mod tests {
     )]
 
     use super::{
-        cutoff_source, deferral_warning, finalize_reader, judge, try_send_from_reader, turn_plan,
-        Msg, SendAttempt, SourceGate, TurnPlan, Verdict, Work,
+        cutoff_source, deferral_warning, drain, finalize_reader, judge,
+        should_latch_recording_failure, try_send_from_reader, turn_plan, DrainOptions, Msg,
+        SendAttempt, SourceGate, TurnPlan, Verdict, Work,
     };
+    use oa_feed::record::{format_recording, Format, Recorder};
     use oa_feed::{
         encode_frame, ErrorKind, FeedHealth, FrameReader, FrameWorkBudget, FrameWorkKind,
         FrameWorkRefusal, MAX_FRAME_LEN, TRAILER_LEN,
@@ -948,6 +1064,64 @@ mod tests {
             required,
             available: 0,
         }
+    }
+
+    #[test]
+    fn stop_on_recording_failure_stops_draining_and_counts_the_cap_frame() {
+        let directory = std::env::temp_dir().join(format!(
+            "oa-feed-stop-cap-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |value| value.as_nanos())
+        ));
+        std::fs::create_dir(&directory).expect("temporary recording directory");
+        let mut recorder = Some(
+            Recorder::open(&directory, "feed", 4096, 1, Format::Raw)
+                .expect("recorder opens under the synthetic one-byte cap"),
+        );
+        let mut wire = vec![0u8; 2 * (oa_feed::HEADER_LEN + 1 + TRAILER_LEN)];
+        let first = encode_frame(&mut wire, 1, 0, 1, 10, 10, b"a").expect("first frame fits");
+        let second =
+            encode_frame(&mut wire[first..], 1, 0, 2, 20, 20, b"b").expect("second frame fits");
+        let mut storage = vec![0u8; MAX_FRAME_LEN];
+        let mut reader = FrameReader::new(&mut storage).expect("reader buffer fits");
+        assert_eq!(reader.push(&wire[..first + second]), first + second);
+        let mut health = FeedHealth::new();
+        let mut stamped = Vec::new();
+        let mut work = fresh();
+        let mut stop_reason = None;
+        drain(
+            &mut reader,
+            &mut health,
+            &mut recorder,
+            "feed",
+            0,
+            DrainOptions {
+                stamped: &mut stamped,
+                work: &mut work,
+                stop_on_recording_failure: true,
+                recording_stop_reason: &mut stop_reason,
+            },
+        )
+        .expect("recording stop is not a frame-work refusal");
+        assert!(stop_reason.is_some());
+        assert_eq!(health.frames, 1);
+        assert_eq!(reader.buffered_len(), second);
+        let recorded = recorder
+            .as_ref()
+            .expect("recorder remains for final report");
+        assert_eq!(recorded.lost_frames(), 1);
+        assert!(format_recording("feed", recorded).contains("STOPPED lost_frames=1"));
+        std::fs::remove_dir_all(&directory).expect("remove synthetic recording directory");
+    }
+
+    #[test]
+    fn stop_mode_latches_recording_errors_discovered_only_during_finalization() {
+        assert!(should_latch_recording_failure(true, false, true));
+        assert!(should_latch_recording_failure(true, true, false));
+        assert!(!should_latch_recording_failure(false, false, true));
+        assert!(!should_latch_recording_failure(true, false, false));
     }
 
     #[test]

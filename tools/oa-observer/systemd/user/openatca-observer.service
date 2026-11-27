@@ -1,0 +1,27 @@
+[Unit]
+StartLimitIntervalSec=0
+Description=OpenATCA 30-day local OAF2 observer and capture-window cursor
+Wants=openatca-collector@SFDPS.service openatca-collector@STDDS.service openatca-collector@TBFM.service
+After=openatca-collector@SFDPS.service openatca-collector@STDDS.service openatca-collector@TBFM.service
+
+[Service]
+Type=simple
+Environment=OA_CAPTURE_FROM_UTC=2026-11-30T05:00:00Z
+Environment=OA_CAPTURE_TO_UTC=2026-12-01T06:00:00Z
+ExecStart=/usr/bin/systemd-inhibit --what=sleep --mode=block "--why=OpenATCA 30-day local observation" "%h/.local/libexec/openatca-observer/run-observer.sh"
+Restart=on-failure
+RestartSec=15
+TimeoutStopSec=10
+KillSignal=SIGTERM
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.local/share/openatca-observer
+MemoryMax=512M
+TasksMax=32
+LimitNOFILE=4096
+
+[Install]
+WantedBy=default.target

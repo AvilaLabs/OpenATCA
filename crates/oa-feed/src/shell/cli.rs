@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! oa-feed (--env <file> [--jar <jar>] [--java <java>] | --stdin) [--feed <name>]
-//!         [--record <dir> | --record-raw <dir>] [--sync-closed-segments]
+//!         [--record <dir> | --record-raw <dir>] [--sync-closed-segments] [--stop-on-recording-failure]
 //!         [--max-bytes <n>] [--rotate-bytes <n>]
 //!         [--retain-days <n> --peak-bytes-per-hour <n> --peak-rate-source <measurement-path>]
 //!         [--duration <s>] [--summary-every <s>]
@@ -69,6 +69,8 @@ pub struct Live {
     pub record_raw: bool,
     /// Request OS syncs for each closed recording segment.
     pub sync_closed_segments: bool,
+    /// Stop source consumption immediately if recording becomes unavailable.
+    pub stop_on_recording_failure: bool,
     /// Total cap on recorded bytes.
     pub max_bytes: u64,
     /// Rotation size of one recording file.
@@ -104,7 +106,7 @@ pub enum Command {
 /// Usage text.
 pub const USAGE: &str =
     "usage:\n  oa-feed (--env <file> [--jar <jar>] [--java <java>] | --stdin) [--feed <name>] \
-[--record <dir> | --record-raw <dir>] [--sync-closed-segments] [--max-bytes <n>] [--rotate-bytes <n>] [--duration <s>] \
+[--record <dir> | --record-raw <dir>] [--sync-closed-segments] [--stop-on-recording-failure] [--max-bytes <n>] [--rotate-bytes <n>] [--duration <s>] \
 [--summary-every <s>] [--retain-days <n> --peak-bytes-per-hour <n> --peak-rate-source <measurement-path>]\n  oa-feed replay <file.oaf | file.oaf.gz>...\n  oa-feed measure-rate <raw-file.oaf>...\n  oa-feed recordings --feed <name> --from <unix-seconds> --to <unix-seconds> <dir>";
 
 /// Parses arguments (without the program name).
@@ -118,6 +120,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
     let mut record = None;
     let mut record_raw = false;
     let mut sync_closed_segments = false;
+    let mut stop_on_recording_failure = false;
     let mut max_bytes = DEFAULT_MAX_BYTES;
     let mut rotate_bytes = DEFAULT_ROTATE_BYTES;
     let mut duration_secs = None;
@@ -171,6 +174,12 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
                     return Err("--sync-closed-segments is given more than once".into());
                 }
                 sync_closed_segments = true;
+            }
+            "--stop-on-recording-failure" => {
+                if stop_on_recording_failure {
+                    return Err("--stop-on-recording-failure is given more than once".into());
+                }
+                stop_on_recording_failure = true;
             }
             "--max-bytes" => {
                 max_bytes = number("--max-bytes", &value("--max-bytes")?)?;
@@ -229,6 +238,9 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
     if sync_closed_segments && record.is_none() {
         return Err("--sync-closed-segments requires --record or --record-raw".into());
     }
+    if stop_on_recording_failure && record.is_none() {
+        return Err("--stop-on-recording-failure requires --record or --record-raw".into());
+    }
     let retention = match (retain_days, peak_bytes_per_hour, peak_rate_source) {
         (None, None, None) => None,
         (Some(days), Some(rate), Some(source)) => {
@@ -273,6 +285,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
         record,
         record_raw,
         sync_closed_segments,
+        stop_on_recording_failure,
         max_bytes,
         rotate_bytes,
         duration_secs,

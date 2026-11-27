@@ -1,0 +1,33 @@
+[Unit]
+StartLimitIntervalSec=0
+Description=OpenATCA local OAF2 collector for %I
+
+[Service]
+Type=simple
+Environment=OA_FEED_BIN=%h/.local/bin/oa-feed
+Environment=OA_BRIDGE_JAR=%h/.local/lib/openatca/scds-bridge.jar
+Environment=OA_SOURCE_CONFIG_DIR=%h/.config/openatca/sources
+Environment=OA_JOURNAL_ROOT=%h/.local/share/openatca-observer/journal
+Environment=OA_JOURNAL_MAX_BYTES=2147483648
+Environment=OA_ROTATE_BYTES=268435456
+EnvironmentFile=%h/.config/openatca-observer/storage-budget.env
+ExecStartPre=/usr/bin/python3 %h/.local/libexec/openatca-observer/check-disk.py %I
+ExecStart=/usr/bin/systemd-inhibit --what=sleep --mode=block "--why=OpenATCA bounded local feed capture %I" "%h/.local/libexec/openatca-observer/collect-one.sh" %I
+Restart=on-failure
+RestartPreventExitStatus=75
+RestartSec=60
+TimeoutStopSec=15
+KillSignal=SIGTERM
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.local/share/openatca-observer
+ReadOnlyPaths=%h/.config/openatca/sources %h/.local/lib/openatca/scds-bridge.jar %h/.local/bin/oa-feed
+MemoryMax=1G
+TasksMax=64
+LimitNOFILE=4096
+
+[Install]
+WantedBy=default.target
