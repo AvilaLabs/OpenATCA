@@ -6,15 +6,18 @@ on:
   schedule:
     - cron: "17 5 * * *"
   workflow_dispatch:
+    inputs:
+      proof_ids:
+        description: "Optional comma-separated enabled proof IDs for a focused diagnostic run"
+        required: false
+        type: string
 permissions:
   contents: read
 jobs:
   kani:
     runs-on: ubuntu-24.04
-    # A push or pull request runs the push tier of the packages the change reaches (a change to
-    # the registry, the runner or this workflow reaches all of them); the nightly schedule and a
-    # manual run take the whole registry, as two jobs of half of it each (every second enabled
-    # proof), well inside the limit.
+    # A push or pull request runs every registered proof for packages reached by the change.
+    # Scheduled/manual full runs cover the registry; workflow_dispatch can select exact IDs.
     timeout-minutes: 120
     strategy:
       fail-fast: false
@@ -48,9 +51,9 @@ jobs:
           EVENT: ${{ github.event_name }}
           PUSH_BEFORE: ${{ github.event.before }}
           PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PROOF_IDS: ${{ github.event.inputs.proof_ids }}
         run: |
-          # Scheduled and manual runs take the full suite; a push compares with the previous
-          # commit on main and a pull request with its base.
+          # Pushes compare with the previous commit on main; PRs compare with their base.
           case "$EVENT" in
             push)
               base="$PUSH_BEFORE"
@@ -62,18 +65,25 @@ jobs:
             pull_request) echo "changed_from=$PR_BASE" >> "$GITHUB_OUTPUT" ;;
             *) echo "changed_from=" >> "$GITHUB_OUTPUT" ;;
           esac
+          if [[ "$PROOF_IDS" == *$'\n'* || "$PROOF_IDS" == *$'\r'* ]]; then
+            echo "proof_ids input must be a single line" >&2
+            exit 2
+          fi
+          printf 'proof_ids=%s\n' "$PROOF_IDS" >> "$GITHUB_OUTPUT"
       - name: Run registered proof suite sequentially
         env:
           CHANGED_FROM: ${{ steps.pick.outputs.changed_from }}
-        run: >-
-          python3 tools/rust_proof_suite.py
-          --fail-fast
-          --shard "${{ matrix.shard }}"
-          ${CHANGED_FROM:+--changed-from "$CHANGED_FROM"}
-          --repo "$GITHUB_WORKSPACE"
-          --registry "$GITHUB_WORKSPACE/tools/rust_proofs.json"
-          --out "$RUNNER_TEMP/kani-proof-evidence"
-          --target-dir "$RUNNER_TEMP/kani-proof-target"
+          PROOF_IDS: ${{ steps.pick.outputs.proof_ids }}
+        shell: bash
+        run: |
+          args=(--shard "${{ matrix.shard }}")
+          if [ -n "$CHANGED_FROM" ]; then args+=(--changed-from "$CHANGED_FROM"); fi
+          if [ -n "$PROOF_IDS" ]; then args+=(--proof-ids "$PROOF_IDS"); fi
+          python3 tools/rust_proof_suite.py "${args[@]}" \
+            --repo "$GITHUB_WORKSPACE" \
+            --registry "$GITHUB_WORKSPACE/tools/rust_proofs.json" \
+            --out "$RUNNER_TEMP/kani-proof-evidence" \
+            --target-dir "$RUNNER_TEMP/kani-proof-target"
       - name: Upload proof JSON and invocation evidence
         if: always()
         uses: actions/upload-artifact@v4

@@ -30,7 +30,7 @@ ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 HARNESS_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*$")
 
 
-# Paths whose change reruns every push-tier proof: the registry, the runner, the workflow, the
+# Paths whose change selects every proof: the registry, the runner, the workflow, the
 # workspace build inputs and what feeds the proof controls.
 RUN_ALL_PATHS = frozenset({
     "tools/rust_proofs.json", "tools/rust_proof_suite.py", "tools/kani_validation.py",
@@ -113,16 +113,69 @@ def affected_packages(graph: dict[str, dict[str, Any]], changed: list[str]) -> s
 
 
 def select_proofs(
-    proofs: list[dict[str, Any]], affected: set[str] | None, push: bool,
+    proofs: list[dict[str, Any]], affected: set[str] | None,
 ) -> list[dict[str, Any]]:
-    """The enabled proofs to run. A push run takes only the push tier and, unless a change to
-    the registry, runner or workflow selects everything, only the affected packages."""
+    """All enabled proofs reached by the change, regardless of recorded runtime tier."""
     chosen = [p for p in proofs if p["enabled"]]
-    if push:
-        chosen = [p for p in chosen if p["tier"] == "push"]
-        if affected is not None:
-            chosen = [p for p in chosen if p["package"] in affected]
+    if affected is not None:
+        chosen = [p for p in chosen if p["package"] in affected]
     return chosen
+
+
+def select_proof_ids(
+    proofs: list[dict[str, Any]], requested: list[str] | None,
+) -> list[dict[str, Any]]:
+    """Select exact enabled registry IDs in registry order; reject typos and disabled IDs."""
+    if requested is None:
+        return proofs
+    if not requested or len(set(requested)) != len(requested):
+        raise SelectionError("--proof-ids must contain unique enabled proof IDs")
+    by_id = {proof["id"]: proof for proof in proofs if proof["enabled"]}
+    missing = sorted(set(requested) - set(by_id))
+    if missing:
+        raise SelectionError(f"unknown or disabled proof IDs: {', '.join(missing)}")
+    wanted = set(requested)
+    return [proof for proof in proofs if proof["id"] in wanted]
+
+
+def proof_selection_report(
+    proofs: list[dict[str, Any]], chosen: list[dict[str, Any]], selected: list[dict[str, Any]],
+    affected: set[str] | None, changed_from: str | None, proof_ids: list[str] | None,
+    changed: list[str] | None,
+) -> dict[str, Any]:
+    chosen_ids = {proof["id"] for proof in chosen}
+    selected_ids = {proof["id"] for proof in selected}
+    excluded = []
+    skipped = []
+    for proof in proofs:
+        if proof["id"] in selected_ids:
+            continue
+        if proof["id"] in chosen_ids:
+            reason = "assigned to another shard"
+            skipped.append({"id": proof["id"], "status": "SKIPPED", "reason": reason})
+        elif not proof["enabled"]:
+            reason = "disabled in registry"
+            excluded.append({"id": proof["id"], "status": "EXCLUDED", "reason": reason})
+        elif proof_ids is not None:
+            reason = "not requested by proof ID"
+            excluded.append({"id": proof["id"], "status": "EXCLUDED", "reason": reason})
+        elif changed_from is not None and affected is not None and proof["package"] not in affected:
+            reason = "package not reached by changed files"
+            excluded.append({"id": proof["id"], "status": "EXCLUDED", "reason": reason})
+        else:
+            reason = "not selected"
+            excluded.append({"id": proof["id"], "status": "EXCLUDED", "reason": reason})
+    return {
+        "mode": "proof_ids" if proof_ids is not None else ("changed_packages" if changed_from is not None else "all_enabled"),
+        "base": changed_from,
+        "changed_files": changed if changed is not None else ("unknown, all packages assumed" if changed_from else None),
+        "affected_packages": sorted(affected) if affected is not None else ("all" if changed_from else None),
+        "requested_proof_ids": proof_ids,
+        "selected_proof_ids": [proof["id"] for proof in chosen],
+        "shard_proof_ids": [proof["id"] for proof in selected],
+        "skipped_proofs": skipped,
+        "excluded_proofs": excluded,
+    }
 
 
 def changed_files(repo: Path, base: str) -> list[str] | None:
@@ -354,29 +407,89 @@ def _failure_diagnostics(
     return list(dict.fromkeys(diagnostics))[:4]
 
 
-def _not_run_outcome(proof: dict[str, Any], failed_id: str) -> dict[str, Any]:
+def _run_one_proof(
+    proof: dict[str, Any], repo: Path, out: Path, target_dir: Path, runner: Path,
+) -> dict[str, Any]:
+    proof_dir = out / "proofs" / proof["id"]
+    proof_dir.mkdir(parents=True, exist_ok=False)
+    run_dir = proof_dir / "run"
+    cmd = [
+        sys.executable, str(runner), "--repo", str(repo), "--package", proof["package"],
+        "--harness", proof["harness"], "--out", str(run_dir),
+        "--target-dir", str(target_dir), "--harness-timeout",
+        str(proof["harness_timeout_seconds"]), "--timeout",
+        str(proof["external_timeout_seconds"]), "--memory-mib", str(proof["memory_mib"]),
+    ]
+    for label in proof["required_covers"]:
+        cmd.extend(["--require-cover", f"{proof['harness']}={label}"])
+    for preset_name in proof.get("loop_unwind_overrides", []):
+        cmd.extend(["--loop-unwind-preset", preset_name])
+    if proof["stubbing"]:
+        cmd.append("--stubbing")
+        for summary in proof["stub_summaries"]:
+            cmd.extend(["--stub-summary", summary])
+    for cfg in proof["cfgs"]:
+        cmd.extend(["--cfg", cfg])
+    started = time.monotonic()
+    stdout_path, stderr_path = proof_dir / "stdout.log", proof_dir / "stderr.log"
+    timed_out = False
+    try:
+        with stdout_path.open("w", encoding="utf-8") as stdout, stderr_path.open(
+            "w", encoding="utf-8"
+        ) as stderr:
+            process = subprocess.Popen(
+                cmd, cwd=repo, env=os.environ.copy(), stdout=stdout, stderr=stderr,
+                start_new_session=True,
+            )
+            try:
+                rc = process.wait(timeout=proof["external_timeout_seconds"] + 30)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                _terminate_group(process)
+                rc = 124
+    except OSError as exc:
+        rc = 127
+        stderr_path.write_text(f"failed to start runner: {exc}\n", encoding="utf-8")
+    run_record_path = run_dir / "run.json"
+    run_record: dict[str, Any] | None = None
+    if run_record_path.is_file():
+        try:
+            run_record = json.loads(run_record_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            pass
+    ok = (
+        rc == 0 and not timed_out and isinstance(run_record, dict)
+        and run_record.get("status") == "PASS"
+        and run_record.get("expected_harnesses") == [proof["harness"]]
+        and run_record.get("package") == proof["package"]
+        and run_record.get("required_covers") == {proof["harness"]: proof["required_covers"]}
+        and run_record.get("loop_unwind_presets", {}).get(proof["harness"], [])
+        == proof.get("loop_unwind_overrides", [])
+    )
+    diagnostics = [] if ok else _failure_diagnostics(run_record, rc, timed_out, run_record_path)
     return {
         "id": proof["id"],
         "package": proof["package"],
         "harness": proof["harness"],
         "loop_unwind_overrides": proof.get("loop_unwind_overrides", []),
         "experimental": proof["experimental"],
-        "status": "NOT_RUN",
-        "exit_code": None,
-        "timed_out": None,
-        "elapsed_seconds": None,
-        "command": None,
-        "command_sha256": None,
-        "run_record_sha256": None,
-        "run_dir": None,
-        "reason": f"fail-fast after proof {failed_id} did not pass",
-        "diagnostics": [],
+        "status": "PASS" if ok else "FAIL",
+        "diagnostics": diagnostics,
+        "exit_code": rc,
+        "timed_out": timed_out,
+        "elapsed_seconds": time.monotonic() - started,
+        "command": cmd,
+        "command_sha256": _canonical_sha256(cmd),
+        "run_record_sha256": hashlib.sha256(run_record_path.read_bytes()).hexdigest()
+        if run_record_path.is_file() else None,
+        "run_dir": str(run_dir),
     }
 
 
 def run_suite(
-    repo: Path, out: Path, target_dir: Path, registry_path: Path, fail_fast: bool = False,
+    repo: Path, out: Path, target_dir: Path, registry_path: Path,
     shard: tuple[int, int] = (0, 1), changed_from: str | None = None,
+    proof_ids: list[str] | None = None,
 ) -> int:
     try:
         registry_path = registry_path.resolve(strict=True)
@@ -413,11 +526,13 @@ def run_suite(
     # Shard `i` of `n` is the i-th of `n` groups of about equal recorded time: the same registry
     # split across jobs, so that each job finishes within the CI time limit.
     shard_index, shard_count = shard
-    # A push run (--changed-from given) takes only the push tier of the packages the change reaches;
-    # without it the whole enabled registry runs, nightly tier included. The shards are balanced by
-    # recorded seconds over what was chosen.
+    # A changed-package run includes every enabled tier for affected packages. Explicit proof IDs
+    # are for manual diagnosis and cannot be combined with changed-package selection.
     affected: set[str] | None = None
     changed: list[str] | None = None
+    if proof_ids is not None and changed_from is not None:
+        print("--proof-ids cannot be combined with --changed-from", file=sys.stderr)
+        return 2
     if changed_from is not None:
         try:
             graph = package_graph(repo)
@@ -430,19 +545,24 @@ def run_suite(
             return 2
         changed = changed_files(repo, changed_from)
         affected = None if changed is None else affected_packages(graph, changed)
-    chosen = select_proofs(registry["proofs"], affected, changed_from is not None)
-    selected = balance_shards(chosen, shard_count)[shard_index]
-    if changed_from is not None and not selected:
-        print(json.dumps({
-            "suite_status": "SKIPPED", "reason": "no proof of this shard is affected",
-            "base": changed_from,
-            "changed_files": changed if changed is not None else "unknown, all packages assumed",
-            "affected_packages": sorted(affected) if affected is not None else "all",
-        }))
-        return 0
-    if not selected:
-        print("registry has no enabled proof entries", file=sys.stderr)
+    try:
+        chosen = select_proof_ids(select_proofs(registry["proofs"], affected), proof_ids)
+    except SelectionError as exc:
+        print(f"cannot select proofs: {exc}", file=sys.stderr)
         return 2
+    selected = balance_shards(chosen, shard_count)[shard_index]
+    selection_report = proof_selection_report(
+        registry["proofs"], chosen, selected, affected, changed_from, proof_ids, changed,
+    )
+    if not selected:
+        report = {
+            "suite_status": "SKIPPED",
+            "reason": "no proof selected for this shard",
+            "selection": selection_report,
+            "shard": f"{shard_index}/{shard_count}",
+        }
+        print(json.dumps(report))
+        return 0 if (chosen or changed_from is not None) else 2
     out.parent.mkdir(parents=True, exist_ok=True)
     out.mkdir()
     pipeline_source_hashes: dict[str, str] = {}
@@ -454,96 +574,13 @@ def run_suite(
 
     started_utc = dt.datetime.now(dt.timezone.utc).isoformat()
     outcomes = []
-    failed_proof_id: str | None = None
     for proof in selected:
-        if fail_fast and failed_proof_id is not None:
-            outcome = _not_run_outcome(proof, failed_proof_id)
-            outcomes.append(outcome)
-            print(json.dumps({
-                "proof": proof["id"], "status": "NOT_RUN", "reason": outcome["reason"],
-            }), flush=True)
-            continue
-        proof_dir = out / "proofs" / proof["id"]
-        proof_dir.mkdir(parents=True, exist_ok=False)
-        run_dir = proof_dir / "run"
-        cmd = [
-            sys.executable, str(runner), "--repo", str(repo), "--package", proof["package"],
-            "--harness", proof["harness"], "--out", str(run_dir),
-            "--target-dir", str(target_dir), "--harness-timeout",
-            str(proof["harness_timeout_seconds"]), "--timeout",
-            str(proof["external_timeout_seconds"]), "--memory-mib", str(proof["memory_mib"]),
-        ]
-        for label in proof["required_covers"]:
-            cmd.extend(["--require-cover", f"{proof['harness']}={label}"])
-        for preset_name in proof.get("loop_unwind_overrides", []):
-            cmd.extend(["--loop-unwind-preset", preset_name])
-        if proof["stubbing"]:
-            cmd.append("--stubbing")
-            for summary in proof["stub_summaries"]:
-                cmd.extend(["--stub-summary", summary])
-        for cfg in proof["cfgs"]:
-            cmd.extend(["--cfg", cfg])
-        started = time.monotonic()
-        stdout_path, stderr_path = proof_dir / "stdout.log", proof_dir / "stderr.log"
-        process: subprocess.Popen[Any] | None = None
-        timed_out = False
-        try:
-            with stdout_path.open("w", encoding="utf-8") as stdout, stderr_path.open(
-                "w", encoding="utf-8"
-            ) as stderr:
-                process = subprocess.Popen(
-                    cmd, cwd=repo, env=os.environ.copy(), stdout=stdout, stderr=stderr,
-                    start_new_session=True,
-                )
-                try:
-                    rc = process.wait(timeout=proof["external_timeout_seconds"] + 30)
-                except subprocess.TimeoutExpired:
-                    timed_out = True
-                    _terminate_group(process)
-                    rc = 124
-        except OSError as exc:
-            rc = 127
-            stderr_path.write_text(f"failed to start runner: {exc}\n", encoding="utf-8")
-        run_record_path = run_dir / "run.json"
-        run_record: dict[str, Any] | None = None
-        if run_record_path.is_file():
-            try:
-                run_record = json.loads(run_record_path.read_text(encoding="utf-8"))
-            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-                pass
-        ok = (
-            rc == 0 and not timed_out and isinstance(run_record, dict)
-            and run_record.get("status") == "PASS"
-            and run_record.get("expected_harnesses") == [proof["harness"]]
-            and run_record.get("package") == proof["package"]
-            and run_record.get("required_covers") == {proof["harness"]: proof["required_covers"]}
-            and run_record.get("loop_unwind_presets", {}).get(proof["harness"], [])
-            == proof.get("loop_unwind_overrides", [])
-        )
-        diagnostics = [] if ok else _failure_diagnostics(run_record, rc, timed_out, run_record_path)
-        outcomes.append({
-            "id": proof["id"],
-            "package": proof["package"],
-            "harness": proof["harness"],
-            "loop_unwind_overrides": proof.get("loop_unwind_overrides", []),
-            "experimental": proof["experimental"],
-            "status": "PASS" if ok else "FAIL",
-            "diagnostics": diagnostics,
-            "exit_code": rc,
-            "timed_out": timed_out,
-            "elapsed_seconds": time.monotonic() - started,
-            "command": cmd,
-            "command_sha256": _canonical_sha256(cmd),
-            "run_record_sha256": hashlib.sha256(run_record_path.read_bytes()).hexdigest()
-            if run_record_path.is_file() else None,
-            "run_dir": str(run_dir),
-        })
-        summary = {"proof": proof["id"], "status": outcomes[-1]["status"]}
-        if diagnostics:
-            summary["diagnostics"] = diagnostics
+        outcome = _run_one_proof(proof, repo, out, target_dir, runner)
+        outcomes.append(outcome)
+        summary = {"proof": proof["id"], "status": outcome["status"]}
+        if outcome["diagnostics"]:
+            summary["diagnostics"] = outcome["diagnostics"]
         print(json.dumps(summary), flush=True)
-        if fail_fast and not ok:
-            failed_proof_id = proof["id"]
 
     def unchanged(path: Path, key: str) -> bool:
         try:
@@ -566,6 +603,7 @@ def run_suite(
         "selected_count": len(selected),
         "configured_count": len(registry["proofs"]),
         "shard": f"{shard_index}/{shard_count}",
+        "selection": selection_report,
         "loop_unwind_presets": {
             proof["harness"]: proof.get("loop_unwind_overrides", []) for proof in selected
         },
@@ -586,7 +624,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--registry", type=Path)
     parser.add_argument(
         "--fail-fast", action="store_true",
-        help="stop starting proofs after the first non-PASS result",
+        help="deprecated and ignored; every selected proof runs so failures are fully reported",
     )
     parser.add_argument(
         "--shard", default="0/1",
@@ -594,10 +632,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--changed-from", metavar="REV",
-        help="push run: only the push-tier proofs of packages changed since REV or depending on "
-        "a changed package; without it the full suite runs",
+        help="run every enabled proof for packages changed since REV or depending on a changed package",
+    )
+    parser.add_argument(
+        "--proof-ids", metavar="ID[,ID...]",
+        help="run exactly these enabled registry proof IDs (manual diagnostic selection)",
     )
     args = parser.parse_args(argv)
+    if args.fail_fast:
+        print("--fail-fast is deprecated and ignored; all selected proofs will run", file=sys.stderr)
     try:
         shard_index, shard_count = (int(x) for x in args.shard.split("/"))
     except ValueError:
@@ -607,8 +650,9 @@ def main(argv: list[str] | None = None) -> int:
     repo = args.repo.resolve(strict=True)
     registry_path = args.registry or repo / "tools" / "rust_proofs.json"
     return run_suite(
-        repo, args.out, args.target_dir, registry_path, fail_fast=args.fail_fast,
+        repo, args.out, args.target_dir, registry_path,
         shard=(shard_index, shard_count), changed_from=args.changed_from,
+        proof_ids=args.proof_ids.split(",") if args.proof_ids is not None else None,
     )
 
 
