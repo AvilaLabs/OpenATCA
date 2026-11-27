@@ -704,6 +704,7 @@ fn typed_runway_host_queue_applies_issued_assignment_and_ack_on_normal_advances(
     use oa_regional_session::cli::ModelSource;
 
     let root = temp_path("typed-runway-positive");
+    let _ = fs::remove_dir_all(&root);
     fs::create_dir(&root).unwrap();
     let (manifest_pin, package_root) = issue_synthetic_runway_package(&root);
     let input = root.join("session.tsv");

@@ -1399,11 +1399,11 @@ fn finish_processor_inventory(runner: &mut SessionRunner) -> Result<(), String> 
                 "ON_DEMAND",
                 &report,
             ));
-        write_processor_report(
-            &runner.output.join("processor-report.tsv"),
-            runner.processor_report.as_bytes(),
-        )?;
         if report.status != oa_adapt::local_inventory::LocalInventoryStatus::Match {
+            write_processor_report(
+                &runner.output.join("processor-report.tsv"),
+                runner.processor_report.as_bytes(),
+            )?;
             return Err("issued adaptation on-demand verification found a mismatch; loaded model was retained and no completion marker was written".into());
         }
     }
