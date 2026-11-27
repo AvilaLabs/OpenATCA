@@ -394,7 +394,12 @@ pub fn evaluate(
                     }
                 }
             }
-            if assigned_match {
+            if assigned_match && (multiple_wrong || wrong_match.is_some()) {
+                // A position that falls inside the assigned runway and another candidate
+                // corridor is not evidence for a clear assignment (e.g. a taxiway/runway
+                // intersection). Preserve the ambiguity instead of preferring the assignment.
+                status = AlertKind::AmbiguousPath;
+            } else if assigned_match {
                 status = AlertKind::Clear;
             } else if multiple_wrong {
                 status = AlertKind::AmbiguousPath;
@@ -573,6 +578,98 @@ mod tests {
         assert_eq!(taxi_result.alerts, 1);
         assert_eq!(taxi_status, AlertKind::Taxiway as u8);
         assert_eq!(taxi_id, 30);
+    }
+
+    fn evaluate_overlapping_assigned_and_other_path(
+        other_axis_north: f64,
+        track_north: f64,
+    ) -> Option<u8> {
+        let gufi = [[0xA5; 16]];
+        let address = [0x123456];
+        let centre = [*b"ORD "];
+        let plan_id = [*b"PLAN-001    "];
+        let assigned = [10];
+        let east = [0.0];
+        let north = [-1_000.0];
+        let track_east = [0.0];
+        let track_north = [track_north];
+        let go_around = [0];
+        let prior = [AlertKind::Clear as u8];
+        let ids = [10, 20];
+        let kinds = [PathKind::Runway as u8, PathKind::Taxiway as u8];
+        let threshold_e = [0.0, 10.0];
+        let threshold_n = [0.0; 2];
+        let axis_e = [0.0; 2];
+        let axis_n = [1.0, other_axis_north];
+        let widths = [30.0; 2];
+        let mut out_gufi = [[0; 16]; 1];
+        let mut out_address = [0; 1];
+        let mut out_centre = [[0; 4]; 1];
+        let mut out_plan = [[0; 12]; 1];
+        let mut out_status = [u8::MAX; 1];
+        let mut out_path = [u32::MAX; 1];
+        let result = evaluate(
+            DEFAULT_CONFIG,
+            PredictedFlights {
+                identity: FlightIdentityColumns {
+                    gufi: &gufi,
+                    aircraft_address: &address,
+                    centre: &centre,
+                    plan_id: &plan_id,
+                },
+                assigned_path_id: &assigned,
+                predicted_east_m: &east,
+                predicted_north_m: &north,
+                track_east: &track_east,
+                track_north: &track_north,
+                go_around_authenticated: &go_around,
+                prior_status: &prior,
+            },
+            ArvPaths {
+                ids: &ids,
+                kinds: &kinds,
+                threshold_east_m: &threshold_e,
+                threshold_north_m: &threshold_n,
+                inbound_east: &axis_e,
+                inbound_north: &axis_n,
+                width_m: &widths,
+            },
+            ArvOutput {
+                gufi: &mut out_gufi,
+                aircraft_address: &mut out_address,
+                centre: &mut out_centre,
+                plan_id: &mut out_plan,
+                status: &mut out_status,
+                matched_path_id: &mut out_path,
+            },
+        );
+        assert!(
+            result.is_ok(),
+            "bounded overlap candidate evaluation succeeds"
+        );
+        out_status.first().copied()
+    }
+
+    // REQ: OA-RWY-020
+    #[test]
+    fn simultaneous_assigned_and_other_path_matches_are_ambiguous_not_clear() {
+        assert_eq!(
+            evaluate_overlapping_assigned_and_other_path(1.0, 1.0),
+            Some(AlertKind::AmbiguousPath as u8),
+            "overlapping assigned runway and taxiway evidence cannot claim Clear"
+        );
+        assert_eq!(
+            evaluate_overlapping_assigned_and_other_path(-1.0, 1.0),
+            Some(AlertKind::Clear as u8),
+            "a reversed, nonmatching candidate does not create false ambiguity"
+        );
+        let (_, prior_latched, ..) =
+            evaluate_one(0.0, -1_000.0, 0.0, 10, AlertKind::WrongRunway as u8, 0);
+        assert_eq!(
+            prior_latched,
+            AlertKind::WrongRunway as u8,
+            "ambiguous/currently assigned evidence cannot clear a prior alert"
+        );
     }
 
     // REQ: OA-RWY-020
@@ -857,7 +954,7 @@ mod tests {
         let addresses: Vec<u32> = (0..n).map(|value| value as u32 + 1).collect();
         let centres = vec![*b"TEST"; n];
         let plans = vec![*b"PLAN        "; n];
-        let assigned = vec![1_u32; n];
+        let assigned = vec![257_u32; n];
         let positions = vec![0.0_f64; n];
         let track_east = vec![0.0_f64; n];
         let track_north = vec![1.0_f64; n];
@@ -865,7 +962,14 @@ mod tests {
         let prior = vec![0_u8; n];
         let ids: Vec<u32> = (1..=p as u32).collect();
         let kinds = vec![PathKind::Runway as u8; p];
-        let thresholds = vec![0.0_f64; p];
+        // Keep the maximum-capacity work fixture spatially unambiguous. Candidate
+        // centerlines are 70 m apart (outside the 30 m width plus 50 m tolerance); the
+        // assigned path at index 256 contains the test position. All coordinates stay
+        // inside the core's +/-20 km input envelope.
+        let threshold_east: Vec<f64> = (0..p)
+            .map(|index| -17_920.0 + index as f64 * 70.0)
+            .collect();
+        let threshold_north = vec![0.0_f64; p];
         let axis_east = vec![0.0_f64; p];
         let axis_north = vec![1.0_f64; p];
         let widths = vec![30.0_f64; p];
@@ -895,8 +999,8 @@ mod tests {
             ArvPaths {
                 ids: &ids,
                 kinds: &kinds,
-                threshold_east_m: &thresholds,
-                threshold_north_m: &thresholds,
+                threshold_east_m: &threshold_east,
+                threshold_north_m: &threshold_north,
                 inbound_east: &axis_east,
                 inbound_north: &axis_north,
                 width_m: &widths,

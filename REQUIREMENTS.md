@@ -7653,12 +7653,14 @@ FAA value.
   `warning_is_limited_to_the_final_segment_endpoints` and `predicted_zone_entry_beyond_final_endpoint_is_clear`.
 - **OA-RWY-020** The ARV core evaluates caller-supplied predicted track positions against the assigned runway and
   candidate runway/taxiway centerlines, using a configured lateral tolerance and heading tolerance within 5 NM of
-  each candidate threshold. A match to the assigned runway is clear; an aligned match to another parallel runway or
-  taxiway is reported distinctly. A latched alert clears only when the caller supplies an authenticated go-around
+  each candidate threshold. A match only to the assigned runway is clear; an aligned match to another parallel
+  runway or taxiway is reported distinctly, and simultaneous assigned/other-path matches are AmbiguousPath rather
+  than Clear. A latched alert clears only when the caller supplies an authenticated go-around
   event. The core neither authenticates that event nor claims an operational controller warning. Tested by
   `assigned_runway_match_is_clear_and_keeps_full_identity`, `parallel_runway_and_taxiway_mismatches_alert`,
   `only_authenticated_go_around_clears_latched_alert` and
-  `threshold_range_and_heading_tolerances_bound_candidate_matches`.
+  `threshold_range_and_heading_tolerances_bound_candidate_matches` and
+  `simultaneous_assigned_and_other_path_matches_are_ambiguous_not_clear`.
 - **OA-RWY-021** ARV consumes complete bounded structure-of-arrays inputs for at most 256 unique full flight
   identities and 512 candidate paths with strictly increasing path IDs. It refuses missing assignments, malformed
   columns and invalid geometry before output mutation, and preserves all 36 bytes of identity in output. A checked
