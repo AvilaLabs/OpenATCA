@@ -194,8 +194,8 @@ fn issue_cli_binds_catalog_then_runway_aids_and_reads_v5_back() {
         .find_map(|line| line.strip_prefix("audit_tail\t"))
         .expect("first issue audit tail");
     let pin_hex = to_hex(&pin);
-    let mut v5_args = Vec::new();
-    for pair in issue_args.chunks_exact(2) {
+    let mut v5_args = args(&["issue"]);
+    for pair in issue_args.get(1..).unwrap_or_default().chunks_exact(2) {
         let [flag, value] = pair else { continue };
         if flag == "--pver-catalog" {
             continue;
