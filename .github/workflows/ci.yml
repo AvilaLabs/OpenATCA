@@ -45,7 +45,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        escape: [E01, E02, E03, E04, E05, E07, E09]
+        escape: [E01, E02, E03, E04, E05, E06, E07, E09]
     steps:
       - uses: actions/checkout@v4
       - name: Install pinned proof compiler
@@ -69,6 +69,9 @@ jobs:
               ;;
             E04)
               command=(python3 tools/run_safety_mutants_fixture.py --negative-proof)
+              ;;
+            E06)
+              command=(python3 .github/scripts/test_safety_flag_consumers.py --negative-proof)
               ;;
             E05|E07|E09)
               command=(python3 tools/prove_quality_rejections.py --class "$PROOF_CLASS")

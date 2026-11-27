@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 
 
 SCRIPT = Path(__file__).with_name("check_safety_flag_consumers.py")
@@ -19,7 +20,45 @@ sys.modules[SPEC.name] = CHECKER
 SPEC.loader.exec_module(CHECKER)
 
 
+def prove_unconsumed_flag_refusal() -> int:
+    fixture = SafetyFlagConsumerTests("test_unconsumed_flags_are_reported_and_old_code_would_fail")
+    try:
+        fixture.setUp()
+        prefix = "pub fn mask() -> u8 { safety_dep::F_ACTIVE | safety_dep::F_VISIBLE | safety_dep::F_ALL_FLAGS"
+        fixture.write_consumer(prefix + " | safety_dep::INPUT_PRESENT }\n")
+        code, _ = fixture.run_cli(fixture.root)
+        if code != 0:
+            raise RuntimeError("flag-checker positive control failed")
+        fixture.write_consumer(prefix + " }\n")
+        code, output = fixture.run_cli(fixture.root)
+        if code != 1 or "constant=INPUT_PRESENT" not in output:
+            raise RuntimeError("missing external flag consumer was not refused")
+        print("proof_fixture=validated class=E06 refused=unconsumed-public-flag")
+        return 1
+    except Exception as error:
+        print(f"proof_setup_error class=E06 reason={error}", file=sys.stderr)
+        return 2
+    finally:
+        if getattr(fixture, "tmp", None) is not None:
+            fixture.tearDown()
+
+
 class SafetyFlagConsumerTests(unittest.TestCase):
+    def test_negative_proof_requires_a_passing_control_before_expected_refusal(self) -> None:
+        output = io.StringIO()
+        with redirect_stdout(output):
+            result = prove_unconsumed_flag_refusal()
+        self.assertEqual(result, 1)
+        self.assertIn("proof_fixture=validated class=E06", output.getvalue())
+
+    def test_negative_proof_setup_failure_is_not_a_verified_refusal(self) -> None:
+        output = io.StringIO()
+        with patch.object(SafetyFlagConsumerTests, "setUp", side_effect=OSError("synthetic setup refusal")):
+            with redirect_stdout(output), redirect_stderr(io.StringIO()):
+                result = prove_unconsumed_flag_refusal()
+        self.assertEqual(result, 2)
+        self.assertNotIn("proof_fixture=validated", output.getvalue())
+
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
@@ -365,4 +404,6 @@ class SafetyFlagConsumerTests(unittest.TestCase):
 
 
 if __name__ == "__main__":
+    if sys.argv[1:] == ["--negative-proof"]:
+        raise SystemExit(prove_unconsumed_flag_refusal())
     unittest.main()
