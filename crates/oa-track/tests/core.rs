@@ -478,6 +478,64 @@ fn hash_of(o: &TrackOutput) -> String {
     to_hex(&h.finalize())
 }
 
+/// The frozen OATK1 output projection, used only to prove A7 did not change existing row fields.
+/// It hashes every historical column in the old order and omits only the three new identity
+/// columns (Mode A, source-observation time, and conflict state).
+fn hash_of_v1_projection(o: &TrackOutput) -> String {
+    let mut h = Sha256::new();
+    let mut put = |bytes: &[u8]| h.update(bytes).unwrap();
+    put(b"OATK1");
+    put(&(o.t_ns.len() as u64).to_le_bytes());
+    put(&o.overflow.to_le_bytes());
+    for v in &o.t_ns {
+        put(&v.to_le_bytes());
+    }
+    for v in &o.addr {
+        put(&v.to_le_bytes());
+    }
+    for v in o.lat_e7.iter().chain(o.lon_e7.iter()) {
+        put(&v.to_le_bytes());
+    }
+    for v in o
+        .vel_east_mps
+        .iter()
+        .chain(o.vel_north_mps.iter())
+        .chain(o.turn_rate_rps.iter())
+    {
+        put(&canonical_f32(v).to_le_bytes());
+    }
+    for col in [&o.alt_ft, &o.alt_var_ft2, &o.vrate_fpm] {
+        for (i, v) in col.iter().enumerate() {
+            let value = if o.flags.get(i).is_some_and(|f| f & O_HAS_ALT != 0) {
+                *v
+            } else {
+                0.0
+            };
+            put(&canonical_f32(&value).to_le_bytes());
+        }
+    }
+    for c in o.pos_cov_m2.iter().chain(o.vel_cov_m2s2.iter()) {
+        for v in c {
+            put(&canonical_f32(v).to_le_bytes());
+        }
+    }
+    for c in o.mu_h.iter().chain(o.mu_v.iter()) {
+        for v in c {
+            put(&canonical_f32(v).to_le_bytes());
+        }
+    }
+    put(&o.flags);
+    to_hex(&h.finalize())
+}
+
+fn canonical_f32(value: &f32) -> u32 {
+    if value.is_nan() {
+        0x7fc0_0000
+    } else {
+        value.to_bits()
+    }
+}
+
 // REQ: OA-TRK-066
 #[test]
 fn an_absent_altitude_is_not_a_number_in_the_output_columns() {
@@ -1260,6 +1318,7 @@ fn scrambled_input_keeps_its_pinned_replay_counters_and_output() {
         s.nis_n
     );
     let digest = hash_of(&out);
+    assert_eq!(hash_of_v1_projection(&out), GOLDEN_V1_DIGEST);
     println!(
         "scrambled: {counters} nis_sum {:016x} digest {digest}",
         s.nis_sum.to_bits()
@@ -1299,7 +1358,9 @@ const GOLDEN_COUNTERS: &str = "579 472 35 53 4 284 847 14 0 1316";
 // 0x40a4_3b1a_f97a_16bc and
 // "8924b0a9d9aef420b74326d06d45fe3b055b3ea20a74845e0b03bfa4f6d1a6bd".
 const GOLDEN_NIS_BITS: u64 = 0x40a4_3264_bf63_657b;
-const GOLDEN_DIGEST: &str = "5864f9c330900223ad8e431a98d2f5e1ba70f82867c4a64a3005d89d9921488f";
+// OATK2 adds source-observed identity (or explicit unavailable) to the canonical row hash.
+const GOLDEN_DIGEST: &str = "e932a9bef90f22e406bc9c18fb26fd4b5ec21d60566fe2e06371165e1c87f79f";
+const GOLDEN_V1_DIGEST: &str = "5864f9c330900223ad8e431a98d2f5e1ba70f82867c4a64a3005d89d9921488f";
 
 /// Aircraft that start, stop and start again with long gaps between: one that stops early (and
 /// is dropped), one that flies on, and two that begin after gaps far longer than the drop time.
@@ -1344,11 +1405,13 @@ fn the_rows_across_drops_and_long_gaps_are_the_ones_the_full_scan_gave() {
     tracker_advance(&mut t, 30_000_000_000_000, &mut out);
     tracker_flush(&mut t, 30_000_000_000_000, &mut out);
     let s = tracker_stats(&t);
+    let digest = hash_of(&out);
+    assert_eq!(hash_of_v1_projection(&out), GAPPY_V1_DIGEST);
     println!(
         "gappy: rows {} ended {:?} digest {} held {} applied after {}",
         out.t_ns.len(),
         s.ended,
-        hash_of(&out),
+        digest,
         s.time_held,
         s.time_held_applied
     );
@@ -1356,7 +1419,7 @@ fn the_rows_across_drops_and_long_gaps_are_the_ones_the_full_scan_gave() {
     println!("gappy full stats {s:?}");
     assert_eq!(s.numerical_refused, 0);
     assert_eq!(out.overflow, 0);
-    assert_eq!(hash_of(&out), GAPPY_DIGEST);
+    assert_eq!(digest, GAPPY_DIGEST);
 }
 
 // REQ: OA-TRK-173
@@ -1401,7 +1464,9 @@ fn the_newest_update_is_kept_and_is_an_upper_bound_on_the_live_ones() {
 // OA-TRK-329 changes predicted values with the same 1,446 rows, end counts, held reports and
 // applied-after-step counts. Prior digest:
 // "6bf2d72d551760c04e78ed96d9054f6519e8db2ee59fa9b4a1300bbf212578fd".
-const GAPPY_DIGEST: &str = "4a705106b8b2beecf911272b615cf909e7b4c87082b8a2de8b62cf66b3f04b44";
+// OATK2 adds source-observed identity (or explicit unavailable) to the canonical row hash.
+const GAPPY_DIGEST: &str = "c92dd32853d4389acf1d2bab63fc1e85647d39d703bcae1230a7f81cdf93aa34";
+const GAPPY_V1_DIGEST: &str = "4a705106b8b2beecf911272b615cf909e7b4c87082b8a2de8b62cf66b3f04b44";
 
 // REQ: OA-TRK-041
 #[test]

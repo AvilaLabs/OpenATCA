@@ -28,6 +28,9 @@ fn make_run(dir: &Path, n: usize) -> SpilledRun {
     for i in 0..n {
         o.t_ns.push(1_000_000_000 * i as i64);
         o.addr.push(0xA0_0001 + (i as u32 % 3));
+        o.ident.push(u16::MAX);
+        o.ident_ns.push(i64::MIN);
+        o.ident_conflict.push(0);
         o.lat_e7.push(419_000_000);
         o.lon_e7.push(-883_000_000);
         o.vel_east_mps.push(1.0);
@@ -123,6 +126,9 @@ fn rows_without_an_altitude_have_one_digest_in_memory_and_on_disk() {
         let has = i % 3 == 0;
         o.t_ns.push(1_000_000_000 * i as i64);
         o.addr.push(0xA0_0001);
+        o.ident.push(u16::MAX);
+        o.ident_ns.push(i64::MIN);
+        o.ident_conflict.push(0);
         o.lat_e7.push(419_000_000);
         o.lon_e7.push(-883_000_000);
         o.vel_east_mps.push(1.0);

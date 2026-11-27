@@ -11,7 +11,10 @@ use std::fs::File;
 use std::io::{BufReader, Read, Write};
 use std::path::Path;
 
-use oa_track::canon::{parse_rows_header, CanonRow, ROWS_HEADER_BYTES, ROW_BYTES};
+use oa_track::canon::{
+    parse_rows_header_info, CanonRow, OFF_IDENT, OFF_IDENT_CONFLICT, OFF_IDENT_NS,
+    ROWS_HEADER_BYTES, ROW_BYTES,
+};
 
 use crate::diff::{
     grouper_finish, grouper_push, Group, Grouper, MAX_DIGEST_BYTES, MAX_EXPECT_BYTES,
@@ -77,6 +80,8 @@ pub fn write_out(w: &mut dyn Write, text: &str) -> Result<(), String> {
 pub struct RowsReader<R: Read> {
     r: R,
     remaining: u64,
+    version: u32,
+    row_bytes: usize,
     grouper: Grouper,
     done: bool,
 }
@@ -87,7 +92,8 @@ impl<R: Read> RowsReader<R> {
         let mut h = [0u8; ROWS_HEADER_BYTES];
         r.read_exact(&mut h)
             .map_err(|e| format!("rows file header: {e}"))?;
-        let declared = parse_rows_header(&h)?;
+        let info = parse_rows_header_info(&h)?;
+        let declared = info.rows;
         if declared != digest_rows {
             return Err(format!(
                 "rows file declares {declared} rows, its digest has {digest_rows}"
@@ -96,6 +102,8 @@ impl<R: Read> RowsReader<R> {
         Ok(RowsReader {
             r,
             remaining: declared,
+            version: info.version,
+            row_bytes: info.row_bytes,
             grouper: Grouper::default(),
             done: false,
         })
@@ -116,9 +124,19 @@ impl<R: Read> RowsReader<R> {
                 return Ok(grouper_finish(std::mem::take(&mut self.grouper)));
             }
             let mut b: CanonRow = [0u8; ROW_BYTES];
+            let bytes = b
+                .get_mut(..self.row_bytes)
+                .ok_or_else(|| "unsupported rows width".to_string())?;
             self.r
-                .read_exact(&mut b)
+                .read_exact(bytes)
                 .map_err(|e| format!("rows file ends early: {e}"))?;
+            if self.version == 1 {
+                // v1 predates Mode 3/A output. Preserve the historical row and explicitly encode
+                // unavailable identity; zero would be a plausible but fabricated squawk.
+                b[OFF_IDENT..OFF_IDENT + 2].copy_from_slice(&u16::MAX.to_le_bytes());
+                b[OFF_IDENT_NS..OFF_IDENT_NS + 8].copy_from_slice(&i64::MIN.to_le_bytes());
+                b[OFF_IDENT_CONFLICT] = 0;
+            }
             self.remaining -= 1;
             if let Some(g) = grouper_push(&mut self.grouper, b)? {
                 return Ok(Some(g));
@@ -164,7 +182,9 @@ pub fn open_rows(p: &Path, digest_rows: u64) -> Result<RowsReader<BufReader<File
 )]
 mod tests {
     use super::*;
-    use oa_track::canon::{canon_row, rows_header, OFF_FLAGS};
+    use oa_track::canon::{
+        canon_row, rows_header, OFF_FLAGS, OFF_IDENT, OFF_IDENT_CONFLICT, OFF_IDENT_NS,
+    };
     use oa_track::OutRow;
 
     const S: i64 = 1_000_000_000;
@@ -173,6 +193,9 @@ mod tests {
         canon_row(&OutRow {
             t_ns,
             addr,
+            ident: u16::MAX,
+            ident_ns: i64::MIN,
+            ident_conflict: 0,
             lat_e7: 1,
             lon_e7: 2,
             vel_east_mps: 0.0,
@@ -225,6 +248,28 @@ mod tests {
         let unsorted = file(&[row(12 * S, 1), row(10 * S, 1)]);
         let mut rd = RowsReader::new(&unsorted[..], 2).unwrap();
         assert!(rd.next().unwrap().unwrap_err().contains("ascending"));
+    }
+
+    #[test]
+    fn historical_v1_rows_read_with_identity_explicitly_unavailable() {
+        let current = row(10 * S, 1);
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(oa_track::canon::ROWS_MAGIC);
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&85u32.to_le_bytes());
+        bytes.extend_from_slice(&1u64.to_le_bytes());
+        bytes.extend_from_slice(&current[..85]);
+        let groups: Vec<Group> = RowsReader::new(&bytes[..], 1)
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        let adapted = &groups[0].1[0];
+        assert_eq!(&adapted[OFF_IDENT..OFF_IDENT + 2], &u16::MAX.to_le_bytes());
+        assert_eq!(
+            &adapted[OFF_IDENT_NS..OFF_IDENT_NS + 8],
+            &i64::MIN.to_le_bytes()
+        );
+        assert_eq!(adapted[OFF_IDENT_CONFLICT], 0);
     }
 
     // REQ: OA-RDF-013

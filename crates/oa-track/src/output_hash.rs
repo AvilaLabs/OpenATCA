@@ -6,7 +6,7 @@ use crate::types::{TrackOutput, O_HAS_ALT};
 use oa_sha256::Sha256;
 
 /// Tag and version of the canonical tracker-output serialization.
-pub const OUTPUT_HASH_TAG: &[u8; 5] = b"OATK1";
+pub const OUTPUT_HASH_TAG: &[u8; 5] = b"OATK2";
 
 fn put(h: &mut Sha256, b: &[u8]) {
     // Hashing a few megabytes cannot exceed the hasher's length limit; a failure would only
@@ -61,4 +61,11 @@ pub fn output_hash_into(h: &mut Sha256, o: &TrackOutput) {
         }
     }
     put(h, &o.flags);
+    for v in &o.ident {
+        put(h, &v.to_le_bytes());
+    }
+    for v in &o.ident_ns {
+        put(h, &v.to_le_bytes());
+    }
+    put(h, &o.ident_conflict);
 }

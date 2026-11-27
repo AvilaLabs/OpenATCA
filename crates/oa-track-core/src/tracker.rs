@@ -75,9 +75,9 @@ use crate::time_gate::{
 use crate::types::{
     check_config, log_new, output_push, Measurement, OutRow, PredictError, TrackError, TrackLog,
     TrackOutput, TrackerConfig, TrackerStats, END_DROPPED, END_FLUSHED, END_TENTATIVE, M_HAS_VEL,
-    NONE_I32, NO_ADDR, O_COAST, O_IDENTITY_UNCONFIRMED, O_MOVE_UNCONFIRMED, O_RADAR_DISAGREES,
-    O_REACQUIRED, O_TICK, O_UNCERTAIN, RADAR_KEY_BASE, REF_ALTITUDE, REF_NO_ADDRESS, REF_POSITION,
-    REF_POS_COV, REF_TIME, REF_VELOCITY, TIME_LIMIT_NS,
+    NONE_I32, NO_ADDR, NO_IDENT, NO_IDENT_NS, O_COAST, O_IDENTITY_UNCONFIRMED, O_MOVE_UNCONFIRMED,
+    O_RADAR_DISAGREES, O_REACQUIRED, O_TICK, O_UNCERTAIN, RADAR_KEY_BASE, REF_ALTITUDE,
+    REF_IDENTITY, REF_NO_ADDRESS, REF_POSITION, REF_POS_COV, REF_TIME, REF_VELOCITY, TIME_LIMIT_NS,
 };
 use crate::vfilter::{VFilter, VModel};
 
@@ -114,6 +114,12 @@ pub struct Tracker {
     active: usize,
     // Per-track columns (struct-of-arrays), indexed by slot.
     key: Vec<u32>,
+    /// Last valid source-observed Mode 3/A code by stable track key; no code is an explicit
+    /// sentinel, not a value inferred from flight identity.
+    ident: Vec<u16>,
+    /// Applicability time of the last valid source-observed code.
+    ident_ns: Vec<i64>,
+    ident_conflict: Vec<u8>,
     state: Vec<u8>,
     first_ns: Vec<i64>,
     confirmed_ns: Vec<i64>,
@@ -246,6 +252,9 @@ pub fn tracker_new(cfg: &TrackerConfig) -> Result<Tracker, TrackError> {
         high: 0,
         active: 0,
         key: vec![NO_ADDR; n],
+        ident: vec![NO_IDENT; n],
+        ident_ns: vec![NO_IDENT_NS; n],
+        ident_conflict: vec![0; n],
         state: vec![FREE; n],
         first_ns: vec![0; n],
         confirmed_ns: vec![i64::MIN; n],
@@ -311,10 +320,13 @@ pub fn tracker_counts(t: &Tracker) -> (usize, usize) {
 /// is provided by the separate counting-allocator gate. Test-only because allocator-selected
 /// capacities are not a pure algorithm output (RULESET B8).
 #[cfg(test)]
-fn tracker_buffer_capacities(t: &Tracker) -> [usize; 33] {
+fn tracker_buffer_capacities(t: &Tracker) -> [usize; 36] {
     [
         t.held.capacity(),
         t.key.capacity(),
+        t.ident.capacity(),
+        t.ident_ns.capacity(),
+        t.ident_conflict.capacity(),
         t.state.capacity(),
         t.first_ns.capacity(),
         t.confirmed_ns.capacity(),
@@ -354,6 +366,9 @@ fn tracker_buffer_capacities(t: &Tracker) -> [usize; 33] {
 #[cfg(test)]
 fn tracker_payload_bytes_theoretical(t: &Tracker) -> usize {
     t.key.len() * core::mem::size_of::<u32>()
+        + t.ident.len() * core::mem::size_of::<u16>()
+        + t.ident_ns.len() * core::mem::size_of::<i64>()
+        + t.ident_conflict.len() * core::mem::size_of::<u8>()
         + t.state.len() * core::mem::size_of::<u8>()
         + t.first_ns.len() * core::mem::size_of::<i64>()
         + t.confirmed_ns.len() * core::mem::size_of::<i64>()
@@ -588,6 +603,9 @@ pub fn measurement_check(m: &Measurement) -> Result<(), usize> {
     if m.addr == NO_ADDR {
         return Err(REF_NO_ADDRESS);
     }
+    if m.ident != NO_IDENT && m.ident > 0o7777 {
+        return Err(REF_IDENTITY);
+    }
     Ok(())
 }
 
@@ -666,6 +684,15 @@ pub fn tracker_newest_update_ns(t: &Tracker) -> i64 {
 fn track_begin(t: &mut Tracker, slot: usize, m: &Measurement) -> bool {
     put(&mut t.cur, slot, filter_init(m, t.cfg.h_mode));
     put(&mut t.cat, slot, CategoryState::default());
+    if m.ident != NO_IDENT {
+        put(&mut t.ident, slot, m.ident);
+        put(&mut t.ident_ns, slot, m.toa_ns);
+        put(&mut t.ident_conflict, slot, 0);
+    } else {
+        put(&mut t.ident, slot, NO_IDENT);
+        put(&mut t.ident_ns, slot, NO_IDENT_NS);
+        put(&mut t.ident_conflict, slot, 0);
+    }
     put(&mut t.mv_resync_until_ns, slot, i64::MIN);
     note_category(t, slot, m);
     ring_clear(t, slot);
@@ -707,6 +734,12 @@ fn emit(t: &mut Tracker, slot: usize, at_ns: i64, flags: u8, out: &mut TrackOutp
         return;
     }
     row.addr = col(&t.key, slot, NO_ADDR);
+    let ident_ns = col(&t.ident_ns, slot, NO_IDENT_NS);
+    if ident_ns <= at_ns {
+        row.ident_ns = ident_ns;
+        row.ident = col(&t.ident, slot, NO_IDENT);
+        row.ident_conflict = col(&t.ident_conflict, slot, 0);
+    }
     row.flags |= flags;
     let r95_own = r95;
     if move_active(t, slot) {
@@ -936,11 +969,12 @@ struct TrackTxn {
     ring_len: u8,
     ring_head: u8,
 }
-// Budget: two 664-byte filters, twelve 72-byte measurements, 472-byte statistics (328 before
+// Budget: two 664-byte filters, twelve 72-byte measurements, 488-byte statistics (328 before
 // the eighteen large-move counters of RT-239), six 8-byte times, 8-byte category, 4-byte update
 // count and four byte fields.
+// A7.1: +16 bytes carry a source Mode 3/A range-refusal counter and same-time conflict counter.
 // One bounded stack checkpoint; no track key changes during an update or its replay.
-const _: () = assert!(core::mem::size_of::<TrackTxn>() == 2728);
+const _: () = assert!(core::mem::size_of::<TrackTxn>() == 2744);
 
 /// The pool entry of a move with no snapshot.
 const NO_SNAP: u32 = u32::MAX;
@@ -1213,7 +1247,7 @@ fn restore_track_txn(t: &mut Tracker, slot: usize, snapshot: TrackTxn) {
 #[derive(Clone, Copy)]
 struct OutputTxn {
     overflow: u64,
-    lens: [usize; 15],
+    lens: [usize; 18],
 }
 // Private rollback snapshot: host-sized vector lengths are never serialized or exposed.
 
@@ -1223,6 +1257,9 @@ fn output_txn(out: &TrackOutput) -> OutputTxn {
         lens: [
             out.t_ns.len(),
             out.addr.len(),
+            out.ident.len(),
+            out.ident_ns.len(),
+            out.ident_conflict.len(),
             out.lat_e7.len(),
             out.lon_e7.len(),
             out.vel_east_mps.len(),
@@ -1242,10 +1279,13 @@ fn output_txn(out: &TrackOutput) -> OutputTxn {
 
 fn restore_output_txn(out: &mut TrackOutput, snapshot: OutputTxn) {
     out.overflow = snapshot.overflow;
-    let [t_ns, addr, lat_e7, lon_e7, vel_east_mps, vel_north_mps, pos_cov_m2, vel_cov_m2s2, turn_rate_rps, alt_ft, alt_var_ft2, vrate_fpm, mu_h, mu_v, flags] =
+    let [t_ns, addr, ident, ident_ns, ident_conflict, lat_e7, lon_e7, vel_east_mps, vel_north_mps, pos_cov_m2, vel_cov_m2s2, turn_rate_rps, alt_ft, alt_var_ft2, vrate_fpm, mu_h, mu_v, flags] =
         snapshot.lens;
     out.t_ns.truncate(t_ns);
     out.addr.truncate(addr);
+    out.ident.truncate(ident);
+    out.ident_ns.truncate(ident_ns);
+    out.ident_conflict.truncate(ident_conflict);
     out.lat_e7.truncate(lat_e7);
     out.lon_e7.truncate(lon_e7);
     out.vel_east_mps.truncate(vel_east_mps);
@@ -1549,6 +1589,12 @@ fn update_in_order_ending(
         restore_output_txn(out, output);
         return Step::NumericalRefused;
     }
+    if matches!(
+        step,
+        Step::Applied | Step::Begun | Step::Resynced | Step::Moved
+    ) {
+        update_observed_ident(t, slot, m);
+    }
     // Committed: the move's change goes with it, before the report's row is made.
     match (step, ending) {
         // The state from before the move is the rollback point (the update's own checkpoint);
@@ -1564,6 +1610,29 @@ fn update_in_order_ending(
     // `settle` fails only for a refused step, which returned above.
     let _ = settle(t, slot, step, out);
     step
+}
+
+/// Retains the newest accepted source-observed Mode 3/A code. A missing code means no new
+/// evidence: the prior code stays with its original timestamp so display callers can show its age
+/// and never present it as a fresh current reading.
+fn update_observed_ident(t: &mut Tracker, slot: usize, m: &Measurement) {
+    if m.ident == NO_IDENT {
+        return;
+    }
+    let known_ns = col(&t.ident_ns, slot, NO_IDENT_NS);
+    if m.toa_ns > known_ns {
+        put(&mut t.ident, slot, m.ident);
+        put(&mut t.ident_ns, slot, m.toa_ns);
+        put(&mut t.ident_conflict, slot, 0);
+    } else if m.toa_ns == known_ns && col(&t.ident, slot, NO_IDENT) != m.ident {
+        // Equal-time sensors disagree: no arrival-order winner is selected. A non-sentinel time
+        // with NO_IDENT is the explicit same-time-conflict state until a later code is observed.
+        if col(&t.ident_conflict, slot, 0) == 0 {
+            t.stats.ident_conflicts = t.stats.ident_conflicts.saturating_add(1);
+        }
+        put(&mut t.ident, slot, NO_IDENT);
+        put(&mut t.ident_conflict, slot, 1);
+    }
 }
 
 fn emit_if_confirmed(t: &mut Tracker, slot: usize, out: &mut TrackOutput) {
@@ -1701,6 +1770,12 @@ fn update_late(t: &mut Tracker, slot: usize, m: &Measurement, out: &mut TrackOut
                 return;
             }
         }
+        if matches!(
+            step,
+            Step::Applied | Step::Begun | Step::Resynced | Step::Moved
+        ) {
+            update_observed_ident(t, slot, cm);
+        }
         if k == 0 && matches!(step, Step::Applied | Step::Begun | Step::Resynced) {
             emit_if_confirmed_at(t, slot, m.toa_ns, out);
             // Kani-only reachability evidence that later replay failure rolls back a real attempt.
@@ -1810,6 +1885,9 @@ fn out_row_at(out: &TrackOutput, i: usize) -> Option<OutRow> {
     Some(OutRow {
         t_ns: *out.t_ns.get(i)?,
         addr: *out.addr.get(i)?,
+        ident: *out.ident.get(i)?,
+        ident_ns: *out.ident_ns.get(i)?,
+        ident_conflict: *out.ident_conflict.get(i)?,
         lat_e7: *out.lat_e7.get(i)?,
         lon_e7: *out.lon_e7.get(i)?,
         vel_east_mps: *out.vel_east_mps.get(i)?,
@@ -2416,6 +2494,58 @@ mod tests {
         }
     }
 
+    #[test]
+    fn observed_mode_a_updates_conflicts_ages_and_clears_with_track_lifecycle() {
+        let mut t = tracker_new(&cfg(2, 0)).unwrap();
+        let mut observed = at(0, 0, 100.0);
+        observed.ident = 0o0000;
+        track_begin(&mut t, 0, &observed);
+        update_observed_ident(&mut t, 0, &observed);
+        assert_eq!(
+            (t.ident[0], t.ident_ns[0], t.ident_conflict[0]),
+            (0, observed.toa_ns, 0)
+        );
+
+        let missing = at(1, 0, 100.0);
+        update_observed_ident(&mut t, 0, &missing);
+        assert_eq!((t.ident[0], t.ident_ns[0]), (0, observed.toa_ns));
+
+        let mut conflict = observed;
+        conflict.ident = 0o0123;
+        update_observed_ident(&mut t, 0, &conflict);
+        assert_eq!((t.ident[0], t.ident_conflict[0]), (NO_IDENT, 1));
+        assert_eq!(t.stats.ident_conflicts, 1);
+
+        let mut reverse = tracker_new(&cfg(2, 0)).unwrap();
+        track_begin(&mut reverse, 0, &observed);
+        update_observed_ident(&mut reverse, 0, &conflict);
+        update_observed_ident(&mut reverse, 0, &observed);
+        assert_eq!(
+            (
+                reverse.ident[0],
+                reverse.ident_ns[0],
+                reverse.ident_conflict[0]
+            ),
+            (NO_IDENT, observed.toa_ns, 1)
+        );
+        assert_eq!(reverse.stats.ident_conflicts, 1);
+
+        let mut newer = at(2, 0, 100.0);
+        newer.ident = 0o4567;
+        update_observed_ident(&mut t, 0, &newer);
+        assert_eq!(
+            (t.ident[0], t.ident_ns[0], t.ident_conflict[0]),
+            (0o4567, newer.toa_ns, 0)
+        );
+
+        let no_code = at(3, 0, 100.0);
+        track_begin(&mut t, 0, &no_code);
+        assert_eq!(
+            (t.ident[0], t.ident_ns[0], t.ident_conflict[0]),
+            (NO_IDENT, NO_IDENT_NS, 0)
+        );
+    }
+
     fn baro(t_ns: i64, altitude_ft: i32, rate_fpm: i32) -> Measurement {
         Measurement {
             toa_ns: t_ns,
@@ -2475,7 +2605,7 @@ mod tests {
         assert!(t.log.overflow > 0);
         assert!(t.stats.capacity_refused > 0);
         assert!(t.stats.refiltered > 0);
-        assert_eq!(before.len(), 33);
+        assert_eq!(before.len(), 36);
         assert_eq!(before, tracker_buffer_capacities(&t));
     }
 
@@ -2496,13 +2626,15 @@ mod tests {
         let (small, large) = (payload(4096, 0), payload(38_000, 0));
         let per_track = |bytes: usize, tracks: usize| bytes as f64 / tracks as f64;
         assert!((per_track(small, 4096) - per_track(large, 38_000)).abs() < 12.0);
-        // With a 12-entry ring, the per-track vectors total 2,295 bytes: two 664-byte filters,
-        // twelve 72-byte measurements, and 103 bytes of other per-track columns/free-list entries.
+        // With a 12-entry ring, the pre-A7.1 per-track vectors totaled 2,295 bytes: two 664-byte
+        // filters, twelve 72-byte measurements, and 103 bytes of other columns/free-list entries.
+        // A7.1 adds 11 bytes per track for observed Mode A (u16), source time (i64), and conflict
+        // state (u8).
         // The 38,000-track index rounds 76,000 entries to 131,072 (13.80 bytes per track, under
         // the strict 16-byte-per-track bound). The fixed 8-row hold buffer and 16-entry log add
         // under 0.04 bytes per track; the rollback pool is explicitly zero here. This is a bound
         // on initialized Vec element payload, not allocator reservation or process memory.
-        assert!(per_track(large, 38_000) < 2_312.0);
+        assert!(per_track(large, 38_000) < 2_323.0);
         assert_eq!(
             payload(4096, CONFIRM_POOL) - small,
             CONFIRM_POOL * (core::mem::size_of::<TrackSnap>() + core::mem::size_of::<u32>())

@@ -675,8 +675,12 @@ fn scoring_in_address_ranges_gives_the_numbers_of_scoring_in_one_piece() {
 // REQ: OA-TRK-045
 #[test]
 fn a_run_spilled_to_files_has_the_digest_scores_and_counters_of_the_run_in_memory() {
-    let (meas, cfg, built) = synthetic_run();
+    let (mut meas, cfg, built) = synthetic_run();
+    // Ensure this cross-path regression compares a real identity value as well as unavailable
+    // sentinels; the first report's code must survive both the output drain and disk columns.
+    meas[0].ident = 0o1234;
     let mem = run_tracker(&meas, &cfg).unwrap();
+    assert!(mem.out.ident.contains(&0o1234));
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("track_spill_test");
     let _ = std::fs::remove_dir_all(&dir);
     let spilled = run_tracker_spilled(&meas, &cfg, &dir).unwrap();

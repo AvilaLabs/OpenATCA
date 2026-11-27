@@ -572,6 +572,9 @@ pub struct TrackRun {
 fn append(dst: &mut TrackOutput, src: &TrackOutput) {
     dst.t_ns.extend_from_slice(&src.t_ns);
     dst.addr.extend_from_slice(&src.addr);
+    dst.ident.extend_from_slice(&src.ident);
+    dst.ident_ns.extend_from_slice(&src.ident_ns);
+    dst.ident_conflict.extend_from_slice(&src.ident_conflict);
     dst.lat_e7.extend_from_slice(&src.lat_e7);
     dst.lon_e7.extend_from_slice(&src.lon_e7);
     dst.vel_east_mps.extend_from_slice(&src.vel_east_mps);

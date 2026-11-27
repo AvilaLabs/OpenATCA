@@ -189,6 +189,9 @@ fn push(
 ) {
     o.t_ns.push(t_ns);
     o.addr.push(addr);
+    o.ident.push(u16::MAX);
+    o.ident_ns.push(i64::MIN);
+    o.ident_conflict.push(0);
     o.lat_e7.push(pos.0);
     o.lon_e7.push(pos.1);
     o.vel_east_mps.push(vel.0);
@@ -304,6 +307,29 @@ fn row_flags_altitude_and_radius_map_to_the_target() {
     let mut set = targets_new(2).unwrap();
     targets_at(&store_of(&o), &c, T0, &DEFAULT_CONVERT, &proj(), &mut set);
     assert_eq!(targets_columns(&set).alt_ft, vec![NO_ALT]);
+}
+
+#[test]
+fn tracker_observed_mode_a_flows_through_normal_scope_address_rows_with_age() {
+    let mut o = output_new(2);
+    push(&mut o, T0, 0xabc123, ORD, (1.0, 1.0), 10_000.0, COV, O_TICK);
+    o.ident[0] = 0o1234;
+    o.ident_ns[0] = T0 - 5 * S;
+    let store = store_of(&o);
+    let mut set = targets_new(2).unwrap();
+    let stats = targets_at(
+        &store,
+        &Callsigns::default(),
+        T0 + 2 * S,
+        &DEFAULT_CONVERT,
+        &proj(),
+        &mut set,
+    );
+    assert_eq!(stats.added, 1);
+    let shown = targets_columns(&set);
+    assert_eq!(shown.ident, [0o1234]);
+    assert_eq!(shown.ident_age_s, [7]);
+    assert_eq!(shown.ident_state, [oa_display::traffic::IDENT_OBSERVED]);
 }
 
 // REQ: OA-DSP-043
@@ -1184,6 +1210,9 @@ fn times_parse_as_unix_seconds_or_utc_and_print_back() {
 struct Cols {
     t: Vec<i64>,
     addr: Vec<u32>,
+    ident: Vec<u16>,
+    ident_ns: Vec<i64>,
+    ident_conflict: Vec<u8>,
     lat: Vec<i32>,
     lon: Vec<i32>,
     v: Vec<f32>,
@@ -1196,6 +1225,9 @@ fn cols(n: usize) -> Cols {
     Cols {
         t: vec![T0; n],
         addr: vec![1; n],
+        ident: vec![u16::MAX; n],
+        ident_ns: vec![i64::MIN; n],
+        ident_conflict: vec![0; n],
         lat: vec![ORD.0; n],
         lon: vec![ORD.1; n],
         v: vec![0.0; n],
@@ -1209,6 +1241,9 @@ fn view(c: &Cols) -> RowColumns<'_> {
     RowColumns {
         t_ns: &c.t,
         addr: &c.addr,
+        ident: &c.ident,
+        ident_ns: &c.ident_ns,
+        ident_conflict: &c.ident_conflict,
         lat_e7: &c.lat,
         lon_e7: &c.lon,
         vel_east_mps: &c.v,
@@ -1236,6 +1271,20 @@ fn columns_of_different_lengths_are_an_error_before_any_row_is_read() {
     );
     assert_eq!(store_rows(&s), 0, "nothing was stored");
     assert!(e.to_string().contains("lat_e7"));
+}
+
+#[test]
+fn invalid_mode_a_binding_is_counted_and_never_becomes_a_target() {
+    let mut columns = cols(1);
+    columns.ident[0] = 0o1234;
+    // A numeric code without a source-observation time is not usable identity.
+    let mut store = RowStore::default();
+    let stats = store_add(&mut store, &view(&columns), i64::MIN).unwrap();
+    assert_eq!(
+        (stats.kept, stats.invalid_identity, store_loss(&stats)),
+        (0, 1, 1)
+    );
+    assert_eq!(store_rows(&store), 0);
 }
 
 // REQ: OA-DSP-047

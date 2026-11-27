@@ -283,6 +283,10 @@ mod public_window_canon_tests {
         OutRow {
             t_ns,
             addr: address,
+            ident: u16::MAX,
+            ident_ns: i64::MIN,
+            ident_conflict: 0,
+
             lat_e7: 420_000_000,
             lon_e7: -880_000_000,
             vel_east_mps: value,
@@ -302,6 +306,9 @@ mod public_window_canon_tests {
     fn push_output(out: &mut TrackOutput, row: &OutRow) {
         out.t_ns.push(row.t_ns);
         out.addr.push(row.addr);
+        out.ident.push(row.ident);
+        out.ident_ns.push(row.ident_ns);
+        out.ident_conflict.push(row.ident_conflict);
         out.lat_e7.push(row.lat_e7);
         out.lon_e7.push(row.lon_e7);
         out.vel_east_mps.push(row.vel_east_mps);

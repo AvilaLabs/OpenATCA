@@ -18,7 +18,8 @@ use oa_display::core::{
     raster::{frame_len, render, FrameSpec, RenderError},
     traffic::{
         caps_add, targets_clear, targets_new, targets_push, traffic_caps, Target, TargetSet,
-        TrafficError, DEFAULT_STYLE, MAX_TRAIL, NO_ALT, NO_REACQ, T_COAST, T_UNCERTAIN,
+        TrafficError, DEFAULT_STYLE, IDENT_UNKNOWN, MAX_TRAIL, NO_ALT, NO_IDENT, NO_REACQ, T_COAST,
+        T_UNCERTAIN,
     },
     workstation::{build_r_side, r_side_overlay_caps, RSideFrame},
 };
@@ -1107,6 +1108,9 @@ impl DemoEngine {
                 lon_e7: row.lon_e7,
                 alt_ft,
                 addr: history.address,
+                ident: NO_IDENT,
+                ident_age_s: u32::MAX,
+                ident_state: IDENT_UNKNOWN,
                 r95_m: r95_m_of(&row.pos_cov_m2) as f32,
                 trail,
                 callsign: history.callsign,

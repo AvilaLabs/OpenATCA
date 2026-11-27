@@ -964,6 +964,9 @@ fn output_row(output: &oa_track::TrackOutput, i: usize) -> Option<OutRow> {
         mu_h: *output.mu_h.get(i)?,
         mu_v: *output.mu_v.get(i)?,
         flags: *output.flags.get(i)?,
+        ident: *output.ident.get(i)?,
+        ident_ns: *output.ident_ns.get(i)?,
+        ident_conflict: *output.ident_conflict.get(i)?,
     })
 }
 

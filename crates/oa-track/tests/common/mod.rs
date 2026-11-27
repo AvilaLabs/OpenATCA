@@ -10,7 +10,7 @@
 use oa_geo::aeqd::{frame_new, project, try_frame_velocity, unproject, Frame};
 use oa_track::{
     output_clear, output_len, output_new, tracker_flush, tracker_new, tracker_update, Measurement,
-    TrackOutput, Tracker, TrackerConfig, DEFAULT_CONFIG, M_HAS_VEL, NONE_I32, NO_IDENT,
+    TrackOutput, Tracker, TrackerConfig, DEFAULT_CONFIG, M_HAS_VEL, NONE_I32,
 };
 
 pub const LAT0: f64 = 41.9;
@@ -92,7 +92,7 @@ pub fn measure(
         addr,
         alt_quant_ft: 0,
         sensor: 1,
-        ident: NO_IDENT,
+        ident: u16::MAX,
         flags: 0,
         category: 0,
         vel_lag_s: 0.0,

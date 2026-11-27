@@ -5160,9 +5160,10 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   message-number cursor and does not replace NAM timeout or acknowledgement behavior.
 
 ## Release replay comparison (oa-track canonical output, oa-replay-diff)
-- **OA-TRK-360** A tracker output row has one canonical byte form of 85 bytes: track address, time,
+- **OA-TRK-360** A tracker output row has one canonical byte form of 96 bytes: track address, time,
   position, velocity, turn rate, altitude terms, position and velocity covariance terms, model
-  probabilities and flags, every field little-endian at a fixed offset (`oa_track::canon`), floats as
+  probabilities, flags, source-observed Mode 3/A code, its source time and same-time conflict state,
+  every field little-endian at a fixed offset (`oa_track::canon`), floats as
   their IEEE bits with every NaN made the one fixed NaN first (`oa_math::canon_nan_f32`, whose sign and payload
   would otherwise differ between machines), nothing else zeroed or normalised. The same row
   gives the same bytes on every call, and the form built from a row in memory equals the form built
@@ -5174,9 +5175,10 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   leaves the digests of the other seconds unchanged.
 - **OA-TRK-362** `oa-track-run --digest <file>` writes the digest as text lines
   `second chain_hash second_hash rows` after one `#` header line, and `--rows <file>` writes the
-  canonical rows, grouped by ascending second (each second in emission order), behind a versioned
-  binary header (magic, version, row size, row count). With neither flag the run does what it did
-  before and writes nothing more.
+  canonical rows, grouped by ascending second (each second in emission order), behind a v2 binary
+  header (magic, version, row size, row count). Readers also accept v1/85-byte rows and mark their
+  absent Mode 3/A fields unavailable; they never derive code zero. With neither flag the run does
+  what it did before and writes nothing more.
 - **OA-TRK-363** Two runs of the tracker on the same input write byte-identical digest and rows files.
 - **OA-RDF-001** `oa-replay-diff` calls two digests identical only when every line, chain hash
   included, is equal; otherwise it reports the first differing second, the number of differing
@@ -5186,15 +5188,16 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   seconds not strictly increasing) is an error naming the line, and the tool exits 2.
 - **OA-RDF-003** Given both rows files, for each differing second the tool reports the rows added,
   removed and changed (rows matched by track address, time, tick flag and order among equals), the
-  tracks affected, the changed rows by class (position, velocity, covariance, flags, model), the
+  tracks affected, the changed rows by class (position, velocity, covariance, flags, model,
+  identity), the
   largest absolute difference of every field over finite values, the count of changed non-finite
   values, and the flag bits that differ; a second whose rows are equal and only reordered is reported
   as reordered. Totals follow, and a `key=value` summary.
 - **OA-RDF-004** With an expect file naming the declared classes (`position`, `velocity`,
-  `covariance`, `flags`, `model`, `added`, `removed`, `order`), a difference is accepted (exit 0) only
+  `covariance`, `flags`, `model`, `identity`, `added`, `removed`, `order`), a difference is accepted (exit 0) only
   if every class present is declared; an undeclared class, or an expect file without rows files to
   tell the classes, is a failure (exit 1 or 2), and an unknown class name is an error.
-- **OA-RDF-005** A rows file with a wrong magic, version or row size, truncated, not grouped by
+- **OA-RDF-005** A rows file with a wrong magic, unsupported version or version-mismatched row size, truncated, not grouped by
   ascending second, or whose row counts disagree with its digest file is an error (exit 2), never a
   comparison.
 - **OA-RDF-006** `tools/replay_compare.sh` accepts only commit hashes or refs of the repository,

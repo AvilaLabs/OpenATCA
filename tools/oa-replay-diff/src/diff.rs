@@ -44,9 +44,9 @@ use std::fmt::Write as _;
 use oa_time_window::DropWindow;
 use oa_track::canon::{
     chain_next, field_at, from_hex32, hash_rows, row_second, CanonRow, DIGEST_HEADER,
-    MAX_ROWS_PER_SECOND, MAX_SECONDS, OFF_ADDR, OFF_ALT, OFF_ALT_VAR, OFF_FLAGS, OFF_LAT, OFF_LON,
-    OFF_MU_H, OFF_MU_V, OFF_POS_COV, OFF_TURN, OFF_T_NS, OFF_VE, OFF_VEL_COV, OFF_VN, OFF_VRATE,
-    ROW_BYTES,
+    MAX_ROWS_PER_SECOND, MAX_SECONDS, OFF_ADDR, OFF_ALT, OFF_ALT_VAR, OFF_FLAGS, OFF_IDENT,
+    OFF_IDENT_CONFLICT, OFF_IDENT_NS, OFF_LAT, OFF_LON, OFF_MU_H, OFF_MU_V, OFF_POS_COV, OFF_TURN,
+    OFF_T_NS, OFF_VE, OFF_VEL_COV, OFF_VN, OFF_VRATE, ROW_BYTES,
 };
 use oa_track::O_TICK;
 
@@ -329,15 +329,17 @@ pub enum Class {
     Covariance,
     Flags,
     Model,
+    Identity,
 }
 
 /// Every class, in report order.
-pub const CLASSES: [Class; 5] = [
+pub const CLASSES: [Class; 6] = [
     Class::Position,
     Class::Velocity,
     Class::Covariance,
     Class::Flags,
     Class::Model,
+    Class::Identity,
 ];
 
 // The class index is the position in CLASSES, so `class_rows` is indexed by it.
@@ -357,6 +359,7 @@ pub fn class_name(c: Class) -> &'static str {
         Class::Covariance => "covariance",
         Class::Flags => "flags",
         Class::Model => "model",
+        Class::Identity => "identity",
     }
 }
 
@@ -368,6 +371,8 @@ pub fn class_index(c: Class) -> usize {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
     I32,
+    U16,
+    I64,
     F32,
     U8,
 }
@@ -394,6 +399,8 @@ fn field_size(fl: &Field) -> usize {
     match fl.kind {
         Kind::U8 => 1,
         Kind::I32 | Kind::F32 => 4,
+        Kind::U16 => 2,
+        Kind::I64 => 8,
     }
 }
 
@@ -401,12 +408,14 @@ const fn kind_size(k: Kind) -> usize {
     match k {
         Kind::U8 => 1,
         Kind::I32 | Kind::F32 => 4,
+        Kind::U16 => 2,
+        Kind::I64 => 8,
     }
 }
 
 /// The fields compared, with their class. Latitude and longitude are in 1e-7 degrees, altitude
 /// and its variance in feet and feet squared, vertical rate in feet per minute.
-pub const NF: usize = 19;
+pub const NF: usize = 22;
 const FIELDS: [Field; NF] = [
     f("lat_e7", OFF_LAT, Kind::I32, Class::Position),
     f("lon_e7", OFF_LON, Kind::I32, Class::Position),
@@ -423,6 +432,19 @@ const FIELDS: [Field; NF] = [
     f("vel_cov_en", OFF_VEL_COV + 4, Kind::F32, Class::Covariance),
     f("vel_cov_nn", OFF_VEL_COV + 8, Kind::F32, Class::Covariance),
     f("flags", OFF_FLAGS, Kind::U8, Class::Flags),
+    f("mode_a", OFF_IDENT, Kind::U16, Class::Identity),
+    f(
+        "mode_a_observed_ns",
+        OFF_IDENT_NS,
+        Kind::I64,
+        Class::Identity,
+    ),
+    f(
+        "mode_a_conflict",
+        OFF_IDENT_CONFLICT,
+        Kind::U8,
+        Class::Identity,
+    ),
     f("mu_h_straight", OFF_MU_H, Kind::F32, Class::Model),
     f("mu_h_turn", OFF_MU_H + 4, Kind::F32, Class::Model),
     f("mu_v_level", OFF_MU_V, Kind::F32, Class::Model),
@@ -497,6 +519,16 @@ fn field_delta(
             );
             (true, Some((f64::from(p) - f64::from(q)).abs()), false)
         }
+        Kind::U16 => {
+            let p = u16::from_le_bytes(<[u8; 2]>::try_from(x).map_err(|_| "bad u16 field")?);
+            let q = u16::from_le_bytes(<[u8; 2]>::try_from(y).map_err(|_| "bad u16 field")?);
+            (true, Some(f64::from(p.abs_diff(q))), false)
+        }
+        Kind::I64 => {
+            let p = i64::from_le_bytes(<[u8; 8]>::try_from(x).map_err(|_| "bad i64 field")?);
+            let q = i64::from_le_bytes(<[u8; 8]>::try_from(y).map_err(|_| "bad i64 field")?);
+            (true, Some(p.abs_diff(q) as f64), false)
+        }
         Kind::I32 => {
             let (p, q) = (word(x)? as i32, word(y)? as i32);
             (true, Some((f64::from(p) - f64::from(q)).abs()), false)
@@ -524,7 +556,7 @@ pub struct SecondDiff {
     pub tracks_removed: BTreeSet<u32>,
     pub tracks_changed: BTreeSet<u32>,
     /// Changed rows by class (a row that changed in two classes counts in both).
-    pub class_rows: [u64; 5],
+    pub class_rows: [u64; 6],
     /// Largest absolute difference per field, over the finite pairs.
     pub field_max: [f64; NF],
     /// Rows where the field differs.
@@ -659,7 +691,7 @@ pub fn diff_second(a: &[CanonRow], b: &[CanonRow]) -> Result<SecondDiff, String>
             if let Some(x) = abs {
                 *max = max.max(x);
             }
-            if fl.kind == Kind::U8 {
+            if fl.class == Class::Flags {
                 d.flags_xor |= field_at::<OFF_FLAGS, 1>(ra)[0] ^ field_at::<OFF_FLAGS, 1>(rb)[0];
             }
         }
@@ -688,7 +720,7 @@ pub struct Totals {
     pub tracks_added: BTreeSet<u32>,
     pub tracks_removed: BTreeSet<u32>,
     pub tracks_changed: BTreeSet<u32>,
-    pub class_rows: [u64; 5],
+    pub class_rows: [u64; 6],
     pub field_max: [f64; NF],
     pub field_rows: [u64; NF],
     pub field_nonfinite: [u64; NF],
@@ -751,12 +783,13 @@ pub fn totals_present(t: &Totals) -> BTreeSet<&'static str> {
 // ---------------------------------------------------------------- declared differences
 
 /// The names an expect file may list.
-pub const DECLARABLE: [&str; 9] = [
+pub const DECLARABLE: [&str; 10] = [
     "position",
     "velocity",
     "covariance",
     "flags",
     "model",
+    "identity",
     "added",
     "removed",
     "order",
@@ -1298,6 +1331,9 @@ mod tests {
         OutRow {
             t_ns,
             addr,
+            ident: u16::MAX,
+            ident_ns: i64::MIN,
+            ident_conflict: 0,
             lat_e7: 100,
             lon_e7: 200,
             vel_east_mps: 1.0,
@@ -1647,7 +1683,7 @@ mod tests {
         );
         assert_eq!(d.tracks_changed.len(), 2);
         // position, velocity, covariance, flags, model
-        assert_eq!(d.class_rows, [1, 0, 1, 1, 0]);
+        assert_eq!(d.class_rows, [1, 0, 1, 1, 0, 0]);
         assert_eq!(d.field_max[field_index("lon_e7")], 9.0);
         assert_eq!(d.field_max[field_index("lat_e7")], 5.0);
         assert_eq!(d.field_max[field_index("pos_cov_ee")], 3.0);
@@ -1702,7 +1738,7 @@ mod tests {
         y[0].vel_north_mps = 7.0;
         let d = diff_second(&rows(&x), &rows(&y)).unwrap();
         assert_eq!((d.rows_changed, d.rows_added, d.rows_removed), (1, 0, 0));
-        assert_eq!(d.class_rows, [0, 1, 0, 0, 0]);
+        assert_eq!(d.class_rows, [0, 1, 0, 0, 0, 0]);
     }
 
     // REQ: OA-RDF-009
@@ -1733,13 +1769,31 @@ mod tests {
         b[0].flags &= !O_TICK;
         let d = diff_second(&rows(&a), &rows(&b)).unwrap();
         assert_eq!((d.rows_added, d.rows_removed, d.rows_changed), (0, 0, 1));
-        assert_eq!(d.class_rows, [0, 0, 0, 1, 0]);
+        assert_eq!(d.class_rows, [0, 0, 0, 1, 0, 0]);
         assert_eq!(d.flags_xor, O_TICK);
         let c = comparison(&a, &b);
         assert_eq!(
             totals_present(totals(&c)).into_iter().collect::<Vec<_>>(),
             vec!["flags"]
         );
+    }
+
+    #[test]
+    fn mode_a_code_time_and_conflict_are_reported_as_identity_changes() {
+        let mut a = r(10 * S, 1);
+        a.ident = 0;
+        a.ident_ns = 9 * S;
+        let mut b = a;
+        b.ident = 0o1234;
+        b.ident_ns = 10 * S;
+        b.ident_conflict = 1;
+        let d = diff_second(&rows(&[a]), &rows(&[b])).unwrap();
+        assert_eq!(d.class_rows, [0, 0, 0, 0, 0, 1]);
+        assert_eq!(d.field_rows[field_index("mode_a")], 1);
+        assert_eq!(d.field_rows[field_index("mode_a_observed_ns")], 1);
+        assert_eq!(d.field_rows[field_index("mode_a_conflict")], 1);
+        assert_eq!(class_name(Class::Identity), "identity");
+        assert!(parse_expect("identity\n").is_ok());
     }
 
     // REQ: OA-RDF-010

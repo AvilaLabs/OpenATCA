@@ -76,6 +76,13 @@ pub const NO_U16: u16 = u16::MAX;
 /// Absent reacquisition: the target has not been reacquired lately. A real age is always below
 /// this: the shell limits the window to [`MAX_REACQ_AGE_S`].
 pub const NO_REACQ: u16 = u16::MAX;
+/// No source-observed Mode 3/A code.
+pub const NO_IDENT: u16 = u16::MAX;
+/// No source time for a Mode 3/A code.
+pub const NO_IDENT_NS: i64 = i64::MIN;
+pub const IDENT_UNKNOWN: u8 = 0;
+pub const IDENT_OBSERVED: u8 = 1;
+pub const IDENT_CONFLICT: u8 = 2;
 /// Largest real reacquisition age, seconds (one below the sentinel).
 pub const MAX_REACQ_AGE_S: u16 = NO_REACQ - 1;
 
@@ -116,10 +123,10 @@ const NOTICE_FROM_BOTTOM: i32 = 22;
 const NOTICE_PITCH: i32 = 14;
 /// Notices a frame can carry: targets not drawn, targets malformed.
 const NOTICES: usize = 2;
-const MAX_BLOCK_LINES: usize = 3;
+const MAX_BLOCK_LINES: usize = 4;
 /// Text bytes one target can need: line 1 at most 8 (a callsign) or 7 (a hex address), line 2 at
 /// most 8 (`999+ 655`), line 3 at most 22 (`CST UNC CS? R95? REACQ`); 37 in all, 64 allowed.
-const BYTES_PER_TARGET: usize = 64;
+const BYTES_PER_TARGET: usize = 96;
 const NOTICE_BYTES: usize = 96;
 
 const fn px(n: i32) -> i32 {
@@ -159,8 +166,9 @@ impl std::error::Error for TrafficError {}
 /// that a later frame reads back, so the machine-to-machine reproducibility A9 protects is not at
 /// risk. Every other column is fixed point.
 // Budget: built once per target per frame to be pushed into the set (the set holds the columns, so
-// this record is not itself held in quantity). 164 bytes is the packed size: the 16-entry trail is
-// 128 of them. Fields are ordered 4-byte first so there is no padding.
+// this record is not itself held in quantity). 172 bytes: the 16-entry trail is 128 bytes; the
+// added code/state/age carry observed Mode 3/A without claiming an old observation is current.
+// A7.1: +8 bytes expose source-observed beacon identity and its age/conflict state; no code is inferred.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[repr(C)]
 pub struct Target {
@@ -170,6 +178,8 @@ pub struct Target {
     pub alt_ft: i32,
     /// Aircraft address (bit 24 set for a non-ICAO one); shown as hex without a callsign.
     pub addr: u32,
+    /// Age of `ident` in seconds at this row, or `u32::MAX` if unknown or unrepresentable.
+    pub ident_age_s: u32,
     /// 95% horizontal position radius, metres; NaN or not positive when unknown.
     pub r95_m: f32,
     /// Positions before the current one, newest first; the first `trail_len` are valid.
@@ -182,11 +192,15 @@ pub struct Target {
     pub gs_dkt: u16,
     /// Seconds since the track was last reacquired, or [`NO_REACQ`].
     pub reacq_age_s: u16,
+    /// Last source-observed Mode 3/A code, or [`NO_IDENT`].
+    pub ident: u16,
     /// [`T_COAST`], [`T_UNCERTAIN`] and [`T_CS_CONFLICT`].
     pub flags: u8,
     pub trail_len: u8,
+    /// [`IDENT_UNKNOWN`], [`IDENT_OBSERVED`] or [`IDENT_CONFLICT`].
+    pub ident_state: u8,
 }
-const _: () = assert!(core::mem::size_of::<Target>() == 164);
+const _: () = assert!(core::mem::size_of::<Target>() == 172);
 
 /// The targets of one frame, struct-of-arrays (A3), of fixed capacity (C1, C2). Trail positions
 /// are `MAX_TRAIL` rows per target in the flat `trail_*` columns. The columns are private: the
@@ -203,6 +217,9 @@ pub struct TargetSet {
     gs_dkt: Vec<u16>,
     alt_ft: Vec<i32>,
     addr: Vec<u32>,
+    ident: Vec<u16>,
+    ident_age_s: Vec<u32>,
+    ident_state: Vec<u8>,
     callsign: Vec<[u8; 8]>,
     flags: Vec<u8>,
     reacq_age_s: Vec<u16>,
@@ -222,6 +239,9 @@ pub struct TargetColumns<'a> {
     pub gs_dkt: &'a [u16],
     pub alt_ft: &'a [i32],
     pub addr: &'a [u32],
+    pub ident: &'a [u16],
+    pub ident_age_s: &'a [u32],
+    pub ident_state: &'a [u8],
     pub callsign: &'a [[u8; 8]],
     pub flags: &'a [u8],
     pub reacq_age_s: &'a [u16],
@@ -246,6 +266,9 @@ pub fn targets_new(capacity: usize) -> Result<TargetSet, DisplayError> {
         gs_dkt: Vec::with_capacity(capacity),
         alt_ft: Vec::with_capacity(capacity),
         addr: Vec::with_capacity(capacity),
+        ident: Vec::with_capacity(capacity),
+        ident_age_s: Vec::with_capacity(capacity),
+        ident_state: Vec::with_capacity(capacity),
         callsign: Vec::with_capacity(capacity),
         flags: Vec::with_capacity(capacity),
         reacq_age_s: Vec::with_capacity(capacity),
@@ -285,6 +308,9 @@ pub fn targets_columns(s: &TargetSet) -> TargetColumns<'_> {
         gs_dkt: &s.gs_dkt,
         alt_ft: &s.alt_ft,
         addr: &s.addr,
+        ident: &s.ident,
+        ident_age_s: &s.ident_age_s,
+        ident_state: &s.ident_state,
         callsign: &s.callsign,
         flags: &s.flags,
         reacq_age_s: &s.reacq_age_s,
@@ -305,6 +331,9 @@ pub fn targets_clear(s: &mut TargetSet) {
     s.gs_dkt.clear();
     s.alt_ft.clear();
     s.addr.clear();
+    s.ident.clear();
+    s.ident_age_s.clear();
+    s.ident_state.clear();
     s.callsign.clear();
     s.flags.clear();
     s.reacq_age_s.clear();
@@ -334,6 +363,12 @@ fn malformed(t: &Target) -> Option<&'static str> {
     if t.flags & !FLAGS_KNOWN != 0 {
         return Some("unknown flag bits");
     }
+    if t.ident_state > IDENT_CONFLICT
+        || (t.ident_state == IDENT_OBSERVED && (t.ident == NO_IDENT || t.ident > 0o7777))
+        || (t.ident_state != IDENT_OBSERVED && t.ident != NO_IDENT)
+    {
+        return Some("invalid observed Mode 3/A state");
+    }
     None
 }
 
@@ -356,6 +391,9 @@ pub fn targets_push(s: &mut TargetSet, t: &Target) -> Result<(), TrafficError> {
     s.gs_dkt.push(t.gs_dkt);
     s.alt_ft.push(t.alt_ft);
     s.addr.push(t.addr);
+    s.ident.push(t.ident);
+    s.ident_age_s.push(t.ident_age_s);
+    s.ident_state.push(t.ident_state);
     s.callsign.push(t.callsign);
     s.flags.push(t.flags);
     s.reacq_age_s.push(t.reacq_age_s);
@@ -753,6 +791,9 @@ struct Scalars {
     lon: i32,
     alt: i32,
     addr: u32,
+    ident: u16,
+    ident_age_s: u32,
+    ident_state: u8,
     r95: f32,
     callsign: [u8; 8],
     track: u16,
@@ -768,6 +809,9 @@ fn scalars_at(s: &TargetSet, i: usize) -> Option<Scalars> {
         lon: *s.lon_e7.get(i)?,
         alt: *s.alt_ft.get(i)?,
         addr: *s.addr.get(i)?,
+        ident: *s.ident.get(i)?,
+        ident_age_s: *s.ident_age_s.get(i)?,
+        ident_state: *s.ident_state.get(i)?,
         r95: *s.r95_m.get(i)?,
         callsign: *s.callsign.get(i)?,
         track: *s.track_ddeg.get(i)?,
@@ -803,6 +847,33 @@ fn block_line(
     )?;
     *at_b = add(*at_b, 0, px(BLOCK_PITCH));
     Ok(())
+}
+
+fn mode_a_text(b: &mut TextBuf, code: u16, age_s: u32, state: u8) {
+    match state {
+        IDENT_CONFLICT => text_push_str(b, "MODE A CONFLICT"),
+        IDENT_OBSERVED => {
+            text_push_str(b, "MODE A ");
+            let mut digits = [b'0'; 4];
+            let mut value = code;
+            for slot in digits.iter_mut().rev() {
+                *slot += (value & 7) as u8;
+                value >>= 3;
+            }
+            for digit in digits {
+                text_push_char(b, digit);
+            }
+            text_push_str(b, " AGE ");
+            if age_s == u32::MAX {
+                text_push_str(b, ">MAX");
+            } else {
+                text_push_dec(b, u64::from(age_s), 0);
+            }
+            text_push_char(b, b's');
+        }
+        IDENT_UNKNOWN => {}
+        _ => text_push_str(b, "MODE A INVALID"),
+    }
 }
 
 /// Appends the traffic of `set` to `l` (it does not clear the list). `ell` is the WGS-84
@@ -951,6 +1022,9 @@ pub fn build_traffic(
         }
         text_push_char(&mut tb, b' ');
         speed_text(&mut tb, t.gs);
+        block_line(l, &mut at_b, &tb, &mut stats)?;
+        text_clear(&mut tb);
+        mode_a_text(&mut tb, t.ident, t.ident_age_s, t.ident_state);
         block_line(l, &mut at_b, &tb, &mut stats)?;
         text_clear(&mut tb);
         tags_text(&mut tb, t.flags, reacq, no_circle);
