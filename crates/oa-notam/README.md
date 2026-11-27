@@ -13,11 +13,15 @@ It does not publish NOTAMs, provide SWIM transport, or implement general AIXM.
 `encode_row` writes canonical UTF-8 XML to a caller buffer, is bounded by
 `MAX_ENCODED_BYTES`, and leaves the destination unchanged on refusal. It is intended for model
 round-trip and generated synthetic messages; it is not evidence of FNS acceptance or full XSD
-conformance. The emitted profile structure is tested by parsing the generated message back into
-the same row, feature and geometry model. The default constructor reserves sixteen feature
-records per row as a memory-sizing budget, not an AIXM occurrence limit; callers can specify a
-larger total feature capacity. FAA event-extension declarations are profile-specific and are not
-included in the official core AIXM schema archive.
+conformance. Tests parse generated messages back into the same row, feature and geometry model and
+check the emitted subset's member/time-slice structure, order, occurrence and selected GML facets
+against pinned official AIXM 5.1 core and Event schemas and the published FAA FNSE extension
+schema. This remains a bounded profile check, not validation by a general XSD engine. The default
+constructor reserves sixteen feature records per row as a memory-sizing budget, not an AIXM
+occurrence limit; callers can specify a larger total feature capacity. The published FAA FNSE
+extension schema declares only optional `classification`; rows retaining `canceled`,
+`xovernotamID`, or `icaoLocation` still decode but the encoder refuses them transactionally. No
+alternate or private FNSE schema revision is inferred.
 
 The official AIXM 5.1 XSD archive and retrieval receipt are pinned in `testdata/schema/`:
 
@@ -27,6 +31,8 @@ The official AIXM 5.1 XSD archive and retrieval receipt are pinned in `testdata/
 The emitted namespaces use AIXM 5.1, matching the decoder. The 5.1.1 archive is retained as
 version context only; its namespace differs. The AIXM 5.1 page also identifies an unavailable
 GML profile schema, so these pinned archives are not used to claim full schema validation. The
+Event and FNSE schema files, source URLs, versions, hashes and license notes are recorded in
+`testdata/schema/aixm_event_fnse.source.json` and `testdata/schema/fnse_5_1.source.json`. The
 GML `TimePositionType` and `TimeIndeterminateValueType` declarations are in
 `xsd/ISO_19136_Schemas/temporal.xsd` inside the pinned 5.1 archive.
 See the [NOTAM API proposal](https://github.com/AvilaLabs/OpenATCA/blob/main/docs/core-api/formats/aixm-notam.md).

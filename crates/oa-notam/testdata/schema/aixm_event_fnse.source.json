@@ -1,0 +1,21 @@
+{
+  "source_page": "https://aixm.aero/schema/5.1/event/index.html",
+  "namespace": "http://www.aixm.aero/schema/5.1/event",
+  "schema_version": "5.1-d",
+  "schema_files": [
+    {
+      "url": "https://aixm.aero/schema/5.1/event/Event_Features.xsd",
+      "retrieved_date": "2026-11-26",
+      "bytes": 109665,
+      "sha256": "f8cc720b319647a3120f4d568683b62f1b5dd0d0323b6b8178c7761aedbe09e0"
+    },
+    {
+      "url": "https://aixm.aero/schema/5.1/event/Event_DataTypes.xsd",
+      "retrieved_date": "2026-11-26",
+      "bytes": 9419,
+      "sha256": "dfc8d8076d692dbab6c8d173b63ba423cbebcebb02da1330153f00ad250f699a"
+    }
+  ],
+  "license": "The schema headers state Copyright (c) 2011, EUROCONTROL & FAA and reproduce BSD-style redistribution terms; retain those notices with the files.",
+  "scope_note": "This is a source receipt for the Event XSD subset used by OA-NOTAM-026 profile checks, not a complete offline schema set or general XSD validator."
+}

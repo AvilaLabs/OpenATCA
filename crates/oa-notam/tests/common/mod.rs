@@ -147,6 +147,21 @@ pub fn msg(members: &[&str]) -> String {
     s
 }
 
+/// Removes fixture fields not declared by the published FAA FNSE XSD before testing positive
+/// encoder cases. Negative encoder tests retain those values and assert transactional refusal.
+pub fn schema_supported(xml: &str) -> String {
+    let mut output = xml.to_owned();
+    for fragment in [
+        "<fnse:accountId>QQA</fnse:accountId>",
+        "<fnse:xovernotamID>Z0042/30</fnse:xovernotamID>",
+        "<fnse:lastUpdated>2030-03-05T09:00:00.000Z</fnse:lastUpdated>",
+        "<fnse:icaoLocation>KQQA</fnse:icaoLocation>",
+    ] {
+        output = output.replace(fragment, "");
+    }
+    output
+}
+
 /// A message with every feature kind and a polygon in each of the two element kinds.
 pub fn full() -> String {
     msg(&[

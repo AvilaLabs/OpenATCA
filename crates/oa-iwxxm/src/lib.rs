@@ -1,5 +1,5 @@
 #![forbid(unsafe_code)]
-//! Bounded, read-only IWXXM METAR/SPECI/TAF decoding.
+//! Bounded IWXXM METAR/SPECI/TAF decoding and supported-subset encoding.
 //!
 //! This shell parser supports IWXXM 2025-2 / METAR-SPECI package 3.2.0 only. It accepts one
 //! standalone `iwxxm:METAR`, `iwxxm:SPECI`, or non-cancellation `iwxxm:TAF` report, with bounded
@@ -9,8 +9,8 @@
 //!
 //! The parser has no file, network, clock, or `oa-sealed` access. It uses the existing bounded
 //! `oa-xml` parser with the fixed ceilings in this crate. Callers decide their own input-source
-//! policy. This is not a schema/Schematron validator, a TAC translator, an IWXXM encoder, or a
-//! full-edition decoder. Status, nil values, units, weather code URIs and unsupported reports
+//! policy. This is not a schema/Schematron validator, a TAC translator, or a full-edition decoder;
+//! the encoder emits only the documented normalized subset. Status, nil values, units, weather code URIs and unsupported reports
 //! remain explicit in the result. Aerodrome decoding extracts only the selected station/time-slice
 //! metadata; it does not normalize every AIXM sibling property. METAR/SPECI trend data is separate
 //! from the current observation. TAF has a separate forecast projection and no synthetic

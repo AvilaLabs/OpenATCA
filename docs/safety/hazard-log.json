@@ -9235,12 +9235,17 @@
         {
           "requirement_id": "OA-NOTAM-026",
           "file": "crates/oa-notam/tests/notam.rs",
-          "test_name": "encoder_preserves_estimated_end_and_fnse_event_extension_fields"
+          "test_name": "encoder_refuses_fnse_members_not_declared_by_the_published_schema"
         },
         {
           "requirement_id": "OA-NOTAM-026",
           "file": "crates/oa-notam/tests/notam.rs",
           "test_name": "encoder_roundtrips_permanent_and_explicit_unknown_end_positions"
+        },
+        {
+          "requirement_id": "OA-NOTAM-026",
+          "file": "crates/oa-notam/tests/xsd_profile.rs",
+          "test_name": "encoder_emission_matches_the_pinned_xsd_profile_subset"
         },
         {
           "requirement_id": "OA-RPL-027",
@@ -19232,7 +19237,7 @@
       "id": "OA-NOTAM-026",
       "function": "navigation_and_adaptation_data",
       "hazard_id": "HZ-AIRSPACE-001",
-      "rationale": "Engineering safety candidate: a serialized event that changes retained scalar, feature, time-slice, or polygon data, or is partially returned after a lossy refusal, could misstate a navigation constraint to a downstream consumer. The tests cover a bounded FAA FNS AIXM 5.1 subset, explicit capacity behavior, and transactional refusal. This is not a general AIXM encoder, a SWIM publisher, an XSD-conformance claim, or proof of downstream consumer interpretation."
+      "rationale": "Engineering safety candidate: a serialized event that changes retained scalar, feature, time-slice, or polygon data, or is partially returned after a lossy refusal, could misstate a navigation constraint to a downstream consumer. Tests cover the bounded FAA FNS AIXM 5.1 profile, explicit capacity behavior, transactional refusal, and selected structural/order/facet constraints from the SHA-pinned official AIXM 5.1 core XSD archive. The FAA Event/FNSE schemas are absent from that archive. This is not a full XSD validator, a general AIXM encoder, a SWIM publisher, or proof of downstream consumer interpretation."
     },
     {
       "id": "OA-RPL-027",

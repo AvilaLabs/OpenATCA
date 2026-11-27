@@ -18,6 +18,12 @@ oa-xml = { path = "../oa-xml" }
 oa-airspace = { path = "../oa-airspace" }
 oa-geo = { path = "../oa-geo" }
 
+[dev-dependencies]
+# F1a: test-only access to the checked-in official AIXM 5.1 XSD archive; no runtime edge.
+oa-zip = { path = "../oa-zip" }
+# F1a: verify the archive against its pinned official-source checksum in the profile test.
+oa-sha256 = { path = "../oa-sha256" }
+
 [package.metadata.openatca]
 class = "shell"
 candidate_package_name = "openatca-notam"

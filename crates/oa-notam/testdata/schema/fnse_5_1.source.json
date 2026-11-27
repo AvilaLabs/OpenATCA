@@ -1,0 +1,21 @@
+{
+  "source_page": "https://aixm.aero/schema/5.1/extensions/FAA/FNSE/index.html",
+  "namespace": "http://www.aixm.aero/schema/5.1/extensions/FAA/FNSE",
+  "schema_version": "5.1-a",
+  "schema_files": [
+    {
+      "url": "https://aixm.aero/schema/5.1/extensions/FAA/FNSE/FNSE_Features.xsd",
+      "retrieved_date": "2026-11-26",
+      "bytes": 4153,
+      "sha256": "79221077feba07e0f376554cf1c46330844af760e03c710dceaab6b7ee7be35f"
+    },
+    {
+      "url": "https://aixm.aero/schema/5.1/extensions/FAA/FNSE/FNSE_DataTypes.xsd",
+      "retrieved_date": "2026-11-26",
+      "bytes": 4615,
+      "sha256": "151fd279be1f675420be2e0daab51f2ec8823e46a885c0fb51fc1be6e68841d8"
+    }
+  ],
+  "license": "The schema headers state Copyright (c) 2012, FAA and reproduce BSD-style redistribution terms; retain those notices with the files.",
+  "scope_note": "The published EventExtensionPropertyGroup contains only optional classification. The encoder refuses decoded canceled, xovernotamID, and icaoLocation values because these elements are not declared by this schema. Other FNSE implementations or private schema revisions are not inferred."
+}

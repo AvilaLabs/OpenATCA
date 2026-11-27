@@ -1594,7 +1594,7 @@ fn encoder_roundtrips_retained_scalars_and_escapes_xml_text() {
         "<event:text>RWY 09/27 CLSD</event:text>",
         "<event:text>A &amp; B &lt;C&gt;</event:text>",
     );
-    let (before, _) = ok(&source);
+    let (before, _) = ok(&schema_supported(&source));
     let mut output = vec![0u8; MAX_ENCODED_BYTES];
     let len = encode_row(&before, 0, &mut output).unwrap();
     let xml = std::str::from_utf8(&output[..len]).unwrap();
@@ -1625,7 +1625,7 @@ fn encoder_roundtrips_each_feature_and_keeps_polygon_ownership() {
         &radar_system(),
         &primary_radar(),
     ]);
-    let (before, _) = ok(&source);
+    let (before, _) = ok(&schema_supported(&source));
     let mut output = vec![0u8; MAX_ENCODED_BYTES];
     let len = encode_row(&before, 0, &mut output).unwrap();
     let xml = std::str::from_utf8(&output[..len]).unwrap();
@@ -1651,7 +1651,7 @@ fn encoder_roundtrips_each_feature_and_keeps_polygon_ownership() {
         );
     }
 
-    let (scalars, _) = ok(&msg(&[]));
+    let (scalars, _) = ok(&schema_supported(&msg(&[])));
     let mut tiny = [0xA5; 64];
     assert_eq!(
         encode_row(&scalars, 0, &mut tiny),
@@ -1679,7 +1679,7 @@ fn encoder_roundtrips_every_single_feature_fixture() {
     ];
     for fixture in fixtures {
         let source = msg(&[&fixture]);
-        let (before, _) = ok(&source);
+        let (before, _) = ok(&schema_supported(&source));
         let mut output = vec![0u8; MAX_ENCODED_BYTES];
         let len = encode_row(&before, 0, &mut output).unwrap();
         let (after, _) = ok(std::str::from_utf8(&output[..len]).unwrap());
@@ -1703,7 +1703,7 @@ fn feature_multiplicity_exceeds_default_reservation_with_explicit_capacity() {
         members.push(member);
     }
     let refs: Vec<&str> = members.iter().map(String::as_str).collect();
-    let source = msg(&refs);
+    let source = schema_supported(&msg(&refs));
     let mut before = new_notams_with_feature_capacity(1, 1 << 16, 16, 4096, 24);
     let mut stats = default_stats();
     run_into(source.as_bytes(), &mut before, &mut stats).unwrap();
@@ -1747,25 +1747,46 @@ fn feature_capacity_refusal_is_transactional() {
 
 // REQ: OA-NOTAM-026
 #[test]
-fn encoder_preserves_estimated_end_and_fnse_event_extension_fields() {
-    let source = rep(
-        &msg(&[]),
-        "<event:effectiveEnd>203003061830</event:effectiveEnd>",
-        "<event:effectiveEnd>203003061830EST</event:effectiveEnd>",
-    );
-    let source = rep(
-        &source,
-        "<fnse:classification>DOM",
-        "<fnse:canceled>2030-03-05T09:30:00.000Z</fnse:canceled><fnse:classification>DOM",
-    );
-    let (before, _) = ok(&source);
-    let mut output = vec![0u8; MAX_ENCODED_BYTES];
-    let len = encode_row(&before, 0, &mut output).unwrap();
-    let xml = std::str::from_utf8(&output[..len]).unwrap();
-    assert!(xml.contains("203003061830EST"));
-    assert!(xml.contains("<fnse:canceled>2030-03-05T09:30:00.000Z</fnse:canceled>"));
-    let (after, _) = ok(xml);
-    assert_eq!(row_at(&before, 0), row_at(&after, 0));
+fn encoder_refuses_fnse_members_not_declared_by_the_published_schema() {
+    let base = schema_supported(&msg(&[]));
+    for (field, element) in [
+        (
+            Field::Canceled,
+            "<fnse:canceled>2030-03-05T09:30:00.000Z</fnse:canceled>",
+        ),
+        (
+            Field::Xover,
+            "<fnse:xovernotamID>Z0042/30</fnse:xovernotamID>",
+        ),
+        (
+            Field::IcaoLocation,
+            "<fnse:icaoLocation>KQQA</fnse:icaoLocation>",
+        ),
+    ] {
+        let source = rep(
+            &base,
+            "<fnse:classification>DOM",
+            &format!("{element}<fnse:classification>DOM"),
+        );
+        let (rows, _) = ok(&source);
+        assert!(has_field(&rows, 0, field));
+        match field {
+            Field::Canceled => assert_eq!(
+                rows.canceled_ms[0],
+                parse_iso_ms(b"2030-03-05T09:30:00.000Z").unwrap()
+            ),
+            Field::Xover => assert_eq!(code_str(&rows.xover[0]), "Z0042/30"),
+            Field::IcaoLocation => assert_eq!(code_str(&rows.icao_location[0]), "KQQA"),
+            _ => panic!("fixture field is one of the explicitly unsupported FNSE values"),
+        }
+        let mut output = vec![0xA5; MAX_ENCODED_BYTES];
+        assert_eq!(
+            encode_row(&rows, 0, &mut output),
+            Err(EncodeError::UnsupportedValue),
+            "{field:?} is decoded but not representable by the published FNSE schema"
+        );
+        assert!(output.iter().all(|&byte| byte == 0xA5));
+    }
 }
 
 // REQ: OA-NOTAM-026
@@ -1776,7 +1797,7 @@ fn encoder_roundtrips_permanent_and_explicit_unknown_end_positions() {
         "<event:effectiveEnd>203003061830</event:effectiveEnd>",
         "<event:effectiveEnd>PERM</event:effectiveEnd>",
     );
-    let (concrete_before, _) = ok(&permanent_concrete);
+    let (concrete_before, _) = ok(&schema_supported(&permanent_concrete));
     assert!(has_field(&concrete_before, 0, Field::End));
     let mut output = vec![0u8; MAX_ENCODED_BYTES];
     let len = encode_row(&concrete_before, 0, &mut output).unwrap();
@@ -1792,7 +1813,7 @@ fn encoder_roundtrips_permanent_and_explicit_unknown_end_positions() {
         "<gml:endPosition>2030-03-06T18:30:00.000Z</gml:endPosition>",
         "",
     );
-    let (unknown_before, _) = ok(&permanent_unknown);
+    let (unknown_before, _) = ok(&schema_supported(&permanent_unknown));
     assert!(!has_field(&unknown_before, 0, Field::End));
     assert_eq!(unknown_before.flags[0], FLAG_PERMANENT | FLAG_END_UNKNOWN);
     let len = encode_row(&unknown_before, 0, &mut output).unwrap();
@@ -1809,7 +1830,7 @@ fn encoder_roundtrips_permanent_and_explicit_unknown_end_positions() {
         "<gml:endPosition>2030-03-06T18:30:00.000Z</gml:endPosition>",
         "<gml:endPosition indeterminatePosition=\"after\"/>",
     );
-    let (after_rows, _) = ok(&after_source);
+    let (after_rows, _) = ok(&schema_supported(&after_source));
     assert_ne!(after_rows.flags[0] & FLAG_END_UNKNOWN, FLAG_END_UNKNOWN);
     assert_ne!(after_rows.errors[0] & bit(Field::End), 0);
     assert_eq!(

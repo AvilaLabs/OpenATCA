@@ -19,7 +19,7 @@ use crate::{
 /// Maximum canonical XML output, including the XML declaration.
 pub const MAX_ENCODED_BYTES: usize = 32 * 1024;
 
-/// Why a row cannot be faithfully represented by this encoder profile.
+/// Why a row cannot be faithfully represented by this published-schema encoder profile.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EncodeError {
     /// The row index is outside the source table.
@@ -28,7 +28,8 @@ pub enum EncodeError {
     InvalidRow,
     /// A requested feature object or geometry cannot be reconstructed from retained row data.
     FeatureDataNotRetained,
-    /// The row has unsupported flags or enumeration values.
+    /// The row has unsupported flags, enumeration values, or retained fields outside the
+    /// published encoder schema profile.
     UnsupportedValue,
     /// A timestamp cannot be represented by the supported UTC timestamp grammar.
     InvalidTime,
@@ -46,8 +47,9 @@ pub enum EncodeError {
 ///
 /// Output is all-or-nothing: every refusal leaves `out` untouched. The profile emits the event,
 /// retained feature time slices, row-supported feature properties, and retained polygon geometry.
-/// Optional source properties absent from the row model are omitted; source XML byte identity is
-/// not promised.
+/// It refuses retained FAA FNSE cancellation/cross-over/ICAO fields because the published FNSE
+/// 5.1 XSD does not declare those elements. Optional source properties absent from the row model
+/// are omitted; source XML byte identity is not promised.
 pub fn encode_row(n: &Notams, row: usize, out: &mut [u8]) -> Result<usize, EncodeError> {
     let r = crate::row_at(n, row).ok_or(EncodeError::RowOutOfRange)?;
     let present_mask = (1u64 << crate::FIELD_COUNT) - 1;
@@ -83,6 +85,15 @@ pub fn encode_row(n: &Notams, row: usize, out: &mut [u8]) -> Result<usize, Encod
     }
     if !row_values_valid(n, row, &r) {
         return Err(EncodeError::InvalidRow);
+    }
+    // The published FAA FNSE 5.1 XSD declares only `classification` inside EventExtension.
+    // Retained cancellation/cross-over/ICAO values remain available in the decoded row, but this
+    // encoder cannot serialize them faithfully against that schema contract.
+    if has_field(n, row, Field::Canceled)
+        || has_field(n, row, Field::Xover)
+        || has_field(n, row, Field::IcaoLocation)
+    {
+        return Err(EncodeError::UnsupportedValue);
     }
 
     let mut message = String::new();
@@ -135,6 +146,11 @@ pub fn encode_row(n: &Notams, row: usize, out: &mut [u8]) -> Result<usize, Encod
         };
         push_text(&mut message, "type", value)?;
     }
+    if has_field(n, row, Field::Issued) {
+        message.push_str("<event:issued>");
+        push_iso(&mut message, r.issued_ms)?;
+        message.push_str("</event:issued>");
+    }
     push_code(
         &mut message,
         "referredSeries",
@@ -144,11 +160,6 @@ pub fn encode_row(n: &Notams, row: usize, out: &mut [u8]) -> Result<usize, Encod
     if has_field(n, row, Field::Ref) {
         push_num(&mut message, "referredNumber", r.ref_number, true);
         push_num(&mut message, "referredYear", r.ref_year, true);
-    }
-    if has_field(n, row, Field::Issued) {
-        message.push_str("<event:issued>");
-        push_iso(&mut message, r.issued_ms)?;
-        message.push_str("</event:issued>");
     }
     push_code(
         &mut message,
@@ -162,11 +173,40 @@ pub fn encode_row(n: &Notams, row: usize, out: &mut [u8]) -> Result<usize, Encod
         code_str(&r.selection),
         has_field(n, row, Field::Selection),
     )?;
-    if has_field(n, row, Field::Floor) {
-        push_limit(&mut message, "lowerLimit", r.floor_ft, r.floor_ref)?;
+    if has_field(n, row, Field::Traffic) {
+        push_flags(
+            &mut message,
+            "traffic",
+            r.traffic,
+            &[(TRAFFIC_I, "I"), (TRAFFIC_V, "V"), (TRAFFIC_K, "K")],
+        )?;
     }
-    if has_field(n, row, Field::Ceiling) {
-        push_limit(&mut message, "upperLimit", r.ceil_ft, r.ceil_ref)?;
+    if has_field(n, row, Field::Purpose) {
+        push_flags(
+            &mut message,
+            "purpose",
+            r.purpose,
+            &[
+                (PURPOSE_N, "N"),
+                (PURPOSE_B, "B"),
+                (PURPOSE_O, "O"),
+                (PURPOSE_M, "M"),
+                (PURPOSE_K, "K"),
+            ],
+        )?;
+    }
+    if has_field(n, row, Field::Scope) {
+        push_flags(
+            &mut message,
+            "scope",
+            r.scope,
+            &[
+                (SCOPE_A, "A"),
+                (SCOPE_E, "E"),
+                (SCOPE_W, "W"),
+                (SCOPE_K, "K"),
+            ],
+        )?;
     }
     if has_field(n, row, Field::Centre) {
         push_coordinates(&mut message, r.lat_e7, r.lon_e7)?;
@@ -203,61 +243,18 @@ pub fn encode_row(n: &Notams, row: usize, out: &mut [u8]) -> Result<usize, Encod
     if has_field(n, row, Field::Text) {
         push_text(&mut message, "text", text_of(n, row))?;
     }
-    if has_field(n, row, Field::Traffic) {
-        push_flags(
-            &mut message,
-            "traffic",
-            r.traffic,
-            &[(TRAFFIC_I, "I"), (TRAFFIC_V, "V"), (TRAFFIC_K, "K")],
-        )?;
+    if has_field(n, row, Field::Floor) {
+        push_limit(&mut message, "lowerLimit", r.floor_ft, r.floor_ref)?;
     }
-    if has_field(n, row, Field::Purpose) {
-        push_flags(
-            &mut message,
-            "purpose",
-            r.purpose,
-            &[
-                (PURPOSE_N, "N"),
-                (PURPOSE_B, "B"),
-                (PURPOSE_O, "O"),
-                (PURPOSE_M, "M"),
-                (PURPOSE_K, "K"),
-            ],
-        )?;
-    }
-    if has_field(n, row, Field::Scope) {
-        push_flags(
-            &mut message,
-            "scope",
-            r.scope,
-            &[
-                (SCOPE_A, "A"),
-                (SCOPE_E, "E"),
-                (SCOPE_W, "W"),
-                (SCOPE_K, "K"),
-            ],
-        )?;
+    if has_field(n, row, Field::Ceiling) {
+        push_limit(&mut message, "upperLimit", r.ceil_ft, r.ceil_ref)?;
     }
     message.push_str("</event:NOTAM></event:textNOTAM>");
-    let has_ext = has_field(n, row, Field::Canceled)
-        || has_field(n, row, Field::Classification)
-        || has_field(n, row, Field::Xover)
-        || has_field(n, row, Field::IcaoLocation);
+    let has_ext = has_field(n, row, Field::Classification);
     if has_ext {
         message.push_str("<event:extension><fnse:EventExtension gml:id=\"oa-event-extension\">");
-        if has_field(n, row, Field::Canceled) {
-            message.push_str("<fnse:canceled>");
-            push_iso(&mut message, r.canceled_ms)?;
-            message.push_str("</fnse:canceled>");
-        }
         if has_field(n, row, Field::Classification) {
             push_fnse_text(&mut message, "classification", class_text(r.class)?)?;
-        }
-        if has_field(n, row, Field::Xover) {
-            push_fnse_text(&mut message, "xovernotamID", code_str(&r.xover))?;
-        }
-        if has_field(n, row, Field::IcaoLocation) {
-            push_fnse_text(&mut message, "icaoLocation", code_str(&r.icao_location))?;
         }
         message.push_str("</fnse:EventExtension></event:extension>");
     }

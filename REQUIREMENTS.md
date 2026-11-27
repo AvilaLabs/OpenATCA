@@ -1900,8 +1900,14 @@ the FAA event extension).
   distinct positions; unsupported non-unknown indeterminate states are refused rather than
   collapsed. Its default sixteen-feature-per-row reservation is a memory budget, not an AIXM
   occurrence limit; a caller may provide a larger total feature capacity. A refusal or undersized
-  destination leaves the caller's output bytes unchanged. This is not a general AIXM encoder, a
-  SWIM publisher, or an XSD-conformance claim.
+  destination leaves the caller's output bytes unchanged. Rows retaining `canceled`,
+  `xovernotamID`, or `icaoLocation` are refused because the published FAA FNSE 5.1 EventExtension
+  schema does not declare those elements; the decoded row remains available. A separate test
+  checks emitted fixtures against bounded structural facts from the SHA-pinned AIXM 5.1 core,
+  Event, and FAA FNSE schemas: message/member and Event/time-slice order, retained Event/NOTAM
+  property order, NOTAM type and FNSE classification facets, GML time-position enumeration, and
+  polygon-ring coordinate constraints. This is not a full XSD validator, a general AIXM encoder,
+  a SWIM publisher, or an XSD-conformance claim.
 
 - **OA-RPL-027** A frame whose receive time goes backwards inside one stream is not reordered
   (that would need unbounded lookahead): it is emitted in file order and the pipeline counts a time
