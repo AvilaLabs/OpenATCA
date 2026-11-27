@@ -604,6 +604,8 @@ jobs:
             targets: awc,gzip,nasr,tfms
     steps:
       - uses: actions/checkout@v4
+      - name: Configure synthetic test data root
+        run: python3 .github/scripts/configure_test_data_root.py
       - name: Toolchain
         run: rustup toolchain install nightly-2026-08-21 --profile minimal --component rust-src && rustup default nightly-2026-08-21
       - name: Cache fuzz dependencies and build outputs
