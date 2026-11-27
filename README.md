@@ -102,6 +102,7 @@ today is in [docs/STATUS.md](docs/STATUS.md).
 | [docs/LEGACY_SHORTCOMINGS.md](docs/LEGACY_SHORTCOMINGS.md) | Documented ERAM and STARS failures, each turned into a requirement or test |
 | [docs/INTERFACES.md](docs/INTERFACES.md) | How OpenATCA talks to systems it does not control |
 | [docs/NODE_NETWORK.md](docs/NODE_NETWORK.md) | How facilities compute the national picture, check each other and survive alone |
+| [docs/CONFIGURATION_MANAGEMENT_PLAN.md](docs/CONFIGURATION_MANAGEMENT_PLAN.md) | Configuration items, change control, baselines and release records |
 | [docs/UNKNOWNS.md](docs/UNKNOWNS.md) | Open questions, each with why it matters and the next step |
 | [DATA.md](DATA.md) | Every input dataset with its source and SHA-256 |
 
