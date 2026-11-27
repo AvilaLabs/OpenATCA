@@ -986,10 +986,11 @@ class ShardBalanceTests(unittest.TestCase):
         text = (REPO / ".github" / "workflows" / "rust-proofs.yml").read_text()
         self.assertIn("proof_ids:", text)
         self.assertIn("--proof-ids", text)
-        match = re.search(r"&& '(\[.*?\])' \|\| '(\[.*?\])'", text)
+        match = re.search(r"include:\s*\$\{\{\s*fromJSON\((.*?)\)\s*\}\}", text, re.DOTALL)
         self.assertIsNotNone(match, text)
-        diagnostic = json.loads(match.group(1))
-        normal = json.loads(match.group(2))
+        matrices = re.findall(r"'(\[.*?\])'", match.group(1))
+        self.assertEqual(len(matrices), 3)
+        contexts, diagnostic, normal = (json.loads(value) for value in matrices)
         expected = [
             ("8c5923da2f0c7f11ca84e99fc443980d86b4ef5c", "late-append-output-projection"),
             ("64c44e714bc47bdeb956e671d7e15aa4f06edfde", "late-append-output-projection"),
@@ -1005,6 +1006,20 @@ class ShardBalanceTests(unittest.TestCase):
         ))
         self.assertEqual([row["shard"] for row in normal], ["0/4", "1/4", "2/4", "3/4"])
         self.assertTrue(all(not row["diagnostic"] for row in normal))
+        self.assertEqual(
+            contexts,
+            [
+                {"context_diagnostic": True, "context": "shared", "source_ref": "82009cde336ab3f2cf5db3bd8897df90b2c2bdcb", "shard": "0/1"},
+                {"context_diagnostic": True, "context": "fresh", "source_ref": "82009cde336ab3f2cf5db3bd8897df90b2c2bdcb", "shard": "0/1"},
+            ],
+        )
+        self.assertTrue(all(row["context_diagnostic"] for row in contexts))
+        self.assertIn("compare_target_contexts:", text)
+        self.assertIn("--target-context", text)
+        self.assertIn("CONTEXT_DIAGNOSTIC", text)
+        self.assertIn("Refuse conflicting diagnostic modes", text)
+        self.assertIn("github.event.inputs.diagnose_regression == 'true'", text)
+        self.assertIn("github.event.inputs.compare_target_contexts == 'true'", text)
         self.assertNotIn("python3 tools/rust_proof_suite.py\n          --fail-fast", text)
 
 

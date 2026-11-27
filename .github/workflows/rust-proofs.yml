@@ -16,6 +16,11 @@ on:
         required: false
         type: boolean
         default: false
+      compare_target_contexts:
+        description: "Run the five pinned E-10 proofs sequentially with shared versus fresh target directories"
+        required: false
+        type: boolean
+        default: false
 permissions:
   contents: read
 jobs:
@@ -23,18 +28,21 @@ jobs:
     runs-on: ubuntu-24.04
     # A push or pull request runs every registered proof for packages reached by the change.
     # Scheduled/manual full runs cover the registry; workflow_dispatch can select exact IDs.
-    timeout-minutes: 120
+    timeout-minutes: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.compare_target_contexts == 'true' && 180 || 120 }}
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(github.event_name == 'workflow_dispatch' && github.event.inputs.diagnose_regression == 'true' && '[{"diagnostic":true,"case":"baseline-late","source_ref":"8c5923da2f0c7f11ca84e99fc443980d86b4ef5c","proof_id":"late-append-output-projection","shard":"0/1"},{"diagnostic":true,"case":"current-late","source_ref":"64c44e714bc47bdeb956e671d7e15aa4f06edfde","proof_id":"late-append-output-projection","shard":"0/1"},{"diagnostic":true,"case":"baseline-snapshot","source_ref":"8c5923da2f0c7f11ca84e99fc443980d86b4ef5c","proof_id":"large-move-decision-rejected-current-filter-snapshot","shard":"0/1"},{"diagnostic":true,"case":"current-snapshot","source_ref":"64c44e714bc47bdeb956e671d7e15aa4f06edfde","proof_id":"large-move-decision-rejected-current-filter-snapshot","shard":"0/1"}]' || '[{"diagnostic":false,"source_ref":"","proof_id":"","shard":"0/4"},{"diagnostic":false,"source_ref":"","proof_id":"","shard":"1/4"},{"diagnostic":false,"source_ref":"","proof_id":"","shard":"2/4"},{"diagnostic":false,"source_ref":"","proof_id":"","shard":"3/4"}]') }}
-    name: ${{ matrix.diagnostic && matrix.case || format('shard {0}', matrix.shard) }}
+        include: ${{ fromJSON(github.event_name == 'workflow_dispatch' && github.event.inputs.compare_target_contexts == 'true' && '[{"context_diagnostic":true,"context":"shared","source_ref":"82009cde336ab3f2cf5db3bd8897df90b2c2bdcb","shard":"0/1"},{"context_diagnostic":true,"context":"fresh","source_ref":"82009cde336ab3f2cf5db3bd8897df90b2c2bdcb","shard":"0/1"}]' || github.event_name == 'workflow_dispatch' && github.event.inputs.diagnose_regression == 'true' && '[{"diagnostic":true,"case":"baseline-late","source_ref":"8c5923da2f0c7f11ca84e99fc443980d86b4ef5c","proof_id":"late-append-output-projection","shard":"0/1"},{"diagnostic":true,"case":"current-late","source_ref":"64c44e714bc47bdeb956e671d7e15aa4f06edfde","proof_id":"late-append-output-projection","shard":"0/1"},{"diagnostic":true,"case":"baseline-snapshot","source_ref":"8c5923da2f0c7f11ca84e99fc443980d86b4ef5c","proof_id":"large-move-decision-rejected-current-filter-snapshot","shard":"0/1"},{"diagnostic":true,"case":"current-snapshot","source_ref":"64c44e714bc47bdeb956e671d7e15aa4f06edfde","proof_id":"large-move-decision-rejected-current-filter-snapshot","shard":"0/1"}]' || '[{"diagnostic":false,"context_diagnostic":false,"source_ref":"","proof_id":"","context":"","shard":"0/4"},{"diagnostic":false,"context_diagnostic":false,"source_ref":"","proof_id":"","context":"","shard":"1/4"},{"diagnostic":false,"context_diagnostic":false,"source_ref":"","proof_id":"","context":"","shard":"2/4"},{"diagnostic":false,"context_diagnostic":false,"source_ref":"","proof_id":"","context":"","shard":"3/4"}]') }}
+    name: ${{ matrix.context_diagnostic && format('target context {0}', matrix.context) || matrix.diagnostic && matrix.case || format('shard {0}', matrix.shard) }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Refuse conflicting diagnostic modes
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.compare_target_contexts == 'true' && github.event.inputs.diagnose_regression == 'true' }}
+        run: exit 2
       - name: Check out pinned proof source for diagnostic comparison
-        if: matrix.diagnostic
+        if: ${{ matrix.diagnostic || matrix.context_diagnostic }}
         uses: actions/checkout@v4
         with:
           ref: ${{ matrix.source_ref }}
@@ -90,6 +98,8 @@ jobs:
           CHANGED_FROM: ${{ steps.pick.outputs.changed_from }}
           PROOF_IDS: ${{ steps.pick.outputs.proof_ids }}
           DIAGNOSTIC: ${{ matrix.diagnostic }}
+          CONTEXT_DIAGNOSTIC: ${{ matrix.context_diagnostic }}
+          TARGET_CONTEXT: ${{ matrix.context }}
           SOURCE_REF: ${{ matrix.source_ref }}
           DIAGNOSTIC_PROOF_ID: ${{ matrix.proof_id }}
         shell: bash
@@ -100,6 +110,14 @@ jobs:
               --proof-id "$DIAGNOSTIC_PROOF_ID" \
               --source-revision "$SOURCE_REF" \
               --out "$RUNNER_TEMP/kani-proof-evidence/diagnostic"
+            exit $?
+          fi
+          if [ "$CONTEXT_DIAGNOSTIC" = "true" ]; then
+            python3 tools/e10_kani_diagnostic.py \
+              --repo "$GITHUB_WORKSPACE/source" \
+              --target-context "$TARGET_CONTEXT" \
+              --source-revision "$SOURCE_REF" \
+              --out "$RUNNER_TEMP/kani-proof-evidence/target-context"
             exit $?
           fi
           args=(--shard "${{ matrix.shard }}")
@@ -119,7 +137,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
   miri:
-    if: ${{ !(github.event_name == 'workflow_dispatch' && github.event.inputs.diagnose_regression == 'true') }}
+    if: ${{ !(github.event_name == 'workflow_dispatch' && (github.event.inputs.diagnose_regression == 'true' || github.event.inputs.compare_target_contexts == 'true')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
