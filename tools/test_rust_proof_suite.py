@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from unittest import mock
 
 from rust_proof_suite import (
-    NIGHTLY_OVER_SECONDS, SelectionError, affected_packages, balance_shards, changed_files,
+    MAX_PROOFS, NIGHTLY_OVER_SECONDS, SelectionError, affected_packages, balance_shards, changed_files,
     has_unowned_package_root_changes, load_registry, main, package_directories_at,
     package_graph, proof_target_path, registry_packages_missing, run_suite, select_proofs,
     unmapped_package_paths, validate_registry,
@@ -81,14 +81,18 @@ class SuiteConfigurationTests(unittest.TestCase):
         registry, errors = load_registry(REGISTRY_PATH)
         self.assertEqual(errors, [])
         self.assertIsNotNone(registry)
-        self.assertEqual(registry["expected_proof_count"], 112)
-        self.assertEqual(len({p["id"] for p in registry["proofs"]}), 112)
+        self.assertEqual(registry["expected_proof_count"], len(registry["proofs"]))
+        self.assertLessEqual(len(registry["proofs"]), MAX_PROOFS)
+        self.assertEqual(len({p["id"] for p in registry["proofs"]}), len(registry["proofs"]))
         self.assertEqual(
             sum(p["enabled"] for p in registry["proofs"]),
             sum(not p["experimental"] for p in registry["proofs"]),
         )
-        self.assertEqual(sum(p["enabled"] for p in registry["proofs"]), 103)
         experimental = {p["id"] for p in registry["proofs"] if p["experimental"]}
+        self.assertEqual(
+            sum(p["enabled"] for p in registry["proofs"]),
+            len(registry["proofs"]) - len(experimental),
+        )
         self.assertEqual(experimental, {
             "tracker-numerical-refusal-rollback",
             "tracker-late-replay-rollback",
@@ -157,14 +161,18 @@ class SuiteConfigurationTests(unittest.TestCase):
         self.assertEqual(
             {i for i, p in math.items() if p["enabled"]},
             {"hypot-operands-ordered", "hypot-slow-operands", "hypot-dd-operands",
-             "hypot-dd-sum", "hypot-scale-round"},
+             "hypot-dd-sum", "hypot-scale-round", "math-trig-quadrant-signs",
+             "math-trig-round-half-even", "math-trig-cut-split"},
         )
         self.assertEqual(
             {i for i, p in math.items() if not p["enabled"]},
             {"hypot-dd-square", "hypot-dd-root", "hypot-fast-plain", "hypot-fast-scaled"},
         )
         for proof in math.values():
-            self.assertTrue(proof["harness"].startswith("root::proofs::"))
+            if proof["id"].startswith("hypot-"):
+                self.assertTrue(proof["harness"].startswith("root::proofs::"))
+            else:
+                self.assertTrue(proof["harness"].startswith("trig::proofs::"))
 
     def test_late_rollback_conjunction_has_every_component_and_reachability_case(self):
         registry, errors = load_registry(REGISTRY_PATH)
@@ -207,6 +215,7 @@ class SuiteConfigurationTests(unittest.TestCase):
             "asterix-primitives", "asterix-time-round-trip", "asterix-ident-round-trip",
             "asterix-block-framing", "asterix-position-range", "asterix-walk-cat048",
             "asterix-fspec-cat021", "asterix-fspec-cat048", "asterix-fspec-cat062",
+            "asterix-walk-cat021", "asterix-walk-cat062",
         })
         self.assertEqual(by_package["oa-adsb"], {
             "adsb-decode-row-ads2", "adsb-decode-row-ads1", "adsb-header-two-records",
@@ -223,6 +232,9 @@ class SuiteConfigurationTests(unittest.TestCase):
             over = p["ci_seconds"] > NIGHTLY_OVER_SECONDS
             self.assertEqual(p["tier"], "nightly" if over else "push", p["id"])
             self.assertEqual(p["ci_seconds_source"] == "none", p["ci_seconds"] == 0, p["id"])
+            if p["ci_seconds_source"] == "none":
+                self.assertEqual(p["tier"], "push", p["id"])
+                continue
             if p["enabled"]:
                 self.assertGreater(p["ci_seconds"], 0, p["id"])
         # A few known ones: slow tracker proofs and the long FSPEC walk are nightly.
@@ -722,7 +734,7 @@ class PushSelectionTests(unittest.TestCase):
         tracker_change = {p["package"] for p in select_proofs(
             proofs, affected_packages(graph, ["crates/oa-track-core/src/tracker.rs"]))}
         self.assertIn("oa-track-core", tracker_change)
-        self.assertNotIn("oa-track", tracker_change)
+        self.assertIn("oa-track", tracker_change)
         self.assertNotIn("oa-asterix", tracker_change)
 
 

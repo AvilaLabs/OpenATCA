@@ -94,6 +94,14 @@ class ProofSourceInventoryTests(unittest.TestCase):
         with self.assertRaisesRegex(inventory.InventoryError, "outside package src"):
             inventory.discover_source_proofs(self.root)
 
+    def test_workspace_source_inventory_is_fully_accounted(self):
+        workspace = Path(__file__).resolve().parents[1]
+        result = inventory.check_paths(workspace, workspace / "tools/rust_proofs.json")
+        self.assertEqual(result["status"], "PASS")
+        self.assertEqual(result["source_harness_count"], result["registered_source_harness_count"])
+        self.assertEqual(result["unaccounted_source_harnesses"], [])
+        self.assertEqual(result["stale_registry_or_exclusion_identities"], [])
+
     def test_wrong_root_missing_root_and_filesystem_root_refuse(self):
         with self.assertRaises(inventory.InventoryError):
             inventory.check_paths(self.root / "missing", self.root / "tools/rust_proofs.json")
