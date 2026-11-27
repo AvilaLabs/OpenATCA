@@ -99,7 +99,8 @@ fn issued_adaptation_companion_gap_sets_incomplete_aggregate_flag() {
     let expected = [expected(11, 1, 2)];
     let mut row = report(11, 1, 1_000);
     row.adaptation_components_complete = false;
-    let result = assess_inventory(&expected, &[row], query(None, 1_000)).expect("bounded query");
+    let result =
+        assess_inventory(&expected, &[row], inventory_query(None, 1_000)).expect("bounded query");
     assert_ne!(
         result.flags & crate::FLAG_ADAPTATION_COMPONENT_INCOMPLETE,
         0
