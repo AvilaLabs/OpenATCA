@@ -8,33 +8,18 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from contextlib import ExitStack
 from unittest import mock
 
 from rust_proof_suite import GNU_TIME_COMMAND, run_suite
+from proof_suite_test_support import make_workspace, proof_entry, registry_with
 
 
-def proof_entry() -> dict[str, object]:
-    return {
-        "id": "synthetic-resource-proof",
-        "requirement": "Synthetic wrapper resource evidence.",
-        "package": "oa-track",
-        "harness": "synthetic::bounded_proof",
-        "enabled": True,
-        "experimental": False,
-        "required_covers": ["one synthetic cover"],
-        "stubbing": False,
-        "stub_summaries": [],
-        "cfgs": [],
-        "harness_timeout_seconds": 60,
-        "external_timeout_seconds": 120,
-        "memory_mib": 4096,
-        "tier": "push",
-        "ci_seconds": 1,
-        "ci_seconds_source": "ci",
-    }
+FIXED_RSS_KIB = 123
+FIXED_ELAPSED_SECONDS = 0.01
 
 
 class ProofResourceEvidenceTests(unittest.TestCase):
@@ -45,43 +30,18 @@ class ProofResourceEvidenceTests(unittest.TestCase):
         self.repo, self.registry, self.output, self.target = self.make_workspace(self.root)
 
     def make_workspace(self, root: Path) -> tuple[Path, Path, Path, Path]:
-        repo = root / "repo"
-        tools = repo / "tools"
-        tools.mkdir(parents=True)
-        (repo / "Cargo.toml").write_text('[workspace]\nmembers = []\n', encoding="utf-8")
-        (tools / "rust_proof_suite.py").write_text("# synthetic suite source\n", encoding="utf-8")
-        fake_runner = tools / "kani_validation.py"
-        fake_runner.write_text(
-            "import json, pathlib, sys\n"
-            "import os, subprocess\n"
-            "args=sys.argv[1:]\n"
-            "def value(flag): return args[args.index(flag)+1]\n"
-            "out=pathlib.Path(value('--out')); out.mkdir(parents=True, exist_ok=True)\n"
-            "harness=value('--harness'); package=value('--package')\n"
-            "covers=[args[i+1].split('=',1)[1] for i,x in enumerate(args[:-1]) if x=='--require-cover']\n"
-            "record={'status':'PASS','package':package,'expected_harnesses':[harness],"
-            "'required_covers':{harness:covers},'loop_unwind_presets':{harness:[]}}\n"
-            "(out/'run.json').write_text(json.dumps(record))\n",
-            encoding="utf-8",
-        )
-        source = fake_runner.read_text(encoding="utf-8")
-        source += (
-            "child_bytes=int(os.environ.get('SYNTHETIC_RESOURCE_CHILD_BYTES','0'))\n"
-            "if child_bytes:\n"
-            " code=\"import sys; n=int(sys.argv[1]); b=bytearray(n); "
-            "[b.__setitem__(i,1) for i in range(0,n,4096)]\"\n"
-            " subprocess.run([sys.executable,'-c',code,str(child_bytes)],check=True)\n"
-            "raise SystemExit(int(os.environ.get('SYNTHETIC_RESOURCE_RUNNER_EXIT','0')))\n"
-        )
-        fake_runner.write_text(source, encoding="utf-8")
-        registry = tools / "rust_proofs.json"
-        registry.write_text(
-            json.dumps({"registry_version": 1, "expected_proof_count": 1, "proofs": [proof_entry()]}),
-            encoding="utf-8",
-        )
-        subprocess.run(["git", "init", "-q", str(repo)], check=True)
-        subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
-        output, target = root / "evidence", root / "target"
+        proof = proof_entry({
+            "id": "synthetic-resource-proof",
+            "requirement": "Synthetic wrapper resource evidence.",
+            "harness": "synthetic::bounded_proof",
+            "required_covers": ["one synthetic cover"],
+            "harness_timeout_seconds": 60,
+            "external_timeout_seconds": 120,
+            "ci_seconds": 1,
+            "ci_seconds_source": "ci",
+        })
+        repo, registry, output, target = make_workspace(root, proof_count=1)
+        registry.write_text(json.dumps(registry_with(proof), indent=2) + "\n", encoding="utf-8")
         return repo, registry, output, target
 
     def execute_suite(self, env=None, time_command=None, workspace=None):
@@ -130,6 +90,19 @@ class ProofResourceEvidenceTests(unittest.TestCase):
         self.assertGreaterEqual(resource["measurement"]["elapsed_seconds"], 0)
         self.assertIn("largest individual waited child", resource["measurement"]["measurement_scope"])
         self.assertTrue(resource["tool"]["binary_sha256"])
+
+    def test_fixed_raw_receipt_decodes_exact_rss_and_elapsed(self) -> None:
+        root = self.root / "fixed-receipt"
+        root.mkdir()
+        workspace = self.make_workspace(root)
+        wrapper = self.make_time_wrapper(root, "valid")
+        result, suite, _ = self.execute_suite(
+            time_command=str(wrapper), workspace=workspace,
+        )
+        measurement = suite["checks"][0]["resource_measurement"]["measurement"]
+        self.assertEqual(result, 0)
+        self.assertEqual(measurement["maximum_rss_kib"], FIXED_RSS_KIB)
+        self.assertEqual(measurement["elapsed_seconds"], FIXED_ELAPSED_SECONDS)
 
     def test_resource_peak_includes_waited_descendant_allocation(self) -> None:
         """Kills a direct-runner-only peak interpretation by allocating in a waited child."""

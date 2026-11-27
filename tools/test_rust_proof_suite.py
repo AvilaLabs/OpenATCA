@@ -9,6 +9,7 @@ from pathlib import Path
 import tempfile
 import re
 import subprocess
+import sys
 import unittest
 from contextlib import ExitStack, redirect_stderr, redirect_stdout
 from dataclasses import dataclass
@@ -21,6 +22,9 @@ from rust_proof_suite import (
     unmapped_package_paths, validate_registry,
 )
 from kani_validation import LOOP_UNWIND_PRESETS
+from proof_suite_test_support import (
+    fake_runner_source, make_workspace as make_synthetic_workspace, proof_entry, registry_with,
+)
 
 
 REPO = Path(__file__).resolve().parents[1]
@@ -41,35 +45,6 @@ class CapturedRun:
     suite: dict | None
     stdout: str
     stderr: str
-
-
-def proof_entry():
-    return {
-        "id": "sample-proof",
-        "requirement": "A bounded arithmetic invariant.",
-        "package": "oa-track",
-        "harness": "types::proofs::bounded_example",
-        "enabled": True,
-        "experimental": False,
-        "required_covers": ["append reached"],
-        "stubbing": False,
-        "stub_summaries": [],
-        "cfgs": [],
-        "harness_timeout_seconds": 300,
-        "external_timeout_seconds": 420,
-        "memory_mib": 4096,
-        "tier": "push",
-        "ci_seconds": 10,
-        "ci_seconds_source": "ci",
-    }
-
-
-def registry_with(*proofs):
-    return {
-        "registry_version": 1,
-        "expected_proof_count": len(proofs),
-        "proofs": list(proofs),
-    }
 
 
 def last_stdout_report(stdout):
@@ -364,64 +339,10 @@ class SuiteConfigurationTests(unittest.TestCase):
 class SuiteEndToEndTests(unittest.TestCase):
     @staticmethod
     def fake_runner_source():
-        return '''import json, os, pathlib, sys
-args = sys.argv[1:]
-def value(flag): return args[args.index(flag) + 1]
-out = pathlib.Path(value("--out"))
-out.mkdir(parents=True, exist_ok=True)
-package = value("--package")
-harness = value("--harness")
-covers = [item.split("=", 1)[1] for flag, item in zip(args, args[1:]) if flag == "--require-cover"]
-loop_presets = [item for flag, item in zip(args, args[1:]) if flag == "--loop-unwind-preset"]
-mode = os.environ.get("FAKE_RUN_RECORD_MODE", "pass")
-invocation_log = os.environ.get("FAKE_INVOKED")
-if invocation_log:
-    try:
-        prior_invocations = pathlib.Path(invocation_log).read_text(encoding="utf-8").splitlines()
-    except FileNotFoundError:
-        prior_invocations = []
-    if mode == "first-fail":
-        mode = "fail" if not prior_invocations else "pass"
-    with open(invocation_log, "a", encoding="utf-8") as stream:
-        stream.write(harness + "\\n")
-record = {
-    "status": "FAIL" if mode == "fail" else "PASS",
-    "package": package,
-    "expected_harnesses": [harness],
-    "required_covers": {harness: covers},
-    "loop_unwind_presets": {harness: loop_presets},
-    "checks": [{"harness": harness, "status": "FAIL" if mode == "fail" else "PASS",
-                "evaluation_errors": ["loop binding did not match source evidence"] if mode == "fail" else [],
-                "source_unchanged": True}],
-}
-if mode == "wrong":
-    record["expected_harnesses"] = ["other::proof"]
-if mode != "missing":
-    (out / "run.json").write_text(json.dumps(record))
-print("fake runner stdout")
-'''
+        return fake_runner_source()
 
     def fake_workspace(self, root, mode="pass", proof_count=2):
-        repo = root / "repo"
-        repo.mkdir()
-        (repo / "Cargo.toml").write_text("[workspace]\nmembers = []\n")
-        tools_dir = repo / "tools"
-        tools_dir.mkdir()
-        (tools_dir / "kani_validation.py").write_text(self.fake_runner_source())
-        (tools_dir / "rust_proof_suite.py").write_text("# placeholder checked-out suite source\n")
-        proofs = []
-        for index in range(proof_count):
-            proof = proof_entry()
-            if index:
-                proof["id"] = f"second-proof-{index}"
-                proof["harness"] = f"types::proofs::example_{index}_bounded"
-                proof["required_covers"] = []
-            proofs.append(proof)
-        registry_path = tools_dir / "rust_proofs.json"
-        registry_path.write_text(json.dumps(registry_with(*proofs), indent=2) + "\n")
-        subprocess.run(["git", "init", "-q", str(repo)], check=True)
-        subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
-        return repo, registry_path, root / "evidence", root / "target", mode
+        return (*make_synthetic_workspace(root, proof_count), mode)
 
     def run_captured(self, repo, out, target, registry, options=SuiteRun()):
         env = {"FAKE_RUN_RECORD_MODE": options.mode}
@@ -498,6 +419,32 @@ print("fake runner stdout")
                 self.assertTrue((proof_dir / "stdout.log").is_file())
                 self.assertTrue((proof_dir / "stderr.log").is_file())
                 self.assertEqual(json.loads((proof_dir / "run/run.json").read_text())["status"], "PASS")
+
+    def test_cli_deprecated_fail_fast_still_executes_and_reports_later_proof(self):
+        """Kills restoring fail-fast in the actual CLI while preserving the legacy flag."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, registry, output, target, _ = self.fake_workspace(root, proof_count=2)
+            invoked = root / "invoked.txt"
+            command = [
+                sys.executable, str(REPO / "tools" / "rust_proof_suite.py"),
+                "--repo", str(repo), "--out", str(output), "--target-dir", str(target),
+                "--registry", str(registry), "--fail-fast",
+            ]
+            environment = os.environ.copy()
+            environment.update({
+                "FAKE_RUN_RECORD_MODE": "first-fail",
+                "FAKE_INVOKED": str(invoked),
+            })
+            completed = subprocess.run(
+                command, capture_output=True, text=True, check=False, env=environment,
+            )
+            suite = json.loads((output / "suite.json").read_text(encoding="utf-8"))
+            checks = suite["checks"]
+            self.assertEqual(completed.returncode, 1)
+            self.assertIn("deprecated and ignored", completed.stderr)
+            self.assertEqual([check["status"] for check in checks], ["FAIL", "PASS"])
+            self.assertEqual(len(invoked.read_text(encoding="utf-8").splitlines()), 2)
 
     def test_wrong_or_missing_run_record_fails_the_suite(self):
         for mode in ("wrong", "missing"):
