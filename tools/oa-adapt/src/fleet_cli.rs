@@ -1254,7 +1254,7 @@ mod tests {
         );
         let (result, output) = run_case(&case);
         assert!(result.is_err());
-        assert!(output.contains("processor\t2\tlocal=missing_report"));
+        assert!(output.contains("processor\t2\trole=unknown\tlocal=missing_report"));
         assert!(output.contains("missing_processors=1"));
         for fatal_flag in [
             FLAG_LOADED_ADAPTATION_MISMATCH,
@@ -1405,15 +1405,15 @@ mod tests {
         let (phase_one, output_one) = run_case(&case);
         assert!(phase_one.is_err());
         assert!(
-            output_one.contains("processor\t1\tlocal=match"),
+            output_one.contains("processor\t1\trole=generic\tlocal=match"),
             "{output_one}"
         );
         assert!(
-            output_one.contains("processor\t2\tlocal=match"),
+            output_one.contains("processor\t2\trole=generic\tlocal=match"),
             "{output_one}"
         );
         assert!(
-            output_one.contains("processor\t3\tlocal=match"),
+            output_one.contains("processor\t3\trole=generic\tlocal=match"),
             "{output_one}"
         );
         assert!(
@@ -1473,7 +1473,7 @@ mod tests {
         assert!(phase_two.is_ok(), "{phase_two:?}; {output_two}");
         for id in [1, 2, 3] {
             assert!(
-                output_two.contains(&format!("processor\t{id}\tlocal=match")),
+                output_two.contains(&format!("processor\t{id}\trole=generic\tlocal=match")),
                 "{output_two}"
             );
         }
