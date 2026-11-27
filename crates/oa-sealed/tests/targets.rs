@@ -361,8 +361,9 @@ const ALLOW: &str = "seal-allow:";
 // one guarded parent-directory descriptor used for anchored creation and sync.
 // Data-root resolution: two metadata-only checks reject invalid roots without opening data.
 // Synthetic guard fixtures: seven parser subprocess, fixture enumeration/open and fixture-link sites.
-// STDDS reference publication: four test-only reads of reports created under the test's temp root.
-const ALLOW_COUNT: usize = 232;
+// STDDS reference publication: four reads of newly generated reports, one output-directory
+// enumeration, one read after refusing overwrite, and one read of an interrupted synthetic prefix.
+const ALLOW_COUNT: usize = 235;
 
 /// Text that names the real data root: a file that holds one must read through `oa_sealed`.
 /// Written in two pieces so this file does not name the root itself.

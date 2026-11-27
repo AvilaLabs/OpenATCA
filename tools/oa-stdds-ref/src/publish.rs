@@ -242,27 +242,29 @@ mod tests {
         let g = guard(&root);
         let r = report();
         publish_report(&g, &out, &r).unwrap();
-        // seal-allow: reads the summary this test generated in its synthetic temporary output.
         assert_eq!(
+            // seal-allow: reads the summary this test generated in its synthetic temporary output.
             std::fs::read(out.join("stdds_ref.txt")).unwrap(),
             r.summary.as_bytes()
         );
-        // seal-allow: reads the CSV this test generated in its synthetic temporary output.
         assert_eq!(
+            // seal-allow: reads the CSV this test generated in its synthetic temporary output.
             std::fs::read(out.join("stdds_ref.csv")).unwrap(),
             r.csv.as_bytes()
         );
-        // seal-allow: reads the JSON this test generated in its synthetic temporary output.
         assert_eq!(
+            // seal-allow: reads the JSON this test generated in its synthetic temporary output.
             std::fs::read(out.join("stdds_ref.json")).unwrap(),
             r.json.as_bytes()
         );
-        // seal-allow: reads the commit marker this test generated in its synthetic temporary output.
         assert_eq!(
+            // seal-allow: reads the marker this test generated in its synthetic temporary output.
             std::fs::read(out.join("stdds_ref.complete")).unwrap(),
             r.completion_marker.as_bytes()
         );
-        let leftovers = std::fs::read_dir(&out)
+        let leftovers =
+            // seal-allow: enumerates this test's output directory for leftover staging names only.
+            std::fs::read_dir(&out)
             .unwrap()
             .filter_map(Result::ok)
             .any(|entry| {
@@ -275,6 +277,7 @@ mod tests {
         let err = publish_report(&g, &out, &r).unwrap_err();
         assert!(err.contains("never overwritten"), "{err}");
         assert_eq!(
+            // seal-allow: verifies the first publication's synthetic summary remains unchanged.
             std::fs::read(out.join("stdds_ref.txt")).unwrap(),
             r.summary.as_bytes()
         );
@@ -295,6 +298,7 @@ mod tests {
         let err = publish_report(&g, &out, &report()).unwrap_err();
         assert!(err.contains("never overwritten"), "{err}");
         assert_eq!(
+            // seal-allow: verifies this test's precreated synthetic prefix remains unchanged.
             std::fs::read(out.join("stdds_ref.txt")).unwrap(),
             b"completed prefix from interrupted run"
         );
