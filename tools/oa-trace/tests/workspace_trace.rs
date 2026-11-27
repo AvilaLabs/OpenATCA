@@ -27,5 +27,17 @@ fn actual_workspace_has_no_requirement_trace_errors() {
         report.duplicates.is_empty(),
         "duplicate requirement definitions:\n{rendered}"
     );
+    assert_eq!(
+        report.proposed.len(),
+        15,
+        "unexpected proposal count:\n{rendered}"
+    );
+    assert!(
+        report
+            .proposed
+            .iter()
+            .all(|id| !report.covered.contains_key(id) && !report.untested.contains(id)),
+        "proposals must not enter active coverage or untested counts:\n{rendered}"
+    );
     assert!(report.ok(), "workspace traceability must pass:\n{rendered}");
 }

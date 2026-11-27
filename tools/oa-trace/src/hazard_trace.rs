@@ -433,7 +433,7 @@ pub fn check(root: &Path) -> Vec<String> {
         .unwrap_or_default();
     let active_definitions: BTreeSet<String> = definitions
         .iter()
-        .filter(|requirement| !requirement.withdrawn)
+        .filter(|requirement| !requirement.withdrawn && !requirement.proposed)
         .map(|requirement| requirement.id.clone())
         .collect();
     for id in &safety_assessment_ids {
@@ -537,7 +537,7 @@ pub fn check(root: &Path) -> Vec<String> {
     };
     let withdrawn_definitions: BTreeSet<String> = definitions
         .iter()
-        .filter(|requirement| requirement.withdrawn)
+        .filter(|requirement| requirement.withdrawn && !requirement.proposed)
         .map(|requirement| requirement.id.clone())
         .collect();
     let mut withdrawn_ids = BTreeSet::new();
@@ -901,6 +901,47 @@ pub fn check(root: &Path) -> Vec<String> {
             }
         }
     }
+    for proposal in definitions
+        .iter()
+        .filter(|requirement| requirement.proposed)
+    {
+        if proposal.withdrawn {
+            errors.push(format!(
+                "proposed requirement {} cannot also be withdrawn",
+                proposal.id
+            ));
+        }
+        if proposal
+            .proposal_source
+            .as_deref()
+            .is_none_or(str::is_empty)
+        {
+            errors.push(format!(
+                "proposed requirement {} needs a draft source clause",
+                proposal.id
+            ));
+        }
+        if proposal.proposal_hazards.is_empty() {
+            errors.push(format!(
+                "proposed requirement {} needs at least one draft hazard link",
+                proposal.id
+            ));
+        }
+        let mut linked = BTreeSet::new();
+        for hazard in &proposal.proposal_hazards {
+            if !linked.insert(hazard) {
+                errors.push(format!(
+                    "proposed requirement {} duplicates hazard link {hazard}",
+                    proposal.id
+                ));
+            } else if !hazard_ids.contains(hazard) {
+                errors.push(format!(
+                    "proposed requirement {} links unknown hazard {hazard}",
+                    proposal.id
+                ));
+            }
+        }
+    }
     for requirement in &requirements {
         if !linked_requirements.contains(requirement) {
             errors.push(format!(
@@ -1082,6 +1123,32 @@ mod tests {
         let root = TempRoot::new();
         root.write_log(&fixture());
         assert!(check(&root.0).is_empty());
+    }
+
+    // REQ: OA-MIG-602
+    #[test]
+    fn proposed_requirement_hazard_link_is_validated_without_activating_it() {
+        let root = TempRoot::new();
+        fs::write(
+            root.0.join("REQUIREMENTS.md"),
+            "- **OA-AAA-001** synthetic safety requirement\n- **OA-AAA-002** proposal\n  PROPOSED | source=SSHA §4.1 | hazards=HZ-SYN-1\n",
+        )
+        .unwrap();
+        root.write_log(&fixture());
+        assert!(check(&root.0).is_empty());
+
+        fs::write(
+            root.0.join("REQUIREMENTS.md"),
+            "- **OA-AAA-001** synthetic safety requirement\n- **OA-AAA-002** proposal\n  PROPOSED | source=SSHA §4.1 | hazards=HZ-NOT-IN-LOG\n",
+        )
+        .unwrap();
+        let errors = check(&root.0);
+        assert!(errors.iter().any(|error| error
+            .contains("proposed requirement OA-AAA-002 links unknown hazard HZ-NOT-IN-LOG")));
+        assert!(!errors
+            .iter()
+            .any(|error| error
+                .contains("safety requirement OA-AAA-002 is not an active register ID")));
     }
 
     // REQ: OA-MIG-602

@@ -8250,3 +8250,40 @@ The L13 role registry is not yet landed; roles below are plain caller-supplied c
   A one-shot query is an observation, not continuous monitoring. The checkpoint publisher and
   principal origin remain unauthenticated caller claims, and this feature provides no RMM
   transport, persistent alarm history, authenticated identity, or migration gate.
+
+## Proposed safety requirements (draft SSHA, SHA and O&SHA; not active)
+
+These 15 clauses are recorded verbatim from the named draft sections. `PROPOSED` entries are
+drafts only: `oa-trace` reports them separately, does not count their test tags as verification,
+and does not include them in active hazard coverage.
+
+- **OA-SAF-900** Source time on every safety output. Every conflict alert, MSAW, runway and track output carries the oldest source time of the inputs it used.
+  PROPOSED | source=SSHA §4.1 | hazards=HZ-SURV-TIME-001
+- **OA-SAF-901** Stale outputs are refused at the consumer. The display and every downstream consumer refuse or visibly flag a safety output older than a stated bound for its function. The bound is stated per function and traced to the hazard.
+  PROPOSED | source=SSHA §4.2 | hazards=HZ-SURV-TIME-001,HZ-DISPLAY-001
+- **OA-SAF-902** Heartbeat on every safety function. Each safety function publishes a heartbeat. Loss of heartbeat for longer than a stated time is alarmed to the controller and to Tech Ops, and the function's outputs are marked unavailable.
+  PROPOSED | source=SSHA §4.3 | hazards=HZ-NET-STATE-001
+- **OA-SAF-903** Dissimilar check for catastrophic functions. Conflict alert, MSAW and the track picture are each compared against an independent computation that shares no code with the primary. Disagreement beyond a stated bound is alarmed. This is the dissimilar thread and the independent monitor of the Program Safety Plan, section 6.
+  PROPOSED | source=SSHA §4.4 | hazards=HZ-CA-001,HZ-MSAW-001,HZ-GEOMETRY-001
+- **OA-SAF-904** Bounded resources fail visibly. When a bounded table or buffer is full, the function reports that it is degraded. It does not drop work silently.
+  PROPOSED | source=SSHA §4.5 | hazards=HZ-FEED-001,HZ-NET-STATE-001
+- **OA-SAF-905** Every credited detection has a failing test. The 2,936 rows where a detection exists but no test proves it get one. The method is the one used for the Done rows: remove or invert the check, and the test must fail.
+  PROPOSED | source=SSHA §4.6 | hazards=HZ-EVIDENCE-001
+- **OA-SAF-906** Source authentication at every external interface. Each external input is checked against its expected source. Where the source system cannot sign or authenticate its data, this is recorded as a stated limit for that interface, and the controls of item 4 carry the hazard. That check belongs to the security plan (row E1) as well as to safety.
+  PROPOSED | source=SHA §3.1 | hazards=HZ-SURV-INPUT-001,HZ-FLIGHTDATA-001,HZ-WEATHER-001,HZ-COORDINATION-001
+- **OA-SAF-907** Sequence and freshness at every interface. Each message carries a sequence or source time that the receiver checks. Gaps, repeats and reordering are counted and, above a stated rate, reported to Tech Ops.
+  PROPOSED | source=SHA §3.2 | hazards=HZ-FEED-001,HZ-SURV-TIME-001,HZ-FLIGHTDATA-001
+- **OA-SAF-908** Internal boundaries pass source time with the data. This is the same requirement as SSHA requirement 1, applied where core output enters the shell.
+  PROPOSED | source=SHA §3.3 | hazards=HZ-SURV-TIME-001
+- **OA-SAF-909** Cross-checks between independent sources. Where two sources cover the same aircraft, such as ADS-B and radar, disagreement beyond a stated bound is flagged. This is the main defence against a wrong or spoofed source that cannot be authenticated.
+  PROPOSED | source=SHA §3.4 | hazards=HZ-SURV-INPUT-001,HZ-SURV-ASSOC-001
+- **OA-SAF-910** Overload is reported. When an input exceeds its bound, the excess is counted and the function reports that it is degraded.
+  PROPOSED | source=SHA §3.5 | hazards=HZ-FEED-001,HZ-NET-STATE-001
+- **OA-SAF-911** Write the missing procedures. Each of the nine gets: a named role; the steps; the record it leaves; where software can enforce it, a check that refuses the wrong action. One example is refusing activation when a processor's loaded adaptation does not match the issued digest.
+  PROPOSED | source=O&SHA §3.1 | hazards=HZ-CUTOVER-001,HZ-AIRSPACE-001,HZ-NET-STATE-001
+- **OA-SAF-912** Adaptation restore is a tested drill. The restore of the prior adaptation is run end to end as a drill, the way rollback is. Processors that do not report the restored digest are found by the fleet check.
+  PROPOSED | source=O&SHA §3.2 | hazards=HZ-AIRSPACE-001
+- **OA-SAF-913** Alarm acknowledgement leaves a durable record. The record holds who acknowledged, which alarm instance, and when. An alarm whose condition still holds cannot be cleared.
+  PROPOSED | source=O&SHA §3.3 | hazards=HZ-NET-STATE-001,HZ-DISPLAY-001
+- **OA-SAF-914** Thresholds stay under profile control. This is already required: a threshold change without a profile review is refused.
+  PROPOSED | source=O&SHA §3.4 | hazards=HZ-CUTOVER-001,HZ-CA-001,HZ-MSAW-001
