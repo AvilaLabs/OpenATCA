@@ -1633,7 +1633,7 @@ the SFDPS `gufi` (they are different kinds of value, survey).
   and one that does not project are loss, counted apart from off-map, which is not. An altitude beyond what the data
   block holds is written `999+` or `-99-` and counted, never shown as a flight level. `Target` has a size guard of 164
   bytes.
-- **OA-DSP-047** Tracker rows are stored as plain columns per address and shown without substitution: columns of
+- **OA-DSP-047** The bottom-right frame stamp reports `CURRENT POSITIONS N / DRAWN M`: N counts one selected latest fresh, valid-position row per address before map filtering, including off-map rows and rows refused by the target-set capacity; M counts target symbols actually drawn. Stale rows and invalid positions do not enter N. This is the current display input count, not a facility-wide traffic total. Tracker rows are stored as plain columns per address and shown without substitution: columns of
   different lengths are an error before any row is read, a row with a column missing is refused and counted, rows before
   the window are counted as before the window (not as loss), and a row past a named capacity (addresses 2^17, rows per
   address 2^18, rows 2^24) is refused and counted, except that the total-rows cap is checked from the sizes the input declares

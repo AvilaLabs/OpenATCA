@@ -37,7 +37,7 @@ use oa_safety::inhibit::InhibitTable;
 use oa_safety::net::StateTable;
 use std::fmt;
 
-/// The frame's own text: the time and the target count, bottom right.
+/// The frame's own text: current valid position candidates and actually drawn targets, bottom right.
 const STAMP_SIZE: u8 = 12;
 const STAMP_RIGHT_PX: i32 = 8;
 const STAMP_FROM_BOTTOM_PX: i32 = 22;
@@ -316,9 +316,12 @@ pub(crate) fn replay_build_raw_with_source_stale(
         let scene = build_scene(&mut r.list, &r.model, &r.index, &r.view, &mut r.scratch)?;
         let traffic = build_traffic(&mut r.list, &r.view.proj, &r.ell, &r.set, &r.cfg.style)?;
 
+        let current_positions = raw.fresh_valid_positions;
         let mut status = text_new();
         text_push_str(&mut status, stamp);
-        text_push_str(&mut status, "  TARGETS ");
+        text_push_str(&mut status, "  CURRENT POSITIONS ");
+        text_push_dec(&mut status, current_positions, 0);
+        text_push_str(&mut status, " / DRAWN ");
         text_push_dec(&mut status, u64::from(traffic.drawn), 0);
         let y = i32::try_from(r.cfg.height)
             .unwrap_or(i32::MAX)
@@ -456,9 +459,16 @@ pub fn replay_build_with_overlays(
     } else {
         false
     };
+    let current_positions = u64::from(convert.added)
+        + u64::from(convert.off_map)
+        + u64::from(convert.unprojectable)
+        + u64::from(targets_refused(&r.set))
+        + u64::from(targets_malformed(&r.set));
     let mut tb = text_new();
     text_push_str(&mut tb, stamp);
-    text_push_str(&mut tb, "  TARGETS ");
+    text_push_str(&mut tb, "  CURRENT POSITIONS ");
+    text_push_dec(&mut tb, current_positions, 0);
+    text_push_str(&mut tb, " / DRAWN ");
     text_push_dec(&mut tb, u64::from(traffic.drawn), 0);
     let y = i32::try_from(r.cfg.height)
         .unwrap_or(i32::MAX)

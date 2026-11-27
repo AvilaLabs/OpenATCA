@@ -675,7 +675,7 @@ fn replayed_frames_are_the_same_in_every_run_and_do_not_depend_on_earlier_frames
     assert_eq!(first[2], GOLDEN, "the replay frame changed");
 }
 
-const GOLDEN: &str = "3d27683429165aaedf3ff3e8341b2ed667adcbf711d356c223222a222efd2980";
+const GOLDEN: &str = "1cea770f89fecf6626ff544f7f1500d11e61830503d2b0a202f9f246cf2d2845";
 
 // REQ: OA-DSP-072
 #[test]
@@ -861,9 +861,9 @@ fn raw_fallback_refuses_conflicting_latest_timestamp_and_collapses_duplicates() 
     assert_eq!(targets_columns(&replay.set).lat_e7, &[ORD.0 + 1]);
 }
 
-// REQ: OA-DSP-044
+// REQ: OA-DSP-044, OA-DSP-047
 #[test]
-fn a_replay_frame_marks_state_and_says_when_targets_were_not_drawn() {
+fn a_replay_frame_marks_current_positions_separately_from_drawn_targets() {
     let store = synthetic_store();
     let mut r = replay_new(model(), &frame_cfg()).unwrap();
     let t = T0 + 22 * S;
@@ -883,7 +883,7 @@ fn a_replay_frame_marks_state_and_says_when_targets_were_not_drawn() {
             &r.list.text[s..s + n]
         })
         .collect();
-    assert!(texts.contains(&"STAMP  TARGETS 3"));
+    assert!(texts.contains(&"STAMP  CURRENT POSITIONS 3 / DRAWN 3"));
     assert!(texts.contains(&"CST UNC"));
     assert!(texts.contains(&"REACQ"));
     // A capacity of two: the third is refused, counted and said on the frame.
@@ -894,6 +894,10 @@ fn a_replay_frame_marks_state_and_says_when_targets_were_not_drawn() {
     let mut r = replay_new(model(), &cfg).unwrap();
     let info = replay_build(&mut r, &store, &Callsigns::default(), t, "STAMP").unwrap();
     assert_eq!((info.traffic.drawn, info.refused), (2, 1));
+    assert!((0..r.list.texts.x.len()).any(|i| {
+        let (s, n) = (r.list.texts.start[i] as usize, r.list.texts.len[i] as usize);
+        &r.list.text[s..s + n] == "STAMP  CURRENT POSITIONS 3 / DRAWN 2"
+    }));
     assert!((0..r.list.texts.x.len()).any(|i| {
         let (s, n) = (r.list.texts.start[i] as usize, r.list.texts.len[i] as usize);
         r.list.text[s..s + n].starts_with("TARGETS NOT DRAWN: 1")

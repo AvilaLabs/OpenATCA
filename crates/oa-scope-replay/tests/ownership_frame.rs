@@ -288,7 +288,7 @@ fn ownership_after_timeout_stays_actionable_beside_frozen_and_degraded_warnings(
     assert!(labels.contains(&owner_line), "{labels:?}");
     assert!(labels
         .iter()
-        .any(|label| label.starts_with("T+2S  TARGETS 1")));
+        .any(|label| label.starts_with("T+2S  CURRENT POSITIONS 1 / DRAWN 1")));
 
     let frozen_i = text_index(&replay, frozen);
     let degraded_i = text_index(&replay, degraded);
@@ -296,7 +296,7 @@ fn ownership_after_timeout_stays_actionable_beside_frozen_and_degraded_warnings(
     let owner_i = text_index(&replay, owner_line);
     let stamp_i = labels
         .iter()
-        .position(|label| label.starts_with("T+2S  TARGETS 1"))
+        .position(|label| label.starts_with("T+2S  CURRENT POSITIONS 1 / DRAWN 1"))
         .unwrap();
     assert_eq!(replay.list.texts.colour[frozen_i], palette::ALERT);
     assert_eq!(replay.list.texts.colour[degraded_i], palette::ALERT);
