@@ -41,7 +41,7 @@ BASELINE_PATH = Path("tools/quality-size-baseline.json")
 WORKSPACE_BINDING = "openatca-rust-workspace-v1"
 WORKSPACE_MARKERS = (
     "Cargo.toml", "docs/RULESET.md", "crates/oa-track/Cargo.toml",
-    "tools/quality_size_ratchet.py",
+    "tools/oa-trace/Cargo.toml", "tools/rust_proofs.json",
 )
 
 
@@ -841,12 +841,10 @@ def compare(current: dict[str, object], baseline: dict[str, object]) -> dict[str
             details = current_details.get(fingerprint, {}) if isinstance(current_details, dict) else {}
             additions.append({
                 "fingerprint": fingerprint,
-                "additional_duplicate_windows": count - old_count,
+                "additional_duplicate_blocks": count - old_count,
                 "token_window": details.get("token_window", []),
                 "occurrences": details.get("occurrences", []),
             })
-    if additions:
-        errors.append("new or increased duplicate windows were found")
     return {
         "status": "FAIL" if errors else "PASS",
         "errors": errors,

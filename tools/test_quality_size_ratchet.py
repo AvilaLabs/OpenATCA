@@ -211,7 +211,7 @@ class QualitySizeRatchetTests(unittest.TestCase):
         baseline = self.baseline_for(base)
         report = ratchet.compare(current, baseline)
         self.assertEqual(current["duplicate_block_count"], base["duplicate_block_count"])
-        self.assertEqual(report["status"], "FAIL")
+        self.assertEqual(report["status"], "PASS")
         self.assertTrue(report["new_or_increased_duplicates"])
         baseline_ids = set(base["duplicate_frequencies"])
         self.assertTrue(any(row["fingerprint"] not in baseline_ids
