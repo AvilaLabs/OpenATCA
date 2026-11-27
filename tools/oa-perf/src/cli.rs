@@ -9,7 +9,7 @@ use std::process::Command;
 
 use crate::capacity::{
     assignment_forensics_csv, cap_kv, cap_text, loss_counters, parse_radars, run_capacity,
-    seconds_csv, CapCfg,
+    seconds_csv, tracker_cfg, CapCfg, NETWORK_STRESS_10240_AIRCRAFT, NETWORK_STRESS_10240_RADARS,
 };
 use crate::clip::{clip_kv, clip_text, run_clip, ClipCfg};
 use crate::gen::{Layout, TrafficCfg};
@@ -20,9 +20,8 @@ use oa_track_tools::fusion_score::EPOCH_NS;
 
 /// Seconds past the end of the run that the traffic is generated for.
 const HORIZON_PAD_S: i64 = 60;
-
 /// The usage text.
-pub const USAGE: &str = "usage: oa-perf <all|clip|sweep|one> [flags]
+pub const USAGE: &str = "usage: oa-perf <all|clip|sweep|one|network-stress-10240> [flags]
   all     the clip latency run, then the capacity sweep, knee and overload
   clip    per-update latency on the real clip (OPENATCA_ADSB_CLIP or --clip)
   sweep   capacity runs at each size, the knee, and a run at twice the knee
@@ -36,6 +35,7 @@ flags (defaults in brackets):
                      nas spreads them at the whole-NAS density
   --radars e,t,t     radars: e en-route (12 s), t terminal (4.8 s) [e,t,t]
   --network-profile  opt in to up to 64 distinct physical radar sites (one command only)
+  network-stress-10240  fixed 10,240-aircraft / 64-source mixed ADS-B and radar profile
   --adsb-frac F      fraction of aircraft sending ADS-B [0.5]
   --radar-only       stress run: suppress ADS-B for the full radar-covered aircraft cohort
   --warmup S --duration S   seconds fed before the statistics, and seconds measured [60, 60]
@@ -66,6 +66,8 @@ pub struct Opts {
     pub radars: String,
     /// Opt in to the separate bounded eight-unit / 64-physical-source fusion profile.
     pub network_profile: bool,
+    /// Select the fixed, separately reported 10,240-aircraft synthetic profile.
+    pub network_stress_10240: bool,
     pub adsb_frac: f64,
     pub radar_only: bool,
     pub warmup: i64,
@@ -98,6 +100,7 @@ impl Default for Opts {
             layout: Layout::Stress,
             radars: "e,t,t".to_string(),
             network_profile: false,
+            network_stress_10240: false,
             adsb_frac: 0.5,
             radar_only: false,
             warmup: 60,
@@ -162,8 +165,17 @@ pub fn parse_args(args: &[String]) -> Result<Opts, String> {
     let mut o = Opts::default();
     let mut it = args.iter();
     o.cmd = it.next().ok_or("no command")?.clone();
-    if !["all", "clip", "sweep", "one"].contains(&o.cmd.as_str()) {
+    if !["all", "clip", "sweep", "one", "network-stress-10240"].contains(&o.cmd.as_str()) {
         return Err(format!("unknown command '{}'", o.cmd));
+    }
+    if o.cmd == "network-stress-10240" {
+        o.network_stress_10240 = true;
+        o.network_profile = true;
+        o.n = NETWORK_STRESS_10240_AIRCRAFT;
+        o.layout = Layout::Stress;
+        o.radars = vec!["e"; NETWORK_STRESS_10240_RADARS].join(",");
+        o.max_tracks = NETWORK_STRESS_10240_AIRCRAFT;
+        o.adsb_frac = 0.5;
     }
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -243,8 +255,22 @@ pub fn parse_args(args: &[String]) -> Result<Opts, String> {
     if o.radar_only && o.cmd != "one" {
         return Err("--radar-only is available with `one` only".to_string());
     }
-    if o.network_profile && o.cmd != "one" {
+    if o.network_profile && !["one", "network-stress-10240"].contains(&o.cmd.as_str()) {
         return Err("--network-profile is available with `one` only".to_string());
+    }
+    if o.network_stress_10240
+        && (o.n != NETWORK_STRESS_10240_AIRCRAFT
+            || o.layout != Layout::Stress
+            || o.radars != vec!["e"; NETWORK_STRESS_10240_RADARS].join(",")
+            || o.max_tracks != NETWORK_STRESS_10240_AIRCRAFT
+            || o.adsb_frac != 0.5
+            || o.radar_only
+            || o.radar_no_altitude
+            || o.adsb_dropout_s.is_some()
+            || o.truth_score
+            || o.assignment_forensics)
+    {
+        return Err("network-stress-10240 fixes 10,240 aircraft, stress layout, 64 en-route sources, 10,240 track slots and 0.5 ADS-B fraction; degradation and truth-score flags are unavailable".to_string());
     }
     if o.network_profile && o.truth_score {
         return Err(
@@ -290,6 +316,7 @@ pub fn cap_cfg(o: &Opts, n: usize) -> Result<CapCfg, String> {
             horizon_s: o.warmup.saturating_add(o.duration) as f64 + HORIZON_PAD_S as f64,
         },
         network_profile: o.network_profile,
+        network_stress_10240: o.network_stress_10240,
         warmup_s: o.warmup,
         measure_s: o.duration,
         max_tracks: o.max_tracks,
@@ -311,7 +338,9 @@ fn tag(o: &Opts, n: usize) -> String {
 }
 
 fn result_tag(o: &Opts, n: usize) -> String {
-    if o.network_profile {
+    if o.network_stress_10240 {
+        format!("network_stress_10240_v1_n{n}_w{}_d{}", o.warmup, o.duration)
+    } else if o.network_profile {
         let suffix = if o.radar_only {
             "_radar_only"
         } else if o.adsb_dropout_s.is_some() {
@@ -361,6 +390,10 @@ fn sync_assignment_forensics(path: &Path, csv: Option<&str>) -> Result<(), Strin
 /// One capacity run in this process; writes `cap_<layout>_n<N>.{txt,kv}` and the per-second CSV.
 fn one(o: &Opts, n: usize) -> Result<(), String> {
     let mut cfg = cap_cfg(o, n)?;
+    if o.network_stress_10240 {
+        let output_row_capacity = tracker_cfg(o.max_tracks, n).out_capacity;
+        println!("declared profile=network-stress-10240-v1 aircraft=10240 track_capacity=10240 physical_sources=64 sources=all-enroute shared_tracker_instances=1 output_row_capacity={output_row_capacity} layout=stress adsb_fraction=0.5");
+    }
     let (control_result, r) = if let Some(dropout_s) = o.adsb_dropout_s {
         let mut control = cfg.clone();
         control.adsb_dropout_s = Some(0);
@@ -749,7 +782,7 @@ fn run_counted(args: &[String], drops: &mut oa_sealed::DropReport) -> Result<(),
     // The output directory is checked before it is created.
     oa_sealed::refuse(&o.out)?;
     std::fs::create_dir_all(&o.out).map_err(|e| format!("{}: {e}", o.out.display()))?;
-    if o.cmd == "one" {
+    if o.cmd == "one" || o.cmd == "network-stress-10240" {
         return one(&o, o.n);
     }
     let mut kvs = Kv::default();
@@ -785,6 +818,7 @@ fn run_counted(args: &[String], drops: &mut oa_sealed::DropReport) -> Result<(),
 )]
 mod tests {
     use super::*;
+    use oa_track_tools::fusion_score::Kind;
 
     fn a(s: &str) -> Vec<String> {
         s.split_whitespace().map(String::from).collect()
@@ -843,6 +877,28 @@ mod tests {
         )))
         .is_err());
         assert_eq!(result_tag(&opts, 1_900), "network_stress_n1900");
+    }
+
+    // REQ: OA-PRF-009
+    #[test]
+    fn named_10240_network_profile_freezes_population_and_source_capacity() {
+        let opts = parse_args(&a("network-stress-10240 --warmup 2 --duration 3")).unwrap();
+        let cfg = cap_cfg(&opts, opts.n).unwrap();
+        assert_eq!(opts.n, 10_240);
+        assert_eq!(opts.max_tracks, 10_240);
+        assert_eq!(cfg.traffic.n, 10_240);
+        assert_eq!(cfg.traffic.radars.len(), NETWORK_STRESS_10240_RADARS);
+        assert_eq!(tracker_cfg(opts.max_tracks, opts.n).out_capacity, 1 << 16);
+        assert!(cfg.traffic.radars.iter().all(|kind| *kind == Kind::EnRoute));
+        assert!(cfg.network_profile && cfg.network_stress_10240);
+        assert!(!cfg.radar_only);
+        assert_eq!(cfg.traffic.adsb_frac, 0.5);
+        assert_eq!(
+            result_tag(&opts, opts.n),
+            "network_stress_10240_v1_n10240_w2_d3"
+        );
+        assert!(parse_args(&a("network-stress-10240 --n 1900")).is_err());
+        assert!(parse_args(&a("network-stress-10240 --radar-only")).is_err());
     }
 
     // REQ: OA-PRF-007

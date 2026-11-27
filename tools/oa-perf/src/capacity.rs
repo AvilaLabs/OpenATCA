@@ -32,6 +32,11 @@ use crate::stats::{dist_of, fmt_f, Dist, Hist, Kv};
 use crate::sys::{loadavg3, status_kb};
 
 const NS_PER_S: i64 = 1_000_000_000;
+/// Fixed aircraft/track population of the separately named network stress profile.
+pub const NETWORK_STRESS_10240_AIRCRAFT: usize = 10_240;
+/// Physical synthetic source count pinned by network-stress-10240-v1.
+pub const NETWORK_STRESS_10240_RADARS: usize = 64;
+const _: () = assert!(NETWORK_STRESS_10240_RADARS <= MAX_NETWORK_RADARS);
 /// Opt-in stage samples are at most one day: four f64 values per measured second stay below
 /// 3 MiB, and a longer timer request is refused rather than growing its evidence buffers.
 const MAX_STAGE_TIMING_SECONDS: i64 = 86_400;
@@ -42,6 +47,8 @@ pub struct CapCfg {
     pub traffic: TrafficCfg,
     /// Explicitly selects the bounded eight-unit, 64-physical-source fusion profile.
     pub network_profile: bool,
+    /// Identifies the fixed 10,240-aircraft synthetic network stress profile.
+    pub network_stress_10240: bool,
     /// Seconds of traffic fed before the statistics start (tracks initiate, registration settles).
     pub warmup_s: i64,
     /// Seconds of traffic whose statistics are kept.
@@ -147,6 +154,15 @@ pub struct CapResult {
     pub init_diagnostics: bool,
     pub association_diagnostics: bool,
     pub network_profile: bool,
+    pub network_stress_10240: bool,
+    /// Peak/final confirmed live tracker-key counts across measured one-second snapshots.
+    pub network_confirmed_live_peak: usize,
+    pub network_confirmed_live_final: usize,
+    /// Adjacent snapshot continuity: count of confirmed keys present before and after measured
+    /// advances, with the number of prior-live-key opportunities as its denominator.
+    pub network_confirmed_key_continuations: u64,
+    pub network_confirmed_key_opportunities: u64,
+    pub network_confirmed_snapshot_pairs: u64,
     pub assignment_forensics: bool,
     /// Available only when shell stage timers were explicitly enabled.
     pub stage_timing: Option<ShellStageTiming>,
@@ -167,6 +183,8 @@ pub struct CapResult {
     /// Stopped by the early-stop rule (see [`CapCfg::early_stop`]).
     pub stopped_early: bool,
     pub max_tracks: usize,
+    /// Caller output table capacity selected by [`tracker_cfg`].
+    pub output_row_capacity: usize,
     /// Wall time of the measured seconds' timed calls, seconds.
     pub wall_measured_s: f64,
     /// Wall time of every second's timed call, warm-up included, seconds.
@@ -811,6 +829,16 @@ fn snapshot(f: &oa_track::fusion::Fusion, m: &mut HashMap<u32, i64>) {
     }
 }
 
+/// Counts same-key continuity across two adjacent confirmed-live snapshots. The keys are
+/// tracker identities only; no truth correspondence is inferred by this helper.
+fn confirmed_snapshot_continuity(
+    before: &HashMap<u32, i64>,
+    after: &HashMap<u32, i64>,
+) -> (usize, usize, usize) {
+    let retained = after.keys().filter(|key| before.contains_key(key)).count();
+    (after.len(), before.len(), retained)
+}
+
 /// Measured-window truth coverage. All maps and bitset storage are prepared before timing;
 /// account calls only inspect offered shell inputs and never touch fusion's timed work.
 // A7.2: shell bookkeeping, allocated once before the measured windows.
@@ -1201,6 +1229,23 @@ fn forensics_source_complete(scratch_full: u64) -> bool {
 
 /// Runs the traffic through the layer and measures it.
 pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
+    if cfg.network_stress_10240
+        && (!cfg.network_profile
+            || cfg.traffic.n != NETWORK_STRESS_10240_AIRCRAFT
+            || cfg.max_tracks != NETWORK_STRESS_10240_AIRCRAFT
+            || cfg.traffic.layout != Layout::Stress
+            || cfg.traffic.radars.len() != NETWORK_STRESS_10240_RADARS
+            || cfg.traffic.radars.iter().any(|kind| *kind != Kind::EnRoute)
+            || cfg.traffic.adsb_frac != 0.5
+            || cfg.radar_only
+            || cfg.traffic.radar_only
+            || cfg.radar_no_altitude
+            || cfg.adsb_dropout_s.is_some()
+            || cfg.truth_score
+            || cfg.assignment_forensics)
+    {
+        return Err("network-stress-10240 profile configuration does not match its fixed synthetic population/capacity contract".to_string());
+    }
     if cfg.radar_only != cfg.traffic.radar_only {
         return Err("radar-only mode must match traffic generator configuration".to_string());
     }
@@ -1316,6 +1361,11 @@ pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
     let mut seconds_done = 0i64;
     let mut rss_warm_kb = 0u64;
     let mut generated_radar_plot_rows = vec![0u64; sites.len()];
+    let mut network_confirmed_live_peak = 0usize;
+    let mut network_confirmed_live_final = 0usize;
+    let mut network_confirmed_key_continuations = 0u64;
+    let mut network_confirmed_key_opportunities = 0u64;
+    let mut network_confirmed_snapshot_pairs = 0u64;
     let mut warm = (FusionStats::default(), TrackerStats::default(), 0u64);
     for k in 0..total_s {
         if started.elapsed().as_secs_f64() > cfg.max_wall_s {
@@ -1412,6 +1462,27 @@ pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
             adv_ms.push(ms);
             measure_done += 1;
             snapshot(&f, &mut after);
+            if cfg.network_stress_10240 {
+                let (confirmed_after, confirmed_before, retained) =
+                    confirmed_snapshot_continuity(&before, &after);
+                network_confirmed_live_peak = network_confirmed_live_peak.max(confirmed_after);
+                network_confirmed_live_final = confirmed_after;
+                network_confirmed_snapshot_pairs = network_confirmed_snapshot_pairs
+                    .checked_add(1)
+                    .ok_or("network snapshot pair count overflow")?;
+                network_confirmed_key_opportunities = network_confirmed_key_opportunities
+                    .checked_add(
+                        u64::try_from(confirmed_before)
+                            .map_err(|_| "previous confirmed track count does not fit u64")?,
+                    )
+                    .ok_or("network confirmed-key opportunity count overflow")?;
+                network_confirmed_key_continuations = network_confirmed_key_continuations
+                    .checked_add(
+                        u64::try_from(retained)
+                            .map_err(|_| "confirmed track continuity count does not fit u64")?,
+                    )
+                    .ok_or("network confirmed-key continuity count overflow")?;
+            }
             let mut fresh_seen = BTreeSet::<u32>::new();
             for m in &adsb {
                 h_da.add((until - m.toa_ns) as f64 * 1.0e-6);
@@ -1650,6 +1721,12 @@ pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
         assignment_forensics: cfg.assignment_forensics,
         stage_timing,
         network_profile: cfg.network_profile,
+        network_stress_10240: cfg.network_stress_10240,
+        network_confirmed_live_peak,
+        network_confirmed_live_final,
+        network_confirmed_key_continuations,
+        network_confirmed_key_opportunities,
+        network_confirmed_snapshot_pairs,
         adsb_aircraft: traffic.adsb_count(),
         radar_only: cfg.radar_only,
         radar_only_suppressed_aircraft,
@@ -1665,6 +1742,7 @@ pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
         truncated,
         stopped_early,
         max_tracks: cfg.max_tracks,
+        output_row_capacity: base.out_capacity,
         wall_measured_s: wall_measured,
         wall_total_s: wall_total,
         realtime_ratio: if measure_done > 0 {
@@ -1739,6 +1817,52 @@ pub fn cap_kv(r: &CapResult) -> Kv {
             .join(","),
     );
     kv.put("network_profile", u8::from(r.network_profile));
+    if r.network_stress_10240 {
+        kv.put("synthetic_profile", "network-stress-10240-v1");
+        kv.put(
+            "network.declared_aircraft_capacity",
+            NETWORK_STRESS_10240_AIRCRAFT,
+        );
+        kv.put("network.declared_confirmed_track_capacity", r.max_tracks);
+        kv.put(
+            "network.declared_output_row_capacity",
+            r.output_row_capacity,
+        );
+        kv.put("network.shared_tracker_instances", 1);
+        kv.put(
+            "network.confirmed_key_population",
+            "all confirmed live tracker keys, including address-keyed and radar-initiated",
+        );
+        kv.put(
+            "network.profile_status",
+            if !r.truncated && !r.stopped_early && r.measure_s_done == r.measure_s_asked {
+                "complete_measured_window"
+            } else {
+                "partial_measured_window"
+            },
+        );
+        kv.put("network.confirmed_live_peak", r.network_confirmed_live_peak);
+        kv.put(
+            "network.confirmed_live_final",
+            r.network_confirmed_live_final,
+        );
+        kv.put(
+            "network.confirmed_snapshot_pairs",
+            r.network_confirmed_snapshot_pairs,
+        );
+        kv.put(
+            "network.confirmed_key_continuations",
+            r.network_confirmed_key_continuations,
+        );
+        kv.put(
+            "network.confirmed_key_previous_live_opportunities",
+            r.network_confirmed_key_opportunities,
+        );
+        kv.put(
+            "network.confirmed_key_continuity_scope",
+            "same confirmed tracker key at consecutive before/after one-second snapshots; not truth match",
+        );
+    }
     kv.put("physical_radar_sources", r.fusion.network_radars);
     if r.network_profile {
         kv.put(
@@ -2191,6 +2315,24 @@ pub fn cap_text(r: &CapResult) -> String {
         r.n, r.adsb_aircraft, r.half_km, r.max_tracks
     ));
     if r.network_profile {
+        if r.network_stress_10240 {
+            s.push_str("  named profile: network-stress-10240-v1; synthetic 10,240-aircraft stress workload, 64 generated en-route sources, one shared tracker\n");
+            s.push_str(&format!(
+                "  declared capacities: generated aircraft {}, confirmed tracker slots {}, caller output rows {}\n",
+                r.n, r.max_tracks, r.output_row_capacity
+            ));
+            s.push_str("  configured ADS-B fraction is 0.5; network radar inputs carry no synthetic truth labels\n");
+            s.push_str(&format!(
+                "  confirmed live tracker keys: peak {} / final {}; adjacent snapshot pairs {}, same-key continuations {} of {} prior-live-key opportunities\n",
+                r.network_confirmed_live_peak,
+                r.network_confirmed_live_final,
+                r.network_confirmed_snapshot_pairs,
+                r.network_confirmed_key_continuations,
+                r.network_confirmed_key_opportunities,
+            ));
+            s.push_str("  key continuity is tracker-state continuity, not one-to-one synthetic truth matching; measured counts do not claim a performance pass\n");
+            s.push_str("  live counts include all confirmed keys in the shared tracker: ADS-B-address keys and radar-initiated keys\n");
+        }
         s.push_str(&format!(
             "  opt-in physical-radar network: {} sources in {} eight-source work units; per-unit association/init/polar ceilings remain unchanged and aggregate by unit; plot-freshness slots {}; Fusion shell-owned reserved bytes {} (tracker-owned buffers and caller output excluded)\n",
             r.fusion.network_radars,
@@ -2693,6 +2835,7 @@ mod tests {
                 horizon_s: (warm + meas) as f64 + 60.0,
             },
             network_profile: false,
+            network_stress_10240: false,
             warmup_s: warm,
             measure_s: meas,
             max_tracks: 4096,
@@ -2707,6 +2850,28 @@ mod tests {
             assignment_forensics: false,
             stage_timings: false,
         }
+    }
+
+    // REQ: OA-PRF-009
+    #[test]
+    fn fixed_10240_profile_refuses_mismatched_capacity_before_setup() {
+        let mut cfg = small(100, 1, 1);
+        cfg.network_profile = true;
+        cfg.network_stress_10240 = true;
+        let error = run_capacity(&cfg).expect_err("fixed profile must refuse altered capacities");
+        assert!(error.contains("does not match its fixed synthetic population/capacity contract"));
+    }
+
+    // REQ: OA-PRF-009
+    #[test]
+    fn confirmed_snapshot_continuity_uses_exact_key_intersection_and_denominator() {
+        let before = HashMap::from([(10, 1), (20, 2), (30, 3)]);
+        let after = HashMap::from([(20, 4), (30, 5), (40, 6), (50, 7)]);
+        assert_eq!(confirmed_snapshot_continuity(&before, &after), (4, 3, 2));
+        assert_eq!(
+            confirmed_snapshot_continuity(&HashMap::new(), &HashMap::new()),
+            (0, 0, 0)
+        );
     }
 
     #[test]
