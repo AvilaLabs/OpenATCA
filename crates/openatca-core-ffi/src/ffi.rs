@@ -49,9 +49,9 @@ pub const OA_STATUS_ZIP_LIMIT: u32 = 37;
 pub const OA_STATUS_ZIP_INFLATE_OR_SIZE: u32 = 38;
 pub const OA_STATUS_ZIP_CRC: u32 = 39;
 pub const OA_STATUS_ZIP_BAD_ENTRY_INDEX: u32 = 40;
-pub const OA_STATUS_GRIB2_FORMAT: u32 = 48;
-pub const OA_STATUS_GRIB2_UNSUPPORTED: u32 = 49;
-pub const OA_STATUS_GRIB2_LIMIT: u32 = 50;
+pub const OA_STATUS_GRIB2_FORMAT: u32 = 80;
+pub const OA_STATUS_GRIB2_UNSUPPORTED: u32 = 81;
+pub const OA_STATUS_GRIB2_LIMIT: u32 = 82;
 
 /// Hard ceiling for one raw-DEFLATE input slice accepted by the provisional C ABI.
 pub const MAX_DEFLATE_INPUT_BYTES: u64 = 64 * 1024 * 1024;

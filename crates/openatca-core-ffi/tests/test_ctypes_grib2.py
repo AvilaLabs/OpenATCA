@@ -40,6 +40,6 @@ unsupported[section5 + 9:section5 + 11] = (41).to_bytes(2, "big")
 try:
     api.decode_message(bytes(unsupported))
 except OpenAtcaError as exc:
-    assert exc.code == 49
+    assert exc.code == 81
 else:
     raise AssertionError("unsupported packing template was accepted")

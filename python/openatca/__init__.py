@@ -166,9 +166,9 @@ _STATUS_NAMES: Final[dict[int, str]] = {
     38: "ZIP_INFLATE_OR_SIZE",
     39: "ZIP_CRC",
     40: "ZIP_BAD_ENTRY_INDEX",
-    48: "GRIB2_FORMAT",
-    49: "GRIB2_UNSUPPORTED",
-    50: "GRIB2_LIMIT",
+    80: "GRIB2_FORMAT",
+    81: "GRIB2_UNSUPPORTED",
+    82: "GRIB2_LIMIT",
 }
 
 

@@ -177,5 +177,5 @@ fn bitmap_valid_truncated_unsupported_and_capacity_are_transactional() {
             &mut error,
         )
     };
-    assert_eq!(status, 49);
+    assert_eq!(status, 81);
 }

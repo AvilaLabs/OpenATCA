@@ -63,7 +63,7 @@ then calls `oa_grib2_decode_message` with capacities from inspection. If either 
 writes complete descriptors and values only after the existing decoder has completed. Other
 failures leave output arrays and required-count outputs unchanged. Null, misaligned, undersized, or
 overlapping C addresses cannot be validated by the ABI; their validity and disjointness are caller
-preconditions. Statuses 48–50 are GRIB2 format, unsupported-profile, and existing-limit refusals.
+preconditions. Statuses 80–82 are GRIB2 format, unsupported-profile, and existing-limit refusals.
 
 Python exposes `load(path).grib2.inspect_message(bytes)` and
 `load(path).grib2.decode_message(bytes)`. The latter performs query then fill, verifies the native
