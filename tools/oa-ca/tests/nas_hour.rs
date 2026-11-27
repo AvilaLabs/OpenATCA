@@ -39,7 +39,6 @@ fn run_example_with_path(mode: &str, path: &Path) -> std::process::Output {
         .unwrap()
 }
 
-
 /// 2026-11-19T21:00:00Z, Unix seconds.
 const HOUR: i64 = 1_795_122_000;
 

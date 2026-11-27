@@ -92,8 +92,12 @@ fn configured_root(
 mod data_root_tests {
     use super::{Sealed, DATA_ROOT_SENTINEL, DEFAULT_DATA_ROOT, LIST};
     use std::path::Path;
-    #[path = "../tests/common/test_support.rs"]
-    mod test_support;
+    mod test_support {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/common/test_support.rs"
+        ));
+    }
 
     fn list_without_window() -> String {
         LIST.lines()

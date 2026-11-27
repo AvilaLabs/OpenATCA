@@ -56,8 +56,12 @@ pub fn open_guarded_with(
 #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
 pub(crate) mod tests {
     use super::*;
-    #[path = "../../test-support/sealed_guard.rs"]
-    mod shared_guard;
+    mod shared_guard {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../test-support/sealed_guard.rs"
+        ));
+    }
     use shared_guard::guard;
 
     fn tree(tag: &str) -> std::path::PathBuf {

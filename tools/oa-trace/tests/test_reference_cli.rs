@@ -1,8 +1,8 @@
 #![allow(clippy::expect_used, clippy::panic)]
 
 use std::fs;
-use std::process::Command;
 use std::path::Path;
+use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn scratch() -> std::path::PathBuf {
