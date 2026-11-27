@@ -17,7 +17,6 @@ mod sealed_refusal;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::process::Command;
 
 use oa_encounter_run::qualification::{
     score, AlertEpisode, Case, CaseResult, Evaluation, Outcome, Subject,
