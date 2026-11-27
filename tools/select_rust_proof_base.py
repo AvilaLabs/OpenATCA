@@ -47,7 +47,9 @@ def comparison_base(
         return _merge_base(repo, tip_commit, "refs/remotes/origin/main")
     if ref == "refs/heads/main":
         if push_before == ZERO_SHA:
-            return _merge_base(repo, tip_commit, "refs/remotes/origin/main")
+            # With no earlier commit there is no defensible incremental diff base. Emit an
+            # empty base so the workflow runs the full enabled registry.
+            return ""
         return _commit(repo, push_before)
     raise ValueError("unsupported proof workflow push ref")
 

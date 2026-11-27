@@ -802,8 +802,10 @@ class SelectionHardeningTests(unittest.TestCase):
         command = [
             "python3", str(Path(__file__).with_name("rust_proof_suite.py")),
             "--repo", str(repo), "--out", str(output), "--target-dir", str(output.parent / "target"),
-            "--registry", str(repo / "tools/rust_proofs.json"), "--changed-from", base,
+            "--registry", str(repo / "tools/rust_proofs.json"),
         ]
+        if base:
+            command.extend(["--changed-from", base])
         env = os.environ.copy()
         env["FAKE_RUN_RECORD_MODE"] = "pass"
         env["FAKE_INVOKED"] = str(invoked)
@@ -869,6 +871,40 @@ class SelectionHardeningTests(unittest.TestCase):
             self.assertIn("cannot bind proof target namespaces", actual.stderr)
             self.assertFalse((output / "suite.json").exists())
             self.assertFalse(invoked.exists())
+
+    def test_initial_main_push_selects_full_registry(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, _ = self.selector_workspace(root)
+            (repo / "crates/b/src/new.rs").write_text("pub fn first_main_change() {}\n")
+            git(repo, "add", "crates/b/src/new.rs")
+            git(repo, "commit", "-q", "-m", "initial main change")
+            tip = git(repo, "rev-parse", "HEAD")
+            git(repo, "update-ref", "refs/remotes/origin/main", tip)
+
+            env = os.environ.copy()
+            env.update({
+                "GITHUB_EVENT_NAME": "push",
+                "GITHUB_REF": "refs/heads/main",
+                "GITHUB_SHA": tip,
+                "GITHUB_EVENT_BEFORE": "0" * 40,
+                "GITHUB_PR_BASE_SHA": "",
+            })
+            selected_base = subprocess.run(
+                ["python3", str(Path(__file__).with_name("select_rust_proof_base.py")),
+                 "--repo", str(repo)],
+                env=env, capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(selected_base.returncode, 0, selected_base.stderr)
+            self.assertEqual(selected_base.stdout.strip(), "")
+
+            invoked = root / "proof-invocations.txt"
+            output = root / "evidence"
+            actual = self.run_actual_suite_cli(repo, selected_base.stdout.strip(), output, invoked)
+            self.assertEqual(actual.returncode, 0, actual.stderr)
+            suite = json.loads((output / "suite.json").read_text(encoding="utf-8"))
+            self.assertEqual({row["id"] for row in suite["checks"]},
+                             {"tracker-core-invariant", "unrelated-ca-invariant"})
 
     def test_a_rename_counts_as_a_change_to_the_old_and_the_new_path(self):
         with tempfile.TemporaryDirectory() as temp:
