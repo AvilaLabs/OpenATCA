@@ -181,7 +181,7 @@ fn a_coasting_target_has_an_x_through_the_square_instead_of_the_dot() {
     assert_eq!(st.coasting, 1);
 }
 
-// REQ: OA-DSP-084
+// REQ: OA-DSP-087
 #[test]
 fn fusion_uses_the_solid_circle_and_isr_is_explicit_in_the_data_block() {
     let mut t = plain(ORD.0, ORD.1);
@@ -195,7 +195,7 @@ fn fusion_uses_the_solid_circle_and_isr_is_explicit_in_the_data_block() {
     assert_eq!(tags(T_COAST | T_ISR, false, false), "CST ISR");
 }
 
-// REQ: OA-DSP-084
+// REQ: OA-DSP-087
 #[test]
 fn mode_overlay_matches_sorted_visible_addresses_and_refuses_ambiguous_inputs() {
     let mut first = plain(ORD.0, ORD.1);

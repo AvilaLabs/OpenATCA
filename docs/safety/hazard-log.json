@@ -273,7 +273,7 @@
     "OA-DSP-081",
     "OA-DSP-082",
     "OA-DSP-083",
-    "OA-DSP-084",
+    "OA-DSP-087",
     "OA-E1-001",
     "OA-E1-002",
     "OA-E1-003",
@@ -10521,7 +10521,7 @@
         "OA-DSP-081",
         "OA-DSP-082",
         "OA-DSP-083",
-        "OA-DSP-084",
+        "OA-DSP-087",
         "OA-WS-004"
       ],
       "source_refs": [
@@ -10531,7 +10531,7 @@
         },
         {
           "document": "REQUIREMENTS.md",
-          "locator": "OA-DSP-079 through OA-DSP-084"
+          "locator": "OA-DSP-079 through OA-DSP-087"
         }
       ],
       "verification_refs": [
@@ -10936,12 +10936,12 @@
           "test_name": "meter_list_is_bounded_and_reusable"
         },
         {
-          "requirement_id": "OA-DSP-084",
+          "requirement_id": "OA-DSP-087",
           "file": "crates/oa-display/tests/traffic.rs",
           "test_name": "fusion_uses_the_solid_circle_and_isr_is_explicit_in_the_data_block"
         },
         {
-          "requirement_id": "OA-DSP-084",
+          "requirement_id": "OA-DSP-087",
           "file": "crates/oa-display/tests/traffic.rs",
           "test_name": "mode_overlay_matches_sorted_visible_addresses_and_refuses_ambiguous_inputs"
         },
@@ -23379,10 +23379,10 @@
       "rationale": "Engineering safety candidate: a partial or silently truncated bounded meter list can omit displayed rows. Fixed-capacity insertion refuses oversized/full pushes without partial rows and permits reuse after clear. This pure packet/list module does not ingest TBFM messages or establish operational completeness."
     },
     {
-      "id": "OA-DSP-084",
+      "id": "OA-DSP-087",
       "function": "traffic_and_safety_status_display",
       "hazard_id": "HZ-DISPLAY-001",
-      "rationale": "Engineering safety candidate: a misleading 3 NM cue could overstate Fusion separation eligibility. An explicit caller flag selects the FAA solid-circle cue only for a separation-eligible 3 NM Fusion result; a 5 NM fallback keeps the ordinary marker, and an asserted ISR flag is rendered separately as an `ISR` data-block tag. This renderer does not choose surveillance mode or infer sensor reliability."
+      "rationale": "Engineering safety candidate: invalid or misapplied mode flags could show an unsupported separation cue or lose ISR annotation. Sorted unique flags are validated atomically; only flags for visible rows are applied, valid non-visible addresses are accepted and ignored, and malformed bits/order/duplicates refuse without mutation. The renderer does not choose surveillance mode or infer sensor reliability."
     },
     {
       "id": "OA-IWXXM-005",

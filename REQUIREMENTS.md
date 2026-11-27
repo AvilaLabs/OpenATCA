@@ -7287,7 +7287,7 @@ This is a bounded normalized-input composition, not facility, deadline or operat
 - **OA-DSP-081** Missing STA and ETA remain absent, including when both are missing; a later supplied schedule is compared against the current supplied ETA without substituting another meter point.
 - **OA-DSP-082** Difference and aggregate-counter overflow are explicit; a counter overflow refuses the observation without changing any counter.
 - **OA-DSP-083** A meter list refuses capacities above its fixed limit and refuses a push at capacity without changing prior rows; clearing permits reuse within the same allocation.
-- **OA-DSP-084** The traffic renderer uses the solid Fusion circle only when the caller supplies an eligible 3 NM result; fallback and coast states retain the ordinary marker. ISR is shown as a separate data-block tag, and bounded mode overlays must match sorted visible addresses and refuse ambiguous inputs. The renderer does not infer mode, reliability, or separation eligibility.
+- **OA-DSP-087** The traffic renderer uses the solid Fusion circle only when the caller supplies an eligible 3 NM result; fallback and coast states retain the ordinary marker. ISR is shown as a separate data-block tag. Bounded mode flags must be sorted, unique, and use only supported bits; flags for visible rows are applied atomically, while valid non-visible addresses are accepted and ignored. Invalid bits, ordering, duplicates, or row mismatches refuse without mutation. The renderer does not infer mode, reliability, or separation eligibility.
 
 ## Controller interaction (oa-display)
 

@@ -30,7 +30,8 @@ oa-display = { path = "../../crates/oa-display" }
 oa-scope-replay = { path = "../../crates/oa-scope-replay" }
 # Adaptation snapshot and independent route conversion against its own NASR/CIFP model.
 oa-airspace = { path = "../../crates/oa-airspace" }
-# F1a: load the model and optional surveillance-mode component from one caller-pinned issued package; verify runway-aid bytes.
+# F1a: load the caller-pinned model, optional mode component, and runway-aid bytes from one
+# issued package; the local-startup verifier supplies the exact package and live identity checks.
 oa-adapt = { path = "../oa-adapt" }
 # F1a: bounded final-monitor, CRDA and ATPA calculations on each regional scan.
 oa-runway = { path = "../../crates/oa-runway" }

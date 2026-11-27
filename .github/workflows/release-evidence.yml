@@ -9,14 +9,31 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Toolchain
         run: rustup toolchain install 1.89.0 --profile minimal && rustup default 1.89.0
       - name: Generate safety and supply-chain evidence
+        env:
+          GITHUB_EVENT_RELEASE_DATE: ${{ github.event.release.published_at }}
         run: |
           set -euo pipefail
-          python3 tools/generate_safety_tables.py
+          python3 tools/generate_safety_tables.py --check
+          cargo +1.89.0 build --workspace --release --locked --bins
+          cargo +1.89.0 run --locked -p oa-trace -- --root "$GITHUB_WORKSPACE" | tee "$RUNNER_TEMP/oa-trace-vdd.txt"
           python3 .github/scripts/supply_chain_evidence.py --repo "$GITHUB_WORKSPACE" --out "$RUNNER_TEMP/release-evidence" --toolchain 1.89.0
+          cp "$RUNNER_TEMP/oa-trace-vdd.txt" \
+            "$RUNNER_TEMP/release-evidence/requirements-trace.txt"
           tar -czf "$RUNNER_TEMP/release-evidence/safety-tables.tar.gz" -C docs/safety generated
+          python3 tools/generate_vdd.py \
+            --repo "$GITHUB_WORKSPACE" \
+            --out "$RUNNER_TEMP/release-evidence/VERSION_DESCRIPTION.md" \
+            --mode release \
+            --tag "$GITHUB_REF_NAME" \
+            --release-date "${GITHUB_EVENT_RELEASE_DATE:0:10}" \
+            --trace-file "$RUNNER_TEMP/oa-trace-vdd.txt" \
+            --build-dir target/release \
+            --provenance-file "$RUNNER_TEMP/release-evidence/toolchain-provenance.json"
       - name: Attach evidence to the published release
         env:
           GH_TOKEN: ${{ github.token }}

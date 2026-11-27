@@ -1,7 +1,9 @@
 """Synthetic-only unit checks for P-010 manifest/output gates; never read operational inputs."""
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import io
 import json
 import tempfile
 import unittest
@@ -40,6 +42,66 @@ class P010SyntheticGateTests(unittest.TestCase):
         path = self.root / name
         path.write_bytes(data)
         return path
+
+    def cross_capture_summary(self, manifest_sha: str, scale: float = 1.0, binary_digest: str = "e" * 64) -> dict:
+        profiles = [
+            {"name": "candidate-raw", "tracker_role": "candidate", "timing_profile": "fixed-10-30-120-v1", "publication_grid": None},
+            {"name": "replication-raw", "tracker_role": "replication", "timing_profile": "legacy-day-intervals", "publication_grid": None},
+        ]
+        public_output = {
+            "name": "fixed", "timing_profile": "fixed-10-30-120-v1", "rows": 10, "seconds": 2,
+            "digest": {"bytes": 1, "sha256": "1" * 64},
+            "canonical_rows": {"bytes": 2, "sha256": "2" * 64},
+            "profile_summary_sha256": "3" * 64,
+        }
+        claim = lambda metric, better, diff, lo, hi: (
+            f"CLAIM metric={metric} better={better} diff={diff * scale} lo={lo * scale} hi={hi * scale} "
+            f"verdict=none floor=0 oa3=1 pt3=1"
+        )
+        arms = [
+            {"name": "candidate-raw", "tracker_role": "candidate", "timing_profile": "fixed-10-30-120-v1", "publication_grid": None, "accounting": self.cross_capture_accounting(), "claims": [
+                claim("M1_median", "lower", 0.2, -0.2, 0.4),
+                claim("M5_speed_median", "lower", 0.02, -0.02, 0.04),
+                claim("M4t_300", "higher", 0.003, -0.003, 0.006),
+            ]},
+            {"name": "replication-raw", "tracker_role": "replication", "timing_profile": "legacy-day-intervals", "publication_grid": None, "accounting": self.cross_capture_accounting(), "claims": [
+                claim("M1_median", "lower", 0.1, -0.2, 0.3),
+                claim("M5_speed_median", "lower", 0.01, -0.02, 0.03),
+                claim("M4t_300", "higher", 0.002, -0.003, 0.005),
+            ]},
+        ]
+        return {
+            "schema": p010.AGGREGATE_SCHEMA, "day": p010.DAY, "measurement_status": "complete",
+            "qualification": "not-assessed; frozen-coverage-and-input-health-policy-required",
+            "window": {"warmup_from": p010.WARMUP_FROM, "score_from": p010.SCORE_FROM, "score_to": p010.SCORE_TO, "interval": "half-open"},
+            "arms": arms, "cohort_comparability": [], "availability_interpretation": "synthetic", "interpretation": "synthetic",
+            "bindings": {
+                "driver_sha256": p010._sha(p010._read_guarded(SCRIPT, 2 * 1024 * 1024)), "manifest_sha256": manifest_sha,
+                "candidate_commit": "c" * 40, "replication_commit": p010.REPLICATION_TRACKER_COMMIT,
+                "replication_scorer_commit": "a" * 40, "replication_scorer_patch_sha256": "b" * 64,
+                "build_binary_sha256": {role: binary_digest for role in p010.BUILD_ROLES},
+                "public_archive_inventory_sha256": "7" * 64, "public_clip_sha256": "4" * 64, "public_oa_outputs": [public_output], "compare_profiles": profiles,
+                "health_eligibility": "unknown-not-assessed", "disclosure_eligibility": "unknown-not-assessed",
+            },
+        }
+
+    @staticmethod
+    def cross_capture_accounting() -> dict:
+        return {
+            "qualification": "not-assessed; frozen-coverage-and-input-health-policy-required",
+            "address_minute_opportunities": 100, "no_active_leg_address_minutes": 1,
+            "eligible_address_minutes": 90, "ambiguous_address_minute_candidates": 2,
+            "unusable_truth_address_minutes": 3, "no_truth_address_minutes": 4,
+            "paired_position_time_rows": 80, "available_address_minutes": 75,
+            "availability_denominator": 90, "availability_percent": "83.333333",
+            "tracker_measurements_before_window_filter": 1000,
+            "tracker_measurements_after_warmup_filter": 800,
+            "adsb_bad_frames": 0, "adsb_dropped_records": 0,
+            "adsb_sealed_drops": 0, "sfdps_sealed_drops": 0,
+        }
+
+    def write_cross_capture(self, name: str, summary: dict) -> Path:
+        return self.write(name, json.dumps(summary, ensure_ascii=True, sort_keys=True).encode("ascii"))
 
     def manifest(self) -> dict:
         tag = "2026-11-30"
@@ -128,6 +190,144 @@ class P010SyntheticGateTests(unittest.TestCase):
     def test_duplicate_json_keys_and_day_window_are_rejected(self) -> None:
         with self.assertRaises(ValueError):
             p010._object_no_duplicates([("day", "2026-11-30"), ("day", "2026-12-01")])
+
+    def test_cross_capture_comparison_is_aggregate_only_and_not_a_qualification(self) -> None:
+        project = self.cross_capture_summary("5" * 64)
+        outsider = self.cross_capture_summary("6" * 64, scale=1.1)
+        project_path = self.write_cross_capture("project-summary.json", project)
+        outsider_path = self.write_cross_capture("outsider-summary.json", outsider)
+        parsed_project = p010._read_cross_capture_summary(project_path)
+        parsed_outsider = p010._read_cross_capture_summary(outsider_path)
+        result = p010._compare_capture_summaries(parsed_project, parsed_outsider, "candidate-raw")
+        self.assertEqual(result["status"], "COMPARISON_COMPLETE")
+        self.assertEqual(result["metrics"]["M1_median"]["outsider_minus_project"], 0.020000000000000018)
+        self.assertEqual(result["metrics"]["M1_median"]["proposed_bound"], 0.25)
+        self.assertEqual(result["prediction_hit_miss"], "not-assessed-separately")
+        self.assertEqual(result["capture_close_match"], "not-assessed-pending-approved-statistic-health-and-disclosure-policy")
+        self.assertNotIn("private_cohorts", result)
+
+    def test_cross_capture_cli_preserves_neutral_agreement_as_not_a_prediction_hit(self) -> None:
+        project_path = self.write_cross_capture("neutral-project.json", self.cross_capture_summary("5" * 64, scale=0.0))
+        outsider_path = self.write_cross_capture("neutral-outsider.json", self.cross_capture_summary("6" * 64, scale=0.0))
+        out = self.root / "cross-capture-output"
+        stdout = io.StringIO()
+        with mock.patch.object(p010, "_new_private_dir", side_effect=lambda path: path.mkdir(mode=0o700)):
+            with contextlib.redirect_stdout(stdout):
+                code = p010.main([
+                    "compare-captures", "--project-summary", str(project_path),
+                    "--outsider-summary", str(outsider_path), "--arm", "candidate-raw", "--out", str(out),
+                ])
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(stdout.getvalue())["status"], "COMPARISON_COMPLETE")
+        result = json.loads((out / "cross-capture-summary.json").read_text(encoding="ascii"))
+        self.assertEqual(result["numeric_bounds"], "within-proposed-bounds")
+        self.assertEqual(result["descriptive_alignment"], "aligned")
+        self.assertEqual(result["prediction_hit_miss"], "not-assessed-separately")
+        self.assertEqual(result["qualification"], "not-assessed")
+        self.assertEqual(result["capture_close_match"], "not-assessed-pending-approved-statistic-health-and-disclosure-policy")
+        self.assertEqual(result["matched_cohort_checked"], "not-assessed")
+        self.assertFalse(result["private_cohort_bindings_disclosed"])
+
+    def test_cross_capture_cli_allows_distinct_valid_local_build_hashes(self) -> None:
+        project_path = self.write_cross_capture(
+            "build-project.json", self.cross_capture_summary("5" * 64, scale=0.0, binary_digest="e" * 64)
+        )
+        outsider_path = self.write_cross_capture(
+            "build-outsider.json", self.cross_capture_summary("6" * 64, scale=0.0, binary_digest="f" * 64)
+        )
+        out = self.root / "different-local-builds"
+        stdout = io.StringIO()
+        with mock.patch.object(p010, "_new_private_dir", side_effect=lambda path: path.mkdir(mode=0o700)):
+            with contextlib.redirect_stdout(stdout):
+                code = p010.main([
+                    "compare-captures", "--project-summary", str(project_path),
+                    "--outsider-summary", str(outsider_path), "--arm", "candidate-raw", "--out", str(out),
+                ])
+        self.assertEqual(code, 0)
+        result = json.loads((out / "cross-capture-summary.json").read_text(encoding="ascii"))
+        self.assertEqual(result["status"], "COMPARISON_COMPLETE")
+
+    def test_cross_capture_reader_still_refuses_bad_local_build_mapping(self) -> None:
+        missing_role = self.cross_capture_summary("5" * 64)
+        missing_role["bindings"]["build_binary_sha256"].pop(p010.BUILD_ROLES[0])
+        with self.assertRaises(p010.Refused):
+            p010._read_cross_capture_summary(self.write_cross_capture("missing-local-build-role.json", missing_role))
+
+    def test_cross_capture_cli_refuses_malformed_local_build_hashes(self) -> None:
+        for name, digest in (
+            ("uppercase", "E" * 64),
+            ("nonhex", "g" * 64),
+            ("short", "e" * 63),
+            ("long", "e" * 65),
+            ("wrong-type", 7),
+        ):
+            with self.subTest(name=name):
+                project = self.cross_capture_summary("5" * 64)
+                project["bindings"]["build_binary_sha256"][p010.BUILD_ROLES[0]] = digest
+                project_path = self.write_cross_capture(f"bad-build-{name}.json", project)
+                outsider_path = self.write_cross_capture(
+                    f"valid-build-{name}.json", self.cross_capture_summary("6" * 64, scale=0.0)
+                )
+                out = self.root / f"bad-build-output-{name}"
+                stdout = io.StringIO()
+                stderr = io.StringIO()
+                with mock.patch.object(p010, "_new_private_dir", side_effect=lambda path: path.mkdir(mode=0o700)):
+                    with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                        code = p010.main([
+                            "compare-captures", "--project-summary", str(project_path),
+                            "--outsider-summary", str(outsider_path), "--arm", "candidate-raw", "--out", str(out),
+                        ])
+                self.assertNotEqual(code, 0)
+                self.assertEqual(stdout.getvalue(), "")
+                self.assertIn("malformed binary hash", stderr.getvalue())
+                self.assertFalse(out.exists())
+
+    def test_cross_capture_reader_refuses_private_duplicate_and_bad_accounting_fields(self) -> None:
+        cases = []
+        private_field = self.cross_capture_summary("5" * 64)
+        private_field["arms"][0]["private_flight_ids"] = ["synthetic-only"]
+        cases.append(("private", private_field))
+        private_accounting = self.cross_capture_summary("5" * 64)
+        private_accounting["arms"][0]["accounting"]["addresses"] = []
+        cases.append(("private-accounting", private_accounting))
+        duplicate_arm = self.cross_capture_summary("5" * 64)
+        duplicate_arm["arms"].append(dict(duplicate_arm["arms"][0]))
+        cases.append(("duplicate-arm", duplicate_arm))
+        for name, summary in cases:
+            with self.subTest(name=name):
+                path = self.write_cross_capture(f"{name}.json", summary)
+                with self.assertRaises(p010.Refused):
+                    p010._read_cross_capture_summary(path)
+
+    def test_cross_capture_metric_reader_refuses_reversed_and_nonfinite_intervals(self) -> None:
+        reversed_interval = self.cross_capture_summary("5" * 64)
+        reversed_interval["arms"][0]["claims"][0] = reversed_interval["arms"][0]["claims"][0].replace(
+            "lo=-0.2 hi=0.4", "lo=0.4 hi=-0.2"
+        )
+        reversed_path = self.write_cross_capture("reversed.json", reversed_interval)
+        with self.assertRaises(p010.Refused):
+            p010._read_cross_capture_summary(reversed_path)
+
+        nonfinite = self.cross_capture_summary("5" * 64)
+        nonfinite["arms"][0]["claims"][0] = (
+            "CLAIM metric=M1_median better=lower diff=NaN lo=NaN hi=NaN verdict=none floor=0 oa3=1 pt3=1"
+        )
+        nonfinite_path = self.write_cross_capture("nonfinite.json", nonfinite)
+        parsed = p010._read_cross_capture_summary(nonfinite_path)
+        outsider = p010._read_cross_capture_summary(
+            self.write_cross_capture("nonfinite-outsider.json", self.cross_capture_summary("6" * 64))
+        )
+        with self.assertRaises(p010.Refused):
+            p010._compare_capture_summaries(parsed, outsider, "candidate-raw")
+
+    def test_cross_capture_comparison_refuses_shared_source_mismatch(self) -> None:
+        project = self.cross_capture_summary("5" * 64)
+        outsider = self.cross_capture_summary("6" * 64)
+        outsider["bindings"]["candidate_commit"] = "d" * 40
+        project = p010._read_cross_capture_summary(self.write_cross_capture("source-project.json", project))
+        outsider = p010._read_cross_capture_summary(self.write_cross_capture("source-outsider.json", outsider))
+        with self.assertRaises(p010.Refused):
+            p010._compare_capture_summaries(project, outsider, "candidate-raw")
         self.assertEqual(p010._utc("2026-11-30T05:00:00Z", "warmup"), 1_796_014_800)
         with self.assertRaises(p010.Refused):
             p010._utc("2026-11-30T05:00:00.001Z", "warmup")

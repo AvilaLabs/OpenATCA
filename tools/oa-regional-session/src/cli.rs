@@ -3,8 +3,9 @@
 //! recomputes state and does not claim a live or distributed process checkpoint.
 
 use crate::runtime::{
-    regional_acknowledge_quarantine_before_commit, regional_install_verified_runway_aids,
-    regional_new, regional_new_with_profile,
+    regional_acknowledge_quarantine_before_commit, regional_adaptation_sha256,
+    regional_adaptation_version, regional_mode_adaptation, regional_mode_component_sha256,
+    regional_new_from_issued_package_with_audit_checkpoint,
     regional_new_with_profile_and_quarantine_audit_checkpoint, regional_pixels,
     regional_quarantine_stats, regional_step, QuarantineMaintenanceRequest, RegionalRunProfile,
     DEFAULT_REGIONAL_RUN_PROFILE,
@@ -29,8 +30,19 @@ pub enum ModelSource {
     /// manifest-bound mode component. The manifest digest remains a caller claim, not auth.
     IssuedPackage {
         root: PathBuf,
-        manifest_sha256: [u8; 32],
+        expected_manifest_sha256: [u8; 32],
+        processor_id: u32,
     },
+}
+
+impl ModelSource {
+    fn evidence_label(&self) -> &'static str {
+        match self {
+            Self::Snapshot(_) => "SUPPLIED_UNPINNED_SNAPSHOT",
+            Self::Synthetic => "PUBLIC_SYNTHETIC",
+            Self::IssuedPackage { .. } => "ISSUED_PACKAGE_PIN_VERIFIED_UNAUTHENTICATED",
+        }
+    }
 }
 
 pub enum MsawSource {
@@ -311,55 +323,19 @@ pub fn run_session_with_profile_options_and_runway_aids(
         return Err("normalized input exceeds byte limit".into());
     }
     oa_sealed::refuse(output)?;
-    let verified_package = match source {
-        ModelSource::IssuedPackage {
-            root,
-            manifest_sha256,
-        } => Some(
-            oa_adapt::manifest::verify_current(root, *manifest_sha256)
-                .map_err(|error| format!("issued facility package refused: {error}"))?,
-        ),
-        ModelSource::Snapshot(_) | ModelSource::Synthetic => None,
-    };
     if let (
         ModelSource::IssuedPackage {
             root,
-            manifest_sha256,
+            expected_manifest_sha256,
+            ..
         },
         Some(options),
     ) = (source, runway_aids)
     {
-        if &options.root != root || options.manifest_sha256 != *manifest_sha256 {
+        if &options.root != root || options.manifest_sha256 != *expected_manifest_sha256 {
             return Err("mode and runway aids must use the same issued package pin".into());
         }
     }
-    let (model, snapshot_sha, model_label) = match verified_package.as_ref() {
-        Some(package) => (
-            package.model().clone(),
-            package.identity().snapshot_sha256,
-            "ISSUED_FACILITY_PACKAGE",
-        ),
-        None => {
-            let model_bytes = match source {
-                ModelSource::Snapshot(path) => read_guarded(path, MAX_SNAPSHOT_BYTES)?,
-                ModelSource::Synthetic => oa_airspace::core::snapshot::encode(&synthetic_model()?)
-                    .map_err(|e| format!("synthetic snapshot: {e:?}"))?,
-                ModelSource::IssuedPackage { .. } => {
-                    return Err("issued package verification did not produce a package".into())
-                }
-            };
-            let model = oa_airspace::core::snapshot::decode(&model_bytes)
-                .map_err(|e| format!("snapshot: {e:?}"))?;
-            let label = match source {
-                ModelSource::Synthetic => "SYNTHETIC",
-                ModelSource::Snapshot(_) => "SUPPLIED_SNAPSHOT",
-                ModelSource::IssuedPackage { .. } => "ISSUED_FACILITY_PACKAGE",
-            };
-            (model, oa_sha256::sha256(&model_bytes), label)
-        }
-    };
-    let executable = std::env::current_exe().map_err(|e| e.to_string())?;
-    let executable_sha = oa_sha256::sha256(&read_guarded(&executable, MAX_EXECUTABLE_BYTES)?);
     // Explicit synthetic-development settings, not FAA separation minima or facility sizing.
     let cfg = SurveillanceConfig {
         centre_lat_e7: 410_000_000,
@@ -367,37 +343,99 @@ pub fn run_session_with_profile_options_and_runway_aids(
         range_nm: 180.0,
     };
     let profile = regional_cli_runtime_profile(selected_profile);
-    let mut runtime = match quarantine_release {
-        Some(request) => regional_new_with_profile_and_quarantine_audit_checkpoint(
-            model,
-            snapshot_sha,
-            *b"ZAU1",
-            cfg,
-            profile,
-            request.audit_checkpoint,
-        )?,
-        None if selected_profile == RegionalCliProfile::Default => {
-            regional_new(model, snapshot_sha, *b"ZAU1", cfg)?
+    let audit_checkpoint =
+        quarantine_release.map_or_else(oa_audit_core::genesis, |request| request.audit_checkpoint);
+    let mut activation = None;
+    let mut startup_processor_report = None;
+    let mut runtime = match source {
+        ModelSource::Snapshot(path) => {
+            let model_bytes = read_guarded(path, MAX_SNAPSHOT_BYTES)?;
+            let model = oa_airspace::core::snapshot::decode(&model_bytes)
+                .map_err(|e| format!("snapshot: {e:?}"))?;
+            let snapshot_sha = oa_sha256::sha256(&model_bytes);
+            regional_new_with_profile_and_quarantine_audit_checkpoint(
+                model,
+                snapshot_sha,
+                *b"ZAU1",
+                cfg,
+                profile,
+                audit_checkpoint,
+            )?
         }
-        None => regional_new_with_profile(model, snapshot_sha, *b"ZAU1", cfg, profile)?,
-    };
-    let loaded_mode_adaptation = if let Some(package) = verified_package.as_ref() {
-        if package.surveillance_mode_bytes().is_some() {
-            Some(crate::runtime::regional_install_verified_surveillance_mode(
-                &mut runtime,
+        ModelSource::Synthetic => {
+            let model_bytes = oa_airspace::core::snapshot::encode(&synthetic_model()?)
+                .map_err(|e| format!("synthetic snapshot: {e:?}"))?;
+            let model = oa_airspace::core::snapshot::decode(&model_bytes)
+                .map_err(|e| format!("synthetic snapshot: {e:?}"))?;
+            let snapshot_sha = oa_sha256::sha256(&model_bytes);
+            regional_new_with_profile_and_quarantine_audit_checkpoint(
+                model,
+                snapshot_sha,
+                *b"ZAU1",
+                cfg,
+                profile,
+                audit_checkpoint,
+            )?
+        }
+        ModelSource::IssuedPackage {
+            root,
+            expected_manifest_sha256,
+            processor_id,
+        } => {
+            let (package, local_activation) = match oa_adapt::local_inventory::verify_local_startup(
+                root,
+                *expected_manifest_sha256,
+                *processor_id,
+            ) {
+                Ok(verified) => verified,
+                Err(_) => {
+                    fs::create_dir(output)
+                        .map_err(|error| format!("create startup refusal output: {error}"))?;
+                    let report = crate::processor_inventory::startup_refusal_report(
+                        *processor_id,
+                        *expected_manifest_sha256,
+                        crate::processor_inventory::observed_unix_time_ns(),
+                    );
+                    write_new(&output.join("processor-report.tsv"), report.as_bytes())?;
+                    return Err(
+                        "issued adaptation startup verification refused; no model activated".into(),
+                    );
+                }
+            };
+            let runtime = regional_new_from_issued_package_with_audit_checkpoint(
                 package,
-            )?)
-        } else {
-            None
+                *b"ZAU1",
+                cfg,
+                profile,
+                audit_checkpoint,
+            )?;
+            let report = crate::processor_inventory::check_active_runtime_adaptation(
+                &runtime,
+                &local_activation,
+                crate::processor_inventory::observed_unix_time_ns(),
+            )
+            .map_err(str::to_owned)?;
+            if report.status != oa_adapt::local_inventory::LocalInventoryStatus::Match {
+                return Err(format!(
+                    "issued adaptation startup disk recheck refused: {:?}\n{}",
+                    report.status,
+                    oa_adapt::local_inventory::render_processor_report_tsv("STARTUP", &report)
+                ));
+            }
+            activation = Some(local_activation);
+            startup_processor_report = Some(report);
+            runtime
         }
-    } else {
-        None
     };
+    let loaded_mode_adaptation = regional_mode_adaptation(&runtime);
     if let Some(options) = runway_aids {
         let package = oa_adapt::manifest::verify_current(&options.root, options.manifest_sha256)
             .map_err(|error| format!("verified runway-aid package refused: {error}"))?;
         regional_install_verified_runway_aids(&mut runtime, &package)?;
     }
+    let snapshot_sha = regional_adaptation_sha256(&runtime);
+    let executable = std::env::current_exe().map_err(|e| e.to_string())?;
+    let executable_sha = oa_sha256::sha256(&read_guarded(&executable, MAX_EXECUTABLE_BYTES)?);
     let text = std::str::from_utf8(bytes).map_err(|_| "input not UTF-8")?;
     let version = match text.lines().next() {
         Some("OA-RS\t1") => 1,
@@ -472,10 +510,14 @@ pub fn run_session_with_profile_options_and_runway_aids(
     // Runtime failures precede final output publication. Temporary evidence is identifiable by
     // the absence of COMPLETE and is never accepted as a closed result.
     fs::create_dir(output).map_err(|e| format!("create new output: {e}"))?;
+    let mut processor_report = match &startup_processor_report {
+        Some(report) => oa_adapt::local_inventory::render_processor_report_tsv("STARTUP", report),
+        None => crate::processor_inventory::unpinned_source_report(),
+    };
     let mut settings = match selected_profile {
         // Preserve the prior default settings bytes and behavior exactly.
-        RegionalCliProfile::Default => format!("OA_REGIONAL_SETTINGS\t1\ncentre\tZAU1\nconfiguration\t{cfg:?}\ntracks\t32\nframes\t512\nframe_gap_max_ns\t60000000000\nCA_h_m\t1300\nCA_v_ft\t300\nCA_lookahead_ns\t120000000000\ntrajectory_track_age_max_ms\t5000\nnormalization\tpositive-address airborne positions\nmodel\t{model_label}\n"),
-        RegionalCliProfile::RecordedPeakRendered => format!("OA_REGIONAL_SETTINGS\t1\ncentre\tZAU1\nprofile\t{}\nconfiguration\t{cfg:?}\ntracks\t{}\nflights\t{}\nframes\t512\nsurveillance_max_frames\t{}\nmax_total_events\t{}\nmax_drain_rows\t{}\nmax_baro_evidence\t{}\nmax_open_alerts\t{}\nmax_candidate_pairs\t{}\nmax_ca_work_per_frame\t{}\nmax_flight_log_entries\t{}\nmax_presentation_updates\t{}\nrender_scope\t{}\nframe_gap_max_ns\t60000000000\nCA_h_m\t1300\nCA_v_ft\t300\nCA_lookahead_ns\t120000000000\ntrajectory_track_age_max_ms\t5000\nnormalization\tpositive-address airborne positions\nmodel\t{model_label}\n", regional_cli_profile_id(selected_profile), profile.surveillance.max_tracks, profile.max_flights, profile.surveillance.max_frames, profile.max_total_events, profile.surveillance.max_drain_rows, profile.surveillance.max_baro_evidence, profile.surveillance.max_open_alerts, profile.surveillance.max_candidate_pairs, profile.surveillance.max_ca_work_per_frame, profile.max_flight_log_entries, profile.surveillance.max_presentation_updates, profile.surveillance.render_scope),
+        RegionalCliProfile::Default => format!("OA_REGIONAL_SETTINGS\t1\ncentre\tZAU1\nconfiguration\t{cfg:?}\ntracks\t32\nframes\t512\nframe_gap_max_ns\t60000000000\nCA_h_m\t1300\nCA_v_ft\t300\nCA_lookahead_ns\t120000000000\ntrajectory_track_age_max_ms\t5000\nnormalization\tpositive-address airborne positions\nmodel\t{}\n", source.evidence_label()),
+        RegionalCliProfile::RecordedPeakRendered => format!("OA_REGIONAL_SETTINGS\t1\ncentre\tZAU1\nprofile\t{}\nconfiguration\t{cfg:?}\ntracks\t{}\nflights\t{}\nframes\t512\nsurveillance_max_frames\t{}\nmax_total_events\t{}\nmax_drain_rows\t{}\nmax_baro_evidence\t{}\nmax_open_alerts\t{}\nmax_candidate_pairs\t{}\nmax_ca_work_per_frame\t{}\nmax_flight_log_entries\t{}\nmax_presentation_updates\t{}\nrender_scope\t{}\nframe_gap_max_ns\t60000000000\nCA_h_m\t1300\nCA_v_ft\t300\nCA_lookahead_ns\t120000000000\ntrajectory_track_age_max_ms\t5000\nnormalization\tpositive-address airborne positions\nmodel\t{}\n", regional_cli_profile_id(selected_profile), profile.surveillance.max_tracks, profile.max_flights, profile.surveillance.max_frames, profile.max_total_events, profile.surveillance.max_drain_rows, profile.surveillance.max_baro_evidence, profile.surveillance.max_open_alerts, profile.surveillance.max_candidate_pairs, profile.surveillance.max_ca_work_per_frame, profile.max_flight_log_entries, profile.surveillance.max_presentation_updates, profile.surveillance.render_scope, source.evidence_label()),
     };
     settings.push_str(match safety {
         MsawSource::Disabled => "msaw\tUNAVAILABLE_NOT_CONFIGURED\n",
@@ -488,15 +530,17 @@ pub fn run_session_with_profile_options_and_runway_aids(
             oa_sha256::to_hex(&sha)
         ));
     }
-    if let Some(package) = verified_package.as_ref() {
-        let identity = package.identity();
+    let issued_manifest_sha = crate::runtime::regional_issued_manifest_sha256(&runtime);
+    if let Some(manifest_sha) = issued_manifest_sha {
+        let mode_sha = regional_mode_component_sha256(&runtime);
+        let adaptation_version = regional_adaptation_version(&runtime);
         settings.push_str(&format!(
             "facility_manifest_sha256\t{}\nfacility_snapshot_sha256\t{}\nfacility_adaptation_version\t{}\nsurveillance_mode_component_status\t{}\nsurveillance_mode_component_sha256\t{}\nsurveillance_mode_authority\tCONTENT_PINNED_CALLER_SUPPLIED_ISSUER_CLAIMS_UNAUTHENTICATED\npreferred_radar_location_status\tFACILITY_CLAIM_NOT_INDEPENDENTLY_VALIDATED_AS_PHYSICAL_SITE\n",
-            oa_sha256::to_hex(&identity.manifest_sha256),
-            oa_sha256::to_hex(&identity.snapshot_sha256),
-            identity.adaptation_version.map_or_else(|| "UNAVAILABLE".to_owned(), |version| version.to_string()),
-            if identity.surveillance_mode_sha256.is_some() { "LOADED" } else { "NOT_CONFIGURED" },
-            identity.surveillance_mode_sha256.map_or_else(|| "UNAVAILABLE".to_owned(), |digest| oa_sha256::to_hex(&digest)),
+            oa_sha256::to_hex(&manifest_sha),
+            oa_sha256::to_hex(&snapshot_sha),
+            adaptation_version.map_or_else(|| "UNAVAILABLE".to_owned(), |version| version.to_string()),
+            if mode_sha.is_some() { "LOADED" } else { "NOT_CONFIGURED" },
+            mode_sha.map_or_else(|| "UNAVAILABLE".to_owned(), |digest| oa_sha256::to_hex(&digest)),
         ));
         if let Some(mode) = loaded_mode_adaptation {
             append_mode_settings(&mut settings, mode);
@@ -514,13 +558,13 @@ pub fn run_session_with_profile_options_and_runway_aids(
     }
     write_new(&output.join("settings.tsv"), settings.as_bytes())?;
     let mut manifest = format!("OA_REGIONAL_MANIFEST\t1\ninput_sha256\t{}\nsnapshot_sha256\t{}\nexecutable_sha256\t{}\nsettings_sha256\t{}\n", oa_sha256::to_hex(&oa_sha256::sha256(bytes)), oa_sha256::to_hex(&snapshot_sha), oa_sha256::to_hex(&executable_sha), oa_sha256::to_hex(&oa_sha256::sha256(settings.as_bytes())));
-    if let Some(package) = verified_package.as_ref() {
-        let identity = package.identity();
+    if let Some(manifest_sha) = issued_manifest_sha {
+        let mode_sha = regional_mode_component_sha256(&runtime);
         manifest.push_str(&format!(
             "facility_manifest_sha256\t{}\nfacility_adaptation_version\t{}\nsurveillance_mode_component_sha256\t{}\n",
-            oa_sha256::to_hex(&identity.manifest_sha256),
-            identity.adaptation_version.map_or_else(|| "UNAVAILABLE".to_owned(), |version| version.to_string()),
-            identity.surveillance_mode_sha256.map_or_else(|| "UNAVAILABLE".to_owned(), |digest| oa_sha256::to_hex(&digest)),
+            oa_sha256::to_hex(&manifest_sha),
+            regional_adaptation_version(&runtime).map_or_else(|| "UNAVAILABLE".to_owned(), |version| version.to_string()),
+            mode_sha.map_or_else(|| "UNAVAILABLE".to_owned(), |digest| oa_sha256::to_hex(&digest)),
         ));
     } else {
         manifest.push_str("surveillance_mode_component_status\tNOT_CONFIGURED\n");
@@ -613,6 +657,37 @@ pub fn run_session_with_profile_options_and_runway_aids(
             oa_sha256::to_hex(&oa_sha256::sha256(report.as_bytes()))
         ));
     }
+    if let Some(local_activation) = activation.as_ref() {
+        let report = crate::processor_inventory::check_active_runtime_adaptation(
+            &runtime,
+            local_activation,
+            crate::processor_inventory::observed_unix_time_ns(),
+        )
+        .map_err(str::to_owned)?;
+        processor_report.push_str(&oa_adapt::local_inventory::render_processor_report_tsv(
+            "ON_DEMAND",
+            &report,
+        ));
+        if report.status != oa_adapt::local_inventory::LocalInventoryStatus::Match {
+            write_new(
+                &output.join("processor-report.tsv"),
+                processor_report.as_bytes(),
+            )?;
+            return Err(format!(
+                "on-demand issued adaptation check reported {:?}; loaded model retained and disk model not adopted",
+                report.status
+            ));
+        }
+    }
+    write_new(
+        &output.join("processor-report.tsv"),
+        processor_report.as_bytes(),
+    )?;
+    manifest.push_str(&format!(
+        "processor_report_sha256\t{}\n",
+        oa_sha256::to_hex(&oa_sha256::sha256(processor_report.as_bytes()))
+    ));
+
     write_new(&output.join("manifest.tsv"), manifest.as_bytes())?;
     let directory = oa_sealed::open(output).map_err(|e| e.to_string())?;
     directory.sync_all().map_err(|e| e.to_string())?;
