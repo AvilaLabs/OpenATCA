@@ -1,0 +1,205 @@
+import unittest
+import subprocess
+import tempfile
+from pathlib import Path
+
+from tools import quality_size_ratchet as ratchet
+
+
+def repeated_block(prefix: str) -> str:
+    return "\n".join([
+        f"let {prefix}_alpha = source.alpha();",
+        f"let {prefix}_bravo = source.bravo();",
+        f"let {prefix}_charlie = source.charlie();",
+        f"let {prefix}_delta = source.delta();",
+        f"let {prefix}_echo = source.echo();",
+        f"let {prefix}_foxtrot = source.foxtrot();",
+        f"let {prefix}_golf = source.golf();",
+        f"let {prefix}_hotel = source.hotel();",
+        f"let {prefix}_india = source.india();",
+        f"let {prefix}_juliet = source.juliet();",
+    ])
+
+
+class QualitySizeRatchetTests(unittest.TestCase):
+    def baseline_for(self, summary):
+        return {
+            "schema": 1,
+            "algorithm": ratchet.ALGORITHM,
+            "scope": ratchet.SCOPE,
+            "workspace_binding": ratchet.WORKSPACE_BINDING,
+            "limits": {
+                "long_function_lines_exceeds": 150,
+                "argument_count_exceeds": 7,
+                "duplicate_window_tokens": ratchet.WINDOW_TOKENS,
+                "duplicate_minimum_distinct_identifiers": ratchet.MIN_IDENTIFIERS,
+                "tracked_source_files_max": ratchet.MAX_SOURCE_FILES,
+                "tracked_source_bytes_max": ratchet.MAX_SOURCE_BYTES,
+                "tracked_source_file_bytes_max": ratchet.MAX_SOURCE_FILE_BYTES,
+                "baseline_bytes_max": ratchet.MAX_BASELINE_BYTES,
+                "function_body_tokens_max": ratchet.MAX_CODE_TOKENS,
+                "duplicate_windows_max": ratchet.MAX_DUPLICATE_WINDOWS,
+                "duplicate_block_groups_max": ratchet.MAX_DUPLICATE_BLOCK_GROUPS,
+                "duplicate_comparisons_max": ratchet.MAX_DUPLICATE_COMPARISONS,
+                "lexer_tokens_per_file_max": ratchet.MAX_LEX_TOKENS_PER_FILE,
+            },
+            "seed_revision": "a" * 40,
+            "summary": summary,
+        }
+
+    def test_rust_multiline_generics_and_comments_count_arguments(self):
+        source = """pub(crate) fn bounded<T: Trait<Left, Right>>(
+    first: T, // comments and nested type commas don't add arguments
+    second: Vec<Vec<u8>>,
+    third: usize,
+    fourth: i32,
+    fifth: i32,
+    sixth: i32,
+    seventh: i32,
+    eighth: i32,
+) -> Result<T, Error> { Ok(first) }
+"""
+        functions = ratchet._function_tokens("sample.rs", source)
+        self.assertEqual(len(functions), 1)
+        self.assertEqual(functions[0].name, "bounded")
+        self.assertEqual(functions[0].argument_count, 8)
+
+    def test_rust_trait_declarations_are_counted_without_a_body(self):
+        source = "trait Wide { fn inspect(a,b,c,d,e,f,g,h); }\n"
+        functions = ratchet._function_tokens("sample.rs", source)
+        self.assertEqual(len(functions), 1)
+        self.assertEqual(functions[0].argument_count, 8)
+
+    def test_python_multiline_parameters_and_async_functions_are_counted(self):
+        source = """async def bounded(
+    first,
+    second: tuple[int, str],
+    third,
+    fourth,
+    fifth,
+    sixth,
+    seventh,
+    eighth,
+):
+    return first
+"""
+        functions = ratchet._function_tokens("sample.py", source)
+        self.assertEqual(len(functions), 1)
+        self.assertEqual(functions[0].argument_count, 8)
+
+    def test_function_line_limit_counts_physical_lines_including_comments(self):
+        source = "fn long() {\n" + "\n".join("    // retained line" for _ in range(149)) + "\n}\n"
+        summary = ratchet.analyze_sources([("sample.rs", source)])
+        self.assertEqual(summary["long_function_count"], 1)
+        self.assertEqual(summary["long_functions"][0]["lines"], 151)
+
+    def test_duplicate_nested_function_body_is_not_counted_again_at_same_location(self):
+        body = repeated_block("nested")
+        source = "fn outer(source: Source) {\n    fn inner(source: Source) {\n" + body + "\n    }\n}\n"
+        summary = ratchet.analyze_sources([("nested.rs", source)])
+        self.assertEqual(summary["duplicate_block_count"], 0)
+
+    def test_all_three_ratchets_reject_metric_rises(self):
+        base = ratchet.analyze_sources([("base.rs", "fn small() {}\n")])
+        baseline = self.baseline_for(base)
+        long_source = "fn long() {\n" + "\n".join("    // line" for _ in range(150)) + "\n}\n"
+        long_now = ratchet.analyze_sources([("long.rs", long_source)])
+        self.assertIn("long_function_count", " ".join(ratchet.compare(long_now, baseline)["errors"]))
+        wide_now = ratchet.analyze_sources([("wide.rs", "fn wide(a,b,c,d,e,f,g,h) {}\n")])
+        self.assertIn("wide_argument_function_count", " ".join(ratchet.compare(wide_now, baseline)["errors"]))
+        duplicate = repeated_block("copy")
+        dup_now = ratchet.analyze_sources([
+            ("one.rs", "fn a(source: Source) {\n" + duplicate + "\n}\n"
+             "fn b(source: Source) {\n" + duplicate + "\n}\n")
+        ])
+        self.assertIn("duplicate_block_count", " ".join(ratchet.compare(dup_now, baseline)["errors"]))
+
+    def test_workspace_guard_rejects_missing_slash_and_unrelated_roots(self):
+        with self.assertRaises(ratchet.RatchetError):
+            ratchet._validate_workspace(Path("/path/that/does/not/exist"))
+        with self.assertRaises(ratchet.RatchetError):
+            ratchet._validate_workspace(Path("/"))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            (root / "Cargo.toml").write_text("[workspace]\nmembers = []\n", encoding="utf-8")
+            (root / "docs").mkdir()
+            (root / "docs/RULESET.md").write_text("# unrelated project\n", encoding="utf-8")
+            (root / "crates/oa-track").mkdir(parents=True)
+            (root / "crates/oa-track/Cargo.toml").write_text("[package]\nname='other'\n", encoding="utf-8")
+            (root / "tools").mkdir()
+            (root / "tools/quality_size_ratchet.py").write_text("# not OpenATCA\n", encoding="utf-8")
+            subprocess.run(["git", "add", "Cargo.toml", "docs/RULESET.md", "crates/oa-track/Cargo.toml",
+                            "tools/quality_size_ratchet.py"],
+                           cwd=root, check=True)
+            with self.assertRaises(ratchet.RatchetError):
+                ratchet._validate_workspace(root)
+
+    def test_actual_openatca_git_root_passes_workspace_binding(self):
+        root = Path(__file__).resolve().parents[1]
+        self.assertEqual(ratchet._validate_workspace(root), root.resolve())
+
+    def test_malformed_baseline_file_refuses(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "baseline.json"
+            path.write_text("{bad json", encoding="utf-8")
+            with self.assertRaises(ratchet.RatchetError):
+                ratchet._read_baseline(path)
+
+    def test_baseline_binding_and_revision_fail_closed(self):
+        summary = ratchet.analyze_sources([("sample.rs", "fn small() {}\n")])
+        baseline = self.baseline_for(summary)
+        self.assertEqual(ratchet.compare(summary, baseline)["status"], "PASS")
+        for mutation in ({"workspace_binding": "other"}, {"seed_revision": ""}, {"schema": 2}):
+            invalid = dict(baseline)
+            invalid.update(mutation)
+            with self.assertRaises(ratchet.RatchetError):
+                ratchet.compare(summary, invalid)
+
+    def test_comments_do_not_distinguish_duplicate_code_blocks(self):
+        body = repeated_block("left")
+        same_tokens_different_comments = body.replace("source.alpha()", "source.alpha() /* note one */")
+        source = (
+            "fn first(source: Source) {\n" + body + "\n}\n"
+            "fn second(source: Source) {\n" + same_tokens_different_comments + "\n}\n"
+        )
+        summary = ratchet.analyze_sources([("sample.rs", source)])
+        self.assertGreater(summary["duplicate_block_count"], 0)
+
+    def test_added_duplicate_is_reported_even_when_total_does_not_rise(self):
+        first = repeated_block("alpha")
+        second = repeated_block("bravo")
+        baseline_source = (
+            "fn a(source: Source) {\n" + first + "\n}\n"
+            "fn b(source: Source) {\n" + first + "\n}\n"
+            "fn c(source: Source) {\n" + second + "\n}\n"
+        )
+        current_source = (
+            "fn a(source: Source) {\n" + first + "\n}\n"
+            "fn c(source: Source) {\n" + second + "\n}\n"
+            "fn d(source: Source) {\n" + second + "\n}\n"
+        )
+        base = ratchet.analyze_sources([("sample.rs", baseline_source)])
+        current = ratchet.analyze_sources([("sample.rs", current_source)])
+        baseline = self.baseline_for(base)
+        report = ratchet.compare(current, baseline)
+        self.assertEqual(current["duplicate_block_count"], base["duplicate_block_count"])
+        self.assertEqual(report["status"], "FAIL")
+        self.assertTrue(report["new_or_increased_duplicates"])
+        baseline_ids = set(base["duplicate_frequencies"])
+        self.assertTrue(any(row["fingerprint"] not in baseline_ids
+                            for row in report["new_or_increased_duplicates"]))
+
+    def test_ratchets_accept_equal_or_reduced_counts_and_reject_rises(self):
+        clean = ratchet.analyze_sources([("sample.rs", "fn small() {}\n")])
+        baseline = self.baseline_for(clean)
+        self.assertEqual(ratchet.compare(clean, baseline)["status"], "PASS")
+        wide = "fn wide(a,b,c,d,e,f,g,h) {}\n"
+        elevated = ratchet.analyze_sources([("sample.rs", wide)])
+        report = ratchet.compare(elevated, baseline)
+        self.assertEqual(report["status"], "FAIL")
+        self.assertTrue(any("wide_argument_function_count" in error for error in report["errors"]))
+
+
+if __name__ == "__main__":
+    unittest.main()
