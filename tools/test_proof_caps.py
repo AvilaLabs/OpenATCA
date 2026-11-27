@@ -6,6 +6,7 @@ import copy
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 from check_proof_caps import (
     CAP_FIELDS, CapCheckError, _read_worktree_registry, _registry, check, compare_registries,
@@ -97,6 +98,42 @@ class ProofCapComparisonTests(unittest.TestCase):
 
         with self.assertRaises(CapCheckError):
             check(Path("/"), "0" * 40)
+
+    def test_candidate_registry_read_refuses_symlink_and_nonregular_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            tools = repo / "tools"
+            tools.mkdir()
+            registry = tools / "rust_proofs.json"
+            target = tools / "target.json"
+            target.write_bytes(b"{}")
+            registry.symlink_to(target)
+            with self.assertRaises(CapCheckError):
+                _read_worktree_registry(repo)
+
+            registry.unlink()
+            registry.mkdir()
+            with self.assertRaises(CapCheckError):
+                _read_worktree_registry(repo)
+
+    def test_candidate_registry_read_refuses_file_changed_during_read(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            tools = repo / "tools"
+            tools.mkdir()
+            registry = tools / "rust_proofs.json"
+            registry.write_bytes(b"old")
+            original_open = Path.open
+
+            def replace_before_open(path, *args, **kwargs):
+                if path == registry:
+                    with open(path, "wb") as stream:
+                        stream.write(b"replacement is longer")
+                return original_open(path, *args, **kwargs)
+
+            with mock.patch.object(Path, "open", replace_before_open):
+                with self.assertRaises(CapCheckError):
+                    _read_worktree_registry(repo)
 
 
 if __name__ == "__main__":

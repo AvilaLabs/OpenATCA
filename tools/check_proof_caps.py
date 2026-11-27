@@ -5,13 +5,12 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 from pathlib import Path
-import stat
 import subprocess
 import sys
 from typing import Any
 
+from quality_size_ratchet import RatchetError, _read_bounded_regular_file
 from rust_proof_suite import validate_registry
 
 
@@ -59,34 +58,16 @@ def _read_git_registry(repo: Path, revision: str) -> bytes:
 
 def _read_worktree_registry(repo: Path) -> bytes:
     path = repo / REGISTRY_RELATIVE
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
-        descriptor = os.open(path, flags)
-    except OSError as exc:
-        raise CapCheckError("candidate registry could not be opened as a regular file") from exc
-    try:
-        before = os.fstat(descriptor)
-        if not stat.S_ISREG(before.st_mode) or before.st_size > MAX_REGISTRY_BYTES:
-            raise CapCheckError("candidate registry is not regular or exceeds the read limit")
-        chunks: list[bytes] = []
-        remaining = MAX_REGISTRY_BYTES + 1
-        while remaining:
-            chunk = os.read(descriptor, min(remaining, 16 * 1024))
-            if not chunk:
-                break
-            chunks.append(chunk)
-            remaining -= len(chunk)
-        raw = b"".join(chunks)
-        after = os.fstat(descriptor)
-        if len(raw) > MAX_REGISTRY_BYTES:
-            raise CapCheckError("candidate registry exceeds the read limit")
-        if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (
-            after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns
-        ) or len(raw) != after.st_size:
-            raise CapCheckError("candidate registry changed during bounded read")
-        return raw
-    finally:
-        os.close(descriptor)
+        return _read_bounded_regular_file(
+            path,
+            MAX_REGISTRY_BYTES,
+            "candidate registry must be a regular non-symlink file",
+            "candidate registry exceeds the read limit",
+            "candidate registry changed during bounded read",
+        )
+    except (RatchetError, OSError) as exc:
+        raise CapCheckError(str(exc)) from exc
 
 
 def _registry(raw: bytes, label: str) -> list[dict[str, Any]]:
