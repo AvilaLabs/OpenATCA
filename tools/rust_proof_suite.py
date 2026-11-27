@@ -511,7 +511,7 @@ def _resource_tool_identity() -> dict[str, Any]:
 
 
 def _read_resource_output(path: Path) -> tuple[dict[str, Any] | None, str | None, str | None]:
-    """Read exactly one GNU-time record: direct child max RSS and wall elapsed time."""
+    """Read one GNU-time record: largest waited-process RSS and wall elapsed time."""
     try:
         if path.is_symlink() or not path.is_file() or path.stat().st_size > MAX_RESOURCE_OUTPUT_BYTES:
             return None, None, "resource output is missing, unsafe, or oversized"
