@@ -140,18 +140,21 @@ fn synthetic_runway_model() -> oa_airspace::core::model::Model {
                 .push(u32::try_from(model.strings.text.len()).unwrap());
             ix
         };
+        let ident_ix = intern(&mut model, ident);
+        let region_ix = intern(&mut model, "K1");
+        let scope_ix = if scope.is_empty() {
+            model::StrIx::NONE
+        } else {
+            intern(&mut model, scope)
+        };
         model.points.kind.push(kind);
         model.points.lat.push(lat);
         model.points.lon.push(lon);
         model.points.elev_ft.push(model::ELEV_NONE);
-        model.points.ident.push(intern(&mut model, ident));
+        model.points.ident.push(ident_ix);
         model.points.alt_ident.push(model::StrIx::NONE);
-        model.points.region.push(intern(&mut model, "K1"));
-        model.points.scope.push(if scope.is_empty() {
-            model::StrIx::NONE
-        } else {
-            intern(&mut model, scope)
-        });
+        model.points.region.push(region_ix);
+        model.points.scope.push(scope_ix);
         model.points.name.push(model::StrIx::NONE);
         model::bit_push(&mut model.points.src_nasr, airport);
         model::bit_push(&mut model.points.src_cifp, !airport);
