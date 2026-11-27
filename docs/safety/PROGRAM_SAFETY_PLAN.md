@@ -147,9 +147,9 @@ approved PSP, and we propose none.
 | Initial investment | Comparative Safety Assessment (CSA) | Risk of each alternative, including keeping the legacy system | Not started |
 | Final investment | Preliminary Hazard Analysis (PHA) | Hazards per function with causes, effects, severity and likelihood | Draft table generated; severities are engineering candidates; likelihood not assessed |
 | Solution implementation | System Safety Program Plan | Our plan as developer, under this PSP | To be written from this document |
-| | Subsystem Hazard Analysis (SSHA) | Hazards from each component and its failure modes, including the operating system and runtime | Not started |
-| | System Hazard Analysis (SHA) | Hazards from interfaces and interactions between components and with other NAS systems | Not started |
-| | Operating and Support Hazard Analysis (O&SHA) | Hazards from operating, maintaining, adapting and cutting over | Not started; the transition procedure is its starting point |
+| | Subsystem Hazard Analysis (SSHA) | Hazards from each component and its failure modes, including the operating system and runtime | Draft 1 ([SSHA](SSHA.md)) |
+| | System Hazard Analysis (SHA) | Hazards from interfaces and interactions between components and with other NAS systems | Draft 1 ([SHA](SHA.md)) |
+| | Operating and Support Hazard Analysis (O&SHA) | Hazards from operating, maintaining, adapting and cutting over | Draft 1 ([O&SHA](OSHA.md)); the transition procedure is its starting point |
 | | System Safety Assessment Report (SSAR) with the Safety Requirements Verification Table | All analyses and verification results; every safety requirement traced to origin and verification | Verification table generated; traceability complete (row C6); assessment not written |
 | In service | Post-implementation safety assessment and monitoring | Whether predicted residual risk held in operation | Monitoring targets to be set per hazard (section 10) |
 
