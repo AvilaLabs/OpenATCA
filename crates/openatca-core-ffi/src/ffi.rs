@@ -5,7 +5,9 @@ use crate::text;
 use oa_deflate::{Compressor, MAX_LEVEL, MIN_LEVEL};
 use oa_geo::{wgs84, GeoError, LatLon, Polygon, RhumbInverse, Separation};
 use oa_sha256::{sha256, to_hex_into, MAX_MESSAGE_BYTES};
+use oa_tar::{Next as TarNext, TarError, TarReader, DEFAULT_LIMITS};
 use oa_zip::{InflateError, InflateLimits, Inflater, StreamError};
+use std::io::Cursor;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
 pub const ABI_VERSION_PROVISIONAL: u32 = 1;
@@ -28,6 +30,11 @@ pub const OA_STATUS_DEFLATE_TRUNCATED: u32 = 14;
 pub const OA_STATUS_DEFLATE_OUTPUT_LIMIT: u32 = 15;
 pub const OA_STATUS_DEFLATE_RATIO_LIMIT: u32 = 16;
 pub const OA_STATUS_DEFLATE_ENCODE_OUTPUT_LIMIT: u32 = 17;
+pub const OA_STATUS_TAR_BAD_HEADER: u32 = 18;
+pub const OA_STATUS_TAR_TRUNCATED: u32 = 19;
+pub const OA_STATUS_TAR_LIMIT: u32 = 20;
+pub const OA_STATUS_TAR_NAME_TOO_LONG: u32 = 21;
+pub const OA_STATUS_TAR_READ_ERROR: u32 = 22;
 
 /// Hard ceiling for one raw-DEFLATE input slice accepted by the provisional C ABI.
 pub const MAX_DEFLATE_INPUT_BYTES: u64 = 64 * 1024 * 1024;
@@ -35,6 +42,12 @@ pub const MAX_DEFLATE_INPUT_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_DEFLATE_OUTPUT_BYTES: u64 = 256 * 1024 * 1024;
 /// Hard ceiling for one raw-DEFLATE output buffer accepted by the provisional C ABI.
 pub const MAX_DEFLATE_ENCODE_OUTPUT_BYTES: u64 = 128 * 1024 * 1024;
+/// Maximum archive byte slice parsed by the metadata-only tar adapter.
+pub const MAX_TAR_INPUT_BYTES: u64 = 64 * 1024 * 1024;
+/// Maximum member records returned by one metadata-only tar parse.
+pub const MAX_TAR_ENTRIES: usize = 4096;
+/// Maximum UTF-8 name-pool bytes (entry cap times oa-tar's name bound).
+pub const MAX_TAR_NAME_POOL_BYTES: usize = MAX_TAR_ENTRIES * oa_tar::MAX_NAME_BYTES;
 /// Ratio cap and small-output exemption used by the ZIP entry inflater.
 pub const DEFLATE_MAX_RATIO: u64 = oa_zip::MAX_RATIO;
 pub const DEFLATE_RATIO_EXEMPT_BYTES: u64 = oa_zip::RATIO_EXEMPT_BYTES;
@@ -46,6 +59,33 @@ pub const OA_LOCATION_ELEMENT: u32 = 2;
 /// Opaque immutable polygon handle. Its layout is never exposed in the C header.
 pub struct OaPolygon {
     inner: Polygon,
+}
+
+/// One member's metadata from a parsed tar archive; names reference the call's UTF-8 byte pool.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct OaTarEntry {
+    pub name_offset: u64,
+    pub name_length: u64,
+    pub size: u64,
+    pub mtime: u64,
+    pub header_offset: u64,
+    pub typeflag: u8,
+    pub reserved: [u8; 7],
+}
+
+const _: () = assert!(core::mem::size_of::<OaTarEntry>() == 48);
+const _: () = assert!(core::mem::align_of::<OaTarEntry>() == 8);
+
+fn map_tar_error(error: TarError) -> Failure {
+    match error {
+        TarError::BadHeader { .. } | TarError::Failed => Failure::general(OA_STATUS_TAR_BAD_HEADER),
+        TarError::EntryTooLarge { .. }
+        | TarError::MetaTooLarge { .. }
+        | TarError::TooManyMeta { .. } => Failure::general(OA_STATUS_TAR_LIMIT),
+        TarError::NameTooLong { .. } => Failure::general(OA_STATUS_TAR_NAME_TOO_LONG),
+        TarError::Io { .. } => Failure::general(OA_STATUS_TAR_READ_ERROR),
+    }
 }
 
 pub const MATH_U_SIN: u32 = 1;
@@ -1703,6 +1743,148 @@ pub unsafe extern "C" fn oa_deflate_raw_compress(
     status
 }
 
+/// Parses a bounded tar byte slice into ordered member metadata and a UTF-8 name byte pool.
+/// Payload bytes are never returned or extracted. Member names, typeflags and effective sizes are
+/// preserved from `oa-tar`; offsets identify the first extension header when present, otherwise
+/// the member header.
+/// A capacity query validates the entire archive before returning exact sizes. Other failures
+/// leave output arrays and size metadata untouched.
+///
+/// # Safety
+/// `input` must be readable for `input_length` bytes unless length is zero, in which case it may
+/// be null. `entries` and `name_pool` must be writable for their declared capacities unless the
+/// corresponding capacity is zero, when each may be null. `entry_count`, `name_pool_length`, and
+/// `error` must be valid, aligned, writable, and pairwise non-overlapping. All input, output, and
+/// metadata regions must be pairwise non-overlapping.
+#[no_mangle]
+pub unsafe extern "C" fn oa_tar_parse(
+    input: *const u8,
+    input_length: u64,
+    max_entries: u32,
+    entries: *mut OaTarEntry,
+    entry_capacity: u64,
+    entry_count: *mut u64,
+    name_pool: *mut u8,
+    name_pool_capacity: u64,
+    name_pool_length: *mut u64,
+    error: *mut OaErrorInfo,
+) -> u32 {
+    let mut required_entries = 0u64;
+    let mut required_names = 0u64;
+    let (status, result) = dispatch(error, || {
+        if entry_count.is_null() {
+            return Err(Failure::argument(OA_STATUS_INVALID_ARGUMENT, 4));
+        }
+        if name_pool_length.is_null() {
+            return Err(Failure::argument(OA_STATUS_INVALID_ARGUMENT, 7));
+        }
+        if input_length > MAX_TAR_INPUT_BYTES {
+            return Err(Failure::argument(OA_STATUS_LENGTH_TOO_LARGE, 1));
+        }
+        if max_entries as usize > MAX_TAR_ENTRIES {
+            return Err(Failure::argument(OA_STATUS_BAD_PARAMETER, 2));
+        }
+        let input_length = usize::try_from(input_length)
+            .map_err(|_| Failure::argument(OA_STATUS_LENGTH_TOO_LARGE, 1))?;
+        if input_length != 0 && input.is_null() {
+            return Err(Failure::argument(OA_STATUS_INVALID_ARGUMENT, 0));
+        }
+        if entry_capacity != 0 && entries.is_null() {
+            return Err(Failure::argument(OA_STATUS_INVALID_ARGUMENT, 3));
+        }
+        if name_pool_capacity != 0 && name_pool.is_null() {
+            return Err(Failure::argument(OA_STATUS_INVALID_ARGUMENT, 6));
+        }
+        let input = if input_length == 0 {
+            &[]
+        } else {
+            // SAFETY: caller guarantees a readable, disjoint region of this checked length.
+            unsafe { core::slice::from_raw_parts(input, input_length) }
+        };
+        let mut reader = TarReader::new(vec![Cursor::new(input)], DEFAULT_LIMITS);
+        let mut parsed_entries = Vec::new();
+        let mut parsed_names = Vec::new();
+        loop {
+            let header = match reader.next_entry() {
+                Ok(TarNext::Entry(header)) => header,
+                Ok(TarNext::End) => break,
+                Ok(TarNext::Truncated(_)) => {
+                    return Err(Failure::general(OA_STATUS_TAR_TRUNCATED));
+                }
+                Err(failure) => return Err(map_tar_error(failure)),
+            };
+            if parsed_entries.len() >= max_entries as usize {
+                return Err(Failure::general(OA_STATUS_TAR_LIMIT));
+            }
+            let name = header.name.as_bytes();
+            let next_name_len = parsed_names
+                .len()
+                .checked_add(name.len())
+                .ok_or_else(|| Failure::general(OA_STATUS_TAR_LIMIT))?;
+            if next_name_len > MAX_TAR_NAME_POOL_BYTES {
+                return Err(Failure::general(OA_STATUS_TAR_LIMIT));
+            }
+            parsed_entries
+                .try_reserve(1)
+                .map_err(|_| Failure::general(OA_STATUS_ALLOCATION_FAILED))?;
+            parsed_names
+                .try_reserve(name.len())
+                .map_err(|_| Failure::general(OA_STATUS_ALLOCATION_FAILED))?;
+            let name_offset = u64::try_from(parsed_names.len())
+                .map_err(|_| Failure::general(OA_STATUS_LENGTH_TOO_LARGE))?;
+            let name_length = u64::try_from(name.len())
+                .map_err(|_| Failure::general(OA_STATUS_LENGTH_TOO_LARGE))?;
+            parsed_entries.push(OaTarEntry {
+                name_offset,
+                name_length,
+                size: header.size,
+                mtime: header.mtime,
+                header_offset: header.offset,
+                typeflag: header.typeflag,
+                reserved: [0; 7],
+            });
+            parsed_names.extend_from_slice(name);
+        }
+        required_entries = u64::try_from(parsed_entries.len())
+            .map_err(|_| Failure::general(OA_STATUS_LENGTH_TOO_LARGE))?;
+        required_names = u64::try_from(parsed_names.len())
+            .map_err(|_| Failure::general(OA_STATUS_LENGTH_TOO_LARGE))?;
+        if entry_capacity < required_entries || name_pool_capacity < required_names {
+            return Err(Failure::general(OA_STATUS_BUFFER_TOO_SMALL));
+        }
+        Ok((parsed_entries, parsed_names))
+    });
+    if let Some((parsed_entries, parsed_names)) = result {
+        // SAFETY: validated capacities cover both complete output slices; caller guarantees all
+        // pointers are aligned, writable and disjoint. Empty outputs perform no pointer access.
+        unsafe {
+            if !parsed_entries.is_empty() {
+                core::ptr::copy_nonoverlapping(
+                    parsed_entries.as_ptr(),
+                    entries,
+                    parsed_entries.len(),
+                );
+            }
+            if !parsed_names.is_empty() {
+                core::ptr::copy_nonoverlapping(
+                    parsed_names.as_ptr(),
+                    name_pool,
+                    parsed_names.len(),
+                );
+            }
+            entry_count.write(required_entries);
+            name_pool_length.write(required_names);
+        }
+    } else if status == OA_STATUS_BUFFER_TOO_SMALL {
+        // SAFETY: non-null size metadata pointers were validated and are caller-disjoint.
+        unsafe {
+            entry_count.write(required_entries);
+            name_pool_length.write(required_names);
+        }
+    }
+    status
+}
+
 fn coordinate_argument(error: &GeoError, base: u64) -> u64 {
     match error {
         GeoError::NonFinite("longitude") | GeoError::LongitudeOutOfRange(_) => base + 1,
@@ -1732,6 +1914,11 @@ fn message(code: u32) -> &'static [u8] {
         OA_STATUS_DEFLATE_ENCODE_OUTPUT_LIMIT => {
             b"raw DEFLATE encoding exceeded its output limit\0"
         }
+        OA_STATUS_TAR_BAD_HEADER => b"tar header failed validation\0",
+        OA_STATUS_TAR_TRUNCATED => b"tar archive is truncated\0",
+        OA_STATUS_TAR_LIMIT => b"tar archive exceeds a metadata limit\0",
+        OA_STATUS_TAR_NAME_TOO_LONG => b"tar entry name exceeds its limit\0",
+        OA_STATUS_TAR_READ_ERROR => b"tar input reader failed\0",
         _ => b"unknown status\0",
     }
 }

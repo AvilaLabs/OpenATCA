@@ -21,6 +21,9 @@ _MAX_TEXT_OUTPUT_BYTES: Final[int] = 256 * 1024 * 1024
 _MAX_DEFLATE_INPUT_BYTES: Final[int] = 64 * 1024 * 1024
 _MAX_DEFLATE_OUTPUT_BYTES: Final[int] = 256 * 1024 * 1024
 _MAX_DEFLATE_ENCODE_OUTPUT_BYTES: Final[int] = 128 * 1024 * 1024
+_MAX_TAR_INPUT_BYTES: Final[int] = 64 * 1024 * 1024
+_MAX_TAR_ENTRIES: Final[int] = 4096
+_MAX_TAR_NAME_POOL_BYTES: Final[int] = _MAX_TAR_ENTRIES * 4096
 
 
 class _ErrorInfo(ctypes.Structure):
@@ -50,6 +53,11 @@ _STATUS_NAMES: Final[dict[int, str]] = {
     15: "DEFLATE_OUTPUT_LIMIT",
     16: "DEFLATE_RATIO_LIMIT",
     17: "DEFLATE_ENCODE_OUTPUT_LIMIT",
+    18: "TAR_BAD_HEADER",
+    19: "TAR_TRUNCATED",
+    20: "TAR_LIMIT",
+    21: "TAR_NAME_TOO_LONG",
+    22: "TAR_READ_ERROR",
 }
 
 
@@ -130,6 +138,20 @@ class RawDeflateResult:
     output: bytes
     consumed: int
     actual_level: int
+
+
+@dataclass(frozen=True, slots=True)
+class TarEntry:
+    name: str
+    size: int
+    typeflag: int
+    mtime: int
+    header_offset: int
+
+
+@dataclass(frozen=True, slots=True)
+class TarResult:
+    entries: tuple[TarEntry, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -285,6 +307,18 @@ class _CsvCounts(ctypes.Structure):
 
 class _PolygonOpaque(ctypes.Structure):
     pass
+
+
+class _TarEntry(ctypes.Structure):
+    _fields_ = [
+        ("name_offset", ctypes.c_uint64),
+        ("name_length", ctypes.c_uint64),
+        ("size", ctypes.c_uint64),
+        ("mtime", ctypes.c_uint64),
+        ("header_offset", ctypes.c_uint64),
+        ("typeflag", ctypes.c_uint8),
+        ("reserved", ctypes.c_uint8 * 7),
+    ]
 
 
 def _as_double(value: object, name: str) -> float:
@@ -726,6 +760,7 @@ class Geodesy:
         self.integrity = Integrity(library)
         self.text = TextBindings(library)
         self.compression = Compression(library)
+        self.archives = Archives(library)
 
     def _bind(self) -> None:
         lib = self._library
@@ -743,6 +778,10 @@ class Geodesy:
             ctypes.c_uint64, byte_p, ctypes.c_uint64, u64_p, u64_p,
             ctypes.POINTER(ctypes.c_uint32), error_p]
         lib.oa_deflate_raw_compress.restype = ctypes.c_uint32
+        lib.oa_tar_parse.argtypes = [byte_p, ctypes.c_uint64, ctypes.c_uint32,
+            ctypes.POINTER(_TarEntry), ctypes.c_uint64, u64_p,
+            byte_p, ctypes.c_uint64, u64_p, error_p]
+        lib.oa_tar_parse.restype = ctypes.c_uint32
         lib.oa_geo_wgs84_inverse.argtypes = [
             ctypes.c_double, ctypes.c_double, ctypes.c_double, ctypes.c_double,
             double_p, double_p, double_p, error_p,
@@ -934,12 +973,68 @@ class Compression:
         return RawInflateResult(bytes(output_buffer) if output_buffer is not None else b"", consumed.value)
 
 
+class Archives:
+    """Metadata-only archive readers; this surface never extracts files or writes paths."""
+
+    def __init__(self, library: ctypes.CDLL) -> None:
+        self._library = library
+
+    def parse_tar(self, data: bytes, *, max_entries: int = _MAX_TAR_ENTRIES) -> TarResult:
+        """Validate one bounded tar archive and return ordered member metadata only."""
+        if not isinstance(data, bytes):
+            raise TypeError("data must be bytes")
+        if len(data) > _MAX_TAR_INPUT_BYTES:
+            raise ValueError("data exceeds the native tar input limit")
+        if isinstance(max_entries, bool) or not isinstance(max_entries, int):
+            raise TypeError("max_entries must be an integer")
+        if max_entries < 0 or max_entries > _MAX_TAR_ENTRIES:
+            raise ValueError("max_entries is outside the native tar limit")
+        input_buffer = (ctypes.c_uint8 * len(data)).from_buffer_copy(data) if data else None
+        count, names_length, error = ctypes.c_uint64(), ctypes.c_uint64(), _ErrorInfo()
+        status = int(self._library.oa_tar_parse(
+            input_buffer, len(data), max_entries, None, 0, ctypes.byref(count),
+            None, 0, ctypes.byref(names_length), ctypes.byref(error)))
+        if status not in (0, 6):
+            _raise_if_error(self._library, status, error)
+        if status == 0:
+            if count.value != 0 or names_length.value != 0:
+                raise RuntimeError("native tar parser skipped required output on an empty success")
+            return TarResult(())
+        if count.value > _MAX_TAR_ENTRIES or names_length.value > _MAX_TAR_NAME_POOL_BYTES:
+            raise RuntimeError("native tar parser returned sizes beyond its declared bound")
+        entries = (_TarEntry * count.value)() if count.value else None
+        name_pool = (ctypes.c_uint8 * names_length.value)() if names_length.value else None
+        status = int(self._library.oa_tar_parse(
+            input_buffer, len(data), max_entries, entries, count.value, ctypes.byref(count),
+            name_pool, names_length.value, ctypes.byref(names_length), ctypes.byref(error)))
+        _raise_if_error(self._library, status, error)
+        if count.value != (len(entries) if entries is not None else 0):
+            raise RuntimeError("native tar parser changed its entry count between passes")
+        pool = bytes(name_pool) if name_pool is not None else b""
+        if names_length.value != len(pool):
+            raise RuntimeError("native tar parser changed its name-pool length between passes")
+        output: list[TarEntry] = []
+        for item in entries or ():
+            start, end = item.name_offset, item.name_offset + item.name_length
+            if end > len(pool):
+                raise RuntimeError("native tar parser returned an invalid name-pool span")
+            output.append(TarEntry(
+                name=pool[start:end].decode("utf-8"),
+                size=item.size,
+                typeflag=item.typeflag,
+                mtime=item.mtime,
+                header_offset=item.header_offset,
+            ))
+        return TarResult(tuple(output))
+
+
 def load(library_path: os.PathLike[str] | str) -> Geodesy:
     """Explicit-path loader; this package does not bundle or build the native library."""
     return Geodesy.load(library_path)
 
 
 __all__ = [
+    "Archives",
     "CsvField",
     "Compression",
     "CsvResult",
@@ -955,6 +1050,8 @@ __all__ = [
     "RhumbInverseResult",
     "RawInflateResult",
     "RawDeflateResult",
+    "TarEntry",
+    "TarResult",
     "ScalarMath",
     "SeparationResult",
     "TextBindings",

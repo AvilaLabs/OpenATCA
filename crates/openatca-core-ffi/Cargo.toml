@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 authors.workspace = true
-description = "Provisional C ABI shell for selected OpenATCA L0 math, integrity, geodesy, and text parsing"
+description = "Provisional C ABI shell for selected OpenATCA L0 math, integrity, geodesy, compression, archive metadata, and text parsing"
 
 [package.metadata.openatca]
 class = "shell"
@@ -38,3 +38,5 @@ oa-xml = { path = "../oa-xml" }
 oa-zip = { path = "../oa-zip" }
 # F1a: one-shot C wrapper delegates raw-DEFLATE encoding to the existing streaming compressor.
 oa-deflate = { path = "../oa-deflate" }
+# F1a: bounded metadata-only tar facade delegates parsing to the existing streaming reader.
+oa-tar = { path = "../oa-tar" }

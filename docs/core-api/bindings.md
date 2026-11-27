@@ -65,3 +65,25 @@ The §10 inventory also requires container, CAT021/CAT048/CAT062, CIFP, NASR,
 FNS-AIXM/NOTAM, and bounded GRIB2 APIs with Python wrappers. Each parser API must disclose its
 accepted edition/profile and explicit byte, record, nesting, and work bounds before it is exposed.
 Those modules are staged separately; this first source slice does not imply those bindings exist.
+
+### Proposed tar metadata binding (Preview; awaiting designated API review)
+
+Candidate C surface: `oa_tar_parse(input, input_length, max_entries, entries, entry_capacity,
+entry_count, name_pool, name_pool_capacity, name_pool_length, error)` accepts a borrowed tar byte
+slice and returns metadata only: ordered `OaTarEntry` records plus one UTF-8 byte-name pool.
+The 48-byte record contains `name_offset`, `name_length`, effective `size`, `mtime`,
+`header_offset`, `typeflag`, and seven zeroed reserved bytes. Each record preserves the `oa-tar::Header`
+name bytes, effective payload size, reported typeflag, mtime, and `Header::offset` (the first
+extension record's offset when extension records precede the member, otherwise its header offset).
+Duplicate names
+and unknown typeflags remain distinct; a stored NUL typeflag follows `oa-tar` normalization to
+`'0'`. The parser does not return payload bytes, apply a filesystem path policy, or extract files.
+
+The proposed one-shot limits are 64 MiB input and a caller-selected entry cap no greater than
+4,096, with `oa-tar`'s `DEFAULT_LIMITS` for member size, name bytes, extension-record size/count,
+and total extension bytes. Caller capacities use an all-or-nothing size query: if either output
+capacity is short, `BUFFER_TOO_SMALL` reports exact entry and name-pool sizes. Malformed headers,
+checksum failures, truncated members/end markers, and limit refusals leave caller arrays and size
+metadata unchanged. Python candidate: `Archives.parse_tar(bytes, max_entries=4096)` returns an
+immutable `TarResult.entries` tuple of `TarEntry` records. These names and layouts are
+proposals, not compatibility promises; designated API review remains required before freezing.

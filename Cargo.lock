@@ -845,6 +845,7 @@ dependencies = [
  "oa-json",
  "oa-math",
  "oa-sha256",
+ "oa-tar",
  "oa-xml",
  "oa-zip",
 ]

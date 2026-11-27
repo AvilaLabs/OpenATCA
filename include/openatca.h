@@ -45,12 +45,20 @@ enum {
     OA_STATUS_DEFLATE_TRUNCATED = 14,
     OA_STATUS_DEFLATE_OUTPUT_LIMIT = 15,
     OA_STATUS_DEFLATE_RATIO_LIMIT = 16,
-    OA_STATUS_DEFLATE_ENCODE_OUTPUT_LIMIT = 17
+    OA_STATUS_DEFLATE_ENCODE_OUTPUT_LIMIT = 17,
+    OA_STATUS_TAR_BAD_HEADER = 18,
+    OA_STATUS_TAR_TRUNCATED = 19,
+    OA_STATUS_TAR_LIMIT = 20,
+    OA_STATUS_TAR_NAME_TOO_LONG = 21,
+    OA_STATUS_TAR_READ_ERROR = 22
 };
 
 #define OA_DEFLATE_MAX_INPUT_BYTES UINT64_C(67108864)
 #define OA_DEFLATE_MAX_OUTPUT_BYTES UINT64_C(268435456)
 #define OA_DEFLATE_ENCODE_MAX_OUTPUT_BYTES UINT64_C(134217728)
+#define OA_TAR_MAX_INPUT_BYTES UINT64_C(67108864)
+#define OA_TAR_MAX_ENTRIES UINT64_C(4096)
+#define OA_TAR_MAX_NAME_POOL_BYTES UINT64_C(16777216)
 
 typedef uint32_t OaLocationKind;
 enum {
@@ -75,6 +83,12 @@ typedef struct OaTextError {
     uint64_t detail_a;
     uint64_t detail_b;
 } OaTextError;
+/* Name offsets index oa_tar_parse's UTF-8 byte pool; reserved bytes are always zero. */
+typedef struct OaTarEntry {
+    uint64_t name_offset, name_length, size, mtime, header_offset;
+    uint8_t typeflag; /* oa-tar reported flag: NUL normalizes to '0'; unknown flags are kept. */
+    uint8_t reserved[7];
+} OaTarEntry;
 typedef struct OaJsonNode {
     uint32_t kind, first_child, child_count, subtree_end, value_offset, value_length;
 } OaJsonNode;
@@ -224,6 +238,18 @@ uint32_t oa_deflate_raw_compress(const uint8_t *input, uint64_t input_length,
                                  uint8_t *output, uint64_t output_capacity,
                                  uint64_t *output_length, uint64_t *consumed,
                                  uint32_t *actual_level, OaErrorInfo *error);
+
+/*
+ * Metadata-only tar reader. The complete archive is validated with oa-tar DEFAULT_LIMITS,
+ * a 64 MiB input cap and caller-selected max_entries <= 4096. Names are returned as unchanged UTF-8 bytes in the
+ * caller's pool; duplicates and unknown typeflags are preserved (NUL normalizes to '0'). No payload bytes or filesystem
+ * extraction are exposed. Capacity query validates the whole archive and returns exact counts
+ * only on BUFFER_TOO_SMALL; all other failures leave arrays and size metadata unchanged.
+ */
+uint32_t oa_tar_parse(const uint8_t *input, uint64_t input_length, uint32_t max_entries,
+                      OaTarEntry *entries, uint64_t entry_capacity, uint64_t *entry_count,
+                      uint8_t *name_pool, uint64_t name_pool_capacity,
+                      uint64_t *name_pool_length, OaErrorInfo *error);
 
 /*
  * Bounded text parsers. Call once with zero capacities to query exact counts; this returns

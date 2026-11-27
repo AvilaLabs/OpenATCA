@@ -48,6 +48,7 @@ const FFI_EXPORTS: &[&str] = &[
     "oa_csv_parse",
     "oa_deflate_raw_inflate",
     "oa_deflate_raw_compress",
+    "oa_tar_parse",
 ];
 const FFI_DEPENDENCIES: &[(&str, &str)] = &[
     ("oa-geo", "../oa-geo"),
@@ -59,6 +60,7 @@ const FFI_DEPENDENCIES: &[(&str, &str)] = &[
     ("oa-xml", "../oa-xml"),
     ("oa-zip", "../oa-zip"),
     ("oa-deflate", "../oa-deflate"),
+    ("oa-tar", "../oa-tar"),
 ];
 
 /// Reviewed unsafe blocks in the provisional FFI module, grouped by their owning function.
@@ -98,6 +100,7 @@ pub const FFI_UNSAFE_BLOCKS: &[(&str, usize)] = &[
     ("oa_csv_parse", 5),
     ("oa_deflate_raw_inflate", 3),
     ("oa_deflate_raw_compress", 3),
+    ("oa_tar_parse", 3),
     ("ffi_l0_matches_the_shared_synthetic_vectors", 3),
     ("ffi_polygon_matches_the_shared_synthetic_vectors", 4),
     ("ffi_matches_the_shared_synthetic_geodesy_vectors", 1),

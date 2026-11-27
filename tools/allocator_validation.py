@@ -20,6 +20,7 @@ CORE_FFI_DEPS = {
     "oa-math": "../oa-math", "oa-sha256": "../oa-sha256",
     "oa-csv": "../oa-csv", "oa-json": "../oa-json", "oa-xml": "../oa-xml",
     "oa-zip": "../oa-zip", "oa-deflate": "../oa-deflate",
+    "oa-tar": "../oa-tar",
 }
 CORE_FFI_CRATE_TYPES = ["cdylib", "staticlib", "rlib"]
 CORE_FFI_SOURCE_FILES = {"lib.rs", "ffi.rs", "text.rs"}
@@ -577,7 +578,7 @@ def _core_ffi_exception_errors(root: Path, members: list[Path]) -> list[str]:
         errors.append("openatca-core-ffi must expose exactly cdylib, staticlib and rlib crate types")
     actual_deps = data.get("dependencies", {})
     if not isinstance(actual_deps, dict) or set(actual_deps) != set(CORE_FFI_DEPS):
-        errors.append("openatca-core-ffi dependencies must be exactly the six reviewed core/codec crates and oa-csv, oa-json, oa-xml")
+        errors.append("openatca-core-ffi dependencies must be exactly the seven reviewed core/codec crates and oa-csv, oa-json, oa-xml")
         actual_deps = actual_deps if isinstance(actual_deps, dict) else {}
     for name, relative in CORE_FFI_DEPS.items():
         declaration = actual_deps.get(name)

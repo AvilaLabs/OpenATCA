@@ -1,5 +1,6 @@
 #![deny(unsafe_code)]
-//! Provisional C ABI shell for selected existing `oa-*` L0 operations, including bounded text parsing.
+//! Provisional C ABI shell for selected existing `oa-*` L0 operations, including bounded
+//! compression, archive metadata, and text parsing.
 //!
 //! This is an experimental binding boundary, not a stable API. The only unsafe Rust is the
 //! pointer adaptation in `ffi.rs`; parser, math, integrity, and geodesy operations remain in their
@@ -20,7 +21,8 @@ pub use ffi::{
     oa_math_f32_binary, oa_math_f32_compare, oa_math_f32_is_sign_negative, oa_math_f32_ternary,
     oa_math_f32_unary, oa_math_f64_binary, oa_math_f64_compare, oa_math_f64_is_sign_negative,
     oa_math_f64_powi, oa_math_f64_sin_cos, oa_math_f64_ternary, oa_math_f64_unary,
-    oa_sha256_digest, oa_sha256_hex, oa_xml_decode_span, oa_xml_parse, OaErrorInfo, OaPolygon,
+    oa_sha256_digest, oa_sha256_hex, oa_tar_parse, oa_xml_decode_span, oa_xml_parse, OaErrorInfo,
+    OaPolygon, OaTarEntry,
 };
 pub use text::{
     OaCsvCounts, OaCsvField, OaCsvRow, OaJsonCounts, OaJsonNode, OaTextError, OaXmlAttribute,
