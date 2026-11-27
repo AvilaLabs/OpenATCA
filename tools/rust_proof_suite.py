@@ -92,6 +92,24 @@ def registry_packages_missing(proofs: list[dict[str, Any]], graph: dict[str, dic
     return sorted({p["package"] for p in proofs} - set(graph))
 
 
+def unresolved_path_dependencies(graph: dict[str, dict[str, Any]]) -> list[str]:
+    """Names referenced by path edges but absent from the current package graph."""
+    return sorted({dep for info in graph.values() for dep in info["deps"] if dep not in graph})
+
+
+def unmapped_package_paths(graph: dict[str, dict[str, Any]], changed: list[str]) -> list[str]:
+    """Changed source paths under a package root must map to a package present at HEAD."""
+    directories = {info["dir"] for info in graph.values()}
+    unmapped = set()
+    for path in changed:
+        parts = path.split("/")
+        if len(parts) >= 3 and parts[0] in _PACKAGE_ROOTS:
+            directory = f"{parts[0]}/{parts[1]}/"
+            if directory not in directories:
+                unmapped.add(directory)
+    return sorted(unmapped)
+
+
 def affected_packages(graph: dict[str, dict[str, Any]], changed: list[str]) -> set[str] | None:
     """Packages whose proofs a change can affect: those with a changed file and every package
     that depends on one of them, directly or not. `None` means everything."""
@@ -544,6 +562,14 @@ def run_suite(
             print(f"registry packages not in the workspace: {', '.join(missing)}", file=sys.stderr)
             return 2
         changed = changed_files(repo, changed_from)
+        unresolved = unresolved_path_dependencies(graph)
+        if unresolved:
+            print(f"cannot select proofs: unresolved workspace path dependencies: {', '.join(unresolved)}", file=sys.stderr)
+            return 2
+        unmapped = unmapped_package_paths(graph, changed or [])
+        if unmapped:
+            print(f"cannot select proofs: changed package paths are absent from HEAD: {', '.join(unmapped)}", file=sys.stderr)
+            return 2
         affected = None if changed is None else affected_packages(graph, changed)
     try:
         chosen = select_proof_ids(select_proofs(registry["proofs"], affected), proof_ids)

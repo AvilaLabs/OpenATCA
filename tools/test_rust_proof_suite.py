@@ -806,7 +806,58 @@ class SelectionHardeningTests(unittest.TestCase):
             self.assertEqual(result, 2)
             self.assertIn("oa-runway", stderr.getvalue())
 
-    def test_a_change_to_the_proof_inputs_selects_everything_in_the_push_tier(self):
+    def test_deleted_path_dependency_refuses_instead_of_successfully_skipping_affected_proofs(self):
+        # Kills current-HEAD-only ownership mapping: deletion of a helper must not become SKIPPED/0.
+        with tempfile.TemporaryDirectory() as temp:
+            repo = make_workspace(temp, self.BASE)
+            base = git(repo, "rev-parse", "HEAD")
+            git(repo, "rm", "-r", "crates/a")
+            git(repo, "commit", "-q", "-m", "remove helper package")
+            tools_dir = repo / "tools"
+            tools_dir.mkdir()
+            (tools_dir / "kani_validation.py").write_text("# fixture runner is not reached\n")
+            proof = proof_entry()
+            proof["package"] = "oa-track"
+            registry = Path(temp) / "registry.json"
+            registry.write_text(json.dumps(registry_with(proof)) + "\n")
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                result = run_suite(
+                    repo, Path(temp) / "out", Path(temp) / "target", registry,
+                    changed_from=base,
+                )
+            self.assertEqual(result, 2)
+            self.assertIn("unresolved workspace path dependencies: oa-math", stderr.getvalue())
+            self.assertEqual(stdout.getvalue(), "")
+            self.assertFalse((Path(temp) / "out").exists())
+
+    def test_unmapped_deleted_package_source_refuses_instead_of_successfully_skipping(self):
+        # Kills the old empty-affected-set success when a deleted package path has no HEAD owner.
+        with tempfile.TemporaryDirectory() as temp:
+            files = dict(self.BASE)
+            files["crates/b/Cargo.toml"] = manifest("oa-track")
+            repo = make_workspace(temp, files)
+            base = git(repo, "rev-parse", "HEAD")
+            git(repo, "rm", "-r", "crates/a")
+            git(repo, "commit", "-q", "-m", "remove unused helper")
+            tools_dir = repo / "tools"
+            tools_dir.mkdir()
+            (tools_dir / "kani_validation.py").write_text("# fixture runner is not reached\n")
+            proof = proof_entry()
+            proof["package"] = "oa-track"
+            registry = Path(temp) / "registry.json"
+            registry.write_text(json.dumps(registry_with(proof)) + "\n")
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                result = run_suite(
+                    repo, Path(temp) / "out", Path(temp) / "target", registry,
+                    changed_from=base,
+                )
+            self.assertEqual(result, 2)
+            self.assertIn("changed package paths are absent from HEAD: crates/a/", stderr.getvalue())
+            self.assertEqual(stdout.getvalue(), "")
+
+    def test_a_change_to_the_proof_inputs_selects_everything(self):
         graph = {"a": {"dir": "crates/a/", "deps": set()}}
         for path in (
             "fuzz/Cargo.toml", "fuzz/fuzz_targets/x.rs", "validation/rust-proof-status.json",
