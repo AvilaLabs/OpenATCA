@@ -778,6 +778,7 @@ def remove_package_from_workspace(repo, package_path, message):
 
 
 class SelectionHardeningTests(unittest.TestCase):
+    FULL_REGISTRY_IDS = {"tracker-core-invariant", "unrelated-ca-invariant"}
     BASE = {
         "Cargo.toml": "[workspace]\nmembers = []\n",
         "crates/a/Cargo.toml": manifest("oa-math"),
@@ -824,6 +825,33 @@ class SelectionHardeningTests(unittest.TestCase):
         env["FAKE_INVOKED"] = str(invoked)
         return subprocess.run(command, env=env, capture_output=True, text=True, timeout=60)
 
+    def run_workflow_base(self, repo, event, ref, tip, before):
+        env = os.environ.copy()
+        env.update({
+            "GITHUB_EVENT_NAME": event,
+            "GITHUB_REF": ref,
+            "GITHUB_SHA": tip,
+            "GITHUB_EVENT_BEFORE": before,
+            "GITHUB_PR_BASE_SHA": "",
+        })
+        result = subprocess.run(
+            ["python3", str(Path(__file__).with_name("select_rust_proof_base.py")), "--repo", str(repo)],
+            env=env, capture_output=True, text=True, timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout.strip()
+
+    def run_full_registry_event(self, repo, root, event, ref, tip, before):
+        selected_base = self.run_workflow_base(repo, event, ref, tip, before)
+        self.assertEqual(selected_base, "")
+        invoked = root / f"{event}-invocations.txt"
+        output = root / f"{event}-evidence"
+        actual = self.run_actual_suite_cli(repo, None, output, invoked)
+        self.assertEqual(actual.returncode, 0, actual.stderr)
+        suite = json.loads((output / "suite.json").read_text(encoding="utf-8"))
+        self.assertEqual({row["id"] for row in suite["checks"]}, self.FULL_REGISTRY_IDS)
+        return suite
+
     # Kills using event.before for a later train push and newline-delimited Git path parsing.
     def test_train_push_uses_cumulative_main_base_and_reaches_tracker_after_docs_push(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -841,25 +869,14 @@ class SelectionHardeningTests(unittest.TestCase):
             tip = git(repo, "rev-parse", "HEAD")
             git(repo, "branch", "train/selector-fixture", tip)
 
-            env = os.environ.copy()
-            env.update({
-                "GITHUB_EVENT_NAME": "push",
-                "GITHUB_REF": "refs/heads/train/selector-fixture",
-                "GITHUB_SHA": tip,
-                "GITHUB_EVENT_BEFORE": tracker_commit,
-                "GITHUB_PR_BASE_SHA": "",
-            })
-            selected_base = subprocess.run(
-                ["python3", str(Path(__file__).with_name("select_rust_proof_base.py")),
-                 "--repo", str(repo)],
-                env=env, capture_output=True, text=True, timeout=30,
+            selected_base = self.run_workflow_base(
+                repo, "push", "refs/heads/train/selector-fixture", tip, tracker_commit,
             )
-            self.assertEqual(selected_base.returncode, 0, selected_base.stderr)
-            self.assertEqual(selected_base.stdout.strip(), main_base)
+            self.assertEqual(selected_base, main_base)
 
             invoked = root / "proof-invocations.txt"
             output = root / "evidence"
-            actual = self.run_actual_suite_cli(repo, selected_base.stdout.strip(), output, invoked)
+            actual = self.run_actual_suite_cli(repo, selected_base, output, invoked)
             self.assertEqual(actual.returncode, 0, actual.stderr)
             suite = json.loads((output / "suite.json").read_text(encoding="utf-8"))
             self.assertEqual(suite["selection"]["base"], main_base)
@@ -894,29 +911,8 @@ class SelectionHardeningTests(unittest.TestCase):
             repo, base = self.selector_workspace(root)
             for event in ("schedule", "workflow_dispatch"):
                 with self.subTest(event=event):
-                    env = os.environ.copy()
-                    env.update({
-                        "GITHUB_EVENT_NAME": event,
-                        "GITHUB_REF": "refs/heads/train/selector-fixture",
-                        "GITHUB_SHA": base,
-                        "GITHUB_EVENT_BEFORE": base,
-                        "GITHUB_PR_BASE_SHA": "",
-                    })
-                    selected_base = subprocess.run(
-                        ["python3", str(Path(__file__).with_name("select_rust_proof_base.py")),
-                         "--repo", str(repo)],
-                        env=env, capture_output=True, text=True, timeout=30,
-                    )
-                    self.assertEqual(selected_base.returncode, 0, selected_base.stderr)
-                    self.assertEqual(selected_base.stdout.strip(), "")
-                    invoked = root / f"{event}-invocations.txt"
-                    output = root / f"{event}-evidence"
-                    actual = self.run_actual_suite_cli(repo, None, output, invoked)
-                    self.assertEqual(actual.returncode, 0, actual.stderr)
-                    suite = json.loads((output / "suite.json").read_text(encoding="utf-8"))
-                    self.assertEqual(
-                        {row["id"] for row in suite["checks"]},
-                        {"tracker-core-invariant", "unrelated-ca-invariant"},
+                    self.run_full_registry_event(
+                        repo, root, event, "refs/heads/train/selector-fixture", base, base,
                     )
 
     # Kills comparing a later train cap increase against event.before or the candidate tip.
@@ -958,29 +954,9 @@ class SelectionHardeningTests(unittest.TestCase):
             tip = git(repo, "rev-parse", "HEAD")
             git(repo, "update-ref", "refs/remotes/origin/main", tip)
 
-            env = os.environ.copy()
-            env.update({
-                "GITHUB_EVENT_NAME": "push",
-                "GITHUB_REF": "refs/heads/main",
-                "GITHUB_SHA": tip,
-                "GITHUB_EVENT_BEFORE": "0" * 40,
-                "GITHUB_PR_BASE_SHA": "",
-            })
-            selected_base = subprocess.run(
-                ["python3", str(Path(__file__).with_name("select_rust_proof_base.py")),
-                 "--repo", str(repo)],
-                env=env, capture_output=True, text=True, timeout=30,
+            self.run_full_registry_event(
+                repo, root, "push", "refs/heads/main", tip, "0" * 40,
             )
-            self.assertEqual(selected_base.returncode, 0, selected_base.stderr)
-            self.assertEqual(selected_base.stdout.strip(), "")
-
-            invoked = root / "proof-invocations.txt"
-            output = root / "evidence"
-            actual = self.run_actual_suite_cli(repo, selected_base.stdout.strip(), output, invoked)
-            self.assertEqual(actual.returncode, 0, actual.stderr)
-            suite = json.loads((output / "suite.json").read_text(encoding="utf-8"))
-            self.assertEqual({row["id"] for row in suite["checks"]},
-                             {"tracker-core-invariant", "unrelated-ca-invariant"})
 
     def test_a_rename_counts_as_a_change_to_the_old_and_the_new_path(self):
         with tempfile.TemporaryDirectory() as temp:
