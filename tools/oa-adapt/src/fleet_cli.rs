@@ -1406,7 +1406,7 @@ mod tests {
         assert!(phase_one.is_err());
         assert!(
             output_one.contains("processor\t1\trole=generic\tlocal=match"),
-            "{output_one}"
+            "result={phase_one:?}; output={output_one}"
         );
         assert!(
             output_one.contains("processor\t2\trole=generic\tlocal=match"),
