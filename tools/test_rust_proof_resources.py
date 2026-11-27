@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from contextlib import ExitStack
 from unittest import mock
 
 from rust_proof_suite import GNU_TIME_COMMAND, run_suite
@@ -83,6 +84,18 @@ class ProofResourceEvidenceTests(unittest.TestCase):
         output, target = root / "evidence", root / "target"
         return repo, registry, output, target
 
+    def execute_suite(self, env=None, time_command=None, workspace=None):
+        repo, registry, output, target = workspace or (
+            self.repo, self.registry, self.output, self.target,
+        )
+        with ExitStack() as contexts:
+            contexts.enter_context(mock.patch.dict(os.environ, env or {}))
+            if time_command is not None:
+                contexts.enter_context(mock.patch("rust_proof_suite.GNU_TIME_COMMAND", time_command))
+            result = run_suite(repo, output, target, registry)
+        suite = json.loads((output / "suite.json").read_text(encoding="utf-8"))
+        return result, suite, output
+
     def make_time_wrapper(self, root: Path, mode: str) -> Path:
         wrapper = root / "synthetic-time"
         wrapper.write_text(
@@ -104,12 +117,11 @@ class ProofResourceEvidenceTests(unittest.TestCase):
     def test_full_suite_binds_gnu_time_peak_and_elapsed_file_to_proof_outcome(self) -> None:
         if shutil.which(GNU_TIME_COMMAND) is None:
             self.skipTest("GNU time is unavailable on this host")
-        result = run_suite(self.repo, self.output, self.target, self.registry)
-        suite = json.loads((self.output / "suite.json").read_text(encoding="utf-8"))
+        result, suite, output = self.execute_suite()
         self.assertEqual(result, 0)
         self.assertEqual(suite["status"], "PASS")
         proof = suite["checks"][0]
-        resource_path = self.output / proof["resource_file"]
+        resource_path = output / proof["resource_file"]
         resource_bytes = resource_path.read_bytes()
         self.assertEqual(proof["resource_file_sha256"], hashlib.sha256(resource_bytes).hexdigest())
         resource = json.loads(resource_bytes)
@@ -124,9 +136,9 @@ class ProofResourceEvidenceTests(unittest.TestCase):
         if shutil.which(GNU_TIME_COMMAND) is None:
             self.skipTest("GNU time is unavailable on this host")
         child_allocation_bytes = 64 * 1024 * 1024
-        with mock.patch.dict(os.environ, {"SYNTHETIC_RESOURCE_CHILD_BYTES": str(child_allocation_bytes)}):
-            result = run_suite(self.repo, self.output, self.target, self.registry)
-        suite = json.loads((self.output / "suite.json").read_text(encoding="utf-8"))
+        result, suite, _ = self.execute_suite(
+            env={"SYNTHETIC_RESOURCE_CHILD_BYTES": str(child_allocation_bytes)},
+        )
         measurement = suite["checks"][0]["resource_measurement"]["measurement"]
         self.assertEqual(result, 0)
         self.assertGreater(measurement["maximum_rss_kib"], child_allocation_bytes * 3 // (4 * 1024))
@@ -135,9 +147,7 @@ class ProofResourceEvidenceTests(unittest.TestCase):
         """Kills omission of GNU time's quiet mode, which prefixes nonzero child status text."""
         if shutil.which(GNU_TIME_COMMAND) is None:
             self.skipTest("GNU time is unavailable on this host")
-        with mock.patch.dict(os.environ, {"SYNTHETIC_RESOURCE_RUNNER_EXIT": "7"}):
-            result = run_suite(self.repo, self.output, self.target, self.registry)
-        suite = json.loads((self.output / "suite.json").read_text(encoding="utf-8"))
+        result, suite, _ = self.execute_suite(env={"SYNTHETIC_RESOURCE_RUNNER_EXIT": "7"})
         proof = suite["checks"][0]
         self.assertEqual(result, 1)
         self.assertEqual(proof["status"], "FAIL")
@@ -151,9 +161,9 @@ class ProofResourceEvidenceTests(unittest.TestCase):
                 root.mkdir()
                 repo, registry, output, target = self.make_workspace(root)
                 wrapper = self.make_time_wrapper(root, mode)
-                with mock.patch("rust_proof_suite.GNU_TIME_COMMAND", str(wrapper)):
-                    result = run_suite(repo, output, target, registry)
-                suite = json.loads((output / "suite.json").read_text(encoding="utf-8"))
+                result, suite, _ = self.execute_suite(
+                    time_command=str(wrapper), workspace=(repo, registry, output, target),
+                )
                 proof = suite["checks"][0]
                 self.assertEqual(result, 1)
                 self.assertEqual(suite["status"], "FAIL")

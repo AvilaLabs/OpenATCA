@@ -10,7 +10,7 @@ import tempfile
 import re
 import subprocess
 import unittest
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import ExitStack, redirect_stderr, redirect_stdout
 from dataclasses import dataclass
 from unittest import mock
 
@@ -70,6 +70,10 @@ def registry_with(*proofs):
         "expected_proof_count": len(proofs),
         "proofs": list(proofs),
     }
+
+
+def last_stdout_report(stdout):
+    return json.loads(stdout.getvalue().splitlines()[-1])
 
 
 class SuiteConfigurationTests(unittest.TestCase):
@@ -429,16 +433,37 @@ print("fake runner stdout")
             selection["changed_from"] = options.changed_from
         if options.shard is not None:
             selection["shard"] = options.shard
-        with mock.patch.dict(os.environ, env), redirect_stdout(stdout), redirect_stderr(stderr):
+        with ExitStack() as contexts:
+            contexts.enter_context(mock.patch.dict(os.environ, env))
+            contexts.enter_context(redirect_stdout(stdout))
+            contexts.enter_context(redirect_stderr(stderr))
             result = run_suite(repo, out, target, registry, **selection)
         suite_path = out / "suite.json"
         suite = json.loads(suite_path.read_text()) if suite_path.is_file() else None
         return CapturedRun(result, suite, stdout.getvalue(), stderr.getvalue())
 
-    def invoke(self, root, mode="pass", proof_count=2):
+    def run_fake_case(self, root, mode="pass", proof_count=2, log_invocations=False):
         repo, registry, out, target, mode = self.fake_workspace(root, mode, proof_count)
-        captured = self.run_captured(repo, out, target, registry, SuiteRun(mode=mode))
+        invoked = root / "invoked.txt" if log_invocations else None
+        captured = self.run_captured(
+            repo, out, target, registry, SuiteRun(mode=mode, invoked=invoked),
+        )
+        return captured, out, registry, invoked
+
+    def invoke(self, root, mode="pass", proof_count=2):
+        captured, out, registry, _ = self.run_fake_case(root, mode, proof_count)
         return captured.result, out, registry, captured.stdout, captured.stderr
+
+    def run_logged_case(self, root, mode, proof_count):
+        captured, _, _, invoked = self.run_fake_case(root, mode, proof_count, log_invocations=True)
+        return captured, invoked
+
+    def assert_successful_suite(self, captured, expected_count):
+        suite = captured.suite
+        self.assertEqual(captured.result, 0, captured.stderr)
+        self.assertEqual(suite["status"], "PASS")
+        self.assertEqual(suite["selected_count"], expected_count)
+        return suite
 
     def test_two_fake_harness_runs_pass_and_pipeline_sources_are_archived(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -487,11 +512,7 @@ print("fake runner stdout")
     def test_failure_does_not_suppress_later_proof_execution(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            repo, registry, out, target, _ = self.fake_workspace(root, mode="fail", proof_count=3)
-            invoked = root / "invoked.txt"
-            captured = self.run_captured(
-                repo, out, target, registry, SuiteRun(mode="fail", invoked=invoked),
-            )
+            captured, invoked = self.run_logged_case(root, "fail", 3)
             result, suite = captured.result, captured.suite
             statuses = [check["status"] for check in suite["checks"]]
             self.assertEqual(result, 1)
@@ -509,11 +530,7 @@ print("fake runner stdout")
     def test_failure_then_pass_executes_and_reports_both_proofs(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            repo, registry, out, target, _ = self.fake_workspace(root, mode="first-fail", proof_count=2)
-            invoked = root / "invoked.txt"
-            captured = self.run_captured(
-                repo, out, target, registry, SuiteRun(mode="first-fail", invoked=invoked),
-            )
+            captured, invoked = self.run_logged_case(root, "first-fail", 2)
             result, suite = captured.result, captured.suite
             self.assertEqual(result, 1)
             self.assertEqual([entry["status"] for entry in suite["checks"]], ["FAIL", "PASS"])
@@ -579,10 +596,7 @@ print("fake runner stdout")
             captured = self.run_captured(
                 repo, out, target_root, registry_path,
             )
-            suite = captured.suite
-            self.assertEqual(captured.result, 0, captured.stderr)
-            self.assertEqual(suite["status"], "PASS")
-            self.assertEqual(suite["selected_count"], len(proofs))
+            suite = self.assert_successful_suite(captured, len(proofs))
             commands = {check["id"]: check["command"] for check in suite["checks"]}
             self.assertEqual(set(commands), set(proof_ids))
             targets = {
@@ -611,21 +625,13 @@ print("fake runner stdout")
     def test_success_runs_every_proof_and_default_failure_continues(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            repo, registry, out, target, _ = self.fake_workspace(root, proof_count=3)
-            invoked = root / "invoked.txt"
-            captured = self.run_captured(repo, out, target, registry, SuiteRun(invoked=invoked))
-            suite = captured.suite
-            self.assertEqual(captured.result, 0, captured.stderr)
-            self.assertEqual(suite["status"], "PASS")
+            captured, invoked = self.run_logged_case(root, "pass", 3)
+            suite = self.assert_successful_suite(captured, 3)
             self.assertEqual([x["status"] for x in suite["checks"]], ["PASS"] * 3)
             self.assertEqual(len(invoked.read_text().splitlines()), 3)
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            repo, registry, out, target, _ = self.fake_workspace(root, mode="fail", proof_count=2)
-            invoked = root / "invoked.txt"
-            captured = self.run_captured(
-                repo, out, target, registry, SuiteRun(mode="fail", invoked=invoked),
-            )
+            captured, invoked = self.run_logged_case(root, "fail", 2)
             suite = captured.suite
             self.assertEqual(captured.result, 1)
             self.assertEqual(suite["status"], "FAIL")
@@ -805,6 +811,13 @@ def make_workspace(root, files):
     return repo
 
 
+def remove_package_from_workspace(repo, package_path, message):
+    base = git(repo, "rev-parse", "HEAD")
+    git(repo, "rm", "-r", package_path)
+    git(repo, "commit", "-q", "-m", message)
+    return base
+
+
 class SelectionHardeningTests(unittest.TestCase):
     BASE = {
         "Cargo.toml": "[workspace]\nmembers = []\n",
@@ -816,9 +829,7 @@ class SelectionHardeningTests(unittest.TestCase):
 
     def deleted_package_workspace(self, temp, files, message):
         repo = make_workspace(temp, files)
-        base = git(repo, "rev-parse", "HEAD")
-        git(repo, "rm", "-r", "crates/a")
-        git(repo, "commit", "-q", "-m", message)
+        base = remove_package_from_workspace(repo, "crates/a", message)
         tools_dir = repo / "tools"
         tools_dir.mkdir()
         (tools_dir / "kani_validation.py").write_text("# fixture runner is not reached\n")
@@ -968,7 +979,7 @@ class SelectionHardeningTests(unittest.TestCase):
                     changed_from=base,
                 )
             self.assertEqual(result, 0)
-            report = json.loads(stdout.getvalue().splitlines()[-1])
+            report = last_stdout_report(stdout)
             self.assertEqual(execute.call_count, 2, stdout.getvalue())
             self.assertEqual(report["selected"], 2)
             self.assertEqual(report["suite_status"], "PASS")
@@ -978,9 +989,7 @@ class SelectionHardeningTests(unittest.TestCase):
             files = dict(self.BASE)
             files["crates/b/Cargo.toml"] = manifest("oa-track")
             repo = make_workspace(temp, files)
-            base = git(repo, "rev-parse", "HEAD")
-            git(repo, "rm", "-r", "crates/a")
-            git(repo, "commit", "-q", "-m", "remove package")
+            base = remove_package_from_workspace(repo, "crates/a", "remove package")
             graph = package_graph(repo)
             base_dirs = package_directories_at(repo, base)
             changed = changed_files(repo, base)
@@ -1018,7 +1027,7 @@ class SelectionHardeningTests(unittest.TestCase):
                     repo, Path(temp) / "out", Path(temp) / "t", registry, changed_from=base,
                 )
             self.assertEqual(result, 0, stderr.getvalue())
-            report = json.loads(stdout.getvalue().splitlines()[-1])
+            report = last_stdout_report(stdout)
             self.assertEqual(report["suite_status"], "SKIPPED")
             self.assertEqual(report["selection"]["base"], base)
             self.assertEqual(report["selection"]["changed_files"], ["docs/readme.md"])
