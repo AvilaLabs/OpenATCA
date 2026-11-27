@@ -4,8 +4,8 @@
 
 use crate::runtime::{
     regional_acknowledge_quarantine_before_commit, regional_adaptation_sha256,
-    regional_adaptation_version, regional_mode_adaptation, regional_mode_component_sha256,
-    regional_new_from_issued_package_with_audit_checkpoint,
+    regional_adaptation_version, regional_install_verified_runway_aids, regional_mode_adaptation,
+    regional_mode_component_sha256, regional_new_from_issued_package_with_audit_checkpoint,
     regional_new_with_profile_and_quarantine_audit_checkpoint, regional_pixels,
     regional_quarantine_stats, regional_step, QuarantineMaintenanceRequest, RegionalRunProfile,
     DEFAULT_REGIONAL_RUN_PROFILE,
