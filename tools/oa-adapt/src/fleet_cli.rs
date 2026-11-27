@@ -1332,10 +1332,10 @@ mod tests {
         .expect("issue v2 field change");
         assert_eq!(v2, 2);
         let v2_digest = sha256(&changed);
-        let mut expected_text = String::new();
+        let mut expected_text = String::from("OA_EXPECTED_PROCESSORS\t2\n");
         for id in [1, 2, 3] {
             expected_text.push_str(&format!(
-                "{id}\t{}\t{}\t{}\t{}\t1\t2\n",
+                "{id}\tgeneric\t{}\t{}\t{}\t{}\t1\t2\n",
                 id + 100,
                 "11".repeat(32),
                 "22".repeat(32),
