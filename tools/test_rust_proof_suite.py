@@ -811,6 +811,7 @@ class SelectionHardeningTests(unittest.TestCase):
         env["FAKE_INVOKED"] = str(invoked)
         return subprocess.run(command, env=env, capture_output=True, text=True, timeout=60)
 
+    # Kills using event.before for a later train push and newline-delimited Git path parsing.
     def test_train_push_uses_cumulative_main_base_and_reaches_tracker_after_docs_push(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -854,6 +855,7 @@ class SelectionHardeningTests(unittest.TestCase):
             self.assertEqual(invoked.read_text(encoding="utf-8").splitlines(),
                              ["types::proofs::bounded_example"])
 
+    # Kills treating an undecodable changed pathname as an empty change set/SKIPPED run.
     def test_unrepresentable_git_path_runs_all_proofs_instead_of_skipping(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -872,6 +874,7 @@ class SelectionHardeningTests(unittest.TestCase):
             self.assertFalse((output / "suite.json").exists())
             self.assertFalse(invoked.exists())
 
+    # Kills using the already-updated origin/main tip as an empty initial-push diff base.
     def test_initial_main_push_selects_full_registry(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
