@@ -121,11 +121,39 @@ class CommitHygieneTests(unittest.TestCase):
         head = "a" * 40
         with patch.dict(os.environ, {
             "GITHUB_EVENT_NAME": "push", "GITHUB_SHA": head,
+            "COMMIT_EMAIL_LOG_MASK": "fixture@example.invalid",
         }, clear=True):
             with self.assertRaises(module.Refusal) as caught:
                 module.main()
         self.assertEqual(caught.exception.rule, "missing-or-invalid-email-variable")
         self.assertEqual(caught.exception.sha, head[:12])
+
+    def test_missing_or_mismatched_redaction_carrier_fails_before_git(self):
+        with patch.dict(os.environ, {"EXPECTED_COMMIT_EMAIL": "fixture@example.invalid"}, clear=True):
+            with self.assertRaises(module.Refusal) as caught:
+                module.main(mask_preflight=True)
+        self.assertEqual(caught.exception.rule, "email-log-mask-missing")
+        with patch.dict(os.environ, {"COMMIT_EMAIL_LOG_MASK": "fixture@example.invalid"}, clear=True):
+            self.assertEqual(module.main(mask_preflight=True), 0)
+        with patch.dict(os.environ, {
+            "EXPECTED_COMMIT_EMAIL": "fixture@example.invalid",
+            "COMMIT_EMAIL_LOG_MASK": "different@example.invalid",
+        }, clear=True):
+            with self.assertRaises(module.Refusal) as caught:
+                module.main()
+        self.assertEqual(caught.exception.rule, "email-log-mask-mismatch")
+
+    def test_workflow_uses_secret_carrier_and_vars_only_for_validation(self):
+        workflow = (Path(__file__).parents[1] / "workflows" / "ci.yml").read_text()
+        self.assertIn("COMMIT_EMAIL_LOG_MASK: ${{ secrets.COMMIT_EMAIL_LOG_MASK }}", workflow)
+        self.assertIn("EXPECTED_COMMIT_EMAIL: ${{ vars.COMMIT_EMAIL }}", workflow)
+        self.assertIn("if: env.COMMIT_EMAIL_LOG_MASK != ''", workflow)
+        guard_start = workflow.index("- name: Require commit-email log redaction carrier")
+        checker_start = workflow.index("- name: Check commit metadata and tracked path hygiene")
+        guard_step = workflow[guard_start:checker_start]
+        self.assertNotIn("EXPECTED_COMMIT_EMAIL", guard_step)
+        self.assertIn("--mask-preflight", guard_step)
+        self.assertLess(guard_start, checker_start)
 
     def test_failure_output_is_only_valid_short_sha_and_rule(self):
         head = "b" * 40

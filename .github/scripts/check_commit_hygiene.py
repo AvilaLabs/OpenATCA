@@ -122,10 +122,17 @@ def check_tracked_paths(commits: list[str], cwd=None) -> None:
             raise Refusal("tracked-path-scan")
 
 
-def main() -> int:
+def main(mask_preflight: bool = False) -> int:
+    mask = os.environ.get("COMMIT_EMAIL_LOG_MASK", "")
+    if not mask:
+        raise Refusal("email-log-mask-missing")
+    if mask_preflight:
+        return 0
     expected = os.environ.get("EXPECTED_COMMIT_EMAIL", "")
     if not expected or "\n" in expected or "\r" in expected:
         raise Refusal("missing-or-invalid-email-variable")
+    if mask != expected:
+        raise Refusal("email-log-mask-mismatch")
     event = os.environ.get("GITHUB_EVENT_NAME", "")
     ref = os.environ.get("GITHUB_REF", "")
     if event == "pull_request":
@@ -148,7 +155,10 @@ def main() -> int:
 
 if __name__ == "__main__":
     try:
-        result = main()
+        args = sys.argv[1:]
+        if args not in ([], ["--mask-preflight"]):
+            raise Refusal("unsupported-arguments")
+        result = main(mask_preflight=args == ["--mask-preflight"])
     except Refusal as refusal:
         print(failure_line(refusal), file=sys.stderr)
         raise SystemExit(1)

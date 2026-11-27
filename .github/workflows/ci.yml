@@ -9,11 +9,20 @@ jobs:
   commit-hygiene:
     if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/train/')
     runs-on: ubuntu-24.04
+    env:
+      COMMIT_EMAIL_LOG_MASK: ${{ secrets.COMMIT_EMAIL_LOG_MASK }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Require commit-email log redaction carrier
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_SHA: ${{ github.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python3 .github/scripts/check_commit_hygiene.py --mask-preflight
       - name: Check commit metadata and tracked path hygiene
+        if: env.COMMIT_EMAIL_LOG_MASK != ''
         env:
           EXPECTED_COMMIT_EMAIL: ${{ vars.COMMIT_EMAIL }}
           GITHUB_EVENT_NAME: ${{ github.event_name }}
