@@ -1677,10 +1677,10 @@ mod tests {
         assert_eq!(flight_driver_len(&catalog_flights), 1);
     }
 
-    // REQ: OA-NAM-039, OA-REG-019
     // B2: run both the historic 256-route profile and the opt-in current-route pool through the
     // real regional NAM session, route adapter and oa-flight table. The first retains the
     // explicit refusal result; the second exercises bounded replacement and as-of expiry.
+    // REQ: OA-NAM-039, OA-REG-019
     #[test]
     fn legacy_and_explicit_route_pool_account_7080_nam_plans() {
         let mut legacy = crate::runtime::RegionalRunProfile::recorded_peak();
