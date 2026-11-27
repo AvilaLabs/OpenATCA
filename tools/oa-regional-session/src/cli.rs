@@ -373,6 +373,26 @@ pub fn run_session_with_profile_options_and_quarantine_release(
         return Err("session contains no events".into());
     }
     let first = batches.first().ok_or("session has no cutoff")?.receipt_ns;
+    let mut cifp_area: Option<(f64, f64, f64, f64)> = None;
+    for event in batches.iter().flat_map(|batch| batch.events.iter()) {
+        if let crate::input::EventKind::Position {
+            latitude_e7,
+            longitude_e7,
+            ..
+        } = event.kind
+        {
+            let lat = f64::from(latitude_e7) / 1e7;
+            let lon = f64::from(longitude_e7) / 1e7;
+            if let Some((south, north, west, east)) = &mut cifp_area {
+                *south = south.min(lat);
+                *north = north.max(lat);
+                *west = west.min(lon);
+                *east = east.max(lon);
+            } else {
+                cifp_area = Some((lat, lat, lon, lon));
+            }
+        }
+    }
     let performance_data = performance
         .map(crate::performance::load_performance)
         .transpose()?;
@@ -390,7 +410,7 @@ pub fn run_session_with_profile_options_and_quarantine_release(
         }
         MsawSource::Manifest(path) => {
             let (data, manifest_sha) =
-                crate::msaw_bridge::load_msaw_manifest(path, first / 1_000_000)?;
+                crate::msaw_bridge::load_msaw_manifest(path, first / 1_000_000, cifp_area)?;
             let evidence = format!(
                 "OA_REGIONAL_MSAW_DATA\t1\nprovenance\n{:#?}\nsettings\n{:#?}\nlimits\n{:#?}\n",
                 data.provenance,

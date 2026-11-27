@@ -19,7 +19,11 @@ const MAX_REGIONAL_MSAW_LOGS: usize = 4096;
 
 /// Explicit, bounded startup manifest. Observation time is never substituted for a METAR
 /// file's actual receipt time. Relative paths resolve beside this manifest.
-pub fn load_msaw_manifest(path: &Path, cutoff_ms: i64) -> Result<(RegionalData, [u8; 32]), String> {
+pub fn load_msaw_manifest(
+    path: &Path,
+    cutoff_ms: i64,
+    cifp_area: Option<(f64, f64, f64, f64)>,
+) -> Result<(RegionalData, [u8; 32]), String> {
     use oa_msaw_run::regional::{
         load_regional_data, MetarSource, RegionalDataLimits, RegionalDataPaths, WeatherAdmission,
     };
@@ -42,14 +46,16 @@ pub fn load_msaw_manifest(path: &Path, cutoff_ms: i64) -> Result<(RegionalData, 
     let mut terrain_dir = None;
     let mut dof_files = Vec::new();
     let mut metar_files = Vec::new();
+    let mut cifp = None;
     for (index, line) in lines.enumerate() {
-        if index >= 66 || line.len() > 1100 {
+        if index >= 67 || line.len() > 1100 {
             return Err("MSAW manifest row/byte budget exceeded".into());
         }
         let fields: Vec<_> = line.split('\t').collect();
         match fields.as_slice() {
             ["CONFIG", name] if config.is_none() => config = Some(resolve(name)?),
             ["TERRAIN", name] if terrain_dir.is_none() => terrain_dir = Some(resolve(name)?),
+            ["CIFP", name] if cifp.is_none() => cifp = Some(resolve(name)?),
             ["DOF", name] if dof_files.len() < 32 => {
                 let candidate = resolve(name)?;
                 if dof_files.contains(&candidate) {
@@ -89,6 +95,8 @@ pub fn load_msaw_manifest(path: &Path, cutoff_ms: i64) -> Result<(RegionalData, 
         terrain_dir,
         dof_files,
         metar_files,
+        cifp,
+        cifp_area,
     };
     let data = load_regional_data(
         &paths,
@@ -116,6 +124,7 @@ pub struct RegionalMsaw {
     cycles: usize,
     failed: bool,
     admitted_cutoff_ms: i64,
+    inhibits_installed: bool,
 }
 
 // A3/C6: bounded cold frame evidence; all rows are copied before the core logs are drained.
@@ -160,13 +169,8 @@ fn assemble(
         return Err("MSAW configuration exceeds regional row/sample/log budgets".into());
     }
     // These settings need the corresponding coordinator service, not silent omission.
-    if !settings.inhibits.is_empty() || !settings.requests.is_empty() {
-        return Err(
-            "configured MSAW inhibitions/service requests require an authority adapter".into(),
-        );
-    }
-    if !settings.cifp_airports.is_empty() || settings.cifp_area_margin_nm.is_some() {
-        return Err("automatic CIFP MSAW adaptation requires the corridor-loading adapter".into());
+    if !settings.requests.is_empty() {
+        return Err("MSAW service requests require joined full-flight and beacon evidence".into());
     }
     let max_points = max_rows
         .checked_mul(settings.msaw.samples)
@@ -191,10 +195,16 @@ fn assemble(
         cycles: 0,
         failed: false,
         admitted_cutoff_ms: 0,
+        inhibits_installed: false,
     })
 }
 
 pub fn regional_msaw_new(data: RegionalData, max_rows: usize) -> Result<RegionalMsaw, String> {
+    if (!data.settings.cifp_airports.is_empty() || data.settings.cifp_area_margin_nm.is_some())
+        && !data.provenance.cifp_source_present
+    {
+        return Err("CIFP-dependent MSAW settings lack loaded CIFP provenance".into());
+    }
     let admitted_cutoff_ms = data.provenance.cutoff_ms;
     let mut service = assemble(
         data.settings,
@@ -257,6 +267,41 @@ fn synthetic_floor(point: &oa_msaw::SamplePoint) -> FloorSample {
         apt_clearance_ft: FLOOR_NONE,
         apt_ceiling_ft: FLOOR_NONE,
     }
+}
+
+fn install_configured_inhibits(
+    service: &mut RegionalMsaw,
+    inhibits: &mut InhibitTable,
+    first_ns: i64,
+) -> Result<(), String> {
+    if service.inhibits_installed {
+        return Ok(());
+    }
+    let mut staged = inhibits.clone();
+    for (index, spec) in service.settings.inhibits.iter().enumerate() {
+        let start_ns = first_ns.saturating_add((spec.start_s * 1e9).round() as i64);
+        let end_ns = first_ns.saturating_add((spec.end_s * 1e9).round() as i64);
+        let request = oa_safety::inhibit::InhibitRequest {
+            net: oa_safety::net::NetId::Msaw,
+            vertices: &spec.vertices,
+            alt_low_ft: spec.alt_lo_ft,
+            alt_high_ft: spec.alt_hi_ft,
+            start_ns,
+            end_ns,
+            reason: &spec.reason,
+            author: &spec.author,
+        };
+        oa_safety::inhibit::inhibit_create(
+            &mut staged,
+            &service.settings.inhibit_cfg,
+            &request,
+            first_ns,
+        )
+        .map_err(|error| format!("MSAW inhibit line {} refused: {error:?}", index + 1))?;
+    }
+    *inhibits = staged;
+    service.inhibits_installed = true;
+    Ok(())
 }
 
 fn evaluate_cycle(
@@ -404,7 +449,8 @@ pub fn regional_msaw_cycle(
     let result = if service.failed {
         Err("MSAW service failed; reconstruct before resuming evaluation".into())
     } else {
-        evaluate_cycle(service, time_ns, pressure_rows, states, inhibits)
+        install_configured_inhibits(service, inhibits, time_ns)
+            .and_then(|()| evaluate_cycle(service, time_ns, pressure_rows, states, inhibits))
     };
     match result {
         Ok(frame) => Ok(frame),
@@ -449,6 +495,54 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
     use super::*;
 
+    fn configured_regional_service() -> (std::path::PathBuf, RegionalMsaw, [u8; 32]) {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "oa-regional-msaw-loader-{}-{id}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        let header = include_str!("../../../crates/oa-arinc424/tests/fixtures/header.txt");
+        let body = [
+            include_str!("../../../crates/oa-arinc424/tests/fixtures/airports.txt"),
+            include_str!("../../../crates/oa-arinc424/tests/fixtures/runways.txt"),
+            include_str!("../../../crates/oa-arinc424/tests/fixtures/terminal_waypoints.txt"),
+            include_str!("../../../crates/oa-arinc424/tests/fixtures/approach.txt"),
+        ]
+        .concat();
+        let mut header_rows: Vec<String> = header.lines().map(str::to_string).collect();
+        header_rows[0].replace_range(28..35, &format!("{:07}", body.lines().count()));
+        let mut cifp = header_rows.join("\n");
+        cifp.push('\n');
+        cifp.push_str(&body);
+        std::fs::write(root.join("FAACIFP18"), cifp).unwrap();
+
+        let config = include_str!("../../oa-msaw/testdata/dev.cfg")
+            .replace("max_tracks = 8192", "max_tracks = 32")
+            .replace("max_open = 4096", "max_open = 32")
+            .replace("track_budget = 2048", "track_budget = 32")
+            .replace("alert_log_capacity = 262144", "alert_log_capacity = 4096")
+            .replace("skip_log_capacity = 262144", "skip_log_capacity = 4096");
+        let config = format!(
+            "{config}\ncifp_airport = KORD\ninhibit = 0 120 0 3000 A4TEST configured 40.9,-87.1 40.9,-86.9 41.1,-86.9 41.1,-87.1\n"
+        );
+        std::fs::write(root.join("dev.cfg"), config).unwrap();
+        let manifest = root.join("inputs.tsv");
+        std::fs::write(
+            &manifest,
+            "OA-MSAW-INPUTS\t1\nCONFIG\tdev.cfg\nCIFP\tFAACIFP18\n",
+        )
+        .unwrap();
+        let (data, _) = load_msaw_manifest(&manifest, 0, None).unwrap();
+        let expected_provenance = data.provenance.manifest_sha256;
+        let service = regional_msaw_new(data, 32).unwrap();
+        (root, service, expected_provenance)
+    }
+
     fn track(alt_ft: f32, vrate_fpm: f32) -> MsawTrack {
         MsawTrack {
             lat_deg: 41.0,
@@ -465,6 +559,59 @@ mod tests {
             alt_change_10s_ft: f32::NAN,
             ground_ft: f32::NAN,
         }
+    }
+
+    // REQ: OA-MSAW-007, OA-MSAW-034
+    #[test]
+    fn normal_manifest_loads_cifp_corridors_and_installs_configured_inhibits_once() {
+        let (root, mut service, expected_provenance) = configured_regional_service();
+        // This test's alerting floor is explicitly synthetic; the production loader above still
+        // proves that the configured inhibition and CIFP source enter the normal service.
+        service.synthetic = true;
+        service.floors = None;
+        let mut states = oa_safety::net::state_table_new(10_000_000_000, 0).unwrap();
+        let mut inhibits = oa_safety::inhibit::inhibits_new();
+        assert_eq!(service.provenance_sha256, expected_provenance);
+        assert!(!service.settings.msaw.corridors.is_empty());
+
+        let first_ns = 2_000_000_000;
+        let _ = regional_msaw_cycle(
+            &mut service,
+            first_ns,
+            &[track(1500.0, -600.0)],
+            &mut states,
+            &mut inhibits,
+        )
+        .unwrap();
+        assert_eq!(
+            oa_safety::inhibit::inhibits_in_force(&inhibits, oa_safety::net::NetId::Msaw, first_ns),
+            1
+        );
+        assert!(
+            !oa_safety::inhibit::suppressed_log(&inhibits).is_empty(),
+            "configured inhibition did not record the hidden MSAW alert"
+        );
+        assert!(service.inhibits_installed);
+
+        let later_ns = 130_000_000_000;
+        let later = regional_msaw_cycle(
+            &mut service,
+            later_ns,
+            &[track(1500.0, -600.0)],
+            &mut states,
+            &mut inhibits,
+        )
+        .unwrap();
+        assert_eq!(
+            later.open.len(),
+            1,
+            "expired inhibition must stop hiding the alert"
+        );
+        assert_eq!(
+            oa_safety::inhibit::inhibits_in_force(&inhibits, oa_safety::net::NetId::Msaw, later_ns),
+            0
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     // REQ: OA-REG-011

@@ -114,13 +114,19 @@ CONFIG<TAB>path/to/config.json
 TERRAIN<TAB>path/to/terrain-directory
 DOF<TAB>path/to/obstacles.zip
 METAR<TAB>actual_file_receipt_unix_ms<TAB>path/to/metar.json
+CIFP<TAB>path/to/FAACIFP18-or-cifp.zip
 ```
 
-CONFIG is required; TERRAIN is optional and unique; at most 32 DOF and 32 METAR files are
-accepted. Each weather file must have actually arrived by the first session cutoff; report
-observation times also pass causal admission. Missing terrain, obstacles, weather and chart
-coverage remain explicit. Automatic CIFP corridor loading and controller-authorized MSAW
-inhibition/service requests are not yet bridged and configured requests are refused.
+CONFIG is required; TERRAIN and CIFP are optional and unique; CIFP input is capped at 512 MiB;
+at most 32 DOF and 32 METAR files are accepted. Each weather file must have actually arrived by the first session cutoff; report
+observation times also pass causal admission. When supplied, CIFP adds corridors named by
+`cifp_airport` and approach/runway corridors for the clip bounds widened by
+`cifp_area_margin_nm`. The corridor source bytes are included in the regional MSAW provenance.
+The MSAW input config's polygon inhibitions are installed into the shared inhibition table at the
+first MSAW cycle and expire on their configured end times. Their author field is configuration
+text, not an authenticated identity. MSAW `msaw_request` rows remain refused until full-flight,
+callsign and beacon evidence can be joined at runtime; VFR/service eligibility is reported
+unavailable. Missing terrain, obstacles, weather and chart coverage remain explicit.
 `msaw-data.txt` records supplied settings, source hashes, receipt stamps and loader limits,
 bound by the closed run manifest; frame evidence records the exact terrain tiles used.
 
