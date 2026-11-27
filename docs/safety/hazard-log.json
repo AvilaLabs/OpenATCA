@@ -8739,7 +8739,7 @@
     {
       "id": "HZ-AIRSPACE-001",
       "function": "navigation_and_adaptation_data",
-      "cause": "A facility, runway, route, procedure, airspace, or adaptation record is misdecoded, incomplete, or associated with the wrong source.",
+      "cause": "A facility, runway, route, procedure, airspace, or adaptation record is misdecoded, incomplete, associated with the wrong source, or stale; a processor may load an adaptation set that differs from the separately pinned issued set.",
       "effect": "A route, boundary, or facility constraint may be misplaced or missing from downstream display and warning functions.",
       "severity_class": "Catastrophic",
       "severity_status": "engineering_candidate",
@@ -9299,6 +9299,41 @@
           "requirement_id": "OA-ADAPT-004",
           "file": "tools/oa-adapt/src/manifest.rs",
           "test_name": "v3_issued_facility_preset_roundtrips_exact_body_and_refuses_identity_damage"
+        },
+        {
+          "requirement_id": "OA-ADAPT-003",
+          "file": "tools/oa-adapt/src/local_inventory.rs",
+          "test_name": "startup_verifies_pin_and_on_demand_reports_local_loaded_and_disk_digests"
+        },
+        {
+          "requirement_id": "OA-ADAPT-003",
+          "file": "tools/oa-adapt/src/local_inventory.rs",
+          "test_name": "on_demand_uses_runtime_fingerprint_and_preserves_timestamp_and_unavailable_fields"
+        },
+        {
+          "requirement_id": "OA-ADAPT-003",
+          "file": "tools/oa-adapt/src/fleet_cli.rs",
+          "test_name": "g2_every_processor_matches"
+        },
+        {
+          "requirement_id": "OA-ADAPT-003",
+          "file": "tools/oa-adapt/src/fleet_cli.rs",
+          "test_name": "g2_one_processor_stale_loaded"
+        },
+        {
+          "requirement_id": "OA-ADAPT-003",
+          "file": "tools/oa-adapt/src/fleet_cli.rs",
+          "test_name": "g2_disk_differs_from_loaded"
+        },
+        {
+          "requirement_id": "OA-ADAPT-003",
+          "file": "tools/oa-adapt/src/fleet_cli.rs",
+          "test_name": "g2_missing_processor"
+        },
+        {
+          "requirement_id": "OA-ADAPT-003",
+          "file": "tools/oa-adapt/src/fleet_cli.rs",
+          "test_name": "g2_field_change_end_to_end"
         }
       ],
       "proof_refs": []

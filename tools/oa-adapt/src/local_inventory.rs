@@ -315,7 +315,7 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
-    // REQ: OA-TECHOPS-001, OA-TECHOPS-002
+    // REQ: OA-ADAPT-003, OA-TECHOPS-001, OA-TECHOPS-002
     #[test]
     fn on_demand_uses_runtime_fingerprint_and_preserves_timestamp_and_unavailable_fields() {
         let root = fresh_root("runtime-fingerprint");
