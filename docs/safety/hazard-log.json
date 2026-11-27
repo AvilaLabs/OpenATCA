@@ -23358,6 +23358,30 @@
       "rationale": "Engineering safety candidate: incomplete identity, malformed geometry, capacity overflow or partial output could bind an ARV result to the wrong flight or path. The bounded pure core preserves the full supplied identity and refuses before output mutation. The tests establish synthetic API behavior only; caller source binding and operational warning delivery are not implemented."
     },
     {
+      "id": "OA-RWY-022",
+      "function": "geodetic_and_navigation_geometry",
+      "hazard_id": "HZ-GEOMETRY-001",
+      "rationale": "Engineering safety candidate: an incorrect CRDA ghost transform could misplace the planning reference. The core uses only explicit caller-supplied source/target geometry and offset, validates inputs and capacity before writing, and preserves parent speed/order. It does not sequence arrivals, determine separation, validate facility geometry, or claim operational CRDA behavior."
+    },
+    {
+      "id": "OA-RWY-023",
+      "function": "conflict_alert",
+      "hazard_id": "HZ-CA-001",
+      "rationale": "Engineering safety candidate: an incorrect ATPA pair forecast could misclassify a caller-supplied pair's modeled spacing-loss lead time. The core requires matching caller runway/end/scan values, validates bounded pair rows before output mutation, and uses only supplied minimum spacing and constant closure. It is not a full facility ATPA implementation, approved minima, or operational alert-delivery claim."
+    },
+    {
+      "id": "OA-RWY-024",
+      "function": "geodetic_and_navigation_geometry",
+      "hazard_id": "HZ-GEOMETRY-001",
+      "rationale": "Engineering safety candidate: incomplete or incorrectly resolved issued candidate paths could turn an ARV path mismatch into a false clear. The bounded v2 codec preserves explicit runway/taxiway segment values and coverage claims; runtime resolves against the exact issued model, and incomplete coverage remains unavailable. Synthetic tests do not establish physical airport inventory completeness, source authentication, or operational ARV qualification."
+    },
+    {
+      "id": "OA-RWY-025",
+      "function": "runway_assignment_verification",
+      "hazard_id": "HZ-CA-001",
+      "rationale": "Engineering safety candidate: stale identity, incorrect role claims, missing audit receipts, or a false clear could corrupt runway assignment or ARV acknowledgement. The typed caller binds identity/view/generation, checks local principal-role claims and appends a receipt before mutation. No credential authentication, trusted go-around source, or facility authorization is implemented."
+    },
+    {
       "id": "OA-ENC-023",
       "function": "conflict_alert",
       "hazard_id": "HZ-CA-001",

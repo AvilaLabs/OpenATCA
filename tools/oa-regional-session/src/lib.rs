@@ -26,6 +26,7 @@ pub mod recordings_reader;
 pub mod recordings_stream;
 pub mod route;
 pub mod runtime;
+pub mod runway_aids;
 pub mod session;
 pub mod surveillance;
 

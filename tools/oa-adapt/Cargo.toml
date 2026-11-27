@@ -22,6 +22,9 @@ oa-airspace = { path = "../../crates/oa-airspace" }
 # F1: steer33 L11/A3 explicitly authorizes issue-time semantic validation of the CA preset with
 # the core parser that runtime CA uses; this is a shell-to-core link, never a reverse dependency.
 oa-ca = { path = "../../crates/oa-ca" }
+# F1a: verify the emitted runway-aid adaptation against the pure bounded core parser before
+# writing or returning its exact bytes to the runtime.
+oa-runway = { path = "../../crates/oa-runway" }
 # Private input-path policy stays in this tool process, outside the reusable library.
 oa-sealed = { path = "../../crates/oa-sealed" }
 # Existing command content-identity output, not authentication.
