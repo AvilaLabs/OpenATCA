@@ -1,7 +1,7 @@
 //! Offline regional surveillance composition (**shell**, B1/B3/C6). Real tracker output at
 //! the issue tick feeds both conflict alert and scope; intended routes never suppress CA.
 
-use crate::input::{EventKind, NormalizedEvent, SourceKind};
+use crate::input::{AdsbSourceEvidence, EventKind, NormalizedEvent, SourceKind};
 use oa_airspace::core::model::Model;
 use oa_ca::{
     alert_log_clear, alert_log_new, ca_cycle_with_inhibits, ca_new, ca_open, event_log_clear,
@@ -134,7 +134,39 @@ pub struct Surveillance {
     presentation_updates: usize,
     msaw: Option<crate::msaw_bridge::RegionalMsaw>,
     baro_seen: BTreeMap<u32, i64>,
+    adsb_source_seen: BTreeMap<u32, AdsbSourceObservation>,
+    msaw_service_requests: Vec<MsawServiceRequest>,
     profile: SurveillanceProfile,
+}
+
+#[derive(Clone, Copy)]
+struct AdsbSourceObservation {
+    source_ns: i64,
+    evidence: AdsbSourceEvidence,
+}
+
+#[derive(Clone, Copy)]
+struct MsawServiceRequest {
+    identity: oa_display::interaction::FlightIdentity,
+    generation: u32,
+    identity_stamp: oa_flight::Stamp,
+    address_stamp: oa_flight::Stamp,
+    expires_at_ns: i64,
+    input_sequence: u64,
+    principal: u64,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct MsawServiceRequestUpdate {
+    pub identity: oa_display::interaction::FlightIdentity,
+    pub generation: u32,
+    pub identity_stamp: oa_flight::Stamp,
+    pub address_stamp: oa_flight::Stamp,
+    pub expires_at_ns: i64,
+    pub input_sequence: u64,
+    pub principal: u64,
+    pub now_ns: i64,
+    pub view_sequence: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -145,6 +177,8 @@ pub enum SurveillanceStageError {
     WrongSourceKind,
     InvalidPosition,
     BarometricEvidenceCapacity,
+    InvalidSourceEvidence,
+    SourceEvidenceCapacity,
 }
 
 impl SurveillanceStageError {
@@ -158,6 +192,8 @@ impl SurveillanceStageError {
             Self::WrongSourceKind => "event kind/source category mismatch",
             Self::InvalidPosition => "position fields are outside the supported input bounds",
             Self::BarometricEvidenceCapacity => "barometric evidence capacity exhausted",
+            Self::InvalidSourceEvidence => "ADS-B source evidence is malformed",
+            Self::SourceEvidenceCapacity => "ADS-B source evidence capacity exhausted",
         }
     }
 }
@@ -351,6 +387,8 @@ pub fn surveillance_new_with_profile(
         track_down: false,
         msaw: None,
         baro_seen: BTreeMap::new(),
+        adsb_source_seen: BTreeMap::new(),
+        msaw_service_requests: Vec::with_capacity(profile.max_tracks),
         track_measurement_seen_ns: None,
         measurement_rejections: 0,
         profile,
@@ -374,6 +412,195 @@ pub fn surveillance_enable_msaw(
     s.states = state_table_new(stale_ns, future_ns).map_err(err)?;
     s.msaw = Some(service);
     Ok(())
+}
+
+pub(crate) const fn surveillance_msaw_enabled(s: &Surveillance) -> bool {
+    s.msaw.is_some()
+}
+
+pub const MAX_MSAW_SERVICE_REQUEST_NS: i64 = 300 * SECOND_NS;
+
+#[cfg(test)]
+pub(crate) fn surveillance_msaw_service_request_count(s: &Surveillance) -> usize {
+    s.msaw_service_requests.len()
+}
+
+pub(crate) fn surveillance_validate_msaw_service_request(
+    s: &Surveillance,
+    request: MsawServiceRequestUpdate,
+) -> Result<(), String> {
+    let MsawServiceRequestUpdate {
+        identity,
+        generation,
+        identity_stamp,
+        address_stamp,
+        expires_at_ns,
+        input_sequence,
+        principal,
+        now_ns,
+        ..
+    } = request;
+    if s.msaw.is_none() || generation == 0 || input_sequence == 0 || principal == 0 || now_ns <= 0 {
+        return Err(
+            "MSAW service request lacks configured service or valid identity metadata".into(),
+        );
+    }
+    if identity.aircraft_address == 0 || identity.gufi == [0; 16] || identity.plan_id == [0; 12] {
+        return Err("MSAW service request requires a complete flight identity".into());
+    }
+    if expires_at_ns != 0 {
+        let duration = expires_at_ns
+            .checked_sub(now_ns)
+            .ok_or("MSAW request expiry overflow")?;
+        if duration <= 0 || duration > MAX_MSAW_SERVICE_REQUEST_NS {
+            return Err("MSAW request expiry is outside the five-minute bound".into());
+        }
+    }
+    let existing = s.msaw_service_requests.iter().find(|request| {
+        request.identity == identity
+            && request.generation == generation
+            && request.identity_stamp == identity_stamp
+            && request.address_stamp == address_stamp
+    });
+    if let Some(existing) = existing {
+        if input_sequence <= existing.input_sequence {
+            return Err("MSAW service request sequence is stale".into());
+        }
+    } else if expires_at_ns == 0 {
+        return Err("no matching active MSAW service request to revoke".into());
+    } else if s
+        .msaw_service_requests
+        .iter()
+        .filter(|request| request.expires_at_ns > now_ns)
+        .count()
+        >= s.profile.max_tracks
+    {
+        return Err("MSAW service request table capacity exhausted".into());
+    }
+    Ok(())
+}
+
+/// Commit one request only after the caller has durably appended and verified its audit receipt.
+pub(crate) fn surveillance_commit_msaw_service_request(
+    s: &mut Surveillance,
+    request: MsawServiceRequestUpdate,
+) -> Result<(), String> {
+    let MsawServiceRequestUpdate {
+        identity,
+        generation,
+        identity_stamp,
+        address_stamp,
+        expires_at_ns,
+        input_sequence,
+        principal,
+        now_ns,
+        ..
+    } = request;
+    if s.msaw.is_none() || generation == 0 || input_sequence == 0 || principal == 0 || now_ns <= 0 {
+        return Err(
+            "MSAW service request lacks configured service or valid identity metadata".into(),
+        );
+    }
+    if identity.aircraft_address == 0 || identity.gufi == [0; 16] || identity.plan_id == [0; 12] {
+        return Err("MSAW service request requires a complete flight identity".into());
+    }
+    s.msaw_service_requests
+        .retain(|request| request.expires_at_ns > now_ns);
+    if expires_at_ns == 0 {
+        let Some(index) = s.msaw_service_requests.iter().position(|request| {
+            request.identity == identity
+                && request.generation == generation
+                && request.identity_stamp == identity_stamp
+                && request.address_stamp == address_stamp
+        }) else {
+            return Err("no matching active MSAW service request to revoke".into());
+        };
+        let existing = s
+            .msaw_service_requests
+            .get(index)
+            .ok_or("MSAW request index invariant")?;
+        if input_sequence <= existing.input_sequence {
+            return Err("MSAW service request sequence is stale".into());
+        }
+        s.msaw_service_requests.remove(index);
+        return Ok(());
+    }
+    let duration = expires_at_ns
+        .checked_sub(now_ns)
+        .ok_or("MSAW request expiry overflow")?;
+    if duration <= 0 || duration > MAX_MSAW_SERVICE_REQUEST_NS {
+        return Err("MSAW request expiry is outside the five-minute bound".into());
+    }
+    if let Some(existing) = s.msaw_service_requests.iter_mut().find(|request| {
+        request.identity == identity
+            && request.generation == generation
+            && request.identity_stamp == identity_stamp
+            && request.address_stamp == address_stamp
+    }) {
+        if input_sequence <= existing.input_sequence {
+            return Err("MSAW service request sequence is stale".into());
+        }
+        *existing = MsawServiceRequest {
+            identity,
+            generation,
+            identity_stamp,
+            address_stamp,
+            expires_at_ns,
+            input_sequence,
+            principal,
+        };
+    } else {
+        if s.msaw_service_requests.len() >= s.profile.max_tracks {
+            return Err("MSAW service request table capacity exhausted".into());
+        }
+        s.msaw_service_requests.push(MsawServiceRequest {
+            identity,
+            generation,
+            identity_stamp,
+            address_stamp,
+            expires_at_ns,
+            input_sequence,
+            principal,
+        });
+    }
+    Ok(())
+}
+
+fn msaw_service_request_active(
+    s: &mut Surveillance,
+    identity: oa_display::interaction::FlightIdentity,
+    generation: u32,
+    identity_stamp: oa_flight::Stamp,
+    address_stamp: oa_flight::Stamp,
+    time_ns: i64,
+) -> bool {
+    s.msaw_service_requests
+        .retain(|request| request.expires_at_ns > time_ns);
+    s.msaw_service_requests.iter().any(|request| {
+        request.identity == identity
+            && request.generation == generation
+            && request.identity_stamp == identity_stamp
+            && request.address_stamp == address_stamp
+            && request.expires_at_ns > time_ns
+            && request.principal != 0
+    })
+}
+
+pub fn surveillance_acknowledge_msaw_aural(
+    s: &mut Surveillance,
+    address: u32,
+    alert_start_ns: i64,
+    source_time_ns: i64,
+) -> Result<(), String> {
+    let Some(service) = s.msaw.as_mut() else {
+        return Err("MSAW aural acknowledgement refused because MSAW is not configured".into());
+    };
+    crate::msaw_bridge::regional_msaw_acknowledge_aural(
+        service,
+        address,
+        alert_start_ns,
+        source_time_ns,
+    )
 }
 
 pub fn source_index(source: SourceKind) -> usize {
@@ -439,7 +666,9 @@ pub fn surveillance_stage_event(
         return Err(SurveillanceStageError::WrongReceiptOrTimestamp);
     }
     let source_matches = match event.kind {
-        EventKind::Position { .. } => event.source == SourceKind::Surveillance,
+        EventKind::Position { .. } | EventKind::PositionV2 { .. } => {
+            event.source == SourceKind::Surveillance
+        }
         EventKind::Flight(_) | EventKind::Operator(_) => event.source == SourceKind::Flight,
         EventKind::Route { .. } | EventKind::FiledRoute { .. } | EventKind::ActiveCursor { .. } => {
             event.source == SourceKind::Route
@@ -449,7 +678,37 @@ pub fn surveillance_stage_event(
     if !source_matches {
         return Err(SurveillanceStageError::WrongSourceKind);
     }
+    if let EventKind::PositionV2 { evidence, .. } = event.kind {
+        if evidence.source_type != u8::MAX && evidence.source_type > 13
+            || evidence.version != u8::MAX && evidence.version > 7
+            || evidence.nic != u8::MAX && evidence.nic > 11
+            || evidence.nac_p != u8::MAX && evidence.nac_p > 15
+            || evidence.nac_v != u8::MAX && evidence.nac_v > 7
+            || evidence.sil != u8::MAX && evidence.sil > 3
+            || evidence.sil_type != u8::MAX && evidence.sil_type > 2
+            || evidence.sda != u8::MAX && evidence.sda > 3
+            || evidence.gva != u8::MAX && evidence.gva > 3
+            || evidence.nic_baro != u8::MAX && evidence.nic_baro > 1
+            || evidence.row_flags != u8::MAX && evidence.row_flags > 31
+            || evidence.squawk != u16::MAX && evidence.squawk > 7777
+        {
+            return Err(SurveillanceStageError::InvalidSourceEvidence);
+        }
+        if !s
+            .adsb_source_seen
+            .contains_key(&event.identity.aircraft_address)
+            && s.adsb_source_seen.len() >= s.profile.max_tracks
+        {
+            return Err(SurveillanceStageError::SourceEvidenceCapacity);
+        }
+    }
     if let EventKind::Position {
+        latitude_e7,
+        longitude_e7,
+        altitude_ft,
+        ..
+    }
+    | EventKind::PositionV2 {
         latitude_e7,
         longitude_e7,
         altitude_ft,
@@ -476,6 +735,10 @@ pub fn surveillance_stage_event(
 
 pub fn surveillance_event(s: &mut Surveillance, event: &NormalizedEvent) -> Result<(), String> {
     surveillance_stage_event(s, event).map_err(|error| error.message().to_owned())?;
+    let source_evidence = match event.kind {
+        EventKind::PositionV2 { evidence, .. } => Some(evidence),
+        _ => None,
+    };
     let index = source_index(event.source);
     let seen = s.seen.get_mut(index).ok_or("source index")?;
     let down = s.down.get_mut(index).ok_or("source index")?;
@@ -494,6 +757,15 @@ pub fn surveillance_event(s: &mut Surveillance, event: &NormalizedEvent) -> Resu
             east_mmps,
             north_mmps,
             vertical_rate_fpm,
+        }
+        | EventKind::PositionV2 {
+            latitude_e7,
+            longitude_e7,
+            altitude_ft,
+            east_mmps,
+            north_mmps,
+            vertical_rate_fpm,
+            ..
         } => {
             *seen = Some(event.receipt_ns);
             *down = false;
@@ -527,6 +799,7 @@ pub fn surveillance_event(s: &mut Surveillance, event: &NormalizedEvent) -> Resu
             // conservatively: only this accepted altitude can seed new freshness evidence.
             if after.time_steps_back > before.time_steps_back {
                 s.baro_seen.clear();
+                s.adsb_source_seen.clear();
             } else if after.started > before.started
                 || after.init_implausible > before.init_implausible
                 || after.init_window_expired > before.init_window_expired
@@ -534,6 +807,7 @@ pub fn surveillance_event(s: &mut Surveillance, event: &NormalizedEvent) -> Resu
                 || after.refiltered > before.refiltered
             {
                 s.baro_seen.remove(&event.identity.aircraft_address);
+                s.adsb_source_seen.remove(&event.identity.aircraft_address);
             }
             if measurement_rejected(before, after) {
                 s.measurement_rejections = s.measurement_rejections.saturating_add(1);
@@ -553,6 +827,24 @@ pub fn surveillance_event(s: &mut Surveillance, event: &NormalizedEvent) -> Resu
                     let known = s.baro_seen.entry(address).or_insert(event.source_ns);
                     if event.source_ns > *known {
                         *known = event.source_ns;
+                    }
+                }
+                let address = event.identity.aircraft_address;
+                match source_evidence {
+                    Some(evidence) => {
+                        let prior = s.adsb_source_seen.get(&address).map(|item| item.source_ns);
+                        if prior.is_none_or(|prior_ns| event.source_ns >= prior_ns) {
+                            s.adsb_source_seen.insert(
+                                address,
+                                AdsbSourceObservation {
+                                    source_ns: event.source_ns,
+                                    evidence,
+                                },
+                            );
+                        }
+                    }
+                    None => {
+                        s.adsb_source_seen.remove(&address);
                     }
                 }
             }
@@ -703,6 +995,42 @@ pub(crate) fn surveillance_finish_with_visibility(
     include_surveillance: bool,
     unavailable_reason: Option<ProductUnavailableReason>,
 ) -> Result<SurveillanceFrame, String> {
+    surveillance_finish_inner(
+        s,
+        ownership,
+        include_surveillance,
+        unavailable_reason,
+        None,
+        &[],
+    )
+}
+
+pub(crate) fn surveillance_finish_with_live_flights(
+    s: &mut Surveillance,
+    ownership: Option<&OwnershipStatus>,
+    include_surveillance: bool,
+    unavailable_reason: Option<ProductUnavailableReason>,
+    flights: &mut crate::flight::FlightDriver,
+    views: &[oa_display::interaction::TargetView],
+) -> Result<SurveillanceFrame, String> {
+    surveillance_finish_inner(
+        s,
+        ownership,
+        include_surveillance,
+        unavailable_reason,
+        Some(flights),
+        views,
+    )
+}
+
+fn surveillance_finish_inner(
+    s: &mut Surveillance,
+    ownership: Option<&OwnershipStatus>,
+    include_surveillance: bool,
+    unavailable_reason: Option<ProductUnavailableReason>,
+    mut flight_driver: Option<&mut crate::flight::FlightDriver>,
+    current_views: &[oa_display::interaction::TargetView],
+) -> Result<SurveillanceFrame, String> {
     if !include_surveillance && unavailable_reason.is_none() {
         return Err("withheld surveillance products require a named reason".into());
     }
@@ -742,6 +1070,17 @@ pub(crate) fn surveillance_finish_with_visibility(
     let mut tracks = Vec::with_capacity(s.profile.max_tracks);
     let mut flags = Vec::with_capacity(s.profile.max_tracks);
     let mut msaw_rows = Vec::with_capacity(s.profile.max_tracks);
+    let mut msaw_basis = Vec::with_capacity(if s.msaw.is_some() {
+        s.profile.max_tracks
+    } else {
+        0
+    });
+    let mut flight_views = Vec::with_capacity(
+        flight_driver
+            .as_deref()
+            .map(crate::flight::flight_driver_capacity)
+            .unwrap_or(0),
+    );
     let mut msaw_altitude_source_unknown = 0u32;
     for (&address, &index) in &last {
         let row = output_row(&s.drain, index)?;
@@ -766,6 +1105,81 @@ pub(crate) fn surveillance_finish_with_visibility(
         } else {
             NONE_I32
         };
+        if s.msaw.is_some() {
+            let (flight_view, ambiguous) = match flight_driver.as_deref_mut() {
+                Some(driver) => {
+                    let result = crate::flight::flight_views_for_address(
+                        driver,
+                        address,
+                        current_views
+                            .iter()
+                            .find(|view| view.address == address)
+                            .map_or([0; 4], |view| view.identity.centre),
+                        time_ns / 1_000_000,
+                        &mut flight_views,
+                    );
+                    let view = (result.status == crate::flight::FlightViewStatus::Found
+                        && flight_views.len() == 1)
+                        .then(|| flight_views.first().copied())
+                        .flatten();
+                    (
+                        view,
+                        result.status == crate::flight::FlightViewStatus::AmbiguousAddress,
+                    )
+                }
+                None => (None, false),
+            };
+            let source_evidence = s
+                .adsb_source_seen
+                .get(&address)
+                .copied()
+                .filter(|item| item.source_ns == source_ns);
+            let mut basis = match flight_view {
+                Some(view) => oa_msaw_run::eligibility::live_flight_basis(
+                    matches!(
+                        view.plan_state,
+                        oa_flight::ST_ACTIVE | oa_flight::ST_DEPARTED
+                    ),
+                    view.assigned.form,
+                    true,
+                ),
+                None if ambiguous => oa_msaw_run::eligibility::Basis::Ambiguous,
+                None => oa_msaw_run::eligibility::Basis::NotJudged,
+            };
+            let identity = flight_view.map(|view| oa_display::interaction::FlightIdentity {
+                gufi: view.gufi.to_be_bytes(),
+                aircraft_address: view.address,
+                centre: view.centre,
+                plan_id: view.plan_id,
+            });
+            let generation = current_views
+                .iter()
+                .find(|view| {
+                    view.address == address
+                        && view.identity_present == 1
+                        && identity == Some(view.identity)
+                })
+                .map_or(0, |view| view.generation);
+            let requested = match (identity, flight_view) {
+                (Some(identity), Some(view)) if generation != 0 => msaw_service_request_active(
+                    s,
+                    identity,
+                    generation,
+                    view.identity_stamp,
+                    view.address_stamp,
+                    time_ns,
+                ),
+                _ => false,
+            };
+            let vfr_code = source_evidence.is_some_and(|item| {
+                item.evidence.squawk != u16::MAX
+                    && s.msaw.as_ref().is_some_and(|service| {
+                        crate::msaw_bridge::regional_msaw_vfr_code(service, item.evidence.squawk)
+                    })
+            });
+            basis = oa_msaw_run::eligibility::live_source_basis(basis, requested, vfr_code);
+            msaw_basis.push(crate::msaw_bridge::LiveTrackBasis { address, basis });
+        }
         tracks.push(ObservedTrack {
             state_ns: time_ns,
             newest_source_ns: source_ns,
@@ -873,10 +1287,11 @@ pub(crate) fn surveillance_finish_with_visibility(
         append(&mut snapshot, row)?;
     }
     let msaw = match s.msaw.as_mut() {
-        Some(service) => Some(crate::msaw_bridge::regional_msaw_cycle(
+        Some(service) => Some(crate::msaw_bridge::regional_msaw_cycle_with_basis(
             service,
             time_ns,
             &msaw_rows,
+            &msaw_basis,
             &mut s.states,
             &mut s.inhibits,
         )?),

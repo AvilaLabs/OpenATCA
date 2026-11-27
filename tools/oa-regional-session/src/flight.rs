@@ -596,7 +596,7 @@ fn validate_flight_event(
         return Err(FlightDriverError::InvalidTimestamp);
     }
     let expected_source = match event.kind {
-        EventKind::Position { .. } => Some(SourceKind::Surveillance),
+        EventKind::Position { .. } | EventKind::PositionV2 { .. } => Some(SourceKind::Surveillance),
         EventKind::Flight(_) | EventKind::Operator(_) => Some(SourceKind::Flight),
         EventKind::Route { .. } | EventKind::FiledRoute { .. } | EventKind::ActiveCursor { .. } => {
             Some(SourceKind::Route)

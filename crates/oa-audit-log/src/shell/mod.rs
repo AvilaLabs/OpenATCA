@@ -51,6 +51,38 @@ impl std::fmt::Display for RegistryLoadError {
 
 impl std::error::Error for RegistryLoadError {}
 
+/// Registry bytes loaded through the production guard and matched to an independent digest pin.
+/// This preserves the host-configuration seam; it does not authenticate the principal.
+pub struct PinnedPrincipalRegistry {
+    registry: PrincipalRegistry,
+    digest: Digest,
+}
+
+impl PinnedPrincipalRegistry {
+    pub const fn digest(&self) -> Digest {
+        self.digest
+    }
+
+    pub fn authorize(
+        &self,
+        principal_id: u64,
+        action: oa_audit_core::Action,
+    ) -> Result<oa_audit_core::Role, oa_audit_core::PrincipalAuthorizationError> {
+        oa_audit_core::authorize_principal(&self.registry, principal_id, action)
+    }
+}
+
+pub fn load_pinned_principal_registry(
+    path: &Path,
+    expected_digest: Digest,
+) -> Result<PinnedPrincipalRegistry, RegistryLoadError> {
+    let registry = load_principal_registry(path, expected_digest)?;
+    Ok(PinnedPrincipalRegistry {
+        registry,
+        digest: expected_digest,
+    })
+}
+
 /// Load a bounded local principal registry from a production-guarded regular file.
 ///
 /// `expected_digest` must come from an independent trusted configuration/pin. It is never read

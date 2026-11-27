@@ -61,6 +61,20 @@ pub struct QuarantineReleaseOptions {
     pub time_ns: u64,
 }
 
+/// Host-pinned authority context for typed MSAW service requests in the normalized operator
+/// queue. The registry digest is supplied independently of the registry file contents.
+pub struct MsawServiceAuditOptions {
+    pub audit_log: PathBuf,
+    pub audit_checkpoint: oa_audit_core::Checkpoint,
+    pub principal_registry: oa_audit_log::shell::PinnedPrincipalRegistry,
+    pub principal: u64,
+}
+
+pub struct SessionAuditOptions<'a> {
+    pub quarantine_release: Option<&'a QuarantineReleaseOptions>,
+    pub msaw_service_audit: Option<MsawServiceAuditOptions>,
+}
+
 /// Persisted CLI profile selection. The absent/default option remains the historical 32-track
 /// rendered run; the recorded profile is an explicit bounded high-volume ADS-B replay variant.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -245,6 +259,33 @@ pub fn run_session_with_profile_options_and_quarantine_release(
     selected_profile: RegionalCliProfile,
     quarantine_release: Option<&QuarantineReleaseOptions>,
 ) -> Result<(), String> {
+    run_session_with_profile_options_and_audit_context(
+        bytes,
+        output,
+        source,
+        safety,
+        performance,
+        selected_profile,
+        SessionAuditOptions {
+            quarantine_release,
+            msaw_service_audit: None,
+        },
+    )
+}
+
+pub fn run_session_with_profile_options_and_audit_context(
+    bytes: &[u8],
+    output: &Path,
+    source: &ModelSource,
+    safety: &MsawSource,
+    performance: Option<&Path>,
+    selected_profile: RegionalCliProfile,
+    audit: SessionAuditOptions<'_>,
+) -> Result<(), String> {
+    let SessionAuditOptions {
+        quarantine_release,
+        msaw_service_audit,
+    } = audit;
     if bytes.len() > 16 * 1024 * 1024 {
         return Err("normalized input exceeds byte limit".into());
     }
@@ -344,7 +385,7 @@ pub fn run_session_with_profile_options_and_quarantine_release(
     let executable = std::env::current_exe().map_err(|e| e.to_string())?;
     let executable_sha = oa_sha256::sha256(&read_guarded(&executable, MAX_EXECUTABLE_BYTES)?);
     let text = std::str::from_utf8(bytes).map_err(|_| "input not UTF-8")?;
-    if text.lines().next() != Some("OA-RS\t1") {
+    if !matches!(text.lines().next(), Some("OA-RS\t1" | "OA-RS\t2")) {
         return Err("expected OA-RS header".into());
     }
     let mut cursor = session_cursor_new_with_limit(profile.max_total_events)
@@ -373,6 +414,31 @@ pub fn run_session_with_profile_options_and_quarantine_release(
         return Err("session contains no events".into());
     }
     let first = batches.first().ok_or("session has no cutoff")?.receipt_ns;
+    let mut cifp_area: Option<(f64, f64, f64, f64)> = None;
+    for event in batches.iter().flat_map(|batch| batch.events.iter()) {
+        if let crate::input::EventKind::Position {
+            latitude_e7,
+            longitude_e7,
+            ..
+        }
+        | crate::input::EventKind::PositionV2 {
+            latitude_e7,
+            longitude_e7,
+            ..
+        } = event.kind
+        {
+            let lat = f64::from(latitude_e7) / 1e7;
+            let lon = f64::from(longitude_e7) / 1e7;
+            if let Some((south, north, west, east)) = &mut cifp_area {
+                *south = south.min(lat);
+                *north = north.max(lat);
+                *west = west.min(lon);
+                *east = east.max(lon);
+            } else {
+                cifp_area = Some((lat, lat, lon, lon));
+            }
+        }
+    }
     let performance_data = performance
         .map(crate::performance::load_performance)
         .transpose()?;
@@ -390,7 +456,7 @@ pub fn run_session_with_profile_options_and_quarantine_release(
         }
         MsawSource::Manifest(path) => {
             let (data, manifest_sha) =
-                crate::msaw_bridge::load_msaw_manifest(path, first / 1_000_000)?;
+                crate::msaw_bridge::load_msaw_manifest(path, first / 1_000_000, cifp_area)?;
             let evidence = format!(
                 "OA_REGIONAL_MSAW_DATA\t1\nprovenance\n{:#?}\nsettings\n{:#?}\nlimits\n{:#?}\n",
                 data.provenance,
@@ -405,6 +471,24 @@ pub fn run_session_with_profile_options_and_quarantine_release(
             Some(manifest_sha)
         }
     };
+    if let Some(request) = msaw_service_audit {
+        if let Some(quarantine) = quarantine_release {
+            if request.audit_log == quarantine.audit_log {
+                return Err(
+                    "MSAW and quarantine audit contexts require separate chain checkpoints".into(),
+                );
+            }
+        }
+        crate::runtime::regional_configure_msaw_service_audit(
+            &mut runtime,
+            crate::runtime::MsawServiceAuditConfiguration {
+                audit_log: request.audit_log,
+                checkpoint: request.audit_checkpoint,
+                registry: request.principal_registry,
+                principal: request.principal,
+            },
+        )?;
+    }
     // Runtime failures precede final output publication. Temporary evidence is identifiable by
     // the absence of COMPLETE and is never accepted as a closed result.
     fs::create_dir(output).map_err(|e| format!("create new output: {e}"))?;

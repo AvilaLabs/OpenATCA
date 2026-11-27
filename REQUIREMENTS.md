@@ -7534,6 +7534,8 @@ FAA value.
 - **OA-MSAW-081** A floor lookup is made at the point itself over its own radius, with no cell and no radius bucket.
 - **OA-MSAW-082** `--rows-of <8 hex digits of an address hash>` writes `rows_of.csv`: that aircraft's clip rows
   (barometric and geometric altitude, vertical rate and its kind), its measurements and the tracker's rows.
+- **OA-MSAW-083** Aural alarm requests are created only for an MSAW episode whose first-cycle position is inside exactly one explicitly configured `msaw_aural_area`. The request is keyed by the full aircraft address and alert start time, appears once while the episode persists, and retains clear and acknowledgement timestamps. Overlapping areas, fixed-ledger exhaustion, missing area configuration and an absent sound backend remain explicit; acknowledgement of one episode does not clear its visual alert or acknowledge a later episode for the same address.
+- **OA-MSAW-084** A typed controller MSAW service request is bound to one currently visible, uniquely resolved full flight identity, target generation, and current identity/address stamps. Activation has a positive expiry no more than five minutes after receipt; revocation names the same binding and a newer input sequence. The normal operator queue derives its role from the independently pinned principal registry and durably appends Action 13 before changing the bounded request table. Each later MSAW cycle joins the request to the exact current flight identity and generation; expired, replaced or missing identities do not authorize a request basis. Missing or stale flight/beacon evidence remains `NotJudged`; a service request is never inferred from callsign, category, or an unverified flight claim.
 - **OA-MSAW-041** The 95 % radius of a covariance is the chi-square radius of its larger eigenvalue, and the
   ground codes of the core are the close-encounter record's.
 
@@ -8174,7 +8176,7 @@ The L13 role registry is not yet landed; roles below are plain caller-supplied c
 - **OA-AUDIT-002** The registry allows `monitor` to verify records, `operate` to release quarantine
   items and submit vulnerability intake, and `configure` to issue adaptations, certify, flip or
   roll back migration output, and disposition vulnerability findings. `operate` and `configure`
-  may perform runway assignment and alert-acknowledgement actions. Higher roles may perform
+  may perform runway assignment, alert-acknowledgement, and MSAW service-request actions. Higher roles may perform
   lower-level actions; a lower role is refused before
   the action commit. Principal IDs, role claims and timestamps are caller inputs; this registry
   provides no login, credential check, authenticated origin or authority validation.
@@ -8193,8 +8195,9 @@ The L13 role registry is not yet landed; roles below are plain caller-supplied c
   on every invocation. The log is capped at 65,536 records. This detects changes relative to the
   supplied checkpoint; a hash chain alone does not prevent full history rewriting together with
   replacement of that checkpoint, and it does not authenticate who wrote a record.
-- **OA-AUDIT-005** Adaptation issue, certification, quarantine release, migration flip and
-  migration rollback append a bounded record before committing their action. If a later action
+- **OA-AUDIT-005** Adaptation issue, certification, quarantine release, migration flip,
+  migration rollback, and MSAW service-request activation or revocation append a bounded record
+  before committing their action. If a later action
   fails, its already-written intent remains visible for reconciliation; no failed action is
   reported as committed solely because an audit record exists.
 - **OA-AUDIT-006** Every audit-log read, append destination, and parent directory synchronization

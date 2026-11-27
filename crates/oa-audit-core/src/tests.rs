@@ -40,6 +40,7 @@ fn registry_action_matrix_keeps_added_actions_at_the_declared_levels() {
         Action::VulnerabilityIntake,
         Action::RunwayAssignment,
         Action::AlertAcknowledge,
+        Action::MsawServiceRequest,
     ] {
         assert_eq!(
             authorize(Role::Monitor, action),

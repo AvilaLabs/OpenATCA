@@ -3,7 +3,7 @@
 //! or repeated key, a value that does not parse or is not finite, and a missing key are errors
 //! that name it. Units are the ones in the key: seconds, nautical miles, feet, metres, degrees.
 //!
-//! Five keys may repeat:
+//! Seven keys may repeat:
 //!
 //! ```text
 //! corridor = <thr_lat> <thr_lon> <out_bearing_deg> <length_m> <near_half_m> <far_half_m> <thr_elev_ft> <faf_alt_ft>
@@ -12,6 +12,7 @@
 //! gtm_clearance = box <lat_min> <lat_max> <lon_min> <lon_max> <ft>
 //! gtm_clearance = file <path of lat,lon lines> <ft>
 //! msaw_request = <addr:HEX24 | call:CALLSIGN> <start_s> <end_s>
+//! msaw_aural_area = <area-id> <lat>,<lon> <lat>,<lon> <lat>,<lon> ...
 //! inhibit = <start_s> <end_s> <alt_lo_ft> <alt_hi_ft> <author> <reason> <lat>,<lon> <lat>,<lon> <lat>,<lon> ...
 //! ```
 //!
@@ -93,6 +94,16 @@ pub struct RequestSpec {
     pub end_s: f64,
 }
 
+/// One explicitly adapted geographic area where an MSAW episode requests an aural alarm.
+/// The physical output remains the caller's responsibility and is reported unavailable when no
+/// backend is connected.
+// A7.2: cold one-shot row; id is <=24 bytes and the validated polygon is fixed-size.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AuralArea {
+    pub id: String,
+    pub polygon: oa_safety::geom::Polygon,
+}
+
 /// What the tool needs beyond the core's configuration.
 // A7.2: cold struct, size guard waived
 #[derive(Debug, Clone, PartialEq)]
@@ -113,6 +124,7 @@ pub struct Settings {
     /// The address whose rows `--rows-of` asks for (set by the run, not the configuration).
     pub trace_addr: Option<u32>,
     pub requests: Vec<RequestSpec>,
+    pub aural_areas: Vec<AuralArea>,
     /// The beacon codes of VFR traffic: 1200 and the `vfr_beacon_code` lines.
     pub vfr_codes: Vec<u16>,
     pub gtm_areas: Vec<GtmArea>,
@@ -133,7 +145,7 @@ pub struct Settings {
     pub metar_max_age_s: i64,
 }
 
-const KEYS: [&str; 41] = [
+const KEYS: [&str; 42] = [
     "look_ahead_s",
     "warning_s",
     "samples",
@@ -173,6 +185,7 @@ const KEYS: [&str; 41] = [
     "cifp_airport",
     "gtm_clearance",
     "msaw_request",
+    "msaw_aural_area",
     "vfr_beacon_code",
     "inhibit",
 ];
@@ -375,6 +388,40 @@ fn request(v: &str) -> Result<RequestSpec, String> {
     })
 }
 
+fn aural_area(v: &str) -> Result<AuralArea, String> {
+    let fields: Vec<&str> = v.split_whitespace().collect();
+    let [id, points @ ..] = fields.as_slice() else {
+        return Err("msaw_aural_area needs an identifier and at least three vertices".into());
+    };
+    if id.is_empty()
+        || id.len() > 24
+        || !id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+        || points.len() < 3
+        || points.len() > oa_safety::geom::MAX_VERTICES
+    {
+        return Err("msaw_aural_area identifier or vertex count is outside its bound".into());
+    }
+    let vertices = points
+        .iter()
+        .map(|point| {
+            let (lat, lon) = point
+                .split_once(',')
+                .ok_or("msaw_aural_area vertex needs lat,lon")?;
+            let lat = e7("msaw_aural_area latitude", lat, 90.0)?;
+            let lon = e7("msaw_aural_area longitude", lon, 180.0)?;
+            Ok((lat, lon))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let polygon =
+        polygon_new(&vertices).map_err(|error| format!("msaw_aural_area polygon: {error}"))?;
+    Ok(AuralArea {
+        id: (*id).to_string(),
+        polygon,
+    })
+}
+
 /// Parses the configuration text, and checks it with the core's own check.
 pub fn parse_config(text: &str) -> Result<Settings, String> {
     if text.len() > MAX_TEXT_BYTES {
@@ -384,8 +431,9 @@ pub fn parse_config(text: &str) -> Result<Settings, String> {
     }
     let mut kv: BTreeMap<&str, &str> = BTreeMap::new();
     let mut vfr_codes: Vec<u16> = vec![1200];
-    let (mut procs, mut airports, mut inhibits, mut requests, mut areas) = (
+    let (mut procs, mut airports, mut inhibits, mut requests, mut aural_areas, mut areas) = (
         Vec::<&str>::new(),
+        Vec::new(),
         Vec::new(),
         Vec::new(),
         Vec::new(),
@@ -408,6 +456,7 @@ pub fn parse_config(text: &str) -> Result<Settings, String> {
             "cifp_airport" => airports.push(v),
             "inhibit" => inhibits.push(v),
             "msaw_request" => requests.push(v),
+            "msaw_aural_area" => aural_areas.push(v),
             "vfr_beacon_code" => {
                 let code: u16 = v
                     .parse()
@@ -438,11 +487,12 @@ pub fn parse_config(text: &str) -> Result<Settings, String> {
     }
     if airports.len() > MAX_LINES
         || inhibits.len() > MAX_LINES
+        || aural_areas.len() > MAX_LINES
         || requests.len() > MAX_LINES
         || areas.len() > MAX_LINES
     {
         return Err(format!(
-            "more than {MAX_LINES} cifp_airport, msaw_request or inhibit lines"
+            "more than {MAX_LINES} repeated corridor, airport, area, request or inhibit lines"
         ));
     }
     let list = procs
@@ -524,6 +574,17 @@ pub fn parse_config(text: &str) -> Result<Settings, String> {
     for v in &requests {
         reqs.push(request(v)?);
     }
+    let mut parsed_aural_areas = Vec::with_capacity(aural_areas.len());
+    for value in &aural_areas {
+        let area = aural_area(value)?;
+        if parsed_aural_areas
+            .iter()
+            .any(|prior: &AuralArea| prior.id == area.id)
+        {
+            return Err(format!("msaw_aural_area `{}` is repeated", area.id));
+        }
+        parsed_aural_areas.push(area);
+    }
     let apt_ft = feet(
         "airport_area_clearance_ft",
         get("airport_area_clearance_ft")?,
@@ -546,6 +607,7 @@ pub fn parse_config(text: &str) -> Result<Settings, String> {
             None => None,
         },
         requests: reqs,
+        aural_areas: parsed_aural_areas,
         vfr_codes,
         gtm_areas,
         approach_half_width_nm: positive(
