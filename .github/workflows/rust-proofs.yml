@@ -38,10 +38,18 @@ jobs:
           rustc +1.89.0 --version | grep -E '^rustc 1\.89\.0([[:space:]]|$)'
       - name: Validate proof suite registry
         run: python3 tools/test_rust_proof_suite.py
+      - name: Check shared proof test fixture syntax
+        run: python3 -m py_compile tools/proof_suite_test_support.py
       - name: Test per-proof resource receipts
         run: python3 tools/test_rust_proof_resources.py
       - name: Test Kani runner and result bindings
         run: python3 tools/test_kani_validation.py
+      - name: Test cross-revision proof cap guard
+        run: python3 tools/test_proof_caps.py
+      - name: Test proof source inventory
+        run: python3 tools/test_proof_source_inventory.py
+      - name: Reconcile source harnesses with the proof registry
+        run: python3 tools/proof_source_inventory.py --root . --registry tools/rust_proofs.json
       - name: Guard against proof cap increases
         run: |
           base="$(git merge-base origin/main HEAD)"
