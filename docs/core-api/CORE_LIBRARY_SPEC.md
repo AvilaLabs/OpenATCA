@@ -67,7 +67,7 @@ shape it into a product, not to write it again.
 | Layer | Modules | Exists today | Missing |
 |---|---|---|---|
 | L0 Foundations | Bit-identical maths, WGS-84 geodesy (Karney), hashing for integrity, DEFLATE, ZIP and tar, XML, JSON and CSV | `oa-math`, `oa-ieee`, `oa-geo`, `oa-sha256`, `oa-deflate`, `oa-zip`, `oa-tar`, `oa-xml`, `oa-json`, `oa-csv` | Public API review; `oa-zip` depends on `oa-sealed` |
-| L1 Formats | ASTERIX; Mode S and 1090ES; FIXM/SFDPS, TFMS and TBFM; AIXM (NOTAMs, MVA charts); ARINC 424 (CIFP); NASR; GRIB2 and JPEG 2000; METAR/TAF; IWXXM; GeoTIFF terrain; the Digital Obstacle File; STDDS; NAM | `oa-asterix` (021, 048, 062), `oa-fixm`, `oa-tfms`, `oa-tbfm`, `oa-notam`, `oa-mva`, `oa-arinc424`, `oa-nasr`, `oa-grib2`, `oa-j2k`, `oa-awc`, `oa-tiff`, `oa-dof`, `oa-stdds`, `oa-nam`, `oa-adsb` (readsb traces) | **Raw Mode S/1090ES decoding (DO-260B)**, **IWXXM**, ASTERIX 001/002/008/010/019/020/023/033/034/063/065, and encoders where we only decode |
+| L1 Formats | ASTERIX; Mode S and 1090ES; FIXM/SFDPS, TFMS and TBFM; AIXM (NOTAMs, MVA charts); ARINC 424 (CIFP); NASR; GRIB2 and JPEG 2000; METAR/TAF; IWXXM; GeoTIFF terrain; the Digital Obstacle File; STDDS; NAM | `oa-asterix` (021, 048, 062), `oa-fixm`, `oa-tfms`, `oa-tbfm`, `oa-notam`, `oa-iwxxm`, `oa-mva`, `oa-arinc424`, `oa-nasr`, `oa-grib2`, `oa-j2k`, `oa-awc`, `oa-tiff`, `oa-dof`, `oa-stdds`, `oa-nam`, `oa-adsb` (readsb traces) | **Raw Mode S/1090ES decoding (DO-260B)**, ASTERIX 001/002/008/010/019/020/023/033/034/063/065, and encoders where we only decode |
 | L2 Models | Airspace and procedures as geometry; terrain and obstacles; wind and temperature aloft | `oa-airspace`, `oa-mva`, `oa-wind` | Decouple from `oa-sealed`; a public query API |
 | L3 Engines | Tracking and fusion; trajectory prediction; conflict detection; terrain alert (MSAW); flight data state | `oa-track`, `oa-ca`, `oa-msaw`, `oa-flight`, the shared trajectory baseline | `oa-track` depends on `oa-bench` and `oa-sensorsim`, so split those out. A public, streaming API for each engine |
 
@@ -139,14 +139,14 @@ A module is marked Stable only when it has all of the following:
 
 Scope: L0 plus the most-requested L1 formats, from Rust and Python.
 - Formats: ASTERIX 021, 034, 048 and 062; ARINC 424 (CIFP); NASR; AIXM NOTAMs; FIXM/SFDPS
-  messages; GRIB2 winds.
+  messages; IWXXM 2025-2 METAR/SPECI/TAF subset; GRIB2 winds.
 - Geodesy: WGS-84 distance, azimuth, intersections and point-in-polygon.
 - Test vectors for each of these.
 
 Package publication is authorized when the module meets the Stable bar, CI is green on the exact commit, and its API document has been reviewed. Existing accounts are used; new PyPI packages require the owner to configure their first trusted publisher. Empty placeholder packages are not published.
 
 **Later releases:**
-- Raw Mode S and 1090ES decoding, IWXXM, the remaining ASTERIX categories.
+- Raw Mode S and 1090ES decoding, the remaining ASTERIX categories.
 - Then the engines with streaming APIs: tracker, trajectory, conflict detection and MSAW. Each one
   has proofs on its geometric core, in the style of NASA's DAIDALUS.
 
