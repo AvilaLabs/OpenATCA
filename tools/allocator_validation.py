@@ -603,7 +603,7 @@ def _core_ffi_exception_errors(root: Path, members: list[Path]) -> list[str]:
                 errors.append(f"openatca-core-ffi Rust source may not use symlinks or escape its package: {relative}")
             actual_sources.add(relative)
         if actual_sources != CORE_FFI_SOURCE_FILES:
-            errors.append("openatca-core-ffi Rust source inventory must be exactly src/lib.rs, src/ffi.rs, src/text.rs and src/formats/asterix.rs")
+            errors.append("openatca-core-ffi Rust source inventory must be exactly src/lib.rs, src/ffi.rs, src/text.rs, src/formats/mod.rs, src/formats/asterix.rs and src/formats/zip.rs")
         for relative in CORE_FFI_SOURCE_FILES:
             source = source_dir / relative
             if source.is_symlink() or not source.is_file() or not _inside(source.resolve(), package_dir):
