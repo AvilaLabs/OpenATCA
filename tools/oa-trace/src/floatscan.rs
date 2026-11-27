@@ -117,14 +117,15 @@ pub fn scan(root: &Path, allow: &[Allow]) -> (Vec<Finding>, Vec<String>) {
             .unwrap_or(path)
             .to_string_lossy()
             .replace('\\', "/");
-        let lines: Vec<&str> = text.lines().collect();
-        let end = lines
-            .iter()
-            .position(|l| l.trim() == "#[cfg(test)]")
-            .unwrap_or(lines.len());
-        let lines = lines.get(..end).unwrap_or(&[]);
+        let test_only_lines = crate::classcheck::cfg_test_line_mask(&text);
+        let mut lines: Vec<&str> = text.lines().collect();
+        for (line, test_only) in lines.iter_mut().zip(test_only_lines) {
+            if test_only {
+                *line = "";
+            }
+        }
         for (i, line) in lines.iter().enumerate() {
-            if line.trim_start().starts_with("//") || !is_raw(lines, i) {
+            if line.trim_start().starts_with("//") || !is_raw(&lines, i) {
                 continue;
             }
             let mut ok = false;
@@ -251,6 +252,53 @@ mod tests {
         let (found, stale) = scan(&root, &[]);
         assert_eq!(found.len(), 1, "{found:?}");
         assert_eq!(found[0].file, "tools/oa-x/src/main.rs");
+        assert!(stale.is_empty());
+        let _ = fs::remove_dir_all(&root);
+    }
+    // REQ: OA-TRC-103
+    #[test]
+    fn interleaved_test_items_are_skipped_without_hiding_later_production_reads() {
+        let root = tmp("interleaved");
+        fs::write(
+            root.join("crates/oa-x/src/lib.rs"),
+            "#[cfg(test)]\nfn helper() { let x: f64 = text.parse().unwrap(); }\nfn production(text: &str) -> f64 { text.parse::<f64>().unwrap() }\n",
+        )
+        .unwrap();
+        let (found, stale) = scan(&root, &[]);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].line, 3);
+        assert!(stale.is_empty());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // REQ: OA-TRC-103
+    #[test]
+    fn test_only_item_float_is_excluded_but_cfg_text_in_comments_and_strings_is_not() {
+        let root = tmp("markers");
+        fs::write(
+            root.join("crates/oa-x/src/lib.rs"),
+            "#[cfg(test)] fn helper() { let x: f64 = text.parse::<f64>().unwrap(); }\n// #[cfg(test)]\nconst TEXT: &str = \"#[cfg(test)]\";\nfn production(text: &str) -> f64 { text.parse::<f64>().unwrap() }\n",
+        )
+        .unwrap();
+        let (found, stale) = scan(&root, &[]);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].line, 4);
+        assert!(stale.is_empty());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // REQ: OA-TRC-103
+    #[test]
+    fn nested_test_module_braces_do_not_hide_following_production_code() {
+        let root = tmp("nested");
+        fs::write(
+            root.join("tools/oa-x/src/main.rs"),
+            "#[cfg(test)]\nmod helpers {\n    fn helper() { if true { let x: f64 = text.parse().unwrap(); } }\n}\nfn production(text: &str) -> f64 { text.parse::<f64>().unwrap() }\n",
+        )
+        .unwrap();
+        let (found, stale) = scan(&root, &[]);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].line, 5);
         assert!(stale.is_empty());
         let _ = fs::remove_dir_all(&root);
     }

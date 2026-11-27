@@ -1083,6 +1083,114 @@ fn test_only(toks: &[Tok], i: &mut usize) -> bool {
     }
 }
 
+/// Lines containing only tokens inside an actual `#[cfg(test)]` item. This is shared with the
+/// external-float inventory so test helpers in the middle of a source file do not hide later
+/// production code. Lines shared with both test and non-test tokens are deliberately retained.
+pub fn cfg_test_line_mask(src: &str) -> Vec<bool> {
+    let masked = mask(src);
+    let toks = tokenize(&masked);
+    let mut removed = vec![false; toks.len()];
+    let line_count = src.lines().count();
+    let mut test_item_lines = vec![false; line_count];
+    // An inner cfg(test) attribute at the file start applies to every item in the file.
+    if s(&toks, 0) == "#"
+        && s(&toks, 1) == "!"
+        && s(&toks, 2) == "["
+        && s(&toks, 3) == "cfg"
+        && s(&toks, 4) == "("
+        && s(&toks, 5) == "test"
+        && s(&toks, 6) == ")"
+        && s(&toks, 7) == "]"
+    {
+        return vec![true; line_count];
+    }
+    let mut i = 0;
+    while i + 6 < toks.len() {
+        if s(&toks, i) != "#"
+            || s(&toks, i + 1) != "["
+            || s(&toks, i + 2) != "cfg"
+            || s(&toks, i + 3) != "("
+            || s(&toks, i + 4) != "test"
+            || s(&toks, i + 5) != ")"
+            || s(&toks, i + 6) != "]"
+        {
+            i += 1;
+            continue;
+        }
+        let mut j = i + 7;
+        while s(&toks, j) == "#" && s(&toks, j + 1) == "[" {
+            j = skip_group(&toks, j + 1);
+        }
+        j = skip_modifiers(&toks, j);
+        if !ITEM_KEYWORDS.contains(&s(&toks, j)) {
+            i += 1;
+            continue;
+        }
+        let kw = s(&toks, j);
+        let to_semicolon = matches!(kw, "use" | "const" | "static" | "type")
+            || (kw == "mod" && s(&toks, j + 2) != "{")
+            || (kw == "extern" && s(&toks, j + 1) == "crate");
+        let mut depth = 0usize;
+        let mut end = j;
+        let mut complete = false;
+        while end < toks.len() {
+            match s(&toks, end) {
+                "(" | "[" | "{" => depth += 1,
+                ")" | "]" => depth = depth.saturating_sub(1),
+                "}" => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 && !to_semicolon {
+                        end += 1;
+                        complete = true;
+                        break;
+                    }
+                }
+                ";" if depth == 0 => {
+                    end += 1;
+                    complete = true;
+                    break;
+                }
+                _ => {}
+            }
+            end += 1;
+        }
+        if complete {
+            if let Some(tokens) = removed.get_mut(i..end) {
+                tokens.fill(true);
+            }
+            let first_line = toks.get(i).map_or(1, |token| token.line);
+            let last_line = toks
+                .get(end.saturating_sub(1))
+                .map_or(first_line, |token| token.line);
+            for line in first_line..=last_line {
+                if let Some(test_line) = test_item_lines.get_mut(line.saturating_sub(1)) {
+                    *test_line = true;
+                }
+            }
+            i = end;
+        } else {
+            // An incomplete/unrecognized item is not excluded: the caller will scan it and fail
+            // closed on any raw float read rather than silently dropping the rest of the file.
+            i += 1;
+        }
+    }
+
+    let mut has_kept_token = vec![false; line_count];
+    for (index, token) in toks.iter().enumerate() {
+        let line = token.line.saturating_sub(1);
+        if !removed.get(index).copied().unwrap_or(false) {
+            if let Some(seen) = has_kept_token.get_mut(line) {
+                *seen = true;
+            }
+        }
+    }
+    test_item_lines
+        .into_iter()
+        .zip(has_kept_token)
+        .map(|(in_test, kept)| in_test && !kept)
+        .collect()
+}
+
 /// Removes test-only items (B7: tests and proof harnesses are shell). A test-only attribute
 /// strips the item that follows it only if an item keyword follows; on a field, variant, match
 /// arm, parameter or statement it strips nothing.
