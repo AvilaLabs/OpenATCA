@@ -90,7 +90,27 @@ from an OAF-only cursor.
 
 ## Install on the future spare
 
-Copy this `tools/oa-observer` directory to the Debian user's home, then run:
+Prepare a local transfer bundle from explicitly supplied, already-approved artifact paths. The
+script requires expected SHA-256 pins, reads only those two artifact files, and atomically publishes
+a new bundle directory. It includes package scripts/systemd templates, the binary/JAR hash inventory,
+the storage-budget template, and the fixed capture/scoring bounds. It never reads subscription files
+or copies runtime configuration. It does not contact a destination or install/start services.
+
+```sh
+./prepare-transfer-bundle.py \
+  --oa-feed /explicit/path/to/oa-feed \
+  --oa-feed-sha256 <reviewed-oa-feed-sha256> \
+  --bridge-jar /explicit/path/to/scds-bridge.jar \
+  --bridge-jar-sha256 <reviewed-bridge-jar-sha256> \
+  --output /explicit/new/path/openatca-observer-transfer
+```
+
+The output must not already exist. Verify `SHA256SUMS.json` after any later transfer. A destination
+account, host, and transfer directory must be supplied separately before a human performs any
+transfer. The included `DEPLOYMENT-PROCEDURE-TODO.md` lists later operator steps; it intentionally
+does not automate them.
+
+For a later local installation, copy the package to the Debian user's home, then run:
 
 ```sh
 ./install-user.sh
