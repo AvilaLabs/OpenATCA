@@ -103,7 +103,7 @@ def check_tracked_paths(commits: list[str], cwd=None) -> None:
     for start in range(0, len(commits), PATH_SCAN_CHUNK):
         result = subprocess.run(
             ["git", "grep", "-l", "--fixed-strings", needle,
-             *commits[start:start + PATH_SCAN_CHUNK], "--", ".", ":(exclude)docs/archive/**"],
+             *commits[start:start + PATH_SCAN_CHUNK], "--", "."],
             cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
         )
         if result.returncode not in (0, 1):
@@ -111,8 +111,7 @@ def check_tracked_paths(commits: list[str], cwd=None) -> None:
         if result.returncode == 0:
             for sha in commits[start:start + PATH_SCAN_CHUNK]:
                 individual = subprocess.run(
-                    ["git", "grep", "-l", "--fixed-strings", needle, sha, "--", ".",
-                     ":(exclude)docs/archive/**"],
+                    ["git", "grep", "-l", "--fixed-strings", needle, sha, "--", "."],
                     cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                 )
                 if individual.returncode == 0:
