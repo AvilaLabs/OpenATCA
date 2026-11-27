@@ -1,10 +1,11 @@
 use crate::{
     AssessmentState, ExpectedProcessor, InventoryAssessment, InventoryQuery,
     MetricWindowAssessment, MetricWindowContract, PerformanceSample, ProcessorAssessment,
-    ProcessorReport, StatusError, FLAG_CLOCK_DOMAIN_MISMATCH, FLAG_DISK_ADAPTATION_MISMATCH,
-    FLAG_DUPLICATE_SEQUENCE, FLAG_EPOCH_MISMATCH, FLAG_EPOCH_ORDER_UNKNOWN, FLAG_EPOCH_REGRESSION,
-    FLAG_FIRMWARE_MISMATCH, FLAG_FUTURE, FLAG_INVALID_TIME, FLAG_LOADED_ADAPTATION_MISMATCH,
-    FLAG_METRIC_MISMATCH, FLAG_MISSING_PROCESSOR, FLAG_MISSING_SEQUENCE, FLAG_PROFILE_MISMATCH,
+    ProcessorReport, StatusError, FLAG_ADAPTATION_COMPONENT_INCOMPLETE, FLAG_CLOCK_DOMAIN_MISMATCH,
+    FLAG_DISK_ADAPTATION_MISMATCH, FLAG_DUPLICATE_SEQUENCE, FLAG_EPOCH_MISMATCH,
+    FLAG_EPOCH_ORDER_UNKNOWN, FLAG_EPOCH_REGRESSION, FLAG_FIRMWARE_MISMATCH, FLAG_FUTURE,
+    FLAG_INVALID_TIME, FLAG_LOADED_ADAPTATION_MISMATCH, FLAG_METRIC_MISMATCH,
+    FLAG_MISSING_PROCESSOR, FLAG_MISSING_SEQUENCE, FLAG_PROFILE_MISMATCH,
     FLAG_RELEASE_MANIFEST_MISMATCH, FLAG_RUNNING_IMAGE_MISMATCH, FLAG_SAMPLE_OUTSIDE_WINDOW,
     FLAG_SEQUENCE_OUTSIDE_WINDOW, FLAG_SEQUENCE_OUT_OF_ORDER, FLAG_SOURCE_MISMATCH, FLAG_STALE,
     FLAG_TELEMETRY_LOSS, FLAG_TIME_OUT_OF_ORDER, FLAG_UNEXPECTED_PROCESSOR, INCOMPLETE_FLAGS,
@@ -235,6 +236,13 @@ pub fn assess_inventory(
                 &mut row.telemetry_loss_events,
                 u64::from(report.telemetry_loss_events),
             )?;
+        }
+        if !report.adaptation_components_complete {
+            mark(
+                row,
+                &mut assessment.flags,
+                FLAG_ADAPTATION_COMPONENT_INCOMPLETE,
+            );
         }
         if report.sample_time_ns < 0 {
             increment(&mut row.invalid_time_rows)?;

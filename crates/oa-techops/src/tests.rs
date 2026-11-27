@@ -89,7 +89,26 @@ fn report(id: u32, sequence: u64, time: i64) -> ProcessorReport {
         loaded_adaptation_sha256: [3; 32],
         disk_adaptation_sha256: [3; 32],
         telemetry_loss_events: 0,
+        adaptation_components_complete: true,
     }
+}
+
+// REQ: OA-TECHOPS-003
+#[test]
+fn issued_adaptation_companion_gap_sets_incomplete_aggregate_flag() {
+    let expected = [expected(11, 1, 2)];
+    let mut row = report(11, 1, 1_000);
+    row.adaptation_components_complete = false;
+    let result = assess_inventory(&expected, &[row], query(None, 1_000)).expect("bounded query");
+    assert_ne!(
+        result.flags & crate::FLAG_ADAPTATION_COMPONENT_INCOMPLETE,
+        0
+    );
+    assert_ne!(
+        result.processors[0].flags & crate::FLAG_ADAPTATION_COMPONENT_INCOMPLETE,
+        0
+    );
+    assert_eq!(result.state, AssessmentState::Incomplete);
 }
 
 fn metric_contract(first: u64, next: u64, maximum: i64) -> MetricWindowContract {

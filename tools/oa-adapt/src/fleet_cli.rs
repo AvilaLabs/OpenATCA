@@ -1,10 +1,10 @@
 //! Offline fleet comparison for issued adaptation identities. Shell only: bounded input reads,
 //! guarded paths, and report formatting. Processor values remain caller-supplied claims.
 //!
-//! The independent expected file is header-free TSV with seven fields per row:
-//! `processor_id source_id firmware_sha256 running_image_sha256 adaptation_sha256 sequence_first sequence_next`.
-//! The reports directory has one `<processor_id>.tsv` per processor, with fifteen fields:
-//! `processor_id issued_manifest_sha256 loaded_adaptation_sha256 disk_manifest_sha256|- disk_adaptation_sha256|- provenance_unverified local_status source_id epoch clock_domain_id sequence sample_time_ns firmware_sha256 running_image_sha256 telemetry_loss_events`.
+//! The independent expected file is `OA_EXPECTED_PROCESSORS\t2` followed by eight fields:
+//! `processor_id process_role source_id firmware_sha256 running_image_sha256 adaptation_sha256 sequence_first sequence_next`.
+//! Each report has an `OA_FLEET_PROCESSOR_REPORT\t2` header, then one row with eighteen fields:
+//! `processor_id issued_manifest_sha256 loaded_adaptation_sha256 disk_manifest_sha256|- disk_adaptation_sha256|- provenance_unverified local_status source_id epoch clock_domain_id sequence sample_time_ns firmware_sha256 running_image_sha256 telemetry_loss_events loaded_ca_sha256|- loaded_pver_sha256|- loaded_runway_sha256|-`.
 //! Hash and identity values in a per-processor report are unverified claims, not an attestation.
 
 use crate::local_inventory::{LocalInventoryReport, LocalInventoryStatus};
@@ -13,8 +13,9 @@ use oa_sha256::Digest;
 use oa_techops::{
     assess_inventory, compare_adaptation_identity, ClockDomainId, ExpectedProcessor,
     InventoryQuery, ProcessorId, ProcessorReport, ServiceEpoch, SourceId,
-    FLAG_DISK_ADAPTATION_MISMATCH, FLAG_LOADED_ADAPTATION_MISMATCH, FLAG_MISSING_PROCESSOR,
-    FLAG_MISSING_SEQUENCE, FLAG_RELEASE_MANIFEST_MISMATCH,
+    FLAG_ADAPTATION_COMPONENT_INCOMPLETE, FLAG_DISK_ADAPTATION_MISMATCH,
+    FLAG_LOADED_ADAPTATION_MISMATCH, FLAG_MISSING_PROCESSOR, FLAG_MISSING_SEQUENCE,
+    FLAG_RELEASE_MANIFEST_MISMATCH,
 };
 use std::fmt;
 use std::fs;
@@ -32,16 +33,90 @@ const FATAL_INVENTORY_FLAGS: u32 = FLAG_LOADED_ADAPTATION_MISMATCH
     | FLAG_DISK_ADAPTATION_MISMATCH
     | FLAG_RELEASE_MANIFEST_MISMATCH
     | FLAG_MISSING_PROCESSOR
-    | FLAG_MISSING_SEQUENCE;
+    | FLAG_MISSING_SEQUENCE
+    | FLAG_ADAPTATION_COMPONENT_INCOMPLETE;
 
 fn has_fatal_inventory_flag(flags: u32) -> bool {
     flags & FATAL_INVENTORY_FLAGS != 0
 }
-const MAX_EXPECTED_BYTES: usize = 32_768;
+// 128 rows at worst-case decimal widths, 64-byte hashes, 16-byte role, separators, plus header.
+const MAX_EXPECTED_BYTES: usize = 36_864;
 const MAX_REPORT_FILES: usize = 512;
 const MAX_REPORT_BYTES: usize = 2_048;
 // Across all 512 reports, at most 1 MiB of report bytes is admitted; reads are one file at a time.
-const REPORT_FIELDS: usize = 15;
+const REPORT_FIELDS: usize = 18;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProcessRole {
+    Generic,
+    RegionalSession,
+    ConflictAlert,
+    Certification,
+}
+
+impl ProcessRole {
+    fn parse(value: &str) -> Result<Self, FleetError> {
+        match value {
+            "generic" => Ok(Self::Generic),
+            "regional-session" => Ok(Self::RegionalSession),
+            "conflict-alert" => Ok(Self::ConflictAlert),
+            "certification" => Ok(Self::Certification),
+            _ => Err(FleetError::Failed("unknown expected processor role".into())),
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Generic => "generic",
+            Self::RegionalSession => "regional-session",
+            Self::ConflictAlert => "conflict-alert",
+            Self::Certification => "certification",
+        }
+    }
+
+    fn requires(self, component: Component) -> bool {
+        match self {
+            Self::Generic => true,
+            Self::RegionalSession => matches!(component, Component::Runway),
+            Self::ConflictAlert => matches!(component, Component::Ca),
+            Self::Certification => matches!(component, Component::Pver),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Component {
+    Ca,
+    Pver,
+    Runway,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ComponentState {
+    Match,
+    Mismatch,
+    Unavailable,
+    NotIssued,
+    NotApplicable,
+}
+
+impl ComponentState {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Match => "MATCH",
+            Self::Mismatch => "MISMATCH",
+            Self::Unavailable => "UNAVAILABLE",
+            Self::NotIssued => "NOT_ISSUED",
+            Self::NotApplicable => "NOT_APPLICABLE",
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ExpectedRow {
+    processor: ExpectedProcessor,
+    role: ProcessRole,
+}
 
 /// `oa-adapt fleet-check` input and status failure.
 #[derive(Debug)]
@@ -128,7 +203,7 @@ fn fields<'a>(line: &'a str, expected: usize, what: &str) -> Result<Vec<&'a str>
     Ok(values)
 }
 
-fn read_expected(path: &Path) -> Result<Vec<ExpectedProcessor>, FleetError> {
+fn read_expected(path: &Path) -> Result<Vec<ExpectedRow>, FleetError> {
     let bytes = read_bounded(path, MAX_EXPECTED_BYTES)?;
     let text = std::str::from_utf8(&bytes)
         .map_err(|_| FleetError::Failed("expected processor list is not UTF-8".into()))?;
@@ -136,28 +211,41 @@ fn read_expected(path: &Path) -> Result<Vec<ExpectedProcessor>, FleetError> {
     expected
         .try_reserve_exact(oa_techops::MAX_EXPECTED_PROCESSORS)
         .map_err(|_| FleetError::Failed("expected list allocation refused".into()))?;
-    for line in text.lines() {
+    let mut lines = text.lines();
+    if lines.next() != Some("OA_EXPECTED_PROCESSORS\t2") {
+        return Err(FleetError::Failed(
+            "expected processor roster needs version 2 header".into(),
+        ));
+    }
+    for line in lines {
         if expected.len() == oa_techops::MAX_EXPECTED_PROCESSORS {
             return Err(FleetError::Failed(
                 "expected processor list exceeds 128 rows".into(),
             ));
         }
-        let row = fields(line, 7, "expected processor row")?;
+        let row = fields(line, 8, "expected processor row")?;
         let processor_id = parse_u32(field_value(&row, 0)?, "expected processor ID")?;
-        let source_id = parse_u32(field_value(&row, 1)?, "expected source ID")?;
+        let role = ProcessRole::parse(field_value(&row, 1)?)?;
+        let source_id = parse_u32(field_value(&row, 2)?, "expected source ID")?;
         if processor_id == 0 || source_id == 0 {
             return Err(FleetError::Failed(
                 "expected processor and source IDs must be nonzero".into(),
             ));
         }
-        expected.push(ExpectedProcessor {
-            processor_id: ProcessorId(processor_id),
-            source_id: SourceId(source_id),
-            firmware_sha256: parse_digest(field_value(&row, 2)?, "expected firmware")?,
-            running_image_sha256: parse_digest(field_value(&row, 3)?, "expected running image")?,
-            adaptation_sha256: parse_digest(field_value(&row, 4)?, "expected adaptation")?,
-            sequence_first: parse_u64(field_value(&row, 5)?, "expected first sequence")?,
-            sequence_next: parse_u64(field_value(&row, 6)?, "expected next sequence")?,
+        expected.push(ExpectedRow {
+            role,
+            processor: ExpectedProcessor {
+                processor_id: ProcessorId(processor_id),
+                source_id: SourceId(source_id),
+                firmware_sha256: parse_digest(field_value(&row, 3)?, "expected firmware")?,
+                running_image_sha256: parse_digest(
+                    field_value(&row, 4)?,
+                    "expected running image",
+                )?,
+                adaptation_sha256: parse_digest(field_value(&row, 5)?, "expected adaptation")?,
+                sequence_first: parse_u64(field_value(&row, 6)?, "expected first sequence")?,
+                sequence_next: parse_u64(field_value(&row, 7)?, "expected next sequence")?,
+            },
         });
     }
     Ok(expected)
@@ -166,6 +254,7 @@ fn read_expected(path: &Path) -> Result<Vec<ExpectedProcessor>, FleetError> {
 struct ReportRow {
     local: LocalInventoryReport,
     context: ProcessorContext,
+    loaded_components: crate::local_inventory::LoadedComponents,
 }
 
 struct ProcessorContext {
@@ -196,6 +285,7 @@ fn processor_report(local: LocalInventoryReport, context: ProcessorContext) -> P
         // comparator and is not treated as a successful expected check.
         disk_adaptation_sha256: local.disk_adaptation_sha256.unwrap_or([0; 32]),
         telemetry_loss_events: context.telemetry_loss_events,
+        adaptation_components_complete: local.adaptation_components_complete.unwrap_or(false),
     }
 }
 
@@ -222,14 +312,23 @@ fn local_status(
     }
 }
 
-fn read_report(path: &Path, expected_id: u32) -> Result<ReportRow, FleetError> {
+fn read_report(
+    path: &Path,
+    expected_id: u32,
+    identity: &crate::manifest::PackageIdentity,
+) -> Result<ReportRow, FleetError> {
     let bytes = read_bounded(path, MAX_REPORT_BYTES)?;
     let text = std::str::from_utf8(&bytes)
         .map_err(|_| FleetError::Failed("processor report is not UTF-8".into()))?;
     let mut lines = text.lines();
+    if lines.next() != Some("OA_FLEET_PROCESSOR_REPORT\t2") {
+        return Err(FleetError::Failed(
+            "processor report needs version 2 header".into(),
+        ));
+    }
     let line = lines
         .next()
-        .ok_or_else(|| FleetError::Failed("processor report is empty".into()))?;
+        .ok_or_else(|| FleetError::Failed("processor report row is missing".into()))?;
     if lines.next().is_some() {
         return Err(FleetError::Failed(
             "each processor report must contain exactly one row".into(),
@@ -273,11 +372,17 @@ fn read_report(path: &Path, expected_id: u32) -> Result<ReportRow, FleetError> {
     let firmware_sha256 = parse_digest(field_value(&row, 12)?, "reported firmware")?;
     let running_image_sha256 = parse_digest(field_value(&row, 13)?, "reported running image")?;
     let telemetry_loss_events = parse_u32(field_value(&row, 14)?, "reported telemetry loss")?;
+    let loaded_components = crate::local_inventory::LoadedComponents {
+        model_snapshot: Some(loaded),
+        ca_preset: parse_optional_digest(field_value(&row, 15)?, "loaded CA preset")?,
+        pver_catalog: parse_optional_digest(field_value(&row, 16)?, "loaded PVER catalog")?,
+        runway_aids: parse_optional_digest(field_value(&row, 17)?, "loaded runway aids")?,
+    };
     let local = LocalInventoryReport {
         processor_id,
         observed_at_unix_ns: Some(sample_time_ns),
         issued_manifest_sha256: issued_pin,
-        expected_adaptation_sha256: None,
+        expected_adaptation_sha256: Some(identity.snapshot_sha256),
         loaded_adaptation_sha256: loaded,
         disk_manifest_sha256: disk_manifest,
         disk_adaptation_sha256: disk_adaptation,
@@ -290,9 +395,22 @@ fn read_report(path: &Path, expected_id: u32) -> Result<ReportRow, FleetError> {
         ),
         provenance_unverified: true,
         status,
+        issued_components: crate::local_inventory::IssuedComponents {
+            ca_preset: identity.ca_preset_sha256,
+            pver_catalog: identity.pver_catalog_sha256,
+            runway_aids: identity.runway_aids_sha256,
+        },
+        loaded_components,
+        disk_components: crate::local_inventory::IssuedComponents {
+            ca_preset: identity.ca_preset_sha256,
+            pver_catalog: identity.pver_catalog_sha256,
+            runway_aids: identity.runway_aids_sha256,
+        },
+        adaptation_components_complete: None,
     };
     Ok(ReportRow {
         local,
+        loaded_components,
         context: ProcessorContext {
             source_id: SourceId(source_id),
             epoch: ServiceEpoch(epoch),
@@ -304,6 +422,54 @@ fn read_report(path: &Path, expected_id: u32) -> Result<ReportRow, FleetError> {
             telemetry_loss_events,
         },
     })
+}
+
+fn components_match_role(
+    role: ProcessRole,
+    issued_model: Digest,
+    issued: crate::local_inventory::IssuedComponents,
+    loaded: crate::local_inventory::LoadedComponents,
+) -> bool {
+    let entries = [
+        (Component::Ca, issued.ca_preset, loaded.ca_preset),
+        (Component::Pver, issued.pver_catalog, loaded.pver_catalog),
+        (Component::Runway, issued.runway_aids, loaded.runway_aids),
+    ];
+    entries.into_iter().all(
+        |(component, expected, observed)| match (expected, observed) {
+            (None, None) => true,
+            (Some(expected), Some(observed)) => expected == observed,
+            (Some(_), None) => !role.requires(component),
+            (None, Some(_)) => false,
+        },
+    ) && loaded.model_snapshot == Some(issued_model)
+}
+
+fn component_state(
+    role: Option<ProcessRole>,
+    component: Component,
+    issued: Option<Digest>,
+    loaded: Option<Digest>,
+) -> ComponentState {
+    match (issued, loaded) {
+        (None, None) => ComponentState::NotIssued,
+        (None, Some(_)) => ComponentState::Mismatch,
+        (Some(expected), Some(observed)) if expected == observed => ComponentState::Match,
+        (Some(_), Some(_)) => ComponentState::Mismatch,
+        (Some(_), None) if role.is_some_and(|role| role.requires(component)) => {
+            ComponentState::Unavailable
+        }
+        (Some(_), None) if role.is_some() => ComponentState::NotApplicable,
+        (Some(_), None) => ComponentState::Unavailable,
+    }
+}
+
+fn parse_optional_digest(value: &str, field: &str) -> Result<Option<Digest>, FleetError> {
+    if value == "-" {
+        Ok(None)
+    } else {
+        parse_digest(value, field).map(Some)
+    }
 }
 
 fn local_status_name(status: LocalInventoryStatus) -> &'static str {
@@ -459,7 +625,7 @@ pub fn run(args: &[String], out: &mut dyn Write) -> Result<(), FleetError> {
     }
     if expected
         .iter()
-        .any(|processor| processor.adaptation_sha256 != expected_adaptation)
+        .any(|row| row.processor.adaptation_sha256 != expected_adaptation)
     {
         return Err(FleetError::Failed(
             "expected adaptation digests do not match the verified issued package".into(),
@@ -468,6 +634,7 @@ pub fn run(args: &[String], out: &mut dyn Write) -> Result<(), FleetError> {
     let reports_dir = PathBuf::from(option(&options, "--reports-dir")?);
     let report_paths = discover_reports(&reports_dir)?;
     let mut processor_reports = Vec::new();
+    // A7.2: one bounded fixed-size local outcome tuple for each discovered report.
     let mut local_by_id = Vec::new();
     processor_reports
         .try_reserve_exact(report_paths.len())
@@ -476,9 +643,46 @@ pub fn run(args: &[String], out: &mut dyn Write) -> Result<(), FleetError> {
         .try_reserve_exact(report_paths.len())
         .map_err(|_| FleetError::Failed("report allocation refused".into()))?;
     for (id, path) in report_paths {
-        let row = read_report(&path, id)?;
-        local_by_id.push((id, row.local.status));
-        let is_expected = expected.iter().any(|item| item.processor_id.0 == id);
+        let mut row = read_report(&path, id, package.identity())?;
+        let expected_row = expected
+            .iter()
+            .find(|entry| entry.processor.processor_id.0 == id);
+        if let Some(expected_row) = expected_row {
+            row.local.adaptation_components_complete = Some(components_match_role(
+                expected_row.role,
+                expected_adaptation,
+                row.local.issued_components,
+                row.loaded_components,
+            ));
+        }
+        let role = expected_row.map(|entry| entry.role);
+        let ca_state = component_state(
+            role,
+            Component::Ca,
+            row.local.issued_components.ca_preset,
+            row.loaded_components.ca_preset,
+        );
+        let pver_state = component_state(
+            role,
+            Component::Pver,
+            row.local.issued_components.pver_catalog,
+            row.loaded_components.pver_catalog,
+        );
+        let runway_state = component_state(
+            role,
+            Component::Runway,
+            row.local.issued_components.runway_aids,
+            row.loaded_components.runway_aids,
+        );
+        local_by_id.push((
+            id,
+            row.local.status,
+            role,
+            ca_state,
+            pver_state,
+            runway_state,
+        ));
+        let is_expected = expected_row.is_some();
         if row.local.status != LocalInventoryStatus::PackageRefused || !is_expected {
             processor_reports.push(processor_report(row.local, row.context));
         }
@@ -500,8 +704,13 @@ pub fn run(args: &[String], out: &mut dyn Write) -> Result<(), FleetError> {
     if freshness_limit_ns <= 0 {
         return Err(FleetError::Usage("freshness limit must be positive".into()));
     }
+    let mut expected_processors = Vec::new();
+    expected_processors
+        .try_reserve_exact(expected.len())
+        .map_err(|_| FleetError::Failed("expected assessment allocation refused".into()))?;
+    expected_processors.extend(expected.iter().map(|row| row.processor));
     let assessment = assess_inventory(
-        &expected,
+        &expected_processors,
         &processor_reports,
         InventoryQuery {
             previous_epoch,
@@ -518,14 +727,37 @@ pub fn run(args: &[String], out: &mut dyn Write) -> Result<(), FleetError> {
     for row in assessment.processors.iter().take(row_count) {
         let status = local_by_id
             .iter()
-            .find(|(id, _)| *id == row.processor_id.0)
-            .map_or("missing_report", |(_, status)| local_status_name(*status));
+            .find(|(id, _, _, _, _, _)| *id == row.processor_id.0)
+            .map_or("missing_report", |(_, status, _, _, _, _)| {
+                local_status_name(*status)
+            });
+        let role = local_by_id
+            .iter()
+            .find(|(id, _, _, _, _, _)| *id == row.processor_id.0)
+            .and_then(|(_, _, role, _, _, _)| *role)
+            .map_or("unknown", ProcessRole::name);
+        let (ca_state, pver_state, runway_state) = local_by_id
+            .iter()
+            .find(|(id, _, _, _, _, _)| *id == row.processor_id.0)
+            .map_or(
+                (
+                    ComponentState::Unavailable,
+                    ComponentState::Unavailable,
+                    ComponentState::Unavailable,
+                ),
+                |(_, _, _, ca, pver, runway)| (*ca, *pver, *runway),
+            );
         writeln!(
             out,
-            "processor\t{}\tlocal={}\tflags=0x{:08x}\trows={}\tunique={}\tmissing_sequences={}\tloaded_adaptation_mismatches={}\tdisk_adaptation_mismatches={}",
+            "processor\t{}\trole={}\tlocal={}\tflags=0x{:08x}\tcomponents_complete={}\tca_preset={}\tpver_catalog={}\trunway_aids={}\trows={}\tunique={}\tmissing_sequences={}\tloaded_adaptation_mismatches={}\tdisk_adaptation_mismatches={}",
             row.processor_id.0,
+            role,
             status,
             row.flags,
+            row.flags & FLAG_ADAPTATION_COMPONENT_INCOMPLETE == 0,
+            ca_state.name(),
+            pver_state.name(),
+            runway_state.name(),
             row.report_rows,
             row.unique_sequences,
             row.missing_sequences,
@@ -554,7 +786,7 @@ pub fn run(args: &[String], out: &mut dyn Write) -> Result<(), FleetError> {
     let adaptation_or_missing = has_fatal_inventory_flag(assessment.flags)
         || local_by_id
             .iter()
-            .any(|(_, status)| *status != LocalInventoryStatus::Match)
+            .any(|(_, status, _, _, _, _)| *status != LocalInventoryStatus::Match)
         || assessment.unexpected_reports != 0;
     if adaptation_or_missing {
         return Err(FleetError::Failed(
@@ -623,10 +855,10 @@ mod tests {
             .expect("write synthetic issued package");
         let digest = sha256(&snapshot);
         let expected_path = root.join("expected.tsv");
-        let mut expected_text = String::new();
+        let mut expected_text = String::from("OA_EXPECTED_PROCESSORS\t2\n");
         for id in ids {
             expected_text.push_str(&format!(
-                "{id}\t{}\t{}\t{}\t{}\t1\t2\n",
+                "{id}\tgeneric\t{}\t{}\t{}\t{}\t1\t2\n",
                 id + 100,
                 "11".repeat(32),
                 "22".repeat(32),
@@ -654,7 +886,7 @@ mod tests {
         status: LocalInventoryStatus,
     ) -> String {
         format!(
-            "{}\t{}\t{}\t{}\t{}\ttrue\t{}\t{}\t9\t7\t1\t1000\t{}\t{}\t0\n",
+            "OA_FLEET_PROCESSOR_REPORT\t2\n{}\t{}\t{}\t{}\t{}\ttrue\t{}\t{}\t9\t7\t1\t1000\t{}\t{}\t0\t-\t-\t-\n",
             id,
             oa_sha256::to_hex(&pin),
             oa_sha256::to_hex(&loaded),
@@ -665,6 +897,174 @@ mod tests {
             "11".repeat(32),
             "22".repeat(32),
         )
+    }
+
+    // REQ: OA-ADAPT-003, OA-TECHOPS-003
+    #[test]
+    fn expected_process_role_controls_component_not_applicable_and_gaps_are_blocking() {
+        let issued = crate::local_inventory::IssuedComponents {
+            ca_preset: Some([1; 32]),
+            pver_catalog: Some([2; 32]),
+            runway_aids: Some([3; 32]),
+        };
+        let all_loaded = crate::local_inventory::LoadedComponents {
+            model_snapshot: Some([9; 32]),
+            ca_preset: Some([1; 32]),
+            pver_catalog: Some([2; 32]),
+            runway_aids: Some([3; 32]),
+        };
+        assert!(components_match_role(
+            ProcessRole::Generic,
+            [9; 32],
+            issued,
+            all_loaded
+        ));
+        for loaded in [
+            crate::local_inventory::LoadedComponents {
+                ca_preset: None,
+                ..all_loaded
+            },
+            crate::local_inventory::LoadedComponents {
+                pver_catalog: None,
+                ..all_loaded
+            },
+            crate::local_inventory::LoadedComponents {
+                runway_aids: None,
+                ..all_loaded
+            },
+            crate::local_inventory::LoadedComponents {
+                ca_preset: Some([8; 32]),
+                ..all_loaded
+            },
+            crate::local_inventory::LoadedComponents {
+                pver_catalog: Some([8; 32]),
+                ..all_loaded
+            },
+            crate::local_inventory::LoadedComponents {
+                runway_aids: Some([8; 32]),
+                ..all_loaded
+            },
+        ] {
+            let complete = components_match_role(
+                ProcessRole::Generic,
+                [9; 32],
+                issued,
+                loaded,
+            );
+            assert!(!complete, "each issued companion mutation blocks coverage");
+            let expected = [ExpectedProcessor {
+                processor_id: ProcessorId(1),
+                source_id: SourceId(2),
+                firmware_sha256: [4; 32],
+                running_image_sha256: [5; 32],
+                adaptation_sha256: [9; 32],
+                sequence_first: 1,
+                sequence_next: 2,
+            }];
+            let report = [ProcessorReport {
+                processor_id: ProcessorId(1),
+                source_id: SourceId(2),
+                epoch: ServiceEpoch(3),
+                clock_domain_id: ClockDomainId(4),
+                sequence: 1,
+                sample_time_ns: 1_000,
+                release_manifest_sha256: [6; 32],
+                firmware_sha256: [4; 32],
+                running_image_sha256: [5; 32],
+                loaded_adaptation_sha256: [9; 32],
+                disk_adaptation_sha256: [9; 32],
+                telemetry_loss_events: 0,
+                adaptation_components_complete: complete,
+            }];
+            let assessment = assess_inventory(
+                &expected,
+                &report,
+                InventoryQuery {
+                    previous_epoch: Some(ServiceEpoch(2)),
+                    epoch: ServiceEpoch(3),
+                    clock_domain_id: ClockDomainId(4),
+                    release_manifest_sha256: [6; 32],
+                    query_time_ns: 1_000,
+                    freshness_limit_ns: 100,
+                },
+            )
+            .expect("bounded synthetic aggregate");
+            assert_ne!(assessment.flags & FLAG_ADAPTATION_COMPONENT_INCOMPLETE, 0);
+            assert!(has_fatal_inventory_flag(assessment.flags));
+        }
+        let regional_n_a = crate::local_inventory::LoadedComponents {
+            ca_preset: None,
+            pver_catalog: None,
+            ..all_loaded
+        };
+        assert!(components_match_role(
+            ProcessRole::RegionalSession,
+            [9; 32],
+            issued,
+            regional_n_a
+        ));
+        assert_eq!(
+            component_state(
+                Some(ProcessRole::RegionalSession),
+                Component::Ca,
+                issued.ca_preset,
+                None
+            ),
+            ComponentState::NotApplicable
+        );
+        assert_eq!(
+            component_state(
+                Some(ProcessRole::Generic),
+                Component::Ca,
+                issued.ca_preset,
+                None
+            ),
+            ComponentState::Unavailable
+        );
+        assert_eq!(
+            component_state(
+                Some(ProcessRole::Generic),
+                Component::Ca,
+                issued.ca_preset,
+                Some([8; 32])
+            ),
+            ComponentState::Mismatch
+        );
+        assert_eq!(
+            component_state(Some(ProcessRole::Generic), Component::Ca, None, None),
+            ComponentState::NotIssued
+        );
+        assert!(!components_match_role(
+            ProcessRole::RegionalSession,
+            [9; 32],
+            issued,
+            crate::local_inventory::LoadedComponents {
+                runway_aids: None,
+                ..regional_n_a
+            }
+        ));
+        assert!(!has_fatal_inventory_flag(0));
+        assert!(has_fatal_inventory_flag(
+            FLAG_ADAPTATION_COMPONENT_INCOMPLETE
+        ));
+    }
+
+    // REQ: OA-ADAPT-003, OA-TECHOPS-003
+    #[test]
+    fn expected_roster_requires_versioned_independent_role() {
+        let root = fresh_root("role-roster");
+        fs::create_dir_all(&root).expect("create synthetic roster directory");
+        let path = root.join("expected.tsv");
+        fs::write(&path, "1\tregional-session\t11\t11\t22\t33\t1\t2\n")
+            .expect("write missing-header roster");
+        assert!(read_expected(&path).is_err());
+        fs::write(
+            &path,
+            "OA_EXPECTED_PROCESSORS\t2\n1\tcaller-says-not-applicable\t11\t11\t22\t33\t1\t2\n",
+        )
+        .expect("write invalid-role roster");
+        assert!(read_expected(&path).is_err());
+        let _ = fs::remove_dir_all(root);
     }
 
     fn write_report(case: &Case, id: u32, line: &str) {

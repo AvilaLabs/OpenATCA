@@ -422,6 +422,13 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
   manifest SHA-256 identifies those exact bytes; recorded principal IDs are claims, not authenticated approval.
   Startup and on-demand processor inventories compare each processor's loaded and on-disk adaptation digest to
   the issued manifest digest, retaining every expected processor and any mismatch. The current
+  component inventory also compares each manifest-issued CA preset, PVER catalog and runway-aid companion
+  with its independently observed loaded digest and the verified disk digest. Fleet role applicability comes
+  only from a versioned independent expected roster; a processor report cannot self-declare a component
+  `NotApplicable`. An issued required companion that is absent or differs prevents a complete aggregate;
+  an absent companion remains `NotIssued`. A process role may make CA/PVER or runway loading inapplicable only
+  where that role explicitly says so. The model snapshot comparison fields retain their existing meaning.
+  The current
   `oa-techops::assess_inventory` result remains `ClaimsMatchUnverified` at best; it is integrity/status evidence,
   not an authenticated issuer, deployment attestation, or operational certification.
 - **OA-ADAPT-004** `oa-adapt issue --ca-preset` accepts a bounded versioned CA preset only after the shared
@@ -7919,7 +7926,8 @@ claims; a match is explicitly unverified.
   findings. It does not infer an expected population from received rows.
 - **OA-TECHOPS-003** Source, epoch, clock domain, release-manifest, firmware, running-image, loaded
   adaptation and on-disk adaptation claims are compared exactly. A mismatch remains named and
-  counted. Even complete equality yields `ClaimsMatchUnverified`, never `PASS`, because this core
+  counted. The adaptation-companion completeness input is retained as an incomplete flag in both processor
+  and aggregate results. Even complete equality yields `ClaimsMatchUnverified`, never `PASS`, because this core
   has no authenticated evidence or profile authority.
 - **OA-TECHOPS-004** A metric window retains its profile/metric/processor/epoch/clock identity,
   expected sample denominator, received/unique/missing counts, freshness and loss findings, observed

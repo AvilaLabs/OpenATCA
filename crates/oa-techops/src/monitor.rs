@@ -748,6 +748,7 @@ mod tests {
             loaded_adaptation_sha256: [3; 32],
             disk_adaptation_sha256: [3; 32],
             telemetry_loss_events: loss,
+            adaptation_components_complete: true,
         };
         let reports = [
             report(11, 21, 0, 950),
@@ -818,6 +819,7 @@ mod tests {
             loaded_adaptation_sha256: [3; 32],
             disk_adaptation_sha256: [3; 32],
             telemetry_loss_events: 0,
+            adaptation_components_complete: true,
         };
         let same_id_assessment = crate::assess_inventory(
             &[one],

@@ -6,7 +6,9 @@
 use crate::runtime::{
     regional_adaptation_sha256, regional_issued_manifest_sha256, RegionalRuntime,
 };
-use oa_adapt::local_inventory::{verify_local_inventory_at, LocalActivation, LocalInventoryReport};
+use oa_adapt::local_inventory::{
+    verify_local_inventory_with_components, LoadedComponents, LocalActivation, LocalInventoryReport,
+};
 use oa_sha256::Digest;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -26,9 +28,13 @@ pub fn check_active_runtime_adaptation(
     if regional_issued_manifest_sha256(runtime) != Some(activation.issued_manifest_sha256()) {
         return Err("runtime and activation issued-manifest identities differ");
     }
-    Ok(verify_local_inventory_at(
+    Ok(verify_local_inventory_with_components(
         activation,
-        regional_adaptation_sha256(runtime),
+        LoadedComponents {
+            model_snapshot: Some(regional_adaptation_sha256(runtime)),
+            runway_aids: crate::runtime::regional_runway_aids_sha256(runtime),
+            ..LoadedComponents::default()
+        },
         observed_at_unix_ns,
     ))
 }

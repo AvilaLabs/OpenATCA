@@ -48,6 +48,28 @@ impl std::fmt::Display for RegistryLoadError {
 
 impl std::error::Error for RegistryLoadError {}
 
+/// Opaque principal table loaded against an independent SHA-256 pin. Requiring this type at a
+/// mutation boundary prevents callers from passing a registry they parsed without pin checking.
+/// It records byte integrity only and does not authenticate the principal or caller.
+pub struct PinnedPrincipalRegistry {
+    registry: PrincipalRegistry,
+    digest: Digest,
+}
+
+impl PinnedPrincipalRegistry {
+    pub const fn digest(&self) -> Digest {
+        self.digest
+    }
+
+    pub fn authorize(
+        &self,
+        principal_id: u64,
+        action: oa_audit_core::Action,
+    ) -> Result<oa_audit_core::Role, oa_audit_core::PrincipalAuthorizationError> {
+        oa_audit_core::authorize_principal(&self.registry, principal_id, action)
+    }
+}
+
 /// Load a bounded local principal registry from a production-guarded regular file.
 ///
 /// `expected_digest` must come from an independent trusted configuration/pin. It is never read
@@ -81,6 +103,55 @@ pub fn load_principal_registry(
         return Err(RegistryLoadError::DigestMismatch);
     }
     parse_principal_registry(exact_bytes).map_err(RegistryLoadError::InvalidRegistry)
+}
+
+/// Load an opaque principal registry whose exact bytes match an independently supplied pin.
+pub fn load_pinned_principal_registry(
+    path: &Path,
+    expected_digest: Digest,
+) -> Result<PinnedPrincipalRegistry, RegistryLoadError> {
+    let registry = load_principal_registry(path, expected_digest)?;
+    Ok(PinnedPrincipalRegistry {
+        registry,
+        digest: expected_digest,
+    })
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
+mod pinned_registry_tests {
+    use super::{load_pinned_principal_registry, RegistryLoadError};
+    use oa_audit_core::{Action, Role};
+    use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+
+    // REQ: OA-AUDIT-002
+    #[test]
+    fn runway_authority_registry_requires_an_independent_exact_digest_pin() {
+        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "oa-audit-pinned-registry-{}-{id}",
+            std::process::id()
+        ));
+        fs::create_dir(&root).expect("create isolated registry directory");
+        let path = root.join("principals.tsv");
+        let bytes = b"OACERT-LOCAL-PRINCIPALS-V1\n51\toperate\n";
+        fs::write(&path, bytes).expect("write synthetic registry");
+        let pin = oa_sha256::sha256(bytes);
+        let loaded = load_pinned_principal_registry(&path, pin).expect("pinned registry loads");
+        assert_eq!(loaded.digest(), pin);
+        assert_eq!(
+            loaded.authorize(51, Action::RunwayAssignment),
+            Ok(Role::Operate)
+        );
+        assert!(matches!(
+            load_pinned_principal_registry(&path, [0x55; 32]),
+            Err(RegistryLoadError::DigestMismatch)
+        ));
+        fs::remove_dir_all(root).expect("remove synthetic registry directory");
+    }
 }
 
 impl From<io::Error> for LogError {

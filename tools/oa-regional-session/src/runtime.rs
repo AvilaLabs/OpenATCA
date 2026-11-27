@@ -1537,7 +1537,7 @@ mod runway_aid_packet_tests {
         };
         use crate::input::OperatorCommand;
         use crate::surveillance::SurveillanceConfig;
-        use oa_audit_core::{Action, Role};
+        use oa_audit_core::Action;
         use oa_display::interaction::{FlightIdentity, Intent, TargetView};
         use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -1585,11 +1585,8 @@ mod runway_aid_packet_tests {
             reserved: 0,
             identity,
         });
-        let registry = oa_audit_core::parse_principal_registry(
-            b"OACERT-LOCAL-PRINCIPALS-V1\n51\toperate\n52\tmonitor\n",
-        );
-        assert!(registry.is_ok(), "synthetic role registry");
-        let Ok(registry) = registry else { return };
+        let registry_bytes = b"OACERT-LOCAL-PRINCIPALS-V1\n51\toperate\n52\tmonitor\n";
+        let registry_pin = oa_sha256::sha256(registry_bytes);
         let root = std::env::temp_dir().join(format!(
             "oa-regional-arv-dispatch-{}-{}",
             std::process::id(),
@@ -1600,6 +1597,20 @@ mod runway_aid_packet_tests {
             "isolated temp directory"
         );
         let audit_log = root.join("actions.audit");
+        let registry_path = root.join("principals.tsv");
+        assert!(
+            std::fs::write(&registry_path, registry_bytes).is_ok(),
+            "write pinned test registry"
+        );
+        let pinned_registry =
+            oa_audit_log::shell::load_pinned_principal_registry(&registry_path, registry_pin);
+        assert!(
+            pinned_registry.is_ok(),
+            "independently pinned registry loads"
+        );
+        let Ok(pinned_registry) = pinned_registry else {
+            return;
+        };
         let checkpoint = oa_audit_core::genesis();
         let unknown_runway = regional_dispatch_runway_operator(
             &mut runtime,
@@ -1616,9 +1627,8 @@ mod runway_aid_packet_tests {
                 service_sequence: 1,
                 audit_log: &audit_log,
                 expected_checkpoint: checkpoint,
-                principal_registry: &registry,
+                principal_registry: &pinned_registry,
                 principal: 51,
-                role: Role::Operate,
                 time_ns: 5,
             },
         );
@@ -1643,9 +1653,8 @@ mod runway_aid_packet_tests {
                 service_sequence: 1,
                 audit_log: &audit_log,
                 expected_checkpoint: checkpoint,
-                principal_registry: &registry,
+                principal_registry: &pinned_registry,
                 principal: 51,
-                role: Role::Operate,
                 time_ns: 6,
             },
         );
@@ -1667,9 +1676,8 @@ mod runway_aid_packet_tests {
                 service_sequence: 1,
                 audit_log: &audit_log,
                 expected_checkpoint: checkpoint,
-                principal_registry: &registry,
+                principal_registry: &pinned_registry,
                 principal: 51,
-                role: Role::Operate,
                 time_ns: 10,
             },
         );
@@ -1712,9 +1720,8 @@ mod runway_aid_packet_tests {
                 service_sequence: 1,
                 audit_log: &audit_log,
                 expected_checkpoint: assignment_receipt.audit_checkpoint,
-                principal_registry: &registry,
+                principal_registry: &pinned_registry,
                 principal: 52,
-                role: Role::Monitor,
                 time_ns: 30,
             },
         );
@@ -1735,9 +1742,8 @@ mod runway_aid_packet_tests {
                 service_sequence: 2,
                 audit_log: &audit_log,
                 expected_checkpoint: assignment_receipt.audit_checkpoint,
-                principal_registry: &registry,
+                principal_registry: &pinned_registry,
                 principal: 51,
-                role: Role::Operate,
                 time_ns: 40,
             },
         );
@@ -2735,9 +2741,8 @@ pub struct RunwayAssignmentRequest<'a> {
     pub end_name: [u8; 3],
     pub audit_log: &'a Path,
     pub expected_checkpoint: oa_audit_core::Checkpoint,
-    pub principal_registry: &'a oa_audit_core::PrincipalRegistry,
+    pub principal_registry: &'a oa_audit_log::shell::PinnedPrincipalRegistry,
     pub principal: u64,
-    pub role: oa_audit_core::Role,
     pub time_ns: u64,
 }
 
@@ -2750,7 +2755,7 @@ pub struct RunwayAssignmentReceipt {
 
 /// Apply an explicit runway assignment after current full-key/view validation and durable audit.
 /// A runway aid profile must be installed first; all refusals leave assignment state unchanged.
-pub fn regional_assign_runway(
+fn regional_assign_runway(
     runtime: &mut RegionalRuntime,
     request: RunwayAssignmentRequest<'_>,
 ) -> Result<RunwayAssignmentReceipt, String> {
@@ -2815,12 +2820,10 @@ pub fn regional_assign_runway(
     if matches != 1 {
         return Err("runway assignment target is not unique in the verified profile".into());
     }
-    let registry_role = oa_audit_core::authorize_principal(
-        request.principal_registry,
-        request.principal,
-        oa_audit_core::Action::RunwayAssignment,
-    )
-    .map_err(|error| format!("runway assignment principal registry refused: {error:?}"))?;
+    let registry_role = request
+        .principal_registry
+        .authorize(request.principal, oa_audit_core::Action::RunwayAssignment)
+        .map_err(|error| format!("runway assignment principal registry refused: {error:?}"))?;
     if registry_role != request.role {
         return Err("runway assignment role does not match pinned principal registry".into());
     }
@@ -2885,9 +2888,68 @@ pub fn regional_assign_runway(
     };
     oa_audit_core::validate_event(&event)
         .map_err(|error| format!("runway assignment audit event: {error:?}"))?;
+    let next_sequence = request
+        .expected_checkpoint
+        .count
+        .checked_add(1)
+        .ok_or("runway assignment audit sequence exhausted")?;
+    if slot_index.is_none() {
+        runtime
+            .runway_assignments
+            .try_reserve(1)
+            .map_err(|_| "runway assignment storage reservation refused")?;
+    }
     let (audit_checkpoint, audit_receipt) =
         oa_audit_log::shell::append_receipt(request.audit_log, request.expected_checkpoint, event)
-            .map_err(|error| format!("runway assignment audit append: {error:?}"))?;
+            .map_err(|error| format!("runway assignment audit append outcome uncertain: {error:?}"))?;
+    validate_runway_audit_receipt(
+        request.expected_checkpoint,
+        event,
+        audit_checkpoint,
+        audit_receipt,
+        next_sequence,
+    )?;
+    if runtime.failed || runtime.frame_sequence != u64::from(request.view_sequence) {
+        return Err(
+            "durable runway assignment intent recorded but runtime changed before commit".into(),
+        );
+    }
+    let mut post_view_count = 0usize;
+    for view in runtime
+        .views
+        .iter()
+        .filter(|view| view.address == request.identity.aircraft_address)
+    {
+        post_view_count = post_view_count.saturating_add(1);
+        if view.identity_claims != 1
+            || view.identity_present != 1
+            || view.reserved != 0
+            || view.generation != request.generation
+            || view.identity != request.identity
+        {
+            return Err("durable runway assignment intent recorded but full identity changed before commit".into());
+        }
+    }
+    if post_view_count != 1 {
+        return Err("durable runway assignment intent recorded but target disappeared before commit".into());
+    }
+    match slot_index {
+        Some(index) => {
+            let Some(prior) = runtime.runway_assignments.get(index) else {
+                return Err("durable runway assignment intent recorded but assignment slot disappeared".into());
+            };
+            if prior.identity != request.identity
+                || prior.generation != request.generation
+                || request.service_sequence <= prior.sequence
+            {
+                return Err("durable runway assignment intent recorded but prior assignment changed".into());
+            }
+        }
+        None if runtime.runway_assignments.len() >= runtime.profile.max_flights => {
+            return Err("durable runway assignment intent recorded but active capacity changed".into());
+        }
+        None => {}
+    }
     let assignment = RunwayAssignmentValue {
         identity: request.identity,
         generation: request.generation,
@@ -2935,9 +2997,8 @@ pub struct RunwayAlertAcknowledgementRequest<'a> {
     pub service_sequence: u32,
     pub audit_log: &'a Path,
     pub expected_checkpoint: oa_audit_core::Checkpoint,
-    pub principal_registry: &'a oa_audit_core::PrincipalRegistry,
+    pub principal_registry: &'a oa_audit_log::shell::PinnedPrincipalRegistry,
     pub principal: u64,
-    pub role: oa_audit_core::Role,
     pub time_ns: u64,
 }
 
@@ -2972,9 +3033,8 @@ pub struct RunwayOperatorDispatchRequest<'a> {
     pub service_sequence: u32,
     pub audit_log: &'a Path,
     pub expected_checkpoint: oa_audit_core::Checkpoint,
-    pub principal_registry: &'a oa_audit_core::PrincipalRegistry,
+    pub principal_registry: &'a oa_audit_log::shell::PinnedPrincipalRegistry,
     pub principal: u64,
-    pub role: oa_audit_core::Role,
     pub time_ns: u64,
 }
 
@@ -3019,7 +3079,6 @@ pub fn regional_dispatch_runway_operator(
                     expected_checkpoint: request.expected_checkpoint,
                     principal_registry: request.principal_registry,
                     principal: request.principal,
-                    role: request.role,
                     time_ns: request.time_ns,
                 },
             )?;
@@ -3056,7 +3115,6 @@ pub fn regional_dispatch_runway_operator(
                     expected_checkpoint: request.expected_checkpoint,
                     principal_registry: request.principal_registry,
                     principal: request.principal,
-                    role: request.role,
                     time_ns: request.time_ns,
                 },
             )?;
@@ -3069,7 +3127,7 @@ pub fn regional_dispatch_runway_operator(
 /// Acknowledge one currently latched ARV alert from an existing typed operator request. The
 /// durable canonical receipt is appended before runtime state changes; acknowledgement does not
 /// clear or suppress the alert.
-pub fn regional_acknowledge_runway_alert(
+fn regional_acknowledge_runway_alert(
     runtime: &mut RegionalRuntime,
     request: RunwayAlertAcknowledgementRequest<'_>,
 ) -> Result<RunwayAlertAcknowledgementReceipt, String> {
@@ -3134,12 +3192,10 @@ pub fn regional_acknowledge_runway_alert(
     {
         return Err("ARV acknowledgement does not match a current unacknowledged alert".into());
     }
-    let registry_role = oa_audit_core::authorize_principal(
-        request.principal_registry,
-        request.principal,
-        oa_audit_core::Action::AlertAcknowledge,
-    )
-    .map_err(|error| format!("ARV acknowledgement principal registry refused: {error:?}"))?;
+    let registry_role = request
+        .principal_registry
+        .authorize(request.principal, oa_audit_core::Action::AlertAcknowledge)
+        .map_err(|error| format!("ARV acknowledgement principal registry refused: {error:?}"))?;
     if registry_role != request.role {
         return Err("ARV acknowledgement role does not match pinned principal registry".into());
     }
@@ -3193,9 +3249,37 @@ pub fn regional_acknowledge_runway_alert(
     };
     oa_audit_core::validate_event(&event)
         .map_err(|error| format!("ARV acknowledgement audit event: {error:?}"))?;
+    let next_sequence = request
+        .expected_checkpoint
+        .count
+        .checked_add(1)
+        .ok_or("ARV acknowledgement audit sequence exhausted")?;
     let (audit_checkpoint, audit_receipt) =
         oa_audit_log::shell::append_receipt(request.audit_log, request.expected_checkpoint, event)
-            .map_err(|error| format!("ARV acknowledgement audit append: {error:?}"))?;
+            .map_err(|error| format!("ARV acknowledgement audit append outcome uncertain: {error:?}"))?;
+    validate_runway_audit_receipt(
+        request.expected_checkpoint,
+        event,
+        audit_checkpoint,
+        audit_receipt,
+        next_sequence,
+    )?;
+    let current_assignment = runtime
+        .runway_assignments
+        .get(assignment_index)
+        .ok_or("durable ARV acknowledgement intent recorded but assignment disappeared")?;
+    if runtime.failed
+        || current_assignment.identity != request.identity
+        || current_assignment.generation != request.generation
+        || current_assignment.sequence != request.assignment_sequence
+        || current_assignment.arv_status != request.expected_alert
+        || current_assignment.arv_as_of_ns != request.expected_alert_as_of_ns
+        || current_assignment.arv_acknowledged
+    {
+        return Err(
+            "durable ARV acknowledgement intent recorded but runtime changed before commit".into(),
+        );
+    }
     let assignment = runtime
         .runway_assignments
         .get_mut(assignment_index)
@@ -3213,6 +3297,24 @@ pub fn regional_acknowledge_runway_alert(
         audit_checkpoint,
         audit_receipt,
     })
+}
+
+fn validate_runway_audit_receipt(
+    expected: oa_audit_core::Checkpoint,
+    event: oa_audit_core::Event,
+    next: oa_audit_core::Checkpoint,
+    receipt: oa_audit_core::AuditReceipt,
+    expected_sequence: u64,
+) -> Result<(), String> {
+    if next.count != expected_sequence
+        || receipt.sequence() != expected_sequence
+        || receipt.previous() != expected.tail
+        || receipt.digest() != next.tail
+        || !oa_audit_core::receipt_matches(&receipt, &event)
+    {
+        return Err("durable runway audit intent recorded but returned receipt did not match the exact action".into());
+    }
+    Ok(())
 }
 
 pub fn regional_runway_assignment(
@@ -4107,6 +4209,11 @@ pub fn regional_issued_manifest_sha256(runtime: &RegionalRuntime) -> Option<[u8;
     runtime.issued_manifest_sha256
 }
 
+/// Exact runway companion fingerprint captured when the verified profile was installed.
+pub fn regional_runway_aids_sha256(runtime: &RegionalRuntime) -> Option<[u8; 32]> {
+    runtime.runway_aids_profile_sha256
+}
+
 fn execute(
     runtime: &mut RegionalRuntime,
     batch: &ReceiptBatch,
@@ -4807,7 +4914,7 @@ mod transaction_tests {
                 expected_identity: identity,
                 audit_log: &protected_alias,
                 expected_checkpoint: checkpoint,
-                principal_registry: &registry,
+                principal_registry: &pinned_registry,
                 principal: 51,
                 time_ns: 100,
                 manual_handoff_ref: "manual-case-77",
@@ -4828,7 +4935,7 @@ mod transaction_tests {
                 expected_identity: identity,
                 audit_log: &wrong_role_path,
                 expected_checkpoint: checkpoint,
-                principal_registry: &registry,
+                principal_registry: &pinned_registry,
                 principal: 52,
                 time_ns: 100,
                 manual_handoff_ref: "manual-case-77",
@@ -4849,7 +4956,7 @@ mod transaction_tests {
                 expected_identity: identity,
                 audit_log: &audit_path,
                 expected_checkpoint: checkpoint,
-                principal_registry: &registry,
+                principal_registry: &pinned_registry,
                 principal: 51,
                 time_ns: 101,
                 manual_handoff_ref: "manual-case-77",

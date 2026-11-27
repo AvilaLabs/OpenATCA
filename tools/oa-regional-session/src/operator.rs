@@ -45,6 +45,25 @@ pub enum Action {
     Quit,
 }
 
+/// Registry/log pin supplied by an external operator host for typed runway commands. The
+/// principal is a registry claim; the independently pinned file does not authenticate identity.
+#[derive(Clone, Debug)]
+pub struct OperatorAuditConfiguration {
+    pub registry_path: PathBuf,
+    pub registry_sha256: [u8; 32],
+    pub audit_log: PathBuf,
+    pub checkpoint: oa_audit_core::Checkpoint,
+    pub principal_id: u64,
+}
+
+/// Non-text typed input scheduled after a script action. This is a host API; no keyboard grammar
+/// or claim of controller-display input is added.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TypedOperatorInput {
+    pub after_action: u32,
+    pub intent: Intent,
+}
+
 /// A7.2: cold source row with its original ordinal and sequence retained for audit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RecordedEvent {
@@ -631,6 +650,14 @@ struct SessionRunner {
     console_redraws: usize,
     wall_start: Instant,
     input_loss_unresolved: bool,
+    runway_audit: Option<RunwayAuditState>,
+}
+
+struct RunwayAuditState {
+    registry: oa_audit_log::shell::PinnedPrincipalRegistry,
+    audit_log: PathBuf,
+    checkpoint: oa_audit_core::Checkpoint,
+    principal_id: u64,
 }
 
 impl SessionRunner {
@@ -717,19 +744,143 @@ impl SessionRunner {
         } else {
             core::mem::take(&mut self.queue)
         };
-        let batch = prepare_batch(
+        let mut batch = prepare_batch(
             &recorded,
             &queued,
             &mut self.next_sequence,
             &mut self.journal,
         )?;
+        let mut runway_applied = 0usize;
+        let mut runway_refused = 0usize;
+        let mut runway_intent_uncommitted = 0usize;
+        let mut runway_audit_uncertain = 0usize;
+        for event in &batch.events {
+            let crate::input::EventKind::Operator(command) = &event.kind else {
+                continue;
+            };
+            if !matches!(
+                command.intent,
+                Intent::AssignRunway(_) | Intent::AcknowledgeRunwayAlert
+            ) {
+                continue;
+            }
+            let Some(audit) = self.runway_audit.as_mut() else {
+                runway_refused = runway_refused
+                    .checked_add(1)
+                    .ok_or("runway refusal counter overflow")?;
+                operator_journal_push(
+                    &mut self.journal,
+                    format!(
+                        "RUNWAY_COMMAND\t{}\tREFUSED\tpinned audit configuration unavailable\n",
+                        event.sequence
+                    ),
+                )?;
+                continue;
+            };
+            let identity = FlightIdentity {
+                gufi: event.identity.flight_gufi.to_be_bytes(),
+                aircraft_address: event.identity.aircraft_address,
+                centre: event.centre,
+                plan_id: command.plan_id,
+            };
+            let time_ns = clock_stamp(self.wall_start)?.monotonic_ns.max(1);
+            let result = crate::runtime::regional_dispatch_runway_operator(
+                &mut self.runtime,
+                crate::runtime::RunwayOperatorDispatchRequest {
+                    operator_command: *command,
+                    identity,
+                    generation: command.target_generation,
+                    service_sequence: u32::try_from(event.sequence)
+                        .map_err(|_| "runway command sequence exceeds u32")?,
+                    audit_log: &audit.audit_log,
+                    expected_checkpoint: audit.checkpoint,
+                    principal_registry: &audit.registry,
+                    principal: audit.principal_id,
+                    time_ns,
+                },
+            );
+            match result {
+                Ok(receipt) => {
+                    audit.checkpoint = match receipt {
+                        crate::runtime::RunwayOperatorReceipt::Assignment(receipt) => {
+                            receipt.audit_checkpoint
+                        }
+                        crate::runtime::RunwayOperatorReceipt::AlertAcknowledgement(receipt) => {
+                            receipt.audit_checkpoint
+                        }
+                    };
+                    runway_applied = runway_applied
+                        .checked_add(1)
+                        .ok_or("runway applied counter overflow")?;
+                    operator_journal_push(
+                        &mut self.journal,
+                        format!(
+                            "RUNWAY_COMMAND\t{}\tAPPLIED\tcheckpoint={}\n",
+                            event.sequence, audit.checkpoint.count
+                        ),
+                    )?;
+                }
+                Err(reason) if reason.contains("durable") => {
+                    runway_intent_uncommitted = runway_intent_uncommitted
+                        .checked_add(1)
+                        .ok_or("runway uncommitted counter overflow")?;
+                    operator_journal_push(
+                        &mut self.journal,
+                        format!(
+                            "RUNWAY_COMMAND\t{}\tDURABLE_INTENT_NOT_COMMITTED\t{}\n",
+                            event.sequence,
+                            reason.replace(['\t', '\n'], " ")
+                        ),
+                    )?;
+                }
+                Err(reason) if reason.contains("audit append") => {
+                    runway_audit_uncertain = runway_audit_uncertain
+                        .checked_add(1)
+                        .ok_or("runway audit uncertainty counter overflow")?;
+                    operator_journal_push(
+                        &mut self.journal,
+                        format!(
+                            "RUNWAY_COMMAND\t{}\tAUDIT_OUTCOME_UNCERTAIN\t{}\n",
+                            event.sequence,
+                            reason.replace(['\t', '\n'], " ")
+                        ),
+                    )?;
+                }
+                Err(reason) => {
+                    runway_refused = runway_refused
+                        .checked_add(1)
+                        .ok_or("runway refusal counter overflow")?;
+                    operator_journal_push(
+                        &mut self.journal,
+                        format!(
+                            "RUNWAY_COMMAND\t{}\tREFUSED\t{}\n",
+                            event.sequence,
+                            reason.replace(['\t', '\n'], " ")
+                        ),
+                    )?;
+                }
+            }
+        }
+        batch.events.retain(|event| {
+            !matches!(
+                &event.kind,
+                crate::input::EventKind::Operator(command)
+                    if matches!(command.intent, Intent::AssignRunway(_) | Intent::AcknowledgeRunwayAlert)
+            )
+        });
         let mut frame = regional_step(&mut self.runtime, &batch)?;
         self.next_batch += 1;
         self.selected = None; // Every command requires selection against the newest view sequence.
         if frame.controller_dispatches.len() > crate::MAX_EVENTS_PER_RECEIPT {
             return Err("command outcome presentation exceeds receipt work budget".into());
         }
-        let selection_note = if frame.controller_dispatches.is_empty() && batch_full_refused == 0 {
+        let selection_note = if frame.controller_dispatches.is_empty()
+            && batch_full_refused == 0
+            && runway_applied == 0
+            && runway_refused == 0
+            && runway_intent_uncommitted == 0
+            && runway_audit_uncertain == 0
+        {
             "SELECT then issue command".to_owned()
         } else {
             let accepted = frame
@@ -751,7 +902,24 @@ impl SessionRunner {
             let refused = (frame.controller_dispatches.len() - accepted)
                 .checked_add(batch_full_refused)
                 .ok_or("command refusal count overflow")?;
-            format!("COMMANDS ACCEPTED {accepted} REFUSED {refused}; SELECT AGAIN")
+            if runway_applied == 0
+                && runway_refused == 0
+                && runway_intent_uncommitted == 0
+                && runway_audit_uncertain == 0
+            {
+                format!(
+                    "COMMANDS ACCEPTED {accepted} REFUSED {}; SELECT AGAIN",
+                    refused + batch_full_refused
+                )
+            } else {
+                format!(
+                    "COMMANDS ACCEPTED {} REFUSED {}; DURABLE-INTENT-NOT-COMMITTED {}; AUDIT-OUTCOME-UNCERTAIN {}; SELECT AGAIN",
+                    accepted + runway_applied,
+                    refused + runway_refused + batch_full_refused,
+                    runway_intent_uncommitted,
+                    runway_audit_uncertain
+                )
+            }
         };
         self.clear_runtime_selection(&format!("FRAME:{}", frame.sequence))?;
         self.reserve_presentation_update()?;
@@ -1007,8 +1175,24 @@ fn init_runner(
     output: &Path,
     model_source: &crate::cli::ModelSource,
     batches: Vec<RecordedBatch>,
+    audit_configuration: Option<OperatorAuditConfiguration>,
 ) -> Result<(SessionRunner, [u8; 32], [u8; 32]), String> {
     oa_sealed::refuse(output)?;
+    let runway_audit = audit_configuration
+        .map(|configuration| {
+            let registry = oa_audit_log::shell::load_pinned_principal_registry(
+                &configuration.registry_path,
+                configuration.registry_sha256,
+            )
+            .map_err(|error| format!("pinned operator registry refused: {error}"))?;
+            Ok(RunwayAuditState {
+                registry,
+                audit_log: configuration.audit_log,
+                checkpoint: configuration.checkpoint,
+                principal_id: configuration.principal_id,
+            })
+        })
+        .transpose()?;
     let cfg = crate::surveillance::SurveillanceConfig {
         centre_lat_e7: 410_000_000,
         centre_lon_e7: -870_000_000,
@@ -1134,6 +1318,7 @@ fn init_runner(
             console_redraws: 0,
             wall_start: start,
             input_loss_unresolved: false,
+            runway_audit,
         },
         model_sha,
         executable_sha,
@@ -1240,19 +1425,81 @@ pub fn run_script_session(
     model_source: &crate::cli::ModelSource,
     script: &Path,
 ) -> Result<(), String> {
+    run_script_session_inner(input, output, model_source, script, &[], None)
+}
+
+/// Normal headless host entry point for typed runway operator actions. Actions enter the same
+/// selection, bounded queue, next-scan dispatch, journal and durable audit path as session input.
+/// They are supplied as typed API values; this function adds no keyboard/script text grammar.
+pub fn run_script_session_with_typed_operator_inputs(
+    input: &Path,
+    output: &Path,
+    model_source: &crate::cli::ModelSource,
+    script: &Path,
+    inputs: &[TypedOperatorInput],
+    audit: OperatorAuditConfiguration,
+) -> Result<(), String> {
+    run_script_session_inner(input, output, model_source, script, inputs, Some(audit))
+}
+
+fn run_script_session_inner(
+    input: &Path,
+    output: &Path,
+    model_source: &crate::cli::ModelSource,
+    script: &Path,
+    inputs: &[TypedOperatorInput],
+    audit_configuration: Option<OperatorAuditConfiguration>,
+) -> Result<(), String> {
     let input_bytes = crate::cli::read_guarded(input, MAX_RECORDING_BYTES)?;
     let input_sha = oa_sha256::sha256(&input_bytes);
     let batches = parse_recording(&input_bytes)?;
     let script_bytes = crate::cli::read_guarded(script, MAX_SCRIPT_BYTES)?;
     let script_sha = oa_sha256::sha256(&script_bytes);
     let actions = parse_actions(&script_bytes)?;
-    let (mut runner, model_sha, executable_sha) = init_runner(output, model_source, batches)?;
+    if inputs.len() > MAX_SCRIPT_ACTIONS {
+        return Err("typed operator input count exceeds 4096".into());
+    }
+    let mut previous_action = 0u32;
+    for input in inputs {
+        if input.after_action == 0
+            || input.after_action <= previous_action
+            || usize::try_from(input.after_action).map_or(true, |index| index > actions.len())
+            || !matches!(
+                input.intent,
+                Intent::AssignRunway(_) | Intent::AcknowledgeRunwayAlert
+            )
+        {
+            return Err("typed operator inputs must be ordered runway actions after existing script actions".into());
+        }
+        previous_action = input.after_action;
+    }
+    let (mut runner, model_sha, executable_sha) =
+        init_runner(output, model_source, batches, audit_configuration)?;
     let result = (|| {
-        for action in actions {
+        let mut input_index = 0usize;
+        for (index, action) in actions.into_iter().enumerate() {
             let quit = runner.action(action, clock_stamp(runner.wall_start)?)?;
+            let action_number =
+                u32::try_from(index + 1).map_err(|_| "script action index overflow")?;
+            while inputs
+                .get(input_index)
+                .is_some_and(|input| input.after_action == action_number)
+            {
+                let input = inputs.get(input_index).ok_or("typed input disappeared")?;
+                runner.action(
+                    Action::Intent(input.intent),
+                    clock_stamp(runner.wall_start)?,
+                )?;
+                input_index = input_index
+                    .checked_add(1)
+                    .ok_or("typed input index overflow")?;
+            }
             if quit {
                 break;
             }
+        }
+        if input_index != inputs.len() {
+            return Err("typed runway input was not consumed by the normal action loop".into());
         }
         if runner.current_frame.is_none() {
             return Err("operated session completed no frame".into());
@@ -1428,7 +1675,7 @@ pub fn run_device_session(
     let input_bytes = crate::cli::read_guarded(input, MAX_RECORDING_BYTES)?;
     let input_sha = oa_sha256::sha256(&input_bytes);
     let batches = parse_recording(&input_bytes)?;
-    let (mut runner, model_sha, executable_sha) = init_runner(output, model_source, batches)?;
+    let (mut runner, model_sha, executable_sha) = init_runner(output, model_source, batches, None)?;
     let mut display = oa_display_present::open_kms(drm, tty, connector)
         .map_err(|e| format!("KMS open: {e:?}"))?;
     // Include every post-acquisition initialization path in explicit cleanup; Drop is only

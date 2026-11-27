@@ -6,7 +6,8 @@ use oa_regional_session::input::{
 };
 use oa_regional_session::operator::{
     operator_journal_bytes, operator_journal_new, parse_action, parse_actions, prepare_batch,
-    Action, RecordedBatch, RecordedEvent,
+    run_script_session_with_typed_operator_inputs, Action, OperatorAuditConfiguration,
+    RecordedBatch, RecordedEvent, TypedOperatorInput,
 };
 use oa_regional_session::session::MAX_EVENTS_PER_RECEIPT;
 use std::fs;
@@ -382,4 +383,80 @@ fn full_recorded_batch_keeps_local_command_refusal_visible() {
         fs::remove_file(path).unwrap();
     }
     fs::remove_file(executable).unwrap();
+}
+
+// REQ: OA-RWY-025, OA-AUDIT-002, OA-AUDIT-003
+#[test]
+fn typed_runway_assignment_uses_normal_selection_queue_advance_and_pinned_audit() {
+    use oa_regional_session::cli::ModelSource;
+
+    let root = temp_path("typed-runway");
+    fs::create_dir(&root).expect("create synthetic typed-runway root");
+    let input = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/synthetic-session.tsv");
+    let script = root.join("actions.txt");
+    let output = root.join("output");
+    fs::write(&script, b"NEXT\nNEXT\nSELECT ABC101\nACTOR 1\nNEXT\nQUIT\n")
+        .expect("write ordinary host script");
+    let registry = root.join("principals.tsv");
+    let registry_bytes = b"OACERT-LOCAL-PRINCIPALS-V1\n51\toperate\n";
+    fs::write(&registry, registry_bytes).expect("write synthetic principal registry");
+    let audit_log = root.join("actions.audit");
+    let wrong_pin = run_script_session_with_typed_operator_inputs(
+        &input,
+        &root.join("wrong-pin-output"),
+        &ModelSource::Synthetic,
+        &script,
+        &[TypedOperatorInput {
+            after_action: 4,
+            intent: Intent::AssignRunway(1),
+        }],
+        OperatorAuditConfiguration {
+            registry_path: registry.clone(),
+            registry_sha256: [0x55; 32],
+            audit_log: audit_log.clone(),
+            checkpoint: oa_audit_core::genesis(),
+            principal_id: 51,
+        },
+    );
+    assert!(
+        wrong_pin.is_err(),
+        "normal host entry refuses mismatched authority pin"
+    );
+    assert!(
+        !audit_log.exists(),
+        "wrong authority pin writes no action record"
+    );
+    let result = run_script_session_with_typed_operator_inputs(
+        &input,
+        &output,
+        &ModelSource::Synthetic,
+        &script,
+        &[TypedOperatorInput {
+            after_action: 4,
+            intent: Intent::AssignRunway(1),
+        }],
+        OperatorAuditConfiguration {
+            registry_path: registry,
+            registry_sha256: oa_sha256::sha256(registry_bytes),
+            audit_log: audit_log.clone(),
+            checkpoint: oa_audit_core::genesis(),
+            principal_id: 51,
+        },
+    );
+    assert!(
+        result.is_ok(),
+        "typed queue path completes with an explicit refusal: {result:?}"
+    );
+    let journal = fs::read_to_string(output.join("operator.tsv")).expect("operator journal");
+    assert!(
+        journal.contains("RUNWAY_COMMAND\t")
+            && journal
+                .contains("\tREFUSED\trunway assignment requires an active configured runtime")
+    );
+    assert!(
+        !audit_log.exists(),
+        "precondition refusal does not append audit"
+    );
+    verify_closed_bundle(&output);
+    let _ = fs::remove_dir_all(root);
 }
