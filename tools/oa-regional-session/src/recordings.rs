@@ -2403,7 +2403,7 @@ pub fn serialize_recorded_events(events: &[NormalizedEvent]) -> Result<String, A
                 }
                 write!(
                     out,
-                    "\t{}\t{}",
+                    "\t{}\t{}\t",
                     source_evidence_field(evidence.row_flags),
                     source_squawk_field(evidence.squawk)
                 )
