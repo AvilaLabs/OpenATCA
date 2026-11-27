@@ -55,6 +55,7 @@ class VddFixture(unittest.TestCase):
         self.trace.write_text(
             "Requirements with tests (1):\n  OA-GEN-001\n\n"
             "Requirements WITHOUT tests (0):\n\n"
+            "Proposed requirements (0; not active or verified):\n\n"
             "Traceability (every requirement linked, ids unique; no test or proof run): PASS\n",
             encoding="utf-8",
         )
@@ -175,12 +176,59 @@ class VddFixture(unittest.TestCase):
     def test_uncovered_trace_rows_are_named_as_open_requirements(self):
         self.trace.write_text(
             "Requirements with tests (0):\n\nRequirements WITHOUT tests (1):\n  OA-GEN-001\n\n"
+            "Proposed requirements (0; not active or verified):\n\n"
             "Traceability (every requirement linked, ids unique; no test or proof run): FAIL\n",
             encoding="utf-8",
         )
         text = self.render()
         self.assertIn("Uncovered requirement IDs: OA-GEN-001", text)
         self.assertIn("Uncovered requirements: OA-GEN-001", text)
+
+    def test_proposed_trace_rows_stay_separate_from_active_coverage(self):
+        self.trace.write_text(
+            "Requirements with tests (1):\n  OA-GEN-001\n    tests/demo.rs:4 active_test\n\n"
+            "Requirements WITHOUT tests (1):\n  OA-GEN-002\n\n"
+            "Proposed requirements (1; not active or verified):\n  OA-GEN-900\n"
+            "    informational tags only; proposal remains unverified\n"
+            "    tests/proposal.rs:8 proposal_test\n\n"
+            "Traceability (every requirement linked, ids unique; no test or proof run): FAIL\n",
+            encoding="utf-8",
+        )
+
+        text = self.render()
+        trace_section = text.split("## 4. Requirements trace\n\n", 1)[1].split("\n## ", 1)[0]
+        limits_section = text.split("## 6. Known problems and limits\n\n", 1)[1].split("\n## ", 1)[0]
+        self.assertIn("Requirements with tests (1)", trace_section)
+        self.assertIn("Requirements WITHOUT tests (1)", trace_section)
+        self.assertIn("Proposed requirements (1; not active or verified)", trace_section)
+        self.assertIn("Proposed requirements (1; not active or verified): OA-GEN-900", trace_section)
+        self.assertIn("not included in active covered or untested counts", trace_section)
+        self.assertIn("Uncovered requirement IDs: OA-GEN-002", trace_section)
+        self.assertIn("Uncovered requirements: OA-GEN-002", limits_section)
+        self.assertNotIn("OA-GEN-900", limits_section)
+
+    def test_proposed_trace_count_must_reconcile_and_not_overlap_active_ids(self):
+        cases = [
+            (
+                "Requirements with tests (1):\n  OA-GEN-001\n\n"
+                "Requirements WITHOUT tests (0):\n\n"
+                "Proposed requirements (1; not active or verified):\n\n"
+                "Traceability (every requirement linked, ids unique; no test or proof run): PASS\n",
+                "trace proposed requirement list does not reconcile",
+            ),
+            (
+                "Requirements with tests (1):\n  OA-GEN-001\n\n"
+                "Requirements WITHOUT tests (0):\n\n"
+                "Proposed requirements (1; not active or verified):\n  OA-GEN-001\n\n"
+                "Traceability (every requirement linked, ids unique; no test or proof run): PASS\n",
+                "trace proposed requirements overlap active coverage",
+            ),
+        ]
+        for trace, message in cases:
+            with self.subTest(message=message):
+                self.trace.write_text(trace, encoding="utf-8")
+                with self.assertRaisesRegex(generate_vdd.VddError, message):
+                    generate_vdd._trace_summary(self.trace)
 
     def test_section_5_hazard_commit_and_generated_table_digests(self):
         text = self.render()

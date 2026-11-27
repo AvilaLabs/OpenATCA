@@ -397,22 +397,59 @@ def _trace_summary(path: Path) -> tuple[str, str, list[str]]:
         raise VddError("trace report lacks the oa-trace summary line")
     covered = next((line for line in lines if line.startswith("Requirements with tests (")), "not available")
     uncovered = next((line for line in lines if line.startswith("Requirements WITHOUT tests (")), "not available")
+    proposed = next((line for line in lines if line.startswith("Proposed requirements (")), None)
     counts = re.search(r"Requirements with tests \(([0-9]+)\)", covered)
     missing = re.search(r"Requirements WITHOUT tests \(([0-9]+)\)", uncovered)
-    if counts is None or missing is None or int(counts.group(1)) + int(missing.group(1)) > MAX_REQUIREMENTS:
+    proposed_count = re.fullmatch(
+        r"Proposed requirements \(([0-9]+); not active or verified\):", proposed or ""
+    )
+    if counts is None or missing is None or proposed_count is None:
+        raise VddError("trace requirement counts or proposed section are missing or malformed")
+
+    headers = (
+        "Requirements with tests (",
+        "Requirements WITHOUT tests (",
+        "Proposed requirements (",
+        "Tags naming unknown IDs (",
+        "Malformed tags (",
+        "Duplicate requirement IDs (",
+        "Warnings: tests naming WITHDRAWN requirements:",
+        "Traceability (every requirement linked",
+    )
+
+    def section_ids(header: str) -> list[str]:
+        start = lines.index(header) + 1
+        found = []
+        for line in lines[start:]:
+            if line.startswith(headers):
+                break
+            if re.fullmatch(r"OA-[A-Z0-9]+-[0-9]{3}", line):
+                found.append(line)
+        return found
+
+    covered_ids = section_ids(covered)
+    missing_ids = section_ids(uncovered)
+    proposed_ids = section_ids(proposed)
+    active_count = int(counts.group(1)) + int(missing.group(1))
+    if active_count + int(proposed_count.group(1)) > MAX_REQUIREMENTS:
         raise VddError("trace requirement counts are missing or exceed fixed limit")
-    marker = lines.index(uncovered)
-    missing_ids = []
-    for line in lines[marker + 1 :]:
-        match = re.fullmatch(r"(OA-[A-Z0-9]+-[0-9]{3})", line)
-        if match:
-            missing_ids.append(match.group(1))
-        elif missing_ids or line.startswith("Tags naming"):
-            break
-    if len(missing_ids) != int(missing.group(1)):
+    if (len(covered_ids) != int(counts.group(1))
+            or len(set(covered_ids)) != len(covered_ids)):
+        raise VddError("trace covered requirement list does not reconcile with its count")
+    if len(missing_ids) != int(missing.group(1)) or len(set(missing_ids)) != len(missing_ids):
         raise VddError("trace uncovered requirement list does not reconcile with its count")
-    detail = ("Uncovered requirement IDs: " + ", ".join(missing_ids) + "."
-              if missing_ids else "Uncovered requirement IDs: none.")
+    if (len(proposed_ids) != int(proposed_count.group(1))
+            or len(set(proposed_ids)) != len(proposed_ids)):
+        raise VddError("trace proposed requirement list does not reconcile with its count")
+    if set(proposed_ids) & (set(covered_ids) | set(missing_ids)):
+        raise VddError("trace proposed requirements overlap active coverage or uncovered IDs")
+    uncovered_detail = ", ".join(missing_ids) if missing_ids else "none"
+    proposed_detail = ", ".join(proposed_ids) if proposed_ids else "none"
+    detail = (
+        f"Uncovered requirement IDs: {uncovered_detail}. "
+        f"Proposed requirements ({len(proposed_ids)}; not active or verified): {proposed_detail}. "
+        "Proposed IDs are not included in active covered or untested counts."
+    )
     return f"{summary}; {covered}; {uncovered}; {detail}", _sha(raw), missing_ids
 
 
