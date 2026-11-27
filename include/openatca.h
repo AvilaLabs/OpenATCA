@@ -50,7 +50,16 @@ enum {
     OA_STATUS_TAR_TRUNCATED = 19,
     OA_STATUS_TAR_LIMIT = 20,
     OA_STATUS_TAR_NAME_TOO_LONG = 21,
-    OA_STATUS_TAR_READ_ERROR = 22
+    OA_STATUS_TAR_READ_ERROR = 22,
+    OA_STATUS_ZIP_FORMAT = 32,
+    OA_STATUS_ZIP_TRUNCATED = 33,
+    OA_STATUS_ZIP_UNSUPPORTED_METHOD = 34,
+    OA_STATUS_ZIP_ENCRYPTED = 35,
+    OA_STATUS_ZIP_UNSAFE_PATH = 36,
+    OA_STATUS_ZIP_LIMIT = 37,
+    OA_STATUS_ZIP_INFLATE_OR_SIZE = 38,
+    OA_STATUS_ZIP_CRC = 39,
+    OA_STATUS_ZIP_BAD_ENTRY_INDEX = 40
 };
 
 #define OA_DEFLATE_MAX_INPUT_BYTES UINT64_C(67108864)
@@ -59,6 +68,14 @@ enum {
 #define OA_TAR_MAX_INPUT_BYTES UINT64_C(67108864)
 #define OA_TAR_MAX_ENTRIES UINT64_C(4096)
 #define OA_TAR_MAX_NAME_POOL_BYTES UINT64_C(16777216)
+#define OA_ZIP_MAX_INPUT_BYTES UINT64_C(1073741824)
+#define OA_ZIP_MAX_ENTRIES UINT64_C(10000)
+#define OA_ZIP_MAX_ENTRY_BYTES UINT64_C(268435456)
+#define OA_ZIP_MAX_TOTAL_BYTES UINT64_C(1073741824)
+#define OA_ZIP_MAX_NAME_BYTES UINT64_C(4096)
+#define OA_ZIP_MAX_NAME_POOL_BYTES UINT64_C(40960000)
+#define OA_ZIP_MAX_RATIO UINT64_C(200)
+#define OA_ZIP_RATIO_EXEMPT_BYTES UINT64_C(1048576)
 
 typedef uint32_t OaLocationKind;
 enum {
@@ -73,6 +90,110 @@ typedef struct OaErrorInfo {
     uint32_t location_kind; /* NONE, ARGUMENT, or ELEMENT. */
     uint64_t location;      /* Zero-based argument/element index; raw value is preserved. */
 } OaErrorInfo;
+
+#define OA_ASTERIX_MAX_INPUT_BYTES UINT64_C(65535)
+#define OA_ASTERIX_MAX_RECORDS UINT64_C(21844)
+enum {
+    OA_ASTERIX_EDITION_NONE = 0,
+    OA_ASTERIX_CAT021_EDITION_24 = 24,
+    OA_ASTERIX_CAT021_EDITION_27 = 27
+};
+#define OA_ASTERIX_FIELD_SOURCE (UINT64_C(1) << 0)
+#define OA_ASTERIX_FIELD_ADDRESS (UINT64_C(1) << 1)
+#define OA_ASTERIX_FIELD_IDENT (UINT64_C(1) << 2)
+#define OA_ASTERIX_FIELD_TRACK (UINT64_C(1) << 3)
+#define OA_ASTERIX_FIELD_TIME (UINT64_C(1) << 4)
+#define OA_ASTERIX_FIELD_POSITION_0 (UINT64_C(1) << 5)
+#define OA_ASTERIX_FIELD_POSITION_1 (UINT64_C(1) << 6)
+#define OA_ASTERIX_FIELD_VELOCITY (UINT64_C(1) << 7)
+#define OA_ASTERIX_FIELD_MODE3A (UINT64_C(1) << 8)
+#define OA_ASTERIX_FIELD_VERTICAL (UINT64_C(1) << 9)
+enum {
+    OA_ASTERIX_POSITION_GEODETIC = 1,
+    OA_ASTERIX_POSITION_POLAR = 2,
+    OA_ASTERIX_POSITION_CARTESIAN = 3,
+    OA_ASTERIX_SCALE_CAT021_POS = 1,
+    OA_ASTERIX_SCALE_CAT021_POS_HIGH = 2,
+    OA_ASTERIX_SCALE_CAT062_POS = 3,
+    OA_ASTERIX_SCALE_CAT048_POLAR = 4,
+    OA_ASTERIX_SCALE_CAT048_CART = 5,
+    OA_ASTERIX_SCALE_CAT062_CART = 6,
+    OA_ASTERIX_VELOCITY_CAT021_GROUND = 1,
+    OA_ASTERIX_VELOCITY_CAT062_CART = 2
+};
+enum {
+    OA_ASTERIX_VERTICAL_GEOMETRIC_HEIGHT = 1,
+    OA_ASTERIX_VERTICAL_FLIGHT_LEVEL = 2,
+    OA_ASTERIX_VERTICAL_SELECTED_ALTITUDE = 3,
+    OA_ASTERIX_VERTICAL_FINAL_SELECTED_ALTITUDE = 4,
+    OA_ASTERIX_VERTICAL_BARO_RATE = 5,
+    OA_ASTERIX_VERTICAL_GEOMETRIC_RATE = 6,
+    OA_ASTERIX_VERTICAL_SCALE_6_25_FT = 1,
+    OA_ASTERIX_VERTICAL_SCALE_0_25_FL = 2,
+    OA_ASTERIX_VERTICAL_SCALE_25_FT = 3,
+    OA_ASTERIX_VERTICAL_SCALE_6_25_FPM = 4
+};
+enum {
+    OA_ASTERIX_VERTICAL_RANGE_EXCEEDED = 1 << 0,
+    OA_ASTERIX_VERTICAL_NOT_VALIDATED = 1 << 1,
+    OA_ASTERIX_VERTICAL_GARBLED = 1 << 2,
+    OA_ASTERIX_VERTICAL_QNH = 1 << 3,
+    OA_ASTERIX_VERTICAL_SOURCE_PROVIDED = 1 << 4,
+    OA_ASTERIX_VERTICAL_MANAGE = 1 << 5,
+    OA_ASTERIX_VERTICAL_HOLD = 1 << 6,
+    OA_ASTERIX_VERTICAL_APPROACH = 1 << 7
+};
+enum {
+    OA_ASTERIX_ERROR_BUFFER_TOO_SMALL = 1001,
+    OA_ASTERIX_ERROR_INVALID_ARGUMENT = 1002,
+    OA_ASTERIX_ERROR_LENGTH_TOO_LARGE = 1003,
+    OA_ASTERIX_ERROR_ALLOCATION_FAILED = 1004,
+    OA_ASTERIX_ERROR_INTERNAL_PANIC = 1005
+};
+typedef struct OaAsterixPosition {
+    uint16_t item;
+    uint8_t kind, scale;
+    int32_t a_raw, b_raw;
+} OaAsterixPosition;
+typedef struct OaAsterixVertical {
+    uint16_t item;
+    uint8_t subitem, kind, scale, flags, auxiliary, reserved;
+    int32_t raw;
+} OaAsterixVertical;
+typedef struct OaAsterixRecord {
+    uint8_t category, cat021_edition, source_sac, source_sic;
+    uint32_t reserved0;
+    uint64_t present_frn_mask, raw_untyped_frn_mask, typed_unprojected_frn_mask;
+    uint64_t present_field_mask;
+    uint32_t target_address;
+    uint8_t target_ident[8];
+    uint16_t track_number, time_item;
+    uint32_t time_raw;
+    uint8_t position_count, velocity_kind, velocity_flags, mode3a_flags;
+    OaAsterixPosition positions[2];
+    int32_t velocity_a_raw, velocity_b_raw;
+    uint16_t mode3a_code, reserved3;
+    uint32_t raw_untyped_subitem_mask, reserved4, reserved5;
+    uint8_t vertical_count, reserved6[7];
+    OaAsterixVertical vertical[6];
+} OaAsterixRecord;
+typedef struct OaAsterixCounts {
+    uint8_t category, edition;
+    uint16_t reserved;
+    uint8_t reserved_bytes[4];
+    uint64_t consumed_bytes, required_record_count, written_record_count;
+} OaAsterixCounts;
+typedef struct OaAsterixError {
+    uint32_t status, kind;
+    uint8_t category, subitem;
+    uint16_t item;
+    uint32_t record;
+    uint8_t reserved_bytes[8];
+    uint64_t offset;
+} OaAsterixError;
+
+/* `status` repeats the generic return status; `kind` 1–23 maps to oa-asterix ErrorKind variants.
+ * The generic status values 23–31 are currently unassigned. */
 
 enum { OA_TEXT_XML = 1, OA_TEXT_JSON = 2, OA_TEXT_CSV = 3 };
 /* Parser kind is module-specific; offsets are byte positions except CSV's physical line. */
@@ -89,6 +210,14 @@ typedef struct OaTarEntry {
     uint8_t typeflag; /* oa-tar reported flag: NUL normalizes to '0'; unknown flags are kept. */
     uint8_t reserved[7];
 } OaTarEntry;
+/* ZIP entry name spans index the UTF-8 pool; flags/method are preserved from the central record. */
+typedef struct OaZipEntry {
+    uint64_t name_offset, name_length, compressed_size, uncompressed_size, local_offset;
+    uint32_t crc32;
+    uint16_t flags, method;
+    uint8_t zip64, utf8_name_flag;
+    uint8_t reserved[6]; /* Named padding; always zero. */
+} OaZipEntry;
 typedef struct OaJsonNode {
     uint32_t kind, first_child, child_count, subtree_end, value_offset, value_length;
 } OaJsonNode;
@@ -252,6 +381,25 @@ uint32_t oa_tar_parse(const uint8_t *input, uint64_t input_length, uint32_t max_
                       uint64_t *name_pool_length, OaErrorInfo *error);
 
 /*
+ * Bounded read-only ZIP metadata and selected-member extraction. Uses oa-zip's existing defaults:
+ * 1 GiB input/archive and total uncompressed bytes, 10,000 entries, 256 MiB per entry, ratio 200
+ * except entries <=1 MiB, and 4096-byte names. Names use oa-zip's strict profile: bit-11 names
+ * must be UTF-8; names without bit 11 must be ASCII. Unsupported legacy high-bit names refuse.
+ * `oa_zip_list` validates the entire directory; a short output capacity returns exact counts but
+ * writes no arrays. `oa_zip_extract_entry` selects by zero-based directory index and accepts an
+ * output capacity no greater than 256 MiB. Its size query reports the validated declared size
+ * only; local-header, stream, size and CRC integrity is established only by successful fill.
+ * Extraction is to caller memory only, never to a path. All output is transactional on failures.
+ */
+uint32_t oa_zip_list(const uint8_t *input, uint64_t input_length,
+                     OaZipEntry *entries, uint64_t entry_capacity, uint64_t *entry_count,
+                     uint8_t *name_pool, uint64_t name_pool_capacity,
+                     uint64_t *name_pool_length, OaErrorInfo *error);
+uint32_t oa_zip_extract_entry(const uint8_t *input, uint64_t input_length, uint64_t entry_index,
+                              uint8_t *output, uint64_t output_capacity,
+                              uint64_t *output_length, OaErrorInfo *error);
+
+/*
  * Bounded text parsers. Call once with zero capacities to query exact counts; this returns
  * BUFFER_TOO_SMALL without writing arrays. Retry with those capacities. Parser refusal is
  * PARSE_ERROR and reports the source-specific kind/position. Output rows and pools are caller-owned.
@@ -278,6 +426,17 @@ uint32_t oa_csv_parse(const uint8_t *input, uint64_t input_length,
                       OaCsvField *fields, uint64_t field_capacity,
                       uint8_t *value_pool, uint64_t value_capacity,
                       OaCsvCounts *counts, OaTextError *parse_error, OaErrorInfo *error);
+
+/* One ASTERIX block at a time. CAT021 selector is 24 or 27; CAT048/CAT062 selector is 0.
+ * Input and output arrays are caller-owned. A null records pointer with capacity zero is a count
+ * query; BUFFER_TOO_SMALL reports required count and consumed block bytes but writes no rows.
+ * Parse failures preserve counts/rows and populate OaAsterixError. On success rows and then counts
+ * are written. Present masks use FRN-1 and field bits above; numeric quantities remain raw source
+ * counts. Time-of-day has no inferred date. All regions including OaErrorInfo are disjoint. */
+uint32_t oa_asterix_decode_block(const uint8_t *input, uint64_t input_length,
+                                 uint8_t cat021_edition, OaAsterixRecord *records,
+                                 uint64_t record_capacity, OaAsterixCounts *counts,
+                                 OaAsterixError *parse_error, OaErrorInfo *error);
 
 /*
  * Copies a deterministic UTF-8 status message into caller storage. `required` is mandatory and

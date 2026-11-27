@@ -1,11 +1,15 @@
 //! Raw-pointer adaptation and exported C symbols. Product operations call existing safe `oa-*` APIs.
 #![allow(unsafe_code)] // RULESET A0: the sole unsafe module of openatca-core-ffi.
 
+use crate::formats::asterix::{self, OaAsterixCounts, OaAsterixError, OaAsterixRecord};
+use crate::formats::zip::{self, OaZipEntry, ZipAdapterError};
 use crate::text;
+use oa_asterix::{AsterixError, ErrorKind as AsterixErrorKind, NO_ITEM, NO_OFFSET, NO_RECORD};
 use oa_deflate::{Compressor, MAX_LEVEL, MIN_LEVEL};
 use oa_geo::{wgs84, GeoError, LatLon, Polygon, RhumbInverse, Separation};
 use oa_sha256::{sha256, to_hex_into, MAX_MESSAGE_BYTES};
 use oa_tar::{Next as TarNext, TarError, TarReader, DEFAULT_LIMITS};
+use oa_zip::ZipError;
 use oa_zip::{InflateError, InflateLimits, Inflater, StreamError};
 use std::io::Cursor;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -35,6 +39,15 @@ pub const OA_STATUS_TAR_TRUNCATED: u32 = 19;
 pub const OA_STATUS_TAR_LIMIT: u32 = 20;
 pub const OA_STATUS_TAR_NAME_TOO_LONG: u32 = 21;
 pub const OA_STATUS_TAR_READ_ERROR: u32 = 22;
+pub const OA_STATUS_ZIP_FORMAT: u32 = 32;
+pub const OA_STATUS_ZIP_TRUNCATED: u32 = 33;
+pub const OA_STATUS_ZIP_UNSUPPORTED_METHOD: u32 = 34;
+pub const OA_STATUS_ZIP_ENCRYPTED: u32 = 35;
+pub const OA_STATUS_ZIP_UNSAFE_PATH: u32 = 36;
+pub const OA_STATUS_ZIP_LIMIT: u32 = 37;
+pub const OA_STATUS_ZIP_INFLATE_OR_SIZE: u32 = 38;
+pub const OA_STATUS_ZIP_CRC: u32 = 39;
+pub const OA_STATUS_ZIP_BAD_ENTRY_INDEX: u32 = 40;
 
 /// Hard ceiling for one raw-DEFLATE input slice accepted by the provisional C ABI.
 pub const MAX_DEFLATE_INPUT_BYTES: u64 = 64 * 1024 * 1024;
@@ -51,6 +64,15 @@ pub const MAX_TAR_NAME_POOL_BYTES: usize = MAX_TAR_ENTRIES * oa_tar::MAX_NAME_BY
 /// Ratio cap and small-output exemption used by the ZIP entry inflater.
 pub const DEFLATE_MAX_RATIO: u64 = oa_zip::MAX_RATIO;
 pub const DEFLATE_RATIO_EXEMPT_BYTES: u64 = oa_zip::RATIO_EXEMPT_BYTES;
+pub const MAX_ZIP_INPUT_BYTES: u64 = oa_zip::MAX_ARCHIVE_BYTES;
+pub const MAX_ZIP_ENTRIES: usize = oa_zip::MAX_ENTRIES;
+pub const MAX_ZIP_NAME_POOL_BYTES: usize = oa_zip::MAX_ENTRIES * oa_zip::MAX_NAME_BYTES;
+
+pub const OA_AST_E_BUFFER_TOO_SMALL: u32 = 1001;
+pub const OA_AST_E_INVALID_ARGUMENT: u32 = 1002;
+pub const OA_AST_E_LENGTH_TOO_LARGE: u32 = 1003;
+pub const OA_AST_E_ALLOCATION_FAILED: u32 = 1004;
+pub const OA_AST_E_INTERNAL_PANIC: u32 = 1005;
 
 pub const OA_LOCATION_NONE: u32 = 0;
 pub const OA_LOCATION_ARGUMENT: u32 = 1;
@@ -85,6 +107,35 @@ fn map_tar_error(error: TarError) -> Failure {
         | TarError::TooManyMeta { .. } => Failure::general(OA_STATUS_TAR_LIMIT),
         TarError::NameTooLong { .. } => Failure::general(OA_STATUS_TAR_NAME_TOO_LONG),
         TarError::Io { .. } => Failure::general(OA_STATUS_TAR_READ_ERROR),
+    }
+}
+
+fn map_zip_error(error: ZipError) -> Failure {
+    let status = match error {
+        ZipError::Truncated(_) | ZipError::NoEndOfCentralDirectory => OA_STATUS_ZIP_TRUNCATED,
+        ZipError::UnsupportedMethod { .. } => OA_STATUS_ZIP_UNSUPPORTED_METHOD,
+        ZipError::Encrypted(_) => OA_STATUS_ZIP_ENCRYPTED,
+        ZipError::UnsafePath(_) => OA_STATUS_ZIP_UNSAFE_PATH,
+        ZipError::Limit { .. } => OA_STATUS_ZIP_LIMIT,
+        ZipError::SizeMismatch { .. } | ZipError::Inflate(_) => OA_STATUS_ZIP_INFLATE_OR_SIZE,
+        ZipError::CrcMismatch { .. } => OA_STATUS_ZIP_CRC,
+        ZipError::NameNotFound(_) => OA_STATUS_ZIP_BAD_ENTRY_INDEX,
+        ZipError::BadSignature(_)
+        | ZipError::MultiDisk
+        | ZipError::InvalidNameEncoding
+        | ZipError::Zip64(_)
+        | ZipError::DuplicateName(_)
+        | ZipError::Inconsistent(_)
+        | ZipError::DataDescriptorMismatch(_)
+        | ZipError::Io(_) => OA_STATUS_ZIP_FORMAT,
+    };
+    Failure::general(status)
+}
+
+fn map_zip_adapter_error(error: ZipAdapterError) -> Failure {
+    match error {
+        ZipAdapterError::Parse(error) => map_zip_error(error),
+        ZipAdapterError::Allocation => Failure::general(OA_STATUS_ALLOCATION_FAILED),
     }
 }
 
@@ -215,6 +266,76 @@ fn write_error(pointer: *mut OaErrorInfo, value: OaErrorInfo) {
     // SAFETY: every caller of this private helper first checks non-null; the public C contract
     // requires a valid, aligned, writable OaErrorInfo for the duration of the call.
     unsafe { pointer.write(value) };
+}
+
+fn write_asterix_error(pointer: *mut OaAsterixError, value: OaAsterixError) {
+    // SAFETY: callers check non-null; the C contract requires a valid, aligned, writable,
+    // non-overlapping error record for this call.
+    unsafe { pointer.write(value) };
+}
+
+fn write_asterix_counts(pointer: *mut OaAsterixCounts, value: OaAsterixCounts) {
+    // SAFETY: callers check non-null; the C contract requires a valid, aligned, writable,
+    // non-overlapping counts record for this call.
+    unsafe { pointer.write(value) };
+}
+
+fn asterix_kind_code(kind: AsterixErrorKind) -> u32 {
+    match kind {
+        AsterixErrorKind::Truncated => 1,
+        AsterixErrorKind::BlockLengthBelowHeader => 2,
+        AsterixErrorKind::BlockLengthExceedsInput => 3,
+        AsterixErrorKind::EmptyBlock => 4,
+        AsterixErrorKind::TooManyRecords => 5,
+        AsterixErrorKind::UnsupportedCategory => 6,
+        AsterixErrorKind::EmptyFspec => 7,
+        AsterixErrorKind::FspecTooLong => 8,
+        AsterixErrorKind::FspecNotMinimal => 9,
+        AsterixErrorKind::UnknownUapSlot { .. } => 10,
+        AsterixErrorKind::MissingMandatory { .. } => 11,
+        AsterixErrorKind::ExtensionUnterminated => 12,
+        AsterixErrorKind::ZeroRepetition => 13,
+        AsterixErrorKind::ExplicitLengthInvalid => 14,
+        AsterixErrorKind::EmptyCompound => 15,
+        AsterixErrorKind::UnknownSubitem => 16,
+        AsterixErrorKind::CompoundNotMinimal => 17,
+        AsterixErrorKind::SpareBitSet => 18,
+        AsterixErrorKind::InvalidValue => 19,
+        AsterixErrorKind::ValueOutOfRange => 20,
+        AsterixErrorKind::DuplicateItem => 21,
+        AsterixErrorKind::BlockTooLong => 22,
+        AsterixErrorKind::UnknownFrn { .. } => 23,
+    }
+}
+
+fn asterix_error_record(status: u32, kind: u32) -> OaAsterixError {
+    OaAsterixError {
+        status,
+        kind,
+        category: 0,
+        subitem: 0,
+        item: NO_ITEM,
+        record: NO_RECORD,
+        reserved_bytes: [0; 8],
+        offset: u64::MAX,
+    }
+}
+
+fn map_asterix_error(error: AsterixError) -> OaAsterixError {
+    OaAsterixError {
+        status: OA_STATUS_PARSE_ERROR,
+        kind: asterix_kind_code(error.kind),
+        category: error.cat,
+        subitem: error.sub,
+        item: error.item,
+        record: error.record,
+        reserved_bytes: [0; 8],
+        offset: if error.offset == NO_OFFSET {
+            u64::MAX
+        } else {
+            u64::try_from(error.offset).unwrap_or(u64::MAX)
+        },
+    }
 }
 
 fn dispatch<T>(
@@ -1885,6 +2006,176 @@ pub unsafe extern "C" fn oa_tar_parse(
     status
 }
 
+/// Parses one borrowed ZIP byte slice and returns all validated member metadata plus a UTF-8
+/// name pool. A short-capacity query reports exact sizes without writing output arrays.
+///
+/// # Safety
+/// `input` must be readable for `input_length` bytes unless empty. Nonzero output capacities
+/// require writable aligned buffers. Count, pool-length and error pointers must be valid and
+/// writable. All regions must be pairwise non-overlapping as required by the header contract.
+#[no_mangle]
+pub unsafe extern "C" fn oa_zip_list(
+    input: *const u8,
+    input_length: u64,
+    entries: *mut OaZipEntry,
+    entry_capacity: u64,
+    entry_count: *mut u64,
+    name_pool: *mut u8,
+    name_pool_capacity: u64,
+    name_pool_length: *mut u64,
+    error: *mut OaErrorInfo,
+) -> u32 {
+    let mut required_entries = 0u64;
+    let mut required_names = 0u64;
+    let (status, result) = dispatch(error, || {
+        if entry_count.is_null() {
+            return Err(Failure::argument(OA_STATUS_INVALID_ARGUMENT, 4));
+        }
+        if name_pool_length.is_null() {
+            return Err(Failure::argument(OA_STATUS_INVALID_ARGUMENT, 7));
+        }
+        if input_length > MAX_ZIP_INPUT_BYTES {
+            return Err(Failure::argument(OA_STATUS_LENGTH_TOO_LARGE, 1));
+        }
+        if entry_capacity > MAX_ZIP_ENTRIES as u64 {
+            return Err(Failure::argument(OA_STATUS_BAD_PARAMETER, 3));
+        }
+        if name_pool_capacity > MAX_ZIP_NAME_POOL_BYTES as u64 {
+            return Err(Failure::argument(OA_STATUS_BAD_PARAMETER, 6));
+        }
+        let input_length = usize::try_from(input_length)
+            .map_err(|_| Failure::argument(OA_STATUS_LENGTH_TOO_LARGE, 1))?;
+        if input_length != 0 && input.is_null() {
+            return Err(Failure::argument(OA_STATUS_INVALID_ARGUMENT, 0));
+        }
+        if entry_capacity != 0 && entries.is_null() {
+            return Err(Failure::argument(OA_STATUS_INVALID_ARGUMENT, 2));
+        }
+        if name_pool_capacity != 0 && name_pool.is_null() {
+            return Err(Failure::argument(OA_STATUS_INVALID_ARGUMENT, 5));
+        }
+        let input = if input_length == 0 {
+            &[]
+        } else {
+            // SAFETY: caller supplies the checked readable slice and disjoint output regions.
+            unsafe { core::slice::from_raw_parts(input, input_length) }
+        };
+        let metadata = zip::parse_metadata(input).map_err(map_zip_adapter_error)?;
+        required_entries = u64::try_from(metadata.entries.len())
+            .map_err(|_| Failure::general(OA_STATUS_LENGTH_TOO_LARGE))?;
+        required_names = u64::try_from(metadata.names.len())
+            .map_err(|_| Failure::general(OA_STATUS_LENGTH_TOO_LARGE))?;
+        if entry_capacity < required_entries || name_pool_capacity < required_names {
+            return Err(Failure::general(OA_STATUS_BUFFER_TOO_SMALL));
+        }
+        Ok(metadata)
+    });
+    if let Some(metadata) = result {
+        // SAFETY: capacities cover complete output slices; caller promises aligned, writable,
+        // disjoint regions. Empty slices do not dereference their pointers.
+        unsafe {
+            if !metadata.entries.is_empty() {
+                core::ptr::copy_nonoverlapping(
+                    metadata.entries.as_ptr(),
+                    entries,
+                    metadata.entries.len(),
+                );
+            }
+            if !metadata.names.is_empty() {
+                core::ptr::copy_nonoverlapping(
+                    metadata.names.as_ptr(),
+                    name_pool,
+                    metadata.names.len(),
+                );
+            }
+            entry_count.write(required_entries);
+            name_pool_length.write(required_names);
+        }
+    } else if status == OA_STATUS_BUFFER_TOO_SMALL {
+        // SAFETY: size metadata pointers were checked and caller promises writable storage.
+        unsafe {
+            entry_count.write(required_entries);
+            name_pool_length.write(required_names);
+        }
+    }
+    status
+}
+
+/// Extracts one selected member into caller memory. A zero-capacity query returns the declared
+/// output size after archive-directory validation; full extraction later verifies data and CRC.
+/// Output bytes and `output_length` are unchanged on every failure other than BUFFER_TOO_SMALL.
+///
+/// # Safety
+/// `input` must be readable for `input_length` bytes unless empty. `output` must be writable for
+/// `output_capacity` bytes unless capacity is zero. `output_length` and `error` must be valid,
+/// aligned, writable, and all regions pairwise non-overlapping.
+#[no_mangle]
+pub unsafe extern "C" fn oa_zip_extract_entry(
+    input: *const u8,
+    input_length: u64,
+    entry_index: u64,
+    output: *mut u8,
+    output_capacity: u64,
+    output_length: *mut u64,
+    error: *mut OaErrorInfo,
+) -> u32 {
+    let mut required = 0u64;
+    let (status, result) = dispatch(error, || {
+        if output_length.is_null() {
+            return Err(Failure::argument(OA_STATUS_INVALID_ARGUMENT, 5));
+        }
+        if input_length > MAX_ZIP_INPUT_BYTES {
+            return Err(Failure::argument(OA_STATUS_LENGTH_TOO_LARGE, 1));
+        }
+        if output_capacity > oa_zip::MAX_ENTRY_BYTES {
+            return Err(Failure::argument(OA_STATUS_BAD_PARAMETER, 4));
+        }
+        let input_length = usize::try_from(input_length)
+            .map_err(|_| Failure::argument(OA_STATUS_LENGTH_TOO_LARGE, 1))?;
+        if input_length != 0 && input.is_null() {
+            return Err(Failure::argument(OA_STATUS_INVALID_ARGUMENT, 0));
+        }
+        if output_capacity != 0 && output.is_null() {
+            return Err(Failure::argument(OA_STATUS_INVALID_ARGUMENT, 3));
+        }
+        let input = if input_length == 0 {
+            &[]
+        } else {
+            // SAFETY: caller supplies the checked readable slice and disjoint output region.
+            unsafe { core::slice::from_raw_parts(input, input_length) }
+        };
+        let metadata = zip::parse_metadata(input).map_err(map_zip_adapter_error)?;
+        let index = usize::try_from(entry_index)
+            .map_err(|_| Failure::argument(OA_STATUS_ZIP_BAD_ENTRY_INDEX, 2))?;
+        let selected = metadata
+            .entries
+            .get(index)
+            .ok_or_else(|| Failure::argument(OA_STATUS_ZIP_BAD_ENTRY_INDEX, 2))?;
+        required = selected.uncompressed_size;
+        if output_capacity < required {
+            return Err(Failure::general(OA_STATUS_BUFFER_TOO_SMALL));
+        }
+        let extracted = zip::extract_entry(input, index).map_err(map_zip_error)?;
+        if extracted.len() as u64 != required {
+            return Err(Failure::general(OA_STATUS_ZIP_INFLATE_OR_SIZE));
+        }
+        Ok(extracted)
+    });
+    if let Some(extracted) = result {
+        // SAFETY: the complete validated entry fits the caller's declared output capacity.
+        unsafe {
+            if !extracted.is_empty() {
+                core::ptr::copy_nonoverlapping(extracted.as_ptr(), output, extracted.len());
+            }
+            output_length.write(required);
+        }
+    } else if status == OA_STATUS_BUFFER_TOO_SMALL {
+        // SAFETY: output_length was checked and caller promises writable storage.
+        unsafe { output_length.write(required) };
+    }
+    status
+}
+
 fn coordinate_argument(error: &GeoError, base: u64) -> u64 {
     match error {
         GeoError::NonFinite("longitude") | GeoError::LongitudeOutOfRange(_) => base + 1,
@@ -1919,6 +2210,15 @@ fn message(code: u32) -> &'static [u8] {
         OA_STATUS_TAR_LIMIT => b"tar archive exceeds a metadata limit\0",
         OA_STATUS_TAR_NAME_TOO_LONG => b"tar entry name exceeds its limit\0",
         OA_STATUS_TAR_READ_ERROR => b"tar input reader failed\0",
+        OA_STATUS_ZIP_FORMAT => b"ZIP structure or member-name encoding is invalid\0",
+        OA_STATUS_ZIP_TRUNCATED => b"ZIP archive or selected member is truncated\0",
+        OA_STATUS_ZIP_UNSUPPORTED_METHOD => b"ZIP compression method is unsupported\0",
+        OA_STATUS_ZIP_ENCRYPTED => b"encrypted ZIP entries are unsupported\0",
+        OA_STATUS_ZIP_UNSAFE_PATH => b"ZIP member path is unsafe to extract\0",
+        OA_STATUS_ZIP_LIMIT => b"ZIP archive exceeds an existing parser limit\0",
+        OA_STATUS_ZIP_INFLATE_OR_SIZE => b"ZIP member decompression or size validation failed\0",
+        OA_STATUS_ZIP_CRC => b"ZIP member CRC-32 validation failed\0",
+        OA_STATUS_ZIP_BAD_ENTRY_INDEX => b"ZIP member index is outside the archive\0",
         _ => b"unknown status\0",
     }
 }
@@ -1958,6 +2258,146 @@ pub unsafe extern "C" fn oa_core_error_message(
     // are non-overlapping per the ABI contract.
     unsafe { core::ptr::copy_nonoverlapping(text.as_ptr(), buffer, text.len()) };
     OA_STATUS_OK
+}
+
+/// Decodes one ASTERIX block to caller-owned fixed-layout records using the existing `oa-asterix`
+/// core. CAT021 requires selector 24 or 27; CAT048/CAT062 require selector 0. Input is capped at
+/// 65,535 bytes. A short-capacity query writes required counts and no records; other failures
+/// preserve counts and record output. Caller-owned regions must be valid, aligned and disjoint.
+///
+/// # Safety
+/// Every non-null pointer must refer to valid storage for its claimed extent. Input must remain
+/// immutable for the call. Input, record, counts, detailed error and generic error regions must
+/// be pairwise non-overlapping.
+#[no_mangle]
+pub unsafe extern "C" fn oa_asterix_decode_block(
+    input: *const u8,
+    input_length: u64,
+    cat021_edition: u8,
+    records: *mut OaAsterixRecord,
+    record_capacity: u64,
+    counts: *mut OaAsterixCounts,
+    parse_error: *mut OaAsterixError,
+    error: *mut OaErrorInfo,
+) -> u32 {
+    if error.is_null() {
+        return OA_STATUS_INVALID_ARGUMENT;
+    }
+    let status = dispatch(error, || {
+        if counts.is_null()
+            || parse_error.is_null()
+            || (input.is_null() && input_length != 0)
+            || (records.is_null() && record_capacity != 0)
+        {
+            if !parse_error.is_null() {
+                write_asterix_error(
+                    parse_error,
+                    asterix_error_record(OA_STATUS_INVALID_ARGUMENT, OA_AST_E_INVALID_ARGUMENT),
+                );
+            }
+            return Err(Failure::general(OA_STATUS_INVALID_ARGUMENT));
+        }
+        if input_length > asterix::MAX_INPUT_BYTES as u64
+            || record_capacity > asterix::MAX_RECORDS as u64
+        {
+            write_asterix_error(
+                parse_error,
+                asterix_error_record(OA_STATUS_LENGTH_TOO_LARGE, OA_AST_E_LENGTH_TOO_LARGE),
+            );
+            return Err(Failure::general(OA_STATUS_LENGTH_TOO_LARGE));
+        }
+        let length = usize::try_from(input_length)
+            .map_err(|_| Failure::general(OA_STATUS_LENGTH_TOO_LARGE))?;
+        // SAFETY: the C contract guarantees a readable `input_length` extent; null is accepted
+        // only for an empty slice, which is constructed without dereferencing the pointer.
+        let bytes = unsafe {
+            if length == 0 {
+                &[]
+            } else {
+                core::slice::from_raw_parts(input, length)
+            }
+        };
+        let category = bytes.first().copied().unwrap_or(0);
+        let edition = match (category, cat021_edition) {
+            (21, 24) => oa_asterix::Cat021Edition::Ed24,
+            (21, 27) => oa_asterix::Cat021Edition::Ed27,
+            (category, 0) if category != 21 => oa_asterix::Cat021Edition::Ed27,
+            _ => {
+                let mut detail =
+                    asterix_error_record(OA_STATUS_INVALID_ARGUMENT, OA_AST_E_INVALID_ARGUMENT);
+                detail.category = category;
+                write_asterix_error(parse_error, detail);
+                return Err(Failure::general(OA_STATUS_INVALID_ARGUMENT));
+            }
+        };
+        let flat = match asterix::decode(bytes, edition) {
+            Ok(flat) => flat,
+            Err(asterix::ProjectionFailure::Decode(decode_error)) => {
+                write_asterix_error(parse_error, map_asterix_error(decode_error));
+                return Err(Failure::general(OA_STATUS_PARSE_ERROR));
+            }
+            Err(asterix::ProjectionFailure::Allocation) => {
+                write_asterix_error(
+                    parse_error,
+                    asterix_error_record(OA_STATUS_ALLOCATION_FAILED, OA_AST_E_ALLOCATION_FAILED),
+                );
+                return Err(Failure::general(OA_STATUS_ALLOCATION_FAILED));
+            }
+        };
+        if flat.records.len() > asterix::MAX_RECORDS {
+            write_asterix_error(
+                parse_error,
+                asterix_error_record(OA_STATUS_LENGTH_TOO_LARGE, OA_AST_E_LENGTH_TOO_LARGE),
+            );
+            return Err(Failure::general(OA_STATUS_LENGTH_TOO_LARGE));
+        }
+        let required = match u64::try_from(flat.records.len()) {
+            Ok(value) => value,
+            Err(_) => {
+                write_asterix_error(
+                    parse_error,
+                    asterix_error_record(OA_STATUS_LENGTH_TOO_LARGE, OA_AST_E_LENGTH_TOO_LARGE),
+                );
+                return Err(Failure::general(OA_STATUS_LENGTH_TOO_LARGE));
+            }
+        };
+        let mut reported = flat.counts;
+        reported.required_record_count = required;
+        reported.written_record_count = 0;
+        if record_capacity < required {
+            write_asterix_counts(counts, reported);
+            let mut detail =
+                asterix_error_record(OA_STATUS_BUFFER_TOO_SMALL, OA_AST_E_BUFFER_TOO_SMALL);
+            detail.category = reported.category;
+            write_asterix_error(parse_error, detail);
+            return Err(Failure::general(OA_STATUS_BUFFER_TOO_SMALL));
+        }
+        if required != 0 && records.is_null() {
+            let mut detail =
+                asterix_error_record(OA_STATUS_INVALID_ARGUMENT, OA_AST_E_INVALID_ARGUMENT);
+            detail.category = reported.category;
+            write_asterix_error(parse_error, detail);
+            return Err(Failure::general(OA_STATUS_INVALID_ARGUMENT));
+        }
+        // SAFETY: capacity and null checks establish the exact writable row extent; source rows
+        // remain live, and the C contract requires non-overlapping input/output regions.
+        unsafe {
+            if !flat.records.is_empty() {
+                core::ptr::copy_nonoverlapping(flat.records.as_ptr(), records, flat.records.len());
+            }
+        }
+        reported.written_record_count = required;
+        write_asterix_counts(counts, reported);
+        Ok(())
+    })
+    .0;
+    if status == OA_STATUS_INTERNAL_PANIC && !parse_error.is_null() {
+        write_asterix_error(
+            parse_error,
+            asterix_error_record(OA_STATUS_INTERNAL_PANIC, OA_AST_E_INTERNAL_PANIC),
+        );
+    }
+    status
 }
 
 #[cfg(test)]

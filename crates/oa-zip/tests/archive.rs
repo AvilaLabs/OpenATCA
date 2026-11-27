@@ -628,6 +628,57 @@ fn duplicate_names_are_found_exactly_and_cheaply() {
     ));
 }
 
+fn set_single_name_flags(archive: &mut [u8], flags: u16) {
+    let local = find(archive, &[b'P', b'K', 3, 4], 0);
+    let directory = central(archive);
+    archive[local + 6..local + 8].copy_from_slice(&flags.to_le_bytes());
+    archive[directory + 8..directory + 10].copy_from_slice(&flags.to_le_bytes());
+}
+
+// REQ: OA-ZIP-001
+#[test]
+fn member_names_require_declared_utf8_or_ascii_and_never_lossy_alias() {
+    let invalid_a = empty_entries_zip(&[vec![0x80]]);
+    assert!(matches!(
+        Archive::parse(&invalid_a),
+        Err(ZipError::InvalidNameEncoding)
+    ));
+
+    let invalid_b = empty_entries_zip(&[vec![0x81]]);
+    assert!(matches!(
+        Archive::parse(&invalid_b),
+        Err(ZipError::InvalidNameEncoding)
+    ));
+
+    // Two distinct invalid legacy byte names previously collapsed to the same replacement
+    // character and could be mistaken for a duplicate. Both now refuse at encoding validation.
+    let aliases = empty_entries_zip(&[vec![0x80], vec![0x81]]);
+    assert!(matches!(
+        Archive::parse(&aliases),
+        Err(ZipError::InvalidNameEncoding)
+    ));
+
+    let mut utf8 = empty_entries_zip(&["café".as_bytes().to_vec()]);
+    set_single_name_flags(&mut utf8, 1 << 11);
+    assert_eq!(Archive::parse(&utf8).unwrap().entries()[0].name(), "café");
+
+    let mut malformed_utf8 = empty_entries_zip(&[vec![0x80]]);
+    set_single_name_flags(&mut malformed_utf8, 1 << 11);
+    assert!(matches!(
+        Archive::parse(&malformed_utf8),
+        Err(ZipError::InvalidNameEncoding)
+    ));
+
+    // A valid legacy-profile ASCII name remains accepted without bit 11.
+    assert_eq!(
+        Archive::parse(&empty_entries_zip(&[b"plain.txt".to_vec()]))
+            .unwrap()
+            .entries()[0]
+            .name(),
+        "plain.txt"
+    );
+}
+
 // REQ: OA-ZIP-062
 #[test]
 fn offsets_near_the_top_of_the_address_space_are_refused_not_added_to() {

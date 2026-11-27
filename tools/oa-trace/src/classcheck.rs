@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 const FFI_PACKAGE: &str = "openatca-core-ffi";
 const FFI_PACKAGE_DIR: &str = "crates/openatca-core-ffi";
 const FFI_EXPORTS: &[&str] = &[
+    "oa_asterix_decode_block",
     "oa_geo_wgs84_inverse",
     "oa_geo_wgs84_direct",
     "oa_core_error_message",
@@ -49,6 +50,8 @@ const FFI_EXPORTS: &[&str] = &[
     "oa_deflate_raw_inflate",
     "oa_deflate_raw_compress",
     "oa_tar_parse",
+    "oa_zip_list",
+    "oa_zip_extract_entry",
 ];
 const FFI_DEPENDENCIES: &[(&str, &str)] = &[
     ("oa-geo", "../oa-geo"),
@@ -61,6 +64,7 @@ const FFI_DEPENDENCIES: &[(&str, &str)] = &[
     ("oa-zip", "../oa-zip"),
     ("oa-deflate", "../oa-deflate"),
     ("oa-tar", "../oa-tar"),
+    ("oa-asterix", "../oa-asterix"),
 ];
 
 /// Reviewed unsafe blocks in the provisional FFI module, grouped by their owning function.
@@ -101,6 +105,11 @@ pub const FFI_UNSAFE_BLOCKS: &[(&str, usize)] = &[
     ("oa_deflate_raw_inflate", 3),
     ("oa_deflate_raw_compress", 3),
     ("oa_tar_parse", 3),
+    ("write_asterix_error", 1),
+    ("write_asterix_counts", 1),
+    ("oa_asterix_decode_block", 2),
+    ("oa_zip_list", 3),
+    ("oa_zip_extract_entry", 3),
     ("ffi_l0_matches_the_shared_synthetic_vectors", 3),
     ("ffi_polygon_matches_the_shared_synthetic_vectors", 4),
     ("ffi_matches_the_shared_synthetic_geodesy_vectors", 1),
@@ -2759,6 +2768,7 @@ fn check_ffi_a0(root: &Path, members: &[Member], fails: &mut Vec<String>) {
         }
     };
     let mut names = Vec::new();
+    let mut formats_dir_present = false;
     for entry in entries {
         let entry = match entry {
             Ok(entry) => entry,
@@ -2770,6 +2780,7 @@ fn check_ffi_a0(root: &Path, members: &[Member], fails: &mut Vec<String>) {
             }
         };
         let path = entry.path();
+        let entry_name = entry.file_name().to_string_lossy().into_owned();
         let entry_type = match fs::symlink_metadata(&path) {
             Ok(metadata) => metadata.file_type(),
             Err(error) => {
@@ -2780,29 +2791,106 @@ fn check_ffi_a0(root: &Path, members: &[Member], fails: &mut Vec<String>) {
                 continue;
             }
         };
-        if entry_type.is_symlink() || !entry_type.is_file() {
+        if entry_name == "formats" {
+            if entry_type.is_symlink() || !entry_type.is_dir() {
+                fails.push(format!(
+                    "{}: A0: the reviewed safe formats directory must be a real directory",
+                    rel(root, &path)
+                ));
+            } else {
+                formats_dir_present = true;
+            }
+        } else if entry_type.is_symlink() || !entry_type.is_file() {
             fails.push(format!(
                 "{}: A0: source inventory contains a non-file or symlink",
                 rel(root, &path)
             ));
         }
-        names.push(entry.file_name().to_string_lossy().into_owned());
+        names.push(entry_name);
     }
     names.sort();
-    if names.len() != 3
-        || names.first().map(String::as_str) != Some("ffi.rs")
-        || names.get(1).map(String::as_str) != Some("lib.rs")
-        || names.get(2).map(String::as_str) != Some("text.rs")
+    let expected_source_entries = BTreeSet::from([
+        "ffi.rs".to_string(),
+        "formats".to_string(),
+        "lib.rs".to_string(),
+        "text.rs".to_string(),
+    ]);
+    if names.iter().cloned().collect::<BTreeSet<_>>() != expected_source_entries
+        || names.len() != expected_source_entries.len()
+        || !formats_dir_present
     {
         fails.push(format!(
-            "{FFI_PACKAGE_DIR}/src: A0: Rust source inventory is exactly `lib.rs`, `ffi.rs`, and safe adapter `text.rs`"
+            "{FFI_PACKAGE_DIR}/src: A0: Rust source inventory is exactly `ffi.rs`, `lib.rs`, `text.rs`, and the reviewed `formats/` directory"
+        ));
+    }
+
+    let formats_dir = source_dir.join("formats");
+    let mut format_files = Vec::new();
+    let mut invalid_format_files = BTreeSet::new();
+    let format_entries = if formats_dir_present {
+        fs::read_dir(&formats_dir).map(Some)
+    } else {
+        Ok(None)
+    };
+    match format_entries {
+        Ok(Some(entries)) => {
+            for entry in entries {
+                let entry = match entry {
+                    Ok(entry) => entry,
+                    Err(error) => {
+                        fails.push(format!("{FFI_PACKAGE_DIR}/src/formats: A0: cannot read inventory entry: {error}"));
+                        continue;
+                    }
+                };
+                let path = entry.path();
+                match fs::symlink_metadata(&path) {
+                    Ok(metadata)
+                        if metadata.file_type().is_file() && !metadata.file_type().is_symlink() => {
+                    }
+                    Ok(_) => {
+                        fails.push(format!(
+                            "{}: A0: source inventory contains a non-file or symlink",
+                            rel(root, &path)
+                        ));
+                        invalid_format_files
+                            .insert(entry.file_name().to_string_lossy().into_owned());
+                    }
+                    Err(error) => {
+                        fails.push(format!(
+                            "{}: A0: cannot inspect source entry: {error}",
+                            rel(root, &path)
+                        ));
+                        invalid_format_files
+                            .insert(entry.file_name().to_string_lossy().into_owned());
+                    }
+                }
+                format_files.push(entry.file_name().to_string_lossy().into_owned());
+            }
+        }
+        Ok(None) => {}
+        Err(error) => fails.push(format!(
+            "{FFI_PACKAGE_DIR}/src/formats: A0: cannot read source inventory: {error}"
+        )),
+    }
+    format_files.sort();
+    if format_files != ["asterix.rs", "mod.rs", "zip.rs"] {
+        fails.push(format!(
+            "{FFI_PACKAGE_DIR}/src/formats: A0: safe format inventory is exactly `asterix.rs`, `mod.rs`, and `zip.rs`"
         ));
     }
     for (file, expected_level) in [
         ("lib.rs", "deny"),
         ("ffi.rs", "allow"),
         ("text.rs", "forbid"),
+        ("formats/asterix.rs", "forbid"),
+        ("formats/mod.rs", "forbid"),
+        ("formats/zip.rs", "forbid"),
     ] {
+        if file.starts_with("formats/")
+            && invalid_format_files.contains(file.trim_start_matches("formats/"))
+        {
+            continue;
+        }
         let path = source_dir.join(file);
         let source = match fs::read_to_string(&path) {
             Ok(source) => source,
@@ -2858,9 +2946,56 @@ fn check_ffi_a0(root: &Path, members: &[Member], fails: &mut Vec<String>) {
                     "{FFI_PACKAGE_DIR}: A0: crate root declares the audited safe `text` adapter module"
                 ));
             }
+            let has_formats_module = tokenized
+                .windows(3)
+                .any(|window| token_triple_is(window, "mod", "formats", &[";"]));
+            if !has_formats_module {
+                fails.push(format!(
+                    "{FFI_PACKAGE_DIR}: A0: crate root declares the reviewed safe `formats` adapter module"
+                ));
+            }
             if tokenized.iter().any(|token| token.s == "unsafe") {
                 fails.push(format!(
                     "{}: A0: unsafe operations and declarations stay out of the crate root",
+                    rel(root, &path)
+                ));
+            }
+        } else if file == "formats/mod.rs" {
+            let declared_modules: BTreeSet<String> = tokenized
+                .windows(3)
+                .filter_map(|window| {
+                    (window.first().is_some_and(|token| token.s == "mod")
+                        && window.get(2).is_some_and(|token| token.s == ";"))
+                    .then(|| window.get(1).map(|token| token.s.clone()))
+                    .flatten()
+                })
+                .collect();
+            if declared_modules != BTreeSet::from(["asterix".to_string(), "zip".to_string()]) {
+                fails.push(format!(
+                    "{}: A0: safe formats module declares exactly the reviewed ASTERIX and ZIP sources",
+                    rel(root, &path)
+                ));
+            }
+            if tokenized.iter().any(|token| {
+                matches!(
+                    token.s.as_str(),
+                    "unsafe" | "extern" | "GlobalAlloc" | "no_mangle" | "export_name"
+                )
+            }) {
+                fails.push(format!(
+                    "{}: A0: safe formats module contains no unsafe, ABI, allocator, or export tokens",
+                    rel(root, &path)
+                ));
+            }
+        } else if file == "formats/asterix.rs" || file == "formats/zip.rs" {
+            if tokenized.iter().any(|token| {
+                matches!(
+                    token.s.as_str(),
+                    "unsafe" | "extern" | "GlobalAlloc" | "no_mangle" | "export_name"
+                )
+            }) {
+                fails.push(format!(
+                    "{}: A0: safe format adapter contains no unsafe operations, ABI declarations, allocators, or exports",
                     rel(root, &path)
                 ));
             }
@@ -3006,7 +3141,7 @@ fn check_ffi_a0(root: &Path, members: &[Member], fails: &mut Vec<String>) {
             )
         }) {
             fails.push(format!(
-                "{}: A0: safe text adapter contains no unsafe, ABI, allocator, or linker tokens",
+                "{}: A0: safe adapter contains no unsafe, ABI, allocator, or linker tokens",
                 rel(root, &path)
             ));
         }

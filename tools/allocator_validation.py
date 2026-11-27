@@ -21,9 +21,12 @@ CORE_FFI_DEPS = {
     "oa-csv": "../oa-csv", "oa-json": "../oa-json", "oa-xml": "../oa-xml",
     "oa-zip": "../oa-zip", "oa-deflate": "../oa-deflate",
     "oa-tar": "../oa-tar",
+    "oa-asterix": "../oa-asterix",
 }
 CORE_FFI_CRATE_TYPES = ["cdylib", "staticlib", "rlib"]
-CORE_FFI_SOURCE_FILES = {"lib.rs", "ffi.rs", "text.rs"}
+CORE_FFI_SOURCE_FILES = {
+    "lib.rs", "ffi.rs", "text.rs", "formats/mod.rs", "formats/asterix.rs", "formats/zip.rs"
+}
 STRICT_RUNTIME_CLIPPY_LINTS = ("unwrap_used", "expect_used", "panic", "indexing_slicing")
 # Pinned to oa-airspace::core::route::MAX_ROUTE_WORK: full identity scans across the
 # 11,640-point regional model need 744,960 visits for 64 endpoints, plus expansion.
@@ -578,7 +581,7 @@ def _core_ffi_exception_errors(root: Path, members: list[Path]) -> list[str]:
         errors.append("openatca-core-ffi must expose exactly cdylib, staticlib and rlib crate types")
     actual_deps = data.get("dependencies", {})
     if not isinstance(actual_deps, dict) or set(actual_deps) != set(CORE_FFI_DEPS):
-        errors.append("openatca-core-ffi dependencies must be exactly the seven reviewed core/codec crates and oa-csv, oa-json, oa-xml")
+        errors.append("openatca-core-ffi dependencies must match the exact reviewed core, codec, tar, ZIP, and ASTERIX adapter set")
         actual_deps = actual_deps if isinstance(actual_deps, dict) else {}
     for name, relative in CORE_FFI_DEPS.items():
         declaration = actual_deps.get(name)
@@ -600,7 +603,7 @@ def _core_ffi_exception_errors(root: Path, members: list[Path]) -> list[str]:
                 errors.append(f"openatca-core-ffi Rust source may not use symlinks or escape its package: {relative}")
             actual_sources.add(relative)
         if actual_sources != CORE_FFI_SOURCE_FILES:
-            errors.append("openatca-core-ffi Rust source inventory must be exactly src/lib.rs, src/ffi.rs and src/text.rs")
+            errors.append("openatca-core-ffi Rust source inventory must be exactly src/lib.rs, src/ffi.rs, src/text.rs and src/formats/asterix.rs")
         for relative in CORE_FFI_SOURCE_FILES:
             source = source_dir / relative
             if source.is_symlink() or not source.is_file() or not _inside(source.resolve(), package_dir):
@@ -612,6 +615,15 @@ def _core_ffi_exception_errors(root: Path, members: list[Path]) -> list[str]:
             text_tokens = ""
         if len(re.findall(r"#!\s*\[\s*forbid\s*\(\s*unsafe_code\s*\)\s*\]", text_tokens)) != 1:
             errors.append("openatca-core-ffi src/text.rs must retain exactly one module-level unsafe-code prohibition")
+        adapter = source_dir / "formats/asterix.rs"
+        try:
+            adapter_tokens = _rust_tokens(adapter.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError):
+            adapter_tokens = ""
+        if len(re.findall(r"#!\s*\[\s*forbid\s*\(\s*unsafe_code\s*\)\s*\]", adapter_tokens)) != 1:
+            errors.append("openatca-core-ffi src/formats/asterix.rs must retain exactly one module-level unsafe-code prohibition")
+        if re.search(r"\b(?:unsafe|extern|no_mangle|export_name)\b", adapter_tokens):
+            errors.append("openatca-core-ffi src/formats/asterix.rs must contain no unsafe or ABI declarations")
 
     return errors
 

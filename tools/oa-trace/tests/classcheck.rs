@@ -532,15 +532,27 @@ impl Ws {
         ws.put(BUDGET, "");
         ws.put(
             "crates/openatca-core-ffi/Cargo.toml",
-            "[package]\nname = \"openatca-core-ffi\"\n\n[package.metadata.openatca]\nclass = \"shell\"\n\n[dependencies]\noa-geo = { path = \"../oa-geo\" }\noa-ieee = { path = \"../oa-ieee\" }\noa-math = { path = \"../oa-math\" }\noa-sha256 = { path = \"../oa-sha256\" }\noa-csv = { path = \"../oa-csv\" }\noa-json = { path = \"../oa-json\" }\noa-xml = { path = \"../oa-xml\" }\noa-zip = { path = \"../oa-zip\" }\noa-deflate = { path = \"../oa-deflate\" }\noa-tar = { path = \"../oa-tar\" }\n\n[lints.rust]\nunsafe_code = \"deny\"\n\n[lints.clippy]\nunwrap_used = \"deny\"\nexpect_used = \"deny\"\npanic = \"deny\"\nindexing_slicing = \"deny\"\n",
+            "[package]\nname = \"openatca-core-ffi\"\n\n[package.metadata.openatca]\nclass = \"shell\"\n\n[dependencies]\noa-geo = { path = \"../oa-geo\" }\noa-ieee = { path = \"../oa-ieee\" }\noa-math = { path = \"../oa-math\" }\noa-sha256 = { path = \"../oa-sha256\" }\noa-csv = { path = \"../oa-csv\" }\noa-json = { path = \"../oa-json\" }\noa-xml = { path = \"../oa-xml\" }\noa-zip = { path = \"../oa-zip\" }\noa-deflate = { path = \"../oa-deflate\" }\noa-tar = { path = \"../oa-tar\" }\noa-asterix = { path = \"../oa-asterix\" }\n\n[lints.rust]\nunsafe_code = \"deny\"\n\n[lints.clippy]\nunwrap_used = \"deny\"\nexpect_used = \"deny\"\npanic = \"deny\"\nindexing_slicing = \"deny\"\n",
         );
         ws.put(
             "crates/openatca-core-ffi/src/lib.rs",
-            "#![deny(unsafe_code)]\nmod ffi;\nmod text;\n",
+            "#![deny(unsafe_code)]\nmod ffi;\nmod formats;\nmod text;\n",
         );
         ws.put("crates/openatca-core-ffi/src/ffi.rs", &ffi_fixture_source());
         ws.put(
             "crates/openatca-core-ffi/src/text.rs",
+            "#![forbid(unsafe_code)]\n",
+        );
+        ws.put(
+            "crates/openatca-core-ffi/src/formats/mod.rs",
+            "#![forbid(unsafe_code)]\npub(crate) mod asterix;\npub(crate) mod zip;\n",
+        );
+        ws.put(
+            "crates/openatca-core-ffi/src/formats/asterix.rs",
+            "#![forbid(unsafe_code)]\n",
+        );
+        ws.put(
+            "crates/openatca-core-ffi/src/formats/zip.rs",
             "#![forbid(unsafe_code)]\n",
         );
         for (path, source) in extra_src {
@@ -644,6 +656,7 @@ fn wasm_build_script_rejects_unreviewed_filesystem_and_process_effects() {
 
 fn ffi_fixture_source() -> String {
     const EXPORTS: &[&str] = &[
+        "oa_asterix_decode_block",
         "oa_geo_wgs84_inverse",
         "oa_geo_wgs84_direct",
         "oa_core_error_message",
@@ -677,6 +690,8 @@ fn ffi_fixture_source() -> String {
         "oa_deflate_raw_inflate",
         "oa_deflate_raw_compress",
         "oa_tar_parse",
+        "oa_zip_list",
+        "oa_zip_extract_entry",
     ];
     let mut source = String::from("#![allow(unsafe_code)]\n");
     for name in EXPORTS {
@@ -1987,6 +2002,29 @@ fn the_provisional_ffi_unsafe_exception_is_exact_and_auditable() {
         ws.failures()
     );
 
+    let ws = Ws::ffi(
+        "ffi-formats-extra",
+        &[("formats/hidden.rs", "pub fn hidden() {}\n")],
+    );
+    assert!(
+        has(&ws.failures(), "safe format inventory is exactly"),
+        "{:#?}",
+        ws.failures()
+    );
+
+    let ws = Ws::ffi(
+        "ffi-formats-unsafe-helper",
+        &[(
+            "formats/zip.rs",
+            "#![forbid(unsafe_code)]\npub fn helper() { unsafe {} }\n",
+        )],
+    );
+    assert!(
+        has(&ws.failures(), "safe format adapter contains no unsafe"),
+        "{:#?}",
+        ws.failures()
+    );
+
     let ws = Ws::ffi("ffi-safety", &[]);
     ws.put(
         "crates/openatca-core-ffi/src/ffi.rs",
@@ -2190,6 +2228,38 @@ fn the_provisional_ffi_source_inventory_rejects_symlinks() {
     symlink(&target, &ffi).unwrap();
     assert!(
         has(&ws.failures(), "symlink (cargo follows it"),
+        "{:#?}",
+        ws.failures()
+    );
+}
+
+// REQ: OA-TRC-262
+#[test]
+fn ffi_format_adapter_inventory_rejects_extra_files_and_unsafe_helpers() {
+    let ws = Ws::ffi("ffi-format-extra-file", &[]);
+    ws.put(
+        "crates/openatca-core-ffi/src/formats/unreviewed.rs",
+        "#![forbid(unsafe_code)]\n",
+    );
+    assert!(
+        has(
+            &ws.failures(),
+            "safe format inventory is exactly `asterix.rs`, `mod.rs`, and `zip.rs`"
+        ),
+        "{:#?}",
+        ws.failures()
+    );
+
+    let ws = Ws::ffi("ffi-format-unsafe-helper", &[]);
+    ws.put(
+        "crates/openatca-core-ffi/src/formats/asterix.rs",
+        "#![forbid(unsafe_code)]\nfn unreviewed_helper() { unsafe {} }\n",
+    );
+    assert!(
+        has(
+            &ws.failures(),
+            "safe format adapter contains no unsafe operations"
+        ),
         "{:#?}",
         ws.failures()
     );
