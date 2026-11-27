@@ -54,6 +54,31 @@ fn arguments_are_strict_and_a_sealed_path_exits_2_before_anything_is_opened() {
     ])
     .unwrap();
     assert!(ok.scorer_half);
+    assert!(!ok.speed_diagnostics);
+    assert!(
+        a(&[
+            "--adsb",
+            "a",
+            "--config",
+            "k",
+            "--out",
+            "c",
+            "--speed-diagnostics"
+        ])
+        .unwrap()
+        .speed_diagnostics
+    );
+    assert!(a(&[
+        "--adsb",
+        "a",
+        "--config",
+        "k",
+        "--out",
+        "c",
+        "--speed-diagnostics",
+        "--speed-diagnostics"
+    ])
+    .is_err());
     assert!(
         !a(&["--adsb", "a", "--config", "k", "--out", "c"])
             .unwrap()

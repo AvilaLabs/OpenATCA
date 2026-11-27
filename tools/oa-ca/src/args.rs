@@ -4,7 +4,7 @@ use oa_sha256::Digest;
 use std::path::PathBuf;
 
 pub const USAGE: &str =
-    "usage: oa-ca --adsb <clip.oaf> --config <file.cfg> --out <dir> [--scorer-half]";
+    "usage: oa-ca --adsb <clip.oaf> --config <file.cfg> --out <dir> [--scorer-half] [--speed-diagnostics]";
 
 /// The parsed arguments.
 // A7.2: cold struct, size guard waived
@@ -16,6 +16,8 @@ pub struct Args {
     /// Track only the scorer's half A of the clip (the reports the scoring harness gives the
     /// tracker), not every report.
     pub scorer_half: bool,
+    /// Emit a bounded, address-free diagnostic of CA speed-rejected tracker outputs.
+    pub speed_diagnostics: bool,
     pub adaptation_package: Option<PathBuf>,
     pub adaptation_pin: Option<Digest>,
 }
@@ -29,12 +31,19 @@ pub fn parse(argv: &[String]) -> Result<Args, String> {
     let mut adaptation_package = None;
     let mut adaptation_pin: Option<Digest> = None;
     let mut scorer_half = false;
+    let mut speed_diagnostics = false;
     let mut it = argv.iter();
     while let Some(flag) = it.next() {
         let slot = match flag.as_str() {
             "--scorer-half" => {
                 if std::mem::replace(&mut scorer_half, true) {
                     return Err("--scorer-half given twice".to_string());
+                }
+                continue;
+            }
+            "--speed-diagnostics" => {
+                if std::mem::replace(&mut speed_diagnostics, true) {
+                    return Err("--speed-diagnostics given twice".to_string());
                 }
                 continue;
             }
@@ -73,6 +82,7 @@ pub fn parse(argv: &[String]) -> Result<Args, String> {
             config,
             out,
             scorer_half,
+            speed_diagnostics,
             adaptation_package,
             adaptation_pin,
         }),
