@@ -13,12 +13,14 @@ use std::time::Instant;
 
 use oa_track::fusion::{
     fusion_adsb, fusion_advance, fusion_assign_log, fusion_bookkeeping_len, fusion_buffers,
-    fusion_clear_forensics, fusion_config, fusion_forensics, fusion_new, fusion_plots,
-    fusion_stats, fusion_take_radar_tracks, fusion_tracker, fusion_tracker_config,
-    fusion_tracker_stats, AssignLog, FusionStats, RadarAssociationStats, RadarInitStats,
-    FORENSIC_APPLIED, FORENSIC_INIT, FORENSIC_NONE, HOW_ASSOC, HOW_HARD, HOW_INIT,
+    fusion_clear_forensics, fusion_config, fusion_forensics, fusion_new, fusion_new_network,
+    fusion_plots, fusion_plots_for_sensor, fusion_stats, fusion_take_radar_tracks, fusion_tracker,
+    fusion_tracker_config, fusion_tracker_stats, AssignLog, FusionStats, RadarAssociationStats,
+    RadarInitStats, FORENSIC_APPLIED, FORENSIC_INIT, FORENSIC_NONE, HOW_ASSOC, HOW_HARD, HOW_INIT,
 };
-use oa_track::fusion_params::{ASSIGN_LOG_MAX, ASSOC_FORENSICS_MAX, KEY_RADAR_BASE, MAX_RADARS};
+use oa_track::fusion_params::{
+    ASSIGN_LOG_MAX, ASSOC_FORENSICS_MAX, KEY_RADAR_BASE, MAX_NETWORK_RADARS,
+};
 use oa_track::{
     output_clear, output_new, tracker_counts, tracker_live_iter, Measurement, TrackerConfig,
     TrackerStats, DEFAULT_CONFIG, O_COAST, O_TICK, REFUSE_NAMES,
@@ -38,6 +40,8 @@ const MAX_STAGE_TIMING_SECONDS: i64 = 86_400;
 #[derive(Debug, Clone)]
 pub struct CapCfg {
     pub traffic: TrafficCfg,
+    /// Explicitly selects the bounded eight-unit, 64-physical-source fusion profile.
+    pub network_profile: bool,
     /// Seconds of traffic fed before the statistics start (tracks initiate, registration settles).
     pub warmup_s: i64,
     /// Seconds of traffic whose statistics are kept.
@@ -133,10 +137,16 @@ pub struct ForensicWrongRow {
 #[derive(Debug, Clone)]
 pub struct CapResult {
     pub n: usize,
+    /// Generated synthetic `RadarSite::sensor` IDs in the matching per-radar array order.
+    pub physical_sensor_ids: Vec<u16>,
+    /// Number of synthetic plot rows handed to fusion from each physical source over all fed
+    /// seconds, including warm-up. This is a generator-input denominator, not accepted tracks.
+    pub generated_radar_plot_rows: Vec<u64>,
     pub fed_seconds: i64,
     pub layout: Layout,
     pub init_diagnostics: bool,
     pub association_diagnostics: bool,
+    pub network_profile: bool,
     pub assignment_forensics: bool,
     /// Available only when shell stage timers were explicitly enabled.
     pub stage_timing: Option<ShellStageTiming>,
@@ -183,9 +193,9 @@ pub struct CapResult {
     pub delay_plot_ms: Dist,
     pub fusion: FusionStats,
     /// Per-radar measured-window deltas, excluding warm-up.
-    pub init_radar: [RadarInitStats; MAX_RADARS],
+    pub init_radar: [RadarInitStats; MAX_NETWORK_RADARS],
     /// Per-radar measured-window deltas, excluding warm-up.
-    pub association_radar: [RadarAssociationStats; MAX_RADARS],
+    pub association_radar: [RadarAssociationStats; MAX_NETWORK_RADARS],
     pub tracker: TrackerStats,
     pub out_overflow: u64,
     /// The same three at the end of the warm-up: the loss counters of the measured window are the
@@ -343,6 +353,7 @@ pub fn fusion_counters(s: &FusionStats) -> Vec<(&'static str, u64)> {
         ("adsb_in", s.adsb_in),
         ("adsb_address_refused", s.adsb_address_refused),
         ("plots_in", s.plots_in),
+        ("plots_source_refused", s.plots_source_refused),
         ("plots_refused", s.plots_refused),
         ("late", s.late),
         ("pending_overflow", s.pending_overflow),
@@ -512,6 +523,14 @@ pub fn fusion_counters(s: &FusionStats) -> Vec<(&'static str, u64)> {
 pub const FUSION_NOT_LOSS: &[&str] = &[
     "adsb_in",
     "plots_in",
+    "network_radars",
+    "network_units",
+    "network_bucket_tests_limit",
+    "network_polar_work_limit",
+    "network_init_work_limit",
+    "network_reg_history_per_source_limit",
+    "network_plot_scan_slots",
+    "network_fusion_owned_bytes",
     "applied_hard",
     "applied_assoc",
     "held",
@@ -664,6 +683,7 @@ pub const TRACKER_NOT_LOSS: &[&str] = &[
 pub fn loss_counters(f: &FusionStats, t: &TrackerStats, out_overflow: u64) -> Vec<(String, u64)> {
     let mut v: Vec<(String, u64)> = vec![
         ("fusion.plots_refused".into(), f.plots_refused),
+        ("fusion.plots_source_refused".into(), f.plots_source_refused),
         ("fusion.adsb_address_refused".into(), f.adsb_address_refused),
         ("fusion.late".into(), f.late),
         ("fusion.pending_overflow".into(), f.pending_overflow),
@@ -863,6 +883,7 @@ fn truth_snapshot_score(
         || assign.key.len() != assign.t_ns.len()
         || assign.label.len() != assign.t_ns.len()
         || assign.radar.len() != assign.t_ns.len()
+        || assign.physical_sensor_id.len() != assign.t_ns.len()
         || assign.how.len() != assign.t_ns.len()
     {
         return Err("assignment log columns are incomplete or exceed their bound");
@@ -875,14 +896,19 @@ fn truth_snapshot_score(
     // cold scoring work: labels remain write-only evidence and never enter a fusion decision.
     let mut measured_assign = AssignLog::default();
     for i in 0..assign.t_ns.len() {
-        let Some((&t_ns, &key, &label, &radar, &how)) = assign
+        let Some((&t_ns, &key, &label, &radar, &physical_sensor_id, &how)) = assign
             .t_ns
             .get(i)
             .zip(assign.key.get(i))
             .zip(assign.label.get(i))
             .zip(assign.radar.get(i))
+            .zip(assign.physical_sensor_id.get(i))
             .zip(assign.how.get(i))
-            .map(|((((t_ns, key), label), radar), how)| (t_ns, key, label, radar, how))
+            .map(
+                |(((((t_ns, key), label), radar), physical_sensor_id), how)| {
+                    (t_ns, key, label, radar, physical_sensor_id, how)
+                },
+            )
         else {
             return Err("assignment log columns are incomplete");
         };
@@ -891,6 +917,7 @@ fn truth_snapshot_score(
             measured_assign.key.push(key);
             measured_assign.label.push(label);
             measured_assign.radar.push(radar);
+            measured_assign.physical_sensor_id.push(physical_sensor_id);
             measured_assign.how.push(how);
         }
     }
@@ -963,6 +990,7 @@ fn assignment_forensics_rows(
         || evidence.label.len() != n
         || evidence.plot_mode_a.len() != n
         || evidence.radar.len() != n
+        || evidence.physical_sensor_id.len() != n
         || evidence.action.len() != n
         || evidence.selected_key.len() != n
         || evidence.selected_cost.len() != n
@@ -986,6 +1014,7 @@ fn assignment_forensics_rows(
         || assign.key.len() != assign.t_ns.len()
         || assign.label.len() != assign.t_ns.len()
         || assign.radar.len() != assign.t_ns.len()
+        || assign.physical_sensor_id.len() != assign.t_ns.len()
         || assign.how.len() != assign.t_ns.len()
     {
         return Err("assignment log columns are incomplete");
@@ -995,13 +1024,22 @@ fn assignment_forensics_rows(
         .collect();
     let mut measured = AssignLog::default();
     for i in 0..assign.t_ns.len() {
-        let (Some(&t), Some(&key), Some(&label), Some(&radar), Some(&how)) = (
+        let (
+            Some(&t),
+            Some(&key),
+            Some(&label),
+            Some(&radar),
+            Some(&physical_sensor_id),
+            Some(&how),
+        ) = (
             assign.t_ns.get(i),
             assign.key.get(i),
             assign.label.get(i),
             assign.radar.get(i),
+            assign.physical_sensor_id.get(i),
             assign.how.get(i),
-        ) else {
+        )
+        else {
             return Err("assignment log columns are incomplete");
         };
         if t >= measured_from_ns {
@@ -1009,6 +1047,7 @@ fn assignment_forensics_rows(
             measured.key.push(key);
             measured.label.push(label);
             measured.radar.push(radar);
+            measured.physical_sensor_id.push(physical_sensor_id);
             measured.how.push(how);
         }
     }
@@ -1174,6 +1213,11 @@ pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
     if cfg.assignment_forensics && !cfg.truth_score {
         return Err("assignment forensics requires truth scoring".to_string());
     }
+    if cfg.network_profile && cfg.truth_score {
+        return Err(
+            "network-profile radar input excludes truth labels; use separate evaluator-side truth evidence".to_string(),
+        );
+    }
     if cfg.adsb_dropout_s.is_some() && cfg.warmup_s < 1 {
         return Err(
             "continuity mode requires at least 1 second of mixed-sensor warm-up".to_string(),
@@ -1213,7 +1257,11 @@ pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
     let n = cfg.traffic.n;
     let load_start = loadavg3();
     let rss_before_kb = status_kb("VmRSS").unwrap_or(0);
-    let mut traffic = Traffic::new(&cfg.traffic)?;
+    let mut traffic = if cfg.network_profile {
+        Traffic::new_network(&cfg.traffic)?
+    } else {
+        Traffic::new(&cfg.traffic)?
+    };
     let sites = traffic.sites();
     let base = tracker_cfg(cfg.max_tracks, n);
     let mut fcfg = fusion_config(fusion_tracker_config(&base, &sites));
@@ -1221,7 +1269,12 @@ pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
     fcfg.init_diagnostics = cfg.init_diagnostics;
     fcfg.association_diagnostics = cfg.association_diagnostics;
     fcfg.association_forensics = cfg.assignment_forensics;
-    let mut f = fusion_new(&fcfg, &sites).map_err(|e| e.to_string())?;
+    let mut f = if cfg.network_profile {
+        fusion_new_network(&fcfg, &sites)
+    } else {
+        fusion_new(&fcfg, &sites)
+    }
+    .map_err(|e| e.to_string())?;
     // OA-GEN traffic is fixed truth: prebuild the bounded address index and coverage bits before
     // any core timing. Multiple radar labels for one aircraft intentionally count once.
     let mut offered = offered_new(traffic.aircraft());
@@ -1262,6 +1315,7 @@ pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
     let mut measure_done = 0i64;
     let mut seconds_done = 0i64;
     let mut rss_warm_kb = 0u64;
+    let mut generated_radar_plot_rows = vec![0u64; sites.len()];
     let mut warm = (FusionStats::default(), TrackerStats::default(), 0u64);
     for k in 0..total_s {
         if started.elapsed().as_secs_f64() > cfg.max_wall_s {
@@ -1275,6 +1329,17 @@ pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
         adsb.clear();
         traffic.adsb_window(k, &mut adsb);
         traffic.plot_windows(k, &mut plots);
+        if plots.len() != generated_radar_plot_rows.len() {
+            return Err("generator plot-source count differs from configured sites".to_string());
+        }
+        for (total, source_plots) in generated_radar_plot_rows.iter_mut().zip(&plots) {
+            *total = total
+                .checked_add(
+                    u64::try_from(source_plots.len())
+                        .map_err(|_| "per-source plot row count does not fit u64")?,
+                )
+                .ok_or("per-source generated plot count overflow")?;
+        }
         if cfg.radar_only {
             adsb_generated_reports = adsb_generated_reports.saturating_add(adsb.len() as u64);
             if let Some(coverage) = radar_observed.as_mut() {
@@ -1310,7 +1375,16 @@ pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
             fusion_adsb(&mut f, m);
         }
         for (r, p) in plots.iter().enumerate() {
-            fusion_plots(&mut f, r, p);
+            if cfg.network_profile {
+                let site = sites
+                    .get(r)
+                    .ok_or("network plot source lacks its configured physical site")?;
+                if !fusion_plots_for_sensor(&mut f, site.sensor, p) {
+                    return Err("network plot source ID was refused by fusion".to_string());
+                }
+            } else {
+                fusion_plots(&mut f, r, p);
+            }
         }
         let fusion_advance_ms = if cfg.stage_timings {
             let stage_started = Instant::now();
@@ -1519,12 +1593,12 @@ pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
             Some("truth score unavailable; wrong-row export was not attempted"),
         )
     };
-    let mut init_radar = [RadarInitStats::default(); MAX_RADARS];
+    let mut init_radar = [RadarInitStats::default(); MAX_NETWORK_RADARS];
     if cfg.init_diagnostics && measure_done > 0 {
         for ((delta, now), before) in init_radar
             .iter_mut()
-            .zip(fusion_stats(&f).init_radar)
-            .zip(warm.0.init_radar)
+            .zip(fusion_stats(&f).init_radar.0)
+            .zip(warm.0.init_radar.0)
         {
             *delta = RadarInitStats {
                 batches: now.batches.saturating_sub(before.batches),
@@ -1543,12 +1617,12 @@ pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
             };
         }
     }
-    let mut association_radar = [RadarAssociationStats::default(); MAX_RADARS];
+    let mut association_radar = [RadarAssociationStats::default(); MAX_NETWORK_RADARS];
     if cfg.association_diagnostics && measure_done > 0 {
         for ((delta, now), before) in association_radar
             .iter_mut()
-            .zip(fusion_stats(&f).association_radar)
-            .zip(warm.0.association_radar)
+            .zip(fusion_stats(&f).association_radar.0)
+            .zip(warm.0.association_radar.0)
         {
             *delta = RadarAssociationStats {
                 anonymous_offered: now
@@ -1567,12 +1641,15 @@ pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
     }
     Ok(CapResult {
         n,
+        physical_sensor_ids: sites.iter().map(|site| site.sensor).collect(),
+        generated_radar_plot_rows,
         fed_seconds: seconds_done,
         layout: cfg.traffic.layout,
         init_diagnostics: cfg.init_diagnostics,
         association_diagnostics: cfg.association_diagnostics,
         assignment_forensics: cfg.assignment_forensics,
         stage_timing,
+        network_profile: cfg.network_profile,
         adsb_aircraft: traffic.adsb_count(),
         radar_only: cfg.radar_only,
         radar_only_suppressed_aircraft,
@@ -1653,6 +1730,56 @@ pub fn cap_kv(r: &CapResult) -> Kv {
     kv.put("label", "loaded machine, preliminary");
     kv.put("n", r.n);
     kv.put("layout", r.layout.name());
+    kv.put(
+        "synthetic_physical_radar_sensor_ids",
+        r.physical_sensor_ids
+            .iter()
+            .map(u16::to_string)
+            .collect::<Vec<_>>()
+            .join(","),
+    );
+    kv.put("network_profile", u8::from(r.network_profile));
+    kv.put("physical_radar_sources", r.fusion.network_radars);
+    if r.network_profile {
+        kv.put(
+            "network.generated_plot_rows_scope",
+            "all_fed_seconds_including_warmup",
+        );
+        kv.put(
+            "network.generated_plot_rows_are_fusion_inputs_not_tracks",
+            1,
+        );
+        for (index, count) in r.generated_radar_plot_rows.iter().enumerate() {
+            if let Some(sensor) = r.physical_sensor_ids.get(index) {
+                kv.put(
+                    &format!("network.generated_plot_rows.sensor{sensor}"),
+                    count,
+                );
+            }
+        }
+    }
+    kv.put("eight_source_work_units", r.fusion.network_units);
+    kv.put(
+        "network.bucket_tests_limit",
+        r.fusion.network_bucket_tests_limit,
+    );
+    kv.put(
+        "network.polar_work_limit",
+        r.fusion.network_polar_work_limit,
+    );
+    kv.put("network.init_work_limit", r.fusion.network_init_work_limit);
+    kv.put(
+        "network.reg_history_per_source_limit",
+        r.fusion.network_reg_history_per_source_limit,
+    );
+    kv.put(
+        "network.plot_scan_fixed_slots",
+        r.fusion.network_plot_scan_slots,
+    );
+    kv.put(
+        "network.fusion_owned_bytes_excluding_tracker_buffers_and_caller_output",
+        r.fusion.network_fusion_owned_bytes,
+    );
     kv.put("adsb_aircraft", r.adsb_aircraft);
     if r.radar_only {
         kv.put("radar_only", 1);
@@ -1707,6 +1834,9 @@ pub fn cap_kv(r: &CapResult) -> Kv {
                 continue;
             }
             let prefix = format!("init.radar{radar}.");
+            if let Some(sensor) = r.physical_sensor_ids.get(radar) {
+                kv.put(&format!("{prefix}synthetic_physical_sensor_id"), sensor);
+            }
             kv.put(&format!("{prefix}batches"), d.batches);
             kv.put(&format!("{prefix}plots"), d.plots);
             kv.put(&format!("{prefix}opening_work"), d.opening_work);
@@ -1728,6 +1858,9 @@ pub fn cap_kv(r: &CapResult) -> Kv {
                 continue;
             }
             let prefix = format!("association.radar{radar}.");
+            if let Some(sensor) = r.physical_sensor_ids.get(radar) {
+                kv.put(&format!("{prefix}synthetic_physical_sensor_id"), sensor);
+            }
             kv.put(&format!("{prefix}anonymous_offered"), d.anonymous_offered);
             kv.put(&format!("{prefix}completed"), d.completed);
             kv.put(&format!("{prefix}incomplete"), d.incomplete);
@@ -2057,6 +2190,25 @@ pub fn cap_text(r: &CapResult) -> String {
         "  aircraft {} ({} send ADS-B), box +-{:.0} km, tracker capacity {}\n",
         r.n, r.adsb_aircraft, r.half_km, r.max_tracks
     ));
+    if r.network_profile {
+        s.push_str(&format!(
+            "  opt-in physical-radar network: {} sources in {} eight-source work units; per-unit association/init/polar ceilings remain unchanged and aggregate by unit; plot-freshness slots {}; Fusion shell-owned reserved bytes {} (tracker-owned buffers and caller output excluded)\n",
+            r.fusion.network_radars,
+            r.fusion.network_units,
+            r.fusion.network_plot_scan_slots,
+            r.fusion.network_fusion_owned_bytes,
+        ));
+        s.push_str("  synthetic network site geometry is an artificial 8x8 grid, not a real radar-site layout\n");
+        s.push_str("  physical sensor IDs are generated synthetic IDs, not FAA or deployed site identifiers\n");
+        s.push_str("  generated plot-row denominator includes all fed seconds (warm-up included), before fusion outcomes:\n");
+        for (index, count) in r.generated_radar_plot_rows.iter().enumerate() {
+            if let Some(sensor) = r.physical_sensor_ids.get(index) {
+                s.push_str(&format!(
+                    "    synthetic sensor {sensor}: {count} generated input rows\n"
+                ));
+            }
+        }
+    }
     s.push_str(&format!(
         "  traffic: warm-up {} s, measured {} of {} s{}; per second: {:.0} ADS-B, {:.0} plots, {:.0} rows out\n",
         r.warmup_s,
@@ -2312,8 +2464,12 @@ pub fn cap_text(r: &CapResult) -> String {
             if d.batches == 0 {
                 continue;
             }
+            let sensor = r
+                .physical_sensor_ids
+                .get(radar)
+                .map_or_else(|| "unknown".to_string(), u16::to_string);
             s.push_str(&format!(
-                "    radar {radar}: {} batches, {} plots, {} work available at batch start, {} consumed, {} retirement work requested, {} reservations denied, {} pair tests, {} capped batches, {} refused plots\n",
+                "    source ordinal {radar} (synthetic physical ID {sensor}): {} batches, {} plots, {} work available at batch start, {} consumed, {} retirement work requested, {} reservations denied, {} pair tests, {} capped batches, {} refused plots\n",
                 d.batches, d.plots, d.opening_work, d.work, d.retirement_requested,
                 d.retirement_denied, d.pair_tests, d.capped_batches, d.refused_plots
             ));
@@ -2325,8 +2481,12 @@ pub fn cap_text(r: &CapResult) -> String {
             if d.anonymous_offered == 0 {
                 continue;
             }
+            let sensor = r
+                .physical_sensor_ids
+                .get(radar)
+                .map_or_else(|| "unknown".to_string(), u16::to_string);
             s.push_str(&format!(
-                "    radar {radar}: {} anonymous offered, {} completed, {} incomplete, {} coarse candidates visited, {} exact checks, {} accepted pairs, {} capped batches\n",
+                "    source ordinal {radar} (synthetic physical ID {sensor}): {} anonymous offered, {} completed, {} incomplete, {} coarse candidates visited, {} exact checks, {} accepted pairs, {} capped batches\n",
                 d.anonymous_offered, d.completed, d.incomplete,
                 d.coarse_candidates_visited, d.exact_checks, d.accepted_pairs, d.capped_batches
             ));
@@ -2425,11 +2585,35 @@ mod tests {
             .all(|(name, _)| !name.contains("conversion.")));
     }
 
+    // REQ: OA-PRF-009
+    #[test]
+    fn physical_source_refusals_remain_a_distinct_loss_counter() {
+        let fusion = FusionStats {
+            plots_source_refused: 2,
+            plots_refused: 3,
+            network_radars: 64,
+            ..Default::default()
+        };
+        let losses = loss_counters(&fusion, &TrackerStats::default(), 0);
+        assert!(losses.contains(&("fusion.plots_source_refused".into(), 2)));
+        assert!(losses.contains(&("fusion.plots_refused".into(), 3)));
+        assert!(!losses
+            .iter()
+            .any(|(name, _)| name == "fusion.network_radars"));
+        assert_eq!(
+            fusion_counters(&fusion)
+                .into_iter()
+                .find(|(name, _)| *name == "plots_source_refused"),
+            Some(("plots_source_refused", 2))
+        );
+    }
+
     /// Sets the counter `name` (as `loss_counters` names it) to 1 in the result's totals.
     fn set_loss(r: &mut CapResult, name: &str) {
         let (f, t) = (&mut r.fusion, &mut r.tracker);
         match name {
             "fusion.plots_refused" => f.plots_refused = 1,
+            "fusion.plots_source_refused" => f.plots_source_refused = 1,
             "fusion.adsb_address_refused" => f.adsb_address_refused = 1,
             "fusion.late" => f.late = 1,
             "fusion.pending_overflow" => f.pending_overflow = 1,
@@ -2508,6 +2692,7 @@ mod tests {
                 radars: vec![Kind::EnRoute, Kind::Terminal, Kind::Terminal],
                 horizon_s: (warm + meas) as f64 + 60.0,
             },
+            network_profile: false,
             warmup_s: warm,
             measure_s: meas,
             max_tracks: 4096,
@@ -2594,6 +2779,35 @@ mod tests {
             result.fusion.pairs_gated - result.fusion_warm.pairs_gated
         );
         assert_eq!(cap_kv(&result).get("association_diagnostics"), Some("1"));
+    }
+
+    #[test]
+    fn network_profile_reports_every_source_input_denominator_including_warmup() {
+        let mut cfg = small(32, 2, 3);
+        cfg.network_profile = true;
+        cfg.traffic.radars = vec![Kind::EnRoute; 9];
+        let result = run_capacity(&cfg).unwrap();
+        assert_eq!(result.physical_sensor_ids, (1..=9).collect::<Vec<_>>());
+        assert_eq!(result.generated_radar_plot_rows.len(), 9);
+        assert_eq!(
+            result.generated_radar_plot_rows.iter().sum::<u64>(),
+            result.fusion.plots_in,
+            "every generator-emitted network row is counted and offered to fusion"
+        );
+        let kv = cap_kv(&result);
+        assert_eq!(
+            kv.get("network.generated_plot_rows_scope"),
+            Some("all_fed_seconds_including_warmup")
+        );
+        assert_eq!(
+            kv.get("network.generated_plot_rows_are_fusion_inputs_not_tracks"),
+            Some("1")
+        );
+        for sensor in 1..=9 {
+            assert!(kv
+                .get(&format!("network.generated_plot_rows.sensor{sensor}"))
+                .is_some());
+        }
     }
 
     // REQ: OA-PRF-013

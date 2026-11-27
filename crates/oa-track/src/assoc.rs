@@ -302,6 +302,42 @@ pub fn assoc_scratch_caps(sc: &AssocScratch) -> (usize, usize, usize) {
     (sc.max_tracks, sc.max_plots, sc.max_pairs)
 }
 
+/// Exact heap bytes reserved by this scratch's fixed-capacity vectors. Used by capacity
+/// accounting; it does not include the inline `AssocScratch` value or allocator metadata.
+pub fn assoc_scratch_storage_bytes(sc: &AssocScratch) -> u64 {
+    fn bytes<T>(capacity: usize) -> u128 {
+        (capacity as u128) * (core::mem::size_of::<T>() as u128)
+    }
+    let total = bytes::<u32>(sc.plot_track.capacity())
+        + bytes::<u32>(sc.pair_of.capacity())
+        + bytes::<bool>(sc.amb.capacity())
+        + bytes::<u32>(sc.alternate_pair.capacity())
+        + bytes::<u32>(sc.component_size.capacity())
+        + bytes::<u8>(sc.component_path.capacity())
+        + bytes::<f64>(sc.regret.capacity())
+        + bytes::<u8>(sc.regret_status.capacity())
+        + bytes::<f64>(sc.regret_dist.capacity())
+        + bytes::<f64>(sc.own.capacity())
+        + bytes::<f64>(sc.other.capacity())
+        + bytes::<u32>(sc.parent.capacity())
+        + bytes::<(u32, u32)>(sc.by_root.capacity())
+        + bytes::<u32>(sc.comp_tracks.capacity())
+        + bytes::<u32>(sc.comp_plots.capacity())
+        + bytes::<bool>(sc.t_mark.capacity())
+        + bytes::<bool>(sc.p_mark.capacity())
+        + bytes::<u32>(sc.order.capacity())
+        + bytes::<bool>(sc.track_used.capacity())
+        + bytes::<f64>(sc.hung.cost.capacity())
+        + bytes::<f64>(sc.hung.u.capacity())
+        + bytes::<f64>(sc.hung.v.capacity())
+        + bytes::<f64>(sc.hung.minv.capacity())
+        + bytes::<usize>(sc.hung.p.capacity())
+        + bytes::<usize>(sc.hung.way.capacity())
+        + bytes::<bool>(sc.hung.used.capacity())
+        + bytes::<usize>(sc.hung.row_to_col.capacity());
+    u64::try_from(total).unwrap_or(u64::MAX)
+}
+
 /// The address and capacity of every buffer the scratch owns. A test compares it before and
 /// after a run: equal means nothing was reallocated (RULESET C5, checked on the buffers because
 /// a counting allocator needs `unsafe`, which A0 forbids here).

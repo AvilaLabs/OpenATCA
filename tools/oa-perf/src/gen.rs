@@ -19,6 +19,7 @@
 use oa_geo::aeqd::{frame_new, try_frame_velocity, unproject, Frame};
 use oa_sensorsim::prng::Rng;
 use oa_sensorsim::profile::MSSR_EUROCONTROL_1997;
+use oa_track::fusion_params::MAX_NETWORK_RADARS;
 use oa_track::radar::{
     polar_of, radar_geom, RadarGeom, RadarPlot, RadarSite, FT_M, MIN_PLOT_RANGE_M, NONE_CODE,
     PLOT_NO_ADDR,
@@ -233,6 +234,9 @@ struct Rad {
     site: RadarSite,
     geom: RadarGeom,
     coverage_m: f64,
+    /// Legacy capacity runs use evaluator labels; the new network profile keeps them out of
+    /// every radar input and evaluates only from separate generated truth.
+    truth_label_enabled: bool,
     /// Next scan to generate.
     next_scan: i64,
     /// Plots generated and not yet handed out, in time order.
@@ -253,6 +257,16 @@ fn round_ms(t_ns: i64) -> i64 {
 
 impl Traffic {
     pub fn new(cfg: &TrafficCfg) -> Result<Traffic, String> {
+        Traffic::new_profile(cfg, false)
+    }
+
+    /// Builds the explicitly artificial 64-site network geometry; the ordinary constructor
+    /// retains the historical four-site synthetic layout and refusal behavior.
+    pub fn new_network(cfg: &TrafficCfg) -> Result<Traffic, String> {
+        Traffic::new_profile(cfg, true)
+    }
+
+    fn new_profile(cfg: &TrafficCfg, network_profile: bool) -> Result<Traffic, String> {
         if cfg.n == 0 || cfg.n > MAX_AIRCRAFT {
             return Err(format!(
                 "aircraft count {} outside 1 to {MAX_AIRCRAFT}",
@@ -267,8 +281,13 @@ impl Traffic {
                 "radar-only mode requires stress layout and at least one radar".to_string(),
             );
         }
-        if cfg.radars.len() > RADAR_OFFSETS_KM.len() {
-            return Err(format!("at most {} radars", RADAR_OFFSETS_KM.len()));
+        let radar_limit = if network_profile {
+            MAX_NETWORK_RADARS
+        } else {
+            RADAR_OFFSETS_KM.len()
+        };
+        if cfg.radars.len() > radar_limit {
+            return Err(format!("at most {radar_limit} physical radar sites"));
         }
         if !(cfg.horizon_s.is_finite() && cfg.horizon_s > 0.0) {
             return Err("horizon".to_string());
@@ -328,8 +347,19 @@ impl Traffic {
             });
         }
         let mut rads = Vec::new();
+        // The larger synthetic network uses an explicitly artificial 8x8 site grid. It is not
+        // a claim about real radar siting; the old <=4-site layout remains unchanged. Sites are
+        // distinct and their `sensor` IDs remain separate identities.
+        let network_layout = network_profile;
         for (i, kind) in cfg.radars.iter().enumerate() {
-            let &(oe, on) = RADAR_OFFSETS_KM.get(i).ok_or("radar index")?;
+            let (oe, on) = if network_layout {
+                let col = (i % 8) as f64;
+                let row = (i / 8) as f64;
+                ((col - 3.5) * 6.0, (row - 3.5) * 6.0)
+            } else {
+                let &(oe, on) = RADAR_OFFSETS_KM.get(i).ok_or("radar index")?;
+                (oe, on)
+            };
             let (lat, lon) =
                 unproject(&frame, oe * 1000.0, on * 1000.0).ok_or("radar offset off the chart")?;
             let mut site = make_radar(*kind, MSSR_EUROCONTROL_1997, 0.0, 0.0).trk;
@@ -340,6 +370,7 @@ impl Traffic {
                 geom: radar_geom(&site),
                 site,
                 coverage_m: site_def(*kind).coverage_m,
+                truth_label_enabled: !network_profile,
                 next_scan: 0,
                 queue: Vec::new(),
             });
@@ -492,7 +523,11 @@ fn scan_plots(ac: &[Aircraft], frame: &Frame, seed: u64, ri: u64, rad: &mut Rad,
             az_deg: (polar.1 + na * sig_a).rem_euclid(360.0),
             alt_ft: ((f64::from(a.alt_ft) / q).round() * q) as i32,
             addr: PLOT_NO_ADDR,
-            label: a.addr,
+            label: if rad.truth_label_enabled {
+                a.addr
+            } else {
+                PLOT_NO_ADDR
+            },
             mode_a: NONE_CODE,
         });
     }
@@ -533,6 +568,37 @@ mod tests {
             }
         }
         (adsb, plots)
+    }
+
+    #[test]
+    fn opt_in_network_generator_keeps_sixty_four_distinct_physical_site_ids() {
+        let network_cfg = TrafficCfg {
+            radars: vec![Kind::EnRoute; MAX_NETWORK_RADARS],
+            ..cfg(20261126, 4, Layout::Stress)
+        };
+        assert!(Traffic::new(&network_cfg).is_err());
+        let traffic = Traffic::new_network(&network_cfg).unwrap();
+        assert_eq!(traffic.sites().len(), MAX_NETWORK_RADARS);
+        assert!(traffic.rads.iter().all(|radar| !radar.truth_label_enabled));
+        assert_eq!(
+            traffic
+                .sites()
+                .iter()
+                .map(|site| site.sensor)
+                .collect::<Vec<_>>(),
+            (1..=MAX_NETWORK_RADARS as u16).collect::<Vec<_>>()
+        );
+        assert!(traffic.sites().windows(2).all(|pair| {
+            pair[0].sensor != pair[1].sensor
+                && (pair[0].lat_deg != pair[1].lat_deg || pair[0].lon_deg != pair[1].lon_deg)
+        }));
+        let too_many = TrafficCfg {
+            radars: vec![Kind::EnRoute; MAX_NETWORK_RADARS + 1],
+            ..network_cfg
+        };
+        assert!(Traffic::new_network(&too_many).is_err());
+        let legacy = Traffic::new(&cfg(20261126, 4, Layout::Stress)).unwrap();
+        assert!(legacy.rads.iter().all(|radar| radar.truth_label_enabled));
     }
 
     #[test]

@@ -880,6 +880,7 @@ mod identify_tracks_tests {
             assign.key.push(key);
             assign.label.push(label);
             assign.radar.push(0);
+            assign.physical_sensor_id.push(0);
             assign.how.push(0);
         }
 
