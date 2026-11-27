@@ -47,6 +47,7 @@ class ProofCase:
 class ProofReceipt:
     class_id: str
     sha: str
+    baseline_exit: int
     checker_exit: int
     refusal: str
 
@@ -128,18 +129,29 @@ def run_proof_case(case: ProofCase) -> ProofReceipt:
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             base_tree = make_tree(repo, {"fixture.txt": b"baseline"})
             base = make_commit(repo, base_tree, CommitFixture("synthetic safe baseline"))
+            safe_head = make_commit(
+                repo, base_tree, CommitFixture("synthetic safe positive control"), base
+            )
             bad_tree = make_tree(repo, case.files)
-            head = make_commit(repo, bad_tree, case.fixture, base)
+            head = make_commit(repo, bad_tree, case.fixture, safe_head)
             test_env = {
                 "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
                 "COMMIT_EMAIL_LOG_MASK": FIXTURE_EMAIL,
                 "EXPECTED_COMMIT_EMAIL": FIXTURE_EMAIL,
                 "GITHUB_EVENT_NAME": "push",
                 "GITHUB_REF": "refs/heads/main",
-                "GITHUB_SHA": head,
+                "GITHUB_SHA": safe_head,
                 "PUSH_BEFORE_SHA": base,
             }
             checker = Path(__file__).with_name("check_commit_hygiene.py").resolve()
+            baseline = subprocess.run(
+                [sys.executable, str(checker)], cwd=repo, env=test_env,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            )
+            if baseline.returncode != 0 or baseline.stdout or baseline.stderr:
+                raise ProofHarnessFailure("positive-control")
+            test_env["GITHUB_SHA"] = head
+            test_env["PUSH_BEFORE_SHA"] = safe_head
             result = subprocess.run(
                 [sys.executable, str(checker)], cwd=repo, env=test_env,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
@@ -152,7 +164,8 @@ def run_proof_case(case: ProofCase) -> ProofReceipt:
                 raise ProofHarnessFailure("refusal-shape")
             if FIXTURE_EMAIL in captured or ("/" + "home" + "/" + "connoravila") in captured:
                 raise ProofHarnessFailure("fixture-value-output")
-            return ProofReceipt(case.class_id, head[:12], result.returncode, case.expected_rule)
+            return ProofReceipt(case.class_id, head[:12], baseline.returncode,
+                                result.returncode, case.expected_rule)
     except ProofHarnessFailure:
         raise
     except Exception:
@@ -175,7 +188,8 @@ def proof_command(class_id: str) -> int:
         return 2
     for receipt in receipts:
         print(
-            f"proof_fixture=validated class={receipt.class_id} checker_exit={receipt.checker_exit} "
+            f"proof_fixture=validated class={receipt.class_id} baseline_exit={receipt.baseline_exit} "
+            f"checker_exit={receipt.checker_exit} "
             f"expected_refusal={receipt.refusal} observed_refusal={receipt.refusal} fixture_sha={receipt.sha}"
         )
     return receipts[0].checker_exit
@@ -359,16 +373,19 @@ class CommitHygieneTests(unittest.TestCase):
         receipts = run_proof_class("E01")
         self.assertEqual(tuple(receipt.refusal for receipt in receipts),
                          (AUTHOR_EMAIL_RULE, COMMITTER_EMAIL_RULE))
+        self.assertTrue(all(receipt.baseline_exit == 0 for receipt in receipts))
         self.assertTrue(all(receipt.checker_exit == 1 for receipt in receipts))
 
     def test_E02_synthetic_attribution_message_mutation_is_refused(self):
         receipts = run_proof_class("E02")
         self.assertEqual(tuple(receipt.refusal for receipt in receipts), (MESSAGE_RULE,))
+        self.assertTrue(all(receipt.baseline_exit == 0 for receipt in receipts))
         self.assertTrue(all(receipt.checker_exit == 1 for receipt in receipts))
 
     def test_E03_synthetic_archive_path_mutation_is_refused(self):
         receipts = run_proof_class("E03")
         self.assertEqual(tuple(receipt.refusal for receipt in receipts), (PATH_RULE,))
+        self.assertTrue(all(receipt.baseline_exit == 0 for receipt in receipts))
         self.assertTrue(all(receipt.checker_exit == 1 for receipt in receipts))
 
     def test_proof_command_propagates_checker_refusal_only_after_validated_receipt(self):
@@ -381,7 +398,7 @@ class CommitHygieneTests(unittest.TestCase):
         lines = output.getvalue().splitlines()
         self.assertEqual(len(lines), 1)
         self.assertTrue(lines[0].startswith(
-            "proof_fixture=validated class=E02 checker_exit=1 "
+            "proof_fixture=validated class=E02 baseline_exit=0 checker_exit=1 "
             f"expected_refusal={MESSAGE_RULE} observed_refusal={MESSAGE_RULE} fixture_sha="
         ))
         self.assertNotIn(FIXTURE_EMAIL, output.getvalue())
@@ -406,7 +423,7 @@ class CommitHygieneTests(unittest.TestCase):
                 self.assertEqual(len(lines), len(rules))
                 for line, rule in zip(lines, rules):
                     self.assertTrue(line.startswith(
-                        f"proof_fixture=validated class={class_id} checker_exit=1 "
+                        f"proof_fixture=validated class={class_id} baseline_exit=0 checker_exit=1 "
                         f"expected_refusal={rule} observed_refusal={rule} fixture_sha="
                     ))
                 self.assertNotIn(FIXTURE_EMAIL, result.stdout + result.stderr)
