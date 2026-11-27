@@ -43,6 +43,8 @@ jobs:
           rustc +1.89.0 --version | grep -E '^rustc 1\.89\.0([[:space:]]|$)'
       - name: Validate proof suite registry
         run: python3 tools/test_rust_proof_suite.py
+      - name: Test per-proof resource receipts
+        run: python3 tools/test_rust_proof_resources.py
       - name: Test Kani runner and result bindings
         run: python3 tools/test_kani_validation.py
       - name: Pick the proofs this run covers
