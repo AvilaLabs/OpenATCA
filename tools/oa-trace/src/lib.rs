@@ -359,7 +359,7 @@ pub fn analyze(root: &Path) -> Report {
         e.1 |= r.withdrawn;
         e.2 |= r.proposed;
     }
-    for (id, (lines, _)) in &defs {
+    for (id, (lines, _, _)) in &defs {
         if lines.len() > 1 {
             rep.duplicates.insert(id.clone(), lines.clone());
         }
