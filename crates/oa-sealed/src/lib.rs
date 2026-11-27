@@ -91,6 +91,7 @@ fn list_without_window(list: &str) -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod test_support {
     include!(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -107,7 +108,7 @@ mod test_support {
 )]
 mod data_root_tests {
     use super::test_support;
-    use super::{list_without_window, Sealed, DATA_ROOT_SENTINEL, DEFAULT_DATA_ROOT, LIST};
+    use super::{Sealed, DATA_ROOT_SENTINEL, DEFAULT_DATA_ROOT, LIST};
     use std::path::Path;
 
     fn assert_fail_closed(guard: &Sealed, outside: &Path) {
