@@ -53,6 +53,11 @@ class QualitySizeRatchetTests(unittest.TestCase):
             "summary": summary,
         }
 
+    @staticmethod
+    def function_source(name, comment_lines):
+        body = "\n".join("    // retained source line" for _ in range(comment_lines))
+        return f"fn {name}() {{\n{body}\n}}\n"
+
     def test_rust_multiline_generics_and_comments_count_arguments(self):
         source = """pub(crate) fn bounded<T: Trait<Left, Right>>(
     first: T, // comments and nested type commas don't add arguments
@@ -280,6 +285,40 @@ class QualitySizeRatchetTests(unittest.TestCase):
         report = ratchet.compare(elevated, baseline)
         self.assertEqual(report["status"], "FAIL")
         self.assertTrue(any("wide_argument_function_count" in error for error in report["errors"]))
+
+    def test_watched_function_growth_fails_when_aggregate_long_count_is_unchanged(self):
+        baseline_source = (
+            self.function_source("watched", 149)
+            + self.function_source("other", 149)
+            + self.function_source("replacement", 147)
+        )
+        current_source = (
+            self.function_source("watched", 150)
+            + self.function_source("other", 148)
+            + self.function_source("replacement", 149)
+        )
+        baseline_summary = ratchet.analyze_sources([("sample.rs", baseline_source)])
+        current_summary = ratchet.analyze_sources([("sample.rs", current_source)])
+        self.assertEqual(
+            baseline_summary["long_function_count"], current_summary["long_function_count"]
+        )
+        baseline = self.baseline_for(baseline_summary)
+        with patch.object(ratchet, "WATCHED_LONG_FUNCTIONS", {("sample.rs", "watched")}):
+            report = ratchet.compare(current_summary, baseline)
+        self.assertEqual(report["status"], "FAIL")
+        self.assertTrue(any("watched function sample.rs::watched grew" in error
+                            for error in report["errors"]))
+
+    def test_watched_function_removal_does_not_block_a_later_split(self):
+        baseline_source = "fn watched() {\n" + "\n".join(
+            "    // retained source line" for _ in range(149)
+        ) + "\n}\n"
+        baseline_summary = ratchet.analyze_sources([("sample.rs", baseline_source)])
+        current_summary = ratchet.analyze_sources([("sample.rs", "fn replacement() {}\n")])
+        baseline = self.baseline_for(baseline_summary)
+        with patch.object(ratchet, "WATCHED_LONG_FUNCTIONS", {("sample.rs", "watched")}):
+            report = ratchet.compare(current_summary, baseline)
+        self.assertEqual(report["status"], "PASS")
 
 
 if __name__ == "__main__":

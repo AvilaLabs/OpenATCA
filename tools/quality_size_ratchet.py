@@ -39,6 +39,11 @@ PACKED_LOCATION_PART_MAX = (1 << 32) - 1
 MAX_DUPLICATE_COMPARISONS = 25_000_000
 MAX_LEX_TOKENS_PER_FILE = 1_000_000
 BASELINE_PATH = Path("tools/quality-size-baseline.json")
+WATCHED_LONG_FUNCTIONS = {
+    ("crates/oa-airspace/src/shell/build.rs", "build_model"),
+    ("crates/oa-track-tools/examples/p002.rs", "run"),
+    ("tools/oa-sector-reconstruct/src/main.rs", "parse_trace"),
+}
 WORKSPACE_BINDING = "openatca-rust-workspace-v1"
 WORKSPACE_MARKERS = (
     "Cargo.toml", "docs/RULESET.md", "crates/oa-track/Cargo.toml",
@@ -743,6 +748,39 @@ def _file_identity(info: os.stat_result) -> tuple[int, int, int, int, int]:
     return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
 
 
+def _watched_growth_errors(
+    current_rows: object,
+    baseline_rows: object,
+    watched: set[tuple[str, str]] | None = None,
+) -> list[str]:
+    if not isinstance(current_rows, list) or not isinstance(baseline_rows, list):
+        raise RatchetError("long function inventory is malformed")
+    current_by_key: dict[tuple[str, str], list[int]] = {}
+    baseline_by_key: dict[tuple[str, str], list[int]] = {}
+    for rows, inventory in ((current_rows, current_by_key), (baseline_rows, baseline_by_key)):
+        for row in rows:
+            if not isinstance(row, dict):
+                raise RatchetError("long function entry is malformed")
+            path, name, lines = row.get("path"), row.get("name"), row.get("lines")
+            if not isinstance(path, str) or not isinstance(name, str) or not isinstance(lines, int):
+                raise RatchetError("long function entry fields are malformed")
+            inventory.setdefault((path, name), []).append(lines)
+    errors = []
+    for key in sorted(WATCHED_LONG_FUNCTIONS if watched is None else watched):
+        baseline_lengths = baseline_by_key.get(key, [])
+        # A missing current routine is a legitimate removal or move. The committed baseline
+        # inventory supplies its limit; synthetic summaries may omit unrelated watched rows.
+        if len(baseline_lengths) != 1:
+            continue
+        for current_lines in current_by_key.get(key, []):
+            if current_lines > baseline_lengths[0]:
+                errors.append(
+                    f"watched function {key[0]}::{key[1]} grew from "
+                    f"{baseline_lengths[0]} to {current_lines} lines"
+                )
+    return errors
+
+
 def build_baseline(root: Path) -> dict[str, object]:
     root = _validate_workspace(root)
     summary = analyze_sources(_read_tracked_sources(root))
@@ -831,6 +869,9 @@ def compare(current: dict[str, object], baseline: dict[str, object]) -> dict[str
     }
     errors = [f"{name} rose from {old} to {new}" for name, (new, old) in metrics.items()
               if not isinstance(old, int) or not isinstance(new, int) or new > old]
+    errors.extend(_watched_growth_errors(
+        current.get("long_functions"), base_summary.get("long_functions")
+    ))
     base_frequencies = base_summary.get("duplicate_frequencies")
     now_frequencies = current.get("duplicate_frequencies")
     if not isinstance(base_frequencies, dict) or not isinstance(now_frequencies, dict):

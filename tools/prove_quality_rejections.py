@@ -119,12 +119,7 @@ def _e05_fixture(repo: Path, private: Path, trace_binary: Path) -> tuple[list[st
 
 
 def _prove_e05(repo: Path) -> tuple[str, str]:
-    binary_value = os.environ.get("OPENATCA_OA_TRACE_BIN")
-    if not binary_value:
-        raise RuntimeError("OPENATCA_OA_TRACE_BIN must name the trusted oa-trace executable")
-    binary = Path(binary_value)
-    if not binary.is_absolute() or not binary.is_file() or not os.access(binary, os.X_OK):
-        raise RuntimeError("OPENATCA_OA_TRACE_BIN is not an absolute executable file")
+    binary = _configured_trace_binary()
     with tempfile.TemporaryDirectory(prefix="oa-e05-negative-proof-") as temporary:
         command, claim_path, env = _e05_fixture(repo, Path(temporary) / "synthetic-private", binary)
         positive = _run(command, cwd=repo, env=env)
@@ -229,7 +224,7 @@ def _prove_e07(repo: Path) -> tuple[str, str]:
         return baseline_digest, "long-function,wide-arguments,duplicate-block-refused"
 
 
-def _e09_binary() -> Path:
+def _configured_trace_binary() -> Path:
     value = os.environ.get("OPENATCA_OA_TRACE_BIN")
     if not value:
         raise RuntimeError("OPENATCA_OA_TRACE_BIN must name the trusted oa-trace executable")
@@ -259,7 +254,7 @@ def _expect_e09_refusal(
 
 
 def _prove_e09(repo: Path) -> tuple[str, str]:
-    binary = _e09_binary()
+    binary = _configured_trace_binary()
     source = "crates/oa-geo/tests/general.rs"
     test_ref = f"{source}::every_source_file_is_unsafe_free_and_lib_forbids_unsafe"
     script = repo / "tools/sealed_guard.py"
