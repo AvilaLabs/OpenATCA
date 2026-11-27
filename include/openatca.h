@@ -59,7 +59,10 @@ enum {
     OA_STATUS_ZIP_LIMIT = 37,
     OA_STATUS_ZIP_INFLATE_OR_SIZE = 38,
     OA_STATUS_ZIP_CRC = 39,
-    OA_STATUS_ZIP_BAD_ENTRY_INDEX = 40
+    OA_STATUS_ZIP_BAD_ENTRY_INDEX = 40,
+    OA_STATUS_GRIB2_FORMAT = 48,
+    OA_STATUS_GRIB2_UNSUPPORTED = 49,
+    OA_STATUS_GRIB2_LIMIT = 50
 };
 
 #define OA_DEFLATE_MAX_INPUT_BYTES UINT64_C(67108864)
@@ -76,6 +79,9 @@ enum {
 #define OA_ZIP_MAX_NAME_POOL_BYTES UINT64_C(40960000)
 #define OA_ZIP_MAX_RATIO UINT64_C(200)
 #define OA_ZIP_RATIO_EXEMPT_BYTES UINT64_C(1048576)
+#define OA_GRIB2_MAX_MESSAGE_BYTES UINT64_C(268435456)
+#define OA_GRIB2_MAX_FIELDS UINT64_C(16)
+#define OA_GRIB2_MAX_MESSAGE_POINTS UINT64_C(67108864)
 
 typedef uint32_t OaLocationKind;
 enum {
@@ -218,6 +224,30 @@ typedef struct OaZipEntry {
     uint8_t zip64, utf8_name_flag;
     uint8_t reserved[6]; /* Named padding; always zero. */
 } OaZipEntry;
+/* GRIB2 fixed layouts. Fields describe one decoded source field; values are contiguous f32
+ * in message order, with bitmap-missing points represented by NaN and counted explicitly. */
+typedef struct OaGrib2Time {
+    uint16_t year;
+    uint8_t month, day, hour, minute, second, reserved;
+} OaGrib2Time;
+typedef struct OaGrib2Field {
+    uint8_t discipline, category, number, named_parameter;
+    uint16_t grid_template, product_template, packing_template;
+    uint8_t level_kind, forecast_time_unit;
+    OaGrib2Time reference_time;
+    uint32_t forecast_time;
+    float level_value;
+    uint8_t interval_present, interval_ranges, interval_statistic, reserved0;
+    OaGrib2Time interval_end;
+    uint32_t nx, ny;
+    uint8_t grid_flags, scan_mode;
+    int8_t latitude_row_direction;
+    uint8_t global_longitude;
+    double first_latitude_deg, first_longitude_deg, i_increment_deg, j_increment_deg;
+    double lambert_lad_deg, lambert_lov_deg, lambert_dx_m, lambert_dy_m;
+    double lambert_latin1_deg, lambert_latin2_deg, earth_radius_m;
+    uint64_t value_offset, value_count, missing_count;
+} OaGrib2Field;
 typedef struct OaJsonNode {
     uint32_t kind, first_child, child_count, subtree_end, value_offset, value_length;
 } OaJsonNode;
@@ -398,6 +428,22 @@ uint32_t oa_zip_list(const uint8_t *input, uint64_t input_length,
 uint32_t oa_zip_extract_entry(const uint8_t *input, uint64_t input_length, uint64_t entry_index,
                               uint8_t *output, uint64_t output_capacity,
                               uint64_t *output_length, OaErrorInfo *error);
+/* Exact-subset GRIB2 bindings over the existing oa-grib2 decoder. One complete message only;
+ * structural inspection reports required arrays without decoding values. The existing decoder
+ * supports grid templates 3.0/3.30, products 4.0/4.8, packing 5.0/5.2/5.3/5.40 and bitmap reuse.
+ * Message cap 256 MiB, 16 fields, 16 Mi points/field, 64 Mi total points, work budget 4 Mi +
+ * 64 points/input byte. Query counts with zero capacities; short capacity returns BUFFER_TOO_SMALL
+ * and exact sizes without writing arrays. Decode is transactional. NaN marks missing bitmap data.
+ */
+uint32_t oa_grib2_inspect_message(const uint8_t *input, uint64_t input_length,
+                                  uint64_t *required_fields, uint64_t *required_values,
+                                  OaErrorInfo *error);
+uint32_t oa_grib2_decode_message(const uint8_t *input, uint64_t input_length,
+                                 OaGrib2Field *fields, uint64_t fields_capacity,
+                                 float *values, uint64_t values_capacity,
+                                 uint64_t *required_fields, uint64_t *required_values,
+                                 OaErrorInfo *error);
+
 
 /*
  * Bounded text parsers. Call once with zero capacities to query exact counts; this returns

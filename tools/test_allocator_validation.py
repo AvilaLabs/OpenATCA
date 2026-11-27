@@ -367,6 +367,7 @@ oa-zip = {{ path = "../oa-zip" }}
 oa-deflate = {{ path = "../oa-deflate" }}
 oa-tar = {{ path = "../oa-tar" }}
 oa-asterix = {{ path = "../oa-asterix" }}
+oa-grib2 = {{ path = "../oa-grib2" }}
 [lints.rust]
 unsafe_code = "{unsafe_lint}"
 [lints.clippy]
@@ -382,10 +383,11 @@ indexing_slicing = "deny"
     write(crate / "src/ffi.rs", "#![allow(unsafe_code)]\nfn boundary() {}\n")
     write(crate / "src/text.rs", "#![forbid(unsafe_code)]\n")
     write(crate / "src/formats/mod.rs",
-          "#![forbid(unsafe_code)]\npub(crate) mod asterix;\npub(crate) mod zip;\n")
+          "#![forbid(unsafe_code)]\npub(crate) mod asterix;\npub(crate) mod grib2;\npub(crate) mod zip;\n")
     write(crate / "src/formats/asterix.rs", "#![forbid(unsafe_code)]\n")
+    write(crate / "src/formats/grib2.rs", "#![forbid(unsafe_code)]\n")
     write(crate / "src/formats/zip.rs", "#![forbid(unsafe_code)]\n")
-    for dep in ("oa-geo", "oa-ieee", "oa-math", "oa-sha256", "oa-csv", "oa-json", "oa-xml", "oa-zip", "oa-deflate", "oa-tar", "oa-asterix"):
+    for dep in ("oa-geo", "oa-ieee", "oa-math", "oa-sha256", "oa-csv", "oa-json", "oa-xml", "oa-zip", "oa-deflate", "oa-tar", "oa-asterix", "oa-grib2"):
         write(root / "crates" / dep / "Cargo.toml", f'[package]\nname = "{dep}"\nversion = "0.1.0"\n')
 
 
@@ -600,6 +602,24 @@ class AllocatorLayoutTests(unittest.TestCase):
                 add_core_ffi_exception(root)
                 mutate(root / "crates/openatca-core-ffi/Cargo.toml")
                 self.assertTrue(gate.allocation_layout_errors(root))
+
+    def test_core_ffi_grib2_adapter_and_module_set_are_exact(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            layout_tree(root)
+            add_core_ffi_exception(root)
+            write(root / "crates/openatca-core-ffi/src/formats/grib2.rs",
+                  "#![forbid(unsafe_code)]\nfn adapter() { unsafe {} }\n")
+            self.assertTrue(any("formats/grib2.rs must contain no unsafe, allocator, or ABI declarations" in error
+                                for error in gate.allocation_layout_errors(root)))
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            layout_tree(root)
+            add_core_ffi_exception(root)
+            write(root / "crates/openatca-core-ffi/src/formats/mod.rs",
+                  "#![forbid(unsafe_code)]\npub(crate) mod asterix;\npub(crate) mod grib2;\npub(crate) mod zip;\npub(crate) mod unreviewed;\n")
+            self.assertTrue(any("must declare exactly the reviewed ASTERIX, GRIB2, and ZIP adapters" in error
+                                for error in gate.allocation_layout_errors(root)))
 
     def test_core_ffi_exception_rejects_unreviewed_crate_type_and_source(self):
         mutations = (

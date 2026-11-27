@@ -29,6 +29,7 @@ loads a native library.
 | `oa-math` | `oa_math_f64_unary`, `binary`, `ternary`, `powi`, `sin_cos`, `compare`, `is_sign_negative` | `ScalarMath` named scalar methods | No retained memory; invalid operation is `BAD_OPERATION` |
 | `oa-math` f32 helpers | `oa_math_f32_unary`, `binary`, `ternary`, `compare`, `is_sign_negative` | `ScalarMath` f32 helper methods | Scalar inputs and outputs; Rust helper semantics preserved |
 | `oa-sha256` | `oa_sha256_digest`, `oa_sha256_hex` | `Integrity.sha256/sha256_hex` | One-shot input capped at `MAX_MESSAGE_BYTES`; caller owns input and fixed output buffers |
+| `oa-grib2` exact-subset decoder | `oa_grib2_inspect_message`, `oa_grib2_decode_message` | `Grib2Bindings.inspect_message/decode_message` | One complete borrowed message; existing templates and 256 MiB / 16-field / 64 Mi-point/work bounds; typed metadata and `f32` values; bitmap missing is NaN; Preview only, see [profile](formats/grib2-bindings.md) |
 | `oa-geo` WGS-84 geodesic | `oa_geo_wgs84_inverse`, `oa_geo_wgs84_direct` | `Geodesy.inverse/direct` | Stateless; angles in degrees, distances in metres |
 | `oa-geo` rhumb | `oa_geo_wgs84_rhumb_inverse/direct`, `oa_geo_wgs84_rhumb_point_at_fraction` | `Geodesy.rhumb_*` | Stateless; fraction is validated by core in `[0,1]`; no invented fallback |
 | `oa-geo` separation | `oa_geo_wgs84_geodesic_rhumb_separation` | `Geodesy.geodesic_rhumb_separation` | Sample count is core-bounded to `2..=100000`; `at_fraction` is a maximizing fraction, and any finite fraction in `[0,1]` is valid when the maximum has tied locations (including identically zero separation) |
@@ -53,7 +54,7 @@ and all-or-nothing `oa_core_error_message` interface. Python exposes `OpenAtcaEr
 `location_kind`, `location`, and the optional native message. The existing DEFLATE statuses occupy
 13–17, and tar statuses 18–22. ASTERIX returns the shared generic status (for example,
 `PARSE_ERROR`) while `OaAsterixError.kind` carries the detailed decoder classification 1–23; status
-values 23–31 are currently unassigned. ZIP statuses occupy 32–40. These assignments remain
+values 23–31 are currently unassigned. ZIP statuses occupy 32–40 and GRIB2 statuses 48–50. These assignments remain
 provisional and are mirrored by the Python status-name map.
 
 ## Evidence and remaining work
@@ -67,10 +68,9 @@ approval conditions are met. No Stable designation is made here.
 
 ## Planned module expansion
 
-The §10 inventory also requires container, CAT021/CAT048/CAT062, CIFP, NASR,
-FNS-AIXM/NOTAM, and bounded GRIB2 APIs with Python wrappers. Each parser API must disclose its
-accepted edition/profile and explicit byte, record, nesting, and work bounds before it is exposed.
-The remaining modules are staged separately; these source slices do not imply those bindings exist.
+The remaining §10 modules are staged separately. The exact-subset GRIB2 C/ctypes binding is a Preview
+source slice described in [GRIB2 bindings](formats/grib2-bindings.md); its accepted templates,
+bounds, failure atomicity, and synthetic vectors do not claim general GRIB2 support or Stable status.
 
 ### Proposed tar metadata binding (Preview; awaiting designated API review)
 
@@ -126,3 +126,20 @@ an explicit caller-supplied path. The shared `zip-v1.tsv` vectors are synthetic 
 stored/deflated entries, UTF-8 flag behavior, truncated/unsupported/corrupt/unsafe/ratio refusals,
 capacities, and CRC checks across Rust, C, and ctypes. The names and layout remain proposals until
 designated API review. No Stable designation is made; §8 evidence remains outstanding.
+
+
+### Proposed GRIB2 message binding (Preview; awaiting designated API review)
+
+See [the GRIB2 binding contract](formats/grib2-bindings.md) for the precise `inspect_message` and
+`decode_message` C/ctypes surface, fixed record layout, exact delegated decoder profile, buffer
+query behavior, bounds, and limitations. The shared synthetic bitmap vector is exercised by Rust, C,
+and Python source tests; no publication or stable ABI claim is made.
+
+
+### Proposed GRIB2 message binding (Preview; awaiting designated API review)
+
+See [the GRIB2 binding contract](formats/grib2-bindings.md) for the precise `inspect_message` and
+`decode_message` surface, fixed record layout, delegated decoder profile, bounds, failure atomicity,
+and limitations. The synthetic bitmap vector is exercised by Rust, C, and ctypes source tests; no
+publication or Stable designation is made. Relevant existing hazard records: OA-GRIB-001 through
+OA-GRIB-022.

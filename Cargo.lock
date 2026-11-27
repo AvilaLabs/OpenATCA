@@ -847,6 +847,7 @@ dependencies = [
  "oa-csv",
  "oa-deflate",
  "oa-geo",
+ "oa-grib2",
  "oa-ieee",
  "oa-json",
  "oa-math",

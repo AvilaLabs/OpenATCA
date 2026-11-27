@@ -52,6 +52,8 @@ const FFI_EXPORTS: &[&str] = &[
     "oa_tar_parse",
     "oa_zip_list",
     "oa_zip_extract_entry",
+    "oa_grib2_inspect_message",
+    "oa_grib2_decode_message",
 ];
 const FFI_DEPENDENCIES: &[(&str, &str)] = &[
     ("oa-geo", "../oa-geo"),
@@ -65,6 +67,7 @@ const FFI_DEPENDENCIES: &[(&str, &str)] = &[
     ("oa-deflate", "../oa-deflate"),
     ("oa-tar", "../oa-tar"),
     ("oa-asterix", "../oa-asterix"),
+    ("oa-grib2", "../oa-grib2"),
 ];
 
 /// Reviewed unsafe blocks in the provisional FFI module, grouped by their owning function.
@@ -110,6 +113,8 @@ pub const FFI_UNSAFE_BLOCKS: &[(&str, usize)] = &[
     ("oa_asterix_decode_block", 2),
     ("oa_zip_list", 3),
     ("oa_zip_extract_entry", 3),
+    ("oa_grib2_inspect_message", 2),
+    ("oa_grib2_decode_message", 4),
     ("ffi_l0_matches_the_shared_synthetic_vectors", 3),
     ("ffi_polygon_matches_the_shared_synthetic_vectors", 4),
     ("ffi_matches_the_shared_synthetic_geodesy_vectors", 1),
@@ -2981,9 +2986,9 @@ fn check_ffi_a0(root: &Path, members: &[Member], fails: &mut Vec<String>) {
         )),
     }
     format_files.sort();
-    if format_files != ["asterix.rs", "mod.rs", "zip.rs"] {
+    if format_files != ["asterix.rs", "grib2.rs", "mod.rs", "zip.rs"] {
         fails.push(format!(
-            "{FFI_PACKAGE_DIR}/src/formats: A0: safe format inventory is exactly `asterix.rs`, `mod.rs`, and `zip.rs`"
+            "{FFI_PACKAGE_DIR}/src/formats: A0: safe format inventory is exactly `asterix.rs`, `grib2.rs`, `mod.rs`, and `zip.rs`"
         ));
     }
     for (file, expected_level) in [
@@ -2991,6 +2996,7 @@ fn check_ffi_a0(root: &Path, members: &[Member], fails: &mut Vec<String>) {
         ("ffi.rs", "allow"),
         ("text.rs", "forbid"),
         ("formats/asterix.rs", "forbid"),
+        ("formats/grib2.rs", "forbid"),
         ("formats/mod.rs", "forbid"),
         ("formats/zip.rs", "forbid"),
     ] {
@@ -3078,9 +3084,15 @@ fn check_ffi_a0(root: &Path, members: &[Member], fails: &mut Vec<String>) {
                     .flatten()
                 })
                 .collect();
-            if declared_modules != BTreeSet::from(["asterix".to_string(), "zip".to_string()]) {
+            if declared_modules
+                != BTreeSet::from([
+                    "asterix".to_string(),
+                    "grib2".to_string(),
+                    "zip".to_string(),
+                ])
+            {
                 fails.push(format!(
-                    "{}: A0: safe formats module declares exactly the reviewed ASTERIX and ZIP sources",
+                    "{}: A0: safe formats module declares exactly the reviewed ASTERIX, GRIB2, and ZIP sources",
                     rel(root, &path)
                 ));
             }
@@ -3095,7 +3107,10 @@ fn check_ffi_a0(root: &Path, members: &[Member], fails: &mut Vec<String>) {
                     rel(root, &path)
                 ));
             }
-        } else if file == "formats/asterix.rs" || file == "formats/zip.rs" {
+        } else if file == "formats/asterix.rs"
+            || file == "formats/zip.rs"
+            || file == "formats/grib2.rs"
+        {
             if tokenized.iter().any(|token| {
                 matches!(
                     token.s.as_str(),

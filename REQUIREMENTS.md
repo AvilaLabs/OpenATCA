@@ -7779,6 +7779,12 @@ FAA value.
   shared committed vectors, including polygon handle lifetime operations, bounded one-shot hashing, and the
   text parser capacity/error contract. Source
   runner presence does not establish that a native build or run succeeded; the coordinator records those gates.
+- **OA-FFI-005** The GRIB2 Preview C and Python bindings delegate to the existing `oa-grib2` decoder,
+  accept one complete message under its existing edition/template, byte, field, point, and work limits,
+  preserve typed source metadata and bitmap missing values, and use caller-owned fixed-layout outputs with
+  capacity-query/fill behavior. Shared Rust/C/ctypes synthetic vectors cover valid bitmap decode, truncation,
+  unsupported packing, and capacity atomicity. The binding does not establish GRIB2 freshness, weather
+  coverage, or operational consumer behavior; HZ-WEATHER-001 remains a consumer hazard.
 
 ## Reproducible ZAU comparison package (p002 `--export-eram`, `--eram-export`, tools/reproduce_zau.sh)
 

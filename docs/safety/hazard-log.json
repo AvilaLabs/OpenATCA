@@ -331,6 +331,7 @@
     "OA-FEED-172",
     "OA-FEED-173",
     "OA-FEED-197",
+    "OA-FFI-005",
     "OA-FIXM-001",
     "OA-FIXM-002",
     "OA-FIXM-003",
@@ -16599,6 +16600,7 @@
         "OA-AWC-021",
         "OA-AWC-023",
         "OA-AWC-024",
+        "OA-FFI-005",
         "OA-IWXXM-001",
         "OA-IWXXM-002",
         "OA-IWXXM-003",
@@ -16785,6 +16787,11 @@
           "requirement_id": "OA-IWXXM-006",
           "file": "crates/oa-iwxxm/src/tests.rs",
           "test_name": "encoded_schema_profile_covers_optional_emission_branches"
+        },
+        {
+          "requirement_id": "OA-FFI-005",
+          "file": "crates/openatca-core-ffi/tests/grib2_vectors.rs",
+          "test_name": "bitmap_valid_truncated_unsupported_and_capacity_are_transactional"
         }
       ],
       "proof_refs": []
@@ -18302,6 +18309,12 @@
       "function": "migration_comparison_and_safety_evidence",
       "hazard_id": "HZ-EVIDENCE-001",
       "rationale": "Engineering safety candidate: treating a failed recording as continuous evidence could overstate capture completeness. In opt-in stop mode, recording failure halts further draining, counts the triggering cap frame as lost, and latches a nonzero failure through finalization and the observer wrapper. The source pipe may acknowledge before local durability; this does not claim exactly-once delivery, no data loss, or continuous coverage."
+    },
+    {
+      "id": "OA-FFI-005",
+      "function": "weather_and_pressure_altitude_inputs",
+      "hazard_id": "HZ-WEATHER-001",
+      "rationale": "Engineering safety candidate: this register clause constrains weather_and_pressure_altitude_inputs; a misprojected grid, timestamp, unit, or bitmap value could contribute to incorrect weather context. Synthetic ABI vectors cover field projection and refusal behavior only; freshness, coverage, and consumer behavior remain unqualified."
     },
     {
       "id": "OA-FIXM-001",
