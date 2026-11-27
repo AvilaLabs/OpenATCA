@@ -106,8 +106,10 @@ fn resolve_data_root(path: &Path) -> Result<PathBuf, ()> {
     let resolved = resolve(path, 0)?;
     let mut existing = path;
     loop {
+        // seal-allow: root validation reads only path metadata to reject invalid roots; it does not open data.
         match fs::symlink_metadata(existing) {
             Ok(link_metadata) if link_metadata.file_type().is_symlink() => {
+                // seal-allow: follows the configured root symlink only to confirm its target is a directory.
                 let metadata = fs::metadata(existing).map_err(|_| ())?;
                 return metadata.is_dir().then_some(resolved).ok_or(());
             }

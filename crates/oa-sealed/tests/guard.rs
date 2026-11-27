@@ -63,6 +63,7 @@ fn the_list_has_the_sealed_folders_and_the_python_guard_parses_it_to_the_same_se
     let w: Vec<&str> = l.windows.iter().map(|w| w.text.as_str()).collect();
     assert_eq!(w, ["2026-11-20T00:00:00Z 2026-11-23T00:17:00Z"]);
     let py = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/sealed_guard.py");
+    // seal-allow: this launches the parser on its synthetic list dump and supplies no data path.
     let out = Command::new("python3")
         .arg("-I")
         .arg(&py)
@@ -310,6 +311,7 @@ fn the_window_is_half_open_and_both_parsers_read_it_the_same() {
     let py = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/sealed_guard.py");
     let f = scratch("window-parity").join("two.txt");
     fs::write(&f, two).unwrap();
+    // seal-allow: this parses a temporary synthetic window list, not an input dataset.
     let out = Command::new("python3")
         .arg("-I")
         .arg(&py)
@@ -544,6 +546,7 @@ fn every_file_a_walk_opens_goes_through_the_opener() {
     .unwrap();
     let mut read = 0;
     let mut refused = 0;
+    // seal-allow: enumeration is limited to the synthetic fake_root fixture created above.
     let mut entries: Vec<_> = fs::read_dir(&dev)
         .unwrap()
         .map(|e| e.unwrap().path())
@@ -596,6 +599,7 @@ fn a_file_opened_after_a_swapped_in_link_is_caught_on_the_descriptor() {
     symlink(&sealed_file, work.join("late")).unwrap();
     // As if the path check had passed before the link was put there: the file is opened without
     // the check and then verified.
+    // seal-allow: open of the synthetic swapped-link fixture is the subject of the TOCTOU test.
     let f = fs::File::open(work.join("late")).unwrap();
     let e = g
         .verify_open(&work.join("fine"), &f)
@@ -603,6 +607,7 @@ fn a_file_opened_after_a_swapped_in_link_is_caught_on_the_descriptor() {
         .to_string();
     assert!(e.contains("OA-SEAL-001"), "{e}");
     // A file that is not sealed passes the same verification.
+    // seal-allow: open of the synthetic ordinary fake_root file verifies the unsealed case.
     let ok = fs::File::open(root.join("scds/day-20261118/rec/b.bin")).unwrap();
     g.verify_open(&work.join("fine"), &ok).unwrap();
     // The opener does both steps and refuses the link (the error has the rule and no path).
@@ -684,6 +689,7 @@ fn odd_list_files_are_refused_by_both_parsers_and_good_ones_read_the_same() {
         fs::write(&f, text.as_bytes()).unwrap();
         let rust = parse_list(text);
         assert_eq!(rust.is_ok(), *good, "rust {text:?}");
+        // seal-allow: parses a synthetic temporary list for Rust/Python parser parity.
         let out = Command::new("python3")
             .arg("-I")
             .arg(&py)
@@ -768,6 +774,7 @@ fn a_file_with_a_second_hard_link_is_refused_when_opened() {
     let g = Sealed::with_root(&root);
     let sealed = root.join("scds/rec-20261119/day2/sfdps/a.bin");
     let neutral = root.join("derived-copy.bin");
+    // seal-allow: creates a hard link only within the synthetic fake_root fixture.
     fs::hard_link(&sealed, &neutral).unwrap();
     let e = g.open(&neutral).unwrap_err().to_string();
     assert!(e.contains("hard links"), "{e}");
