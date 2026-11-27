@@ -2,14 +2,25 @@
 
 from __future__ import annotations
 
+import argparse
 import shutil
 import subprocess
 import sys
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import check_safety_mutations as checker
+
+
+@dataclass(frozen=True)
+class FixtureEvidence:
+    report: dict[str, Any]
+    cargo_exit: int
+    packages: set[str]
+    selected: set[str]
+    positive_summary: checker.MutationSummary
 
 
 def copy_fixture(destination: Path) -> None:
@@ -74,7 +85,7 @@ def expected_fixture_survivors(outcomes: list[dict[str, Any]]) -> dict[str, str]
     return allowed
 
 
-def main() -> int:
+def run_fixture() -> FixtureEvidence:
     with tempfile.TemporaryDirectory(prefix="openatca-mutants-fixture-") as temporary:
         root = Path(temporary)
         repo = root / "fixture"
@@ -101,28 +112,82 @@ def main() -> int:
             "cargo", "mutants", "--package", "e04-mutants-fixture", "--test-workspace", "false",
             "--in-diff", str(diff), "--jobs", "1", "--no-shuffle", "--output", str(output),
         ]
-        result = subprocess.run(command, cwd=repo, check=False)
+        result = subprocess.run(command, cwd=repo, check=False, timeout=600)
         report = checker.bounded_json(output / "mutants.out" / "outcomes.json")
         allowlist = expected_fixture_survivors(report.get("outcomes", []))
         summary = checker.assess_outcomes(
             result.returncode, report, allowlist, package_set
         )
         checker.require_complete_selection(listed, summary)
+        return FixtureEvidence(report, result.returncode, package_set, listed, summary)
+
+
+def verify_negative_proof(evidence: FixtureEvidence) -> dict[str, Any]:
+    survivors = expected_fixture_survivors(evidence.report.get("outcomes", []))
+    if len(survivors) != 1:
+        raise checker.MutationCheckError("negative proof requires exactly one known surviving mutant")
+    if evidence.positive_summary.caught < 1 or evidence.positive_summary.allowed_missed < 1:
+        raise checker.MutationCheckError("positive control did not validate caught and allowed-missed cases")
+    try:
+        checker.assess_outcomes(evidence.cargo_exit, evidence.report, {}, evidence.packages)
+    except checker.MutationCheckError as error:
+        expected = "changed-line safety mutants survived without an exact reason"
+        if str(error) != expected:
+            raise checker.MutationCheckError("negative proof was blocked for an unexpected reason") from error
+        return {
+            "status": "negative-proof-verified",
+            "expected_block_status": 1,
+            "verified_refusal": expected,
+            "cargo_mutants_version": checker.REQUIRED_CARGO_MUTANTS_VERSION,
+            "positive_control": "passed",
+            "caught": evidence.positive_summary.caught,
+            "known_missed_mutant": next(iter(survivors))[:256],
+            "selected": len(evidence.selected),
+        }
+    raise checker.MutationCheckError("negative proof unexpectedly accepted the unallowlisted survivor")
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--negative-proof", action="store_true",
+        help="verify that an intentionally missed fixture mutant receives the expected block",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    negative = False
+    try:
+        negative = parse_args(argv).negative_proof
+        evidence = run_fixture()
+        if negative:
+            receipt = verify_negative_proof(evidence)
+            checker.emit(receipt, sys.stdout)
+            return 1
         checker.emit(
             {
                 "status": "fixture-validated",
                 "cargo_mutants_version": checker.REQUIRED_CARGO_MUTANTS_VERSION,
-                "caught": summary.caught,
-                "intentional_survivors": summary.allowed_missed,
-                "total": summary.total,
-            }
+                "caught": evidence.positive_summary.caught,
+                "intentional_survivors": evidence.positive_summary.allowed_missed,
+                "total": evidence.positive_summary.total,
+            },
+            sys.stdout,
         )
-    return 0
+        return 0
+    except Exception as error:
+        if negative:
+            checker.emit(
+                {"status": "negative-proof-invalid", "verified_refusal": False, "error": str(error)[:300]},
+                sys.stderr,
+            )
+            return 2
+        if isinstance(error, checker.MutationCheckError):
+            checker.emit({"status": "fixture-failed", "error": str(error)}, sys.stderr)
+            return 1
+        raise
 
 
 if __name__ == "__main__":
-    try:
-        raise SystemExit(main())
-    except checker.MutationCheckError as error:
-        checker.emit({"status": "fixture-failed", "error": str(error)}, sys.stderr)
-        raise SystemExit(1)
+    raise SystemExit(main())
