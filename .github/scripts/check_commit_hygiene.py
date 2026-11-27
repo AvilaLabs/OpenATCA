@@ -127,6 +127,8 @@ def main(mask_preflight: bool = False) -> int:
     if not mask:
         raise Refusal("email-log-mask-missing")
     if mask_preflight:
+        if os.environ.get("COMMIT_EMAIL_REDACTION_READY") != "true":
+            raise Refusal("email-log-mask-mismatch")
         return 0
     expected = os.environ.get("EXPECTED_COMMIT_EMAIL", "")
     if not expected or "\n" in expected or "\r" in expected:

@@ -11,6 +11,7 @@ jobs:
     runs-on: ubuntu-24.04
     env:
       COMMIT_EMAIL_LOG_MASK: ${{ secrets.COMMIT_EMAIL_LOG_MASK }}
+      COMMIT_EMAIL_REDACTION_READY: ${{ vars.COMMIT_EMAIL == secrets.COMMIT_EMAIL_LOG_MASK }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -22,7 +23,7 @@ jobs:
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: python3 .github/scripts/check_commit_hygiene.py --mask-preflight
       - name: Check commit metadata and tracked path hygiene
-        if: env.COMMIT_EMAIL_LOG_MASK != ''
+        if: env.COMMIT_EMAIL_LOG_MASK != '' && env.COMMIT_EMAIL_REDACTION_READY == 'true'
         env:
           EXPECTED_COMMIT_EMAIL: ${{ vars.COMMIT_EMAIL }}
           GITHUB_EVENT_NAME: ${{ github.event_name }}

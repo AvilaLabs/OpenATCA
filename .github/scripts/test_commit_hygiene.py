@@ -133,8 +133,18 @@ class CommitHygieneTests(unittest.TestCase):
             with self.assertRaises(module.Refusal) as caught:
                 module.main(mask_preflight=True)
         self.assertEqual(caught.exception.rule, "email-log-mask-missing")
-        with patch.dict(os.environ, {"COMMIT_EMAIL_LOG_MASK": "fixture@example.invalid"}, clear=True):
+        with patch.dict(os.environ, {
+            "COMMIT_EMAIL_LOG_MASK": "fixture@example.invalid",
+            "COMMIT_EMAIL_REDACTION_READY": "true",
+        }, clear=True):
             self.assertEqual(module.main(mask_preflight=True), 0)
+        with patch.dict(os.environ, {
+            "COMMIT_EMAIL_LOG_MASK": "fixture@example.invalid",
+            "COMMIT_EMAIL_REDACTION_READY": "false",
+        }, clear=True):
+            with self.assertRaises(module.Refusal) as caught:
+                module.main(mask_preflight=True)
+        self.assertEqual(caught.exception.rule, "email-log-mask-mismatch")
         with patch.dict(os.environ, {
             "EXPECTED_COMMIT_EMAIL": "fixture@example.invalid",
             "COMMIT_EMAIL_LOG_MASK": "different@example.invalid",
@@ -146,8 +156,15 @@ class CommitHygieneTests(unittest.TestCase):
     def test_workflow_uses_secret_carrier_and_vars_only_for_validation(self):
         workflow = (Path(__file__).parents[1] / "workflows" / "ci.yml").read_text()
         self.assertIn("COMMIT_EMAIL_LOG_MASK: ${{ secrets.COMMIT_EMAIL_LOG_MASK }}", workflow)
+        self.assertIn(
+            "COMMIT_EMAIL_REDACTION_READY: ${{ vars.COMMIT_EMAIL == secrets.COMMIT_EMAIL_LOG_MASK }}",
+            workflow,
+        )
         self.assertIn("EXPECTED_COMMIT_EMAIL: ${{ vars.COMMIT_EMAIL }}", workflow)
-        self.assertIn("if: env.COMMIT_EMAIL_LOG_MASK != ''", workflow)
+        self.assertIn(
+            "if: env.COMMIT_EMAIL_LOG_MASK != '' && env.COMMIT_EMAIL_REDACTION_READY == 'true'",
+            workflow,
+        )
         guard_start = workflow.index("- name: Require commit-email log redaction carrier")
         checker_start = workflow.index("- name: Check commit metadata and tracked path hygiene")
         guard_step = workflow[guard_start:checker_start]
