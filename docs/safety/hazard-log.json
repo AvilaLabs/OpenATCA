@@ -332,6 +332,7 @@
     "OA-FEED-173",
     "OA-FEED-197",
     "OA-FFI-005",
+    "OA-FFI-004",
     "OA-FIXM-001",
     "OA-FIXM-002",
     "OA-FIXM-003",
@@ -8821,6 +8822,7 @@
         "OA-NOTAM-024",
         "OA-NOTAM-025",
         "OA-NOTAM-026",
+        "OA-FFI-004",
         "OA-RPL-027",
         "OA-RPL-028",
         "OA-RPL-029",
@@ -8845,9 +8847,43 @@
         {
           "document": "REQUIREMENTS.md",
           "locator": "OA-NOTAM-026"
+        },
+        {
+          "document": "REQUIREMENTS.md",
+          "locator": "OA-FFI-004"
         }
       ],
       "verification_refs": [
+        {
+          "requirement_id": "OA-FFI-004",
+          "file": "crates/openatca-core-ffi/tests/notam_vectors.rs",
+          "test_name": "fns_notam_binding_matches_decoder_rows_features_and_geometry"
+        },
+        {
+          "requirement_id": "OA-FFI-004",
+          "file": "crates/openatca-core-ffi/tests/notam_vectors.rs",
+          "test_name": "fns_notam_binding_requires_explicit_filter_and_drops_inside_half_open_window"
+        },
+        {
+          "requirement_id": "OA-FFI-004",
+          "file": "crates/openatca-core-ffi/tests/notam_vectors.rs",
+          "test_name": "fns_notam_binding_short_capacity_is_atomic_and_bad_fields_remain_distinguishable"
+        },
+        {
+          "requirement_id": "OA-FFI-004",
+          "file": "crates/openatca-core-ffi/tests/notam_vectors.rs",
+          "test_name": "fns_notam_binding_keeps_missing_and_invalid_times_and_bad_polygon_distinct"
+        },
+        {
+          "requirement_id": "OA-FFI-004",
+          "file": "crates/openatca-core-ffi/tests/notam_vectors.rs",
+          "test_name": "fns_notam_binding_rejects_oversized_input_before_parser_construction"
+        },
+        {
+          "requirement_id": "OA-FFI-004",
+          "file": "crates/openatca-core-ffi/tests/notam_vectors.rs",
+          "test_name": "fns_notam_binding_reports_bounded_unknown_path_overflow"
+        },
         {
           "requirement_id": "OA-424-001",
           "file": "crates/oa-arinc424/tests/cifp_full.rs",
@@ -19250,6 +19286,12 @@
       "function": "navigation_and_adaptation_data",
       "hazard_id": "HZ-AIRSPACE-001",
       "rationale": "Engineering safety candidate: this register clause constrains navigation_and_adaptation_data; failure can contribute to the stated hazard. Register clause: The calendar helper refuses years outside 1970 to 9999, months outside 1 to 12 and days that do not exist in the month; hour 24 is refused."
+    },
+    {
+      "id": "OA-FFI-004",
+      "function": "navigation_and_adaptation_data",
+      "hazard_id": "HZ-AIRSPACE-001",
+      "rationale": "Engineering safety candidate: a lossy or misbounded NOTAM C/ctypes projection could misstate a navigation constraint. Direct synthetic Rust, C11 and Python ctypes tests compare the exported profile with the existing decoder and verify explicit time filtering and atomic capacity refusal. This remains a provisional subset binding, not operational qualification or SWIM-data validation."
     },
     {
       "id": "OA-NOTAM-026",

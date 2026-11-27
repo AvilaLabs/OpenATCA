@@ -366,8 +366,11 @@ oa-xml = {{ path = "../oa-xml" }}
 oa-zip = {{ path = "../oa-zip" }}
 oa-deflate = {{ path = "../oa-deflate" }}
 oa-tar = {{ path = "../oa-tar" }}
+oa-notam = {{ path = "../oa-notam" }}
+oa-time-window = {{ path = "../oa-time-window" }}
 oa-asterix = {{ path = "../oa-asterix" }}
 oa-grib2 = {{ path = "../oa-grib2" }}
+oa-arinc424 = {{ path = "../oa-arinc424" }}
 [lints.rust]
 unsafe_code = "{unsafe_lint}"
 [lints.clippy]
@@ -383,11 +386,10 @@ indexing_slicing = "deny"
     write(crate / "src/ffi.rs", "#![allow(unsafe_code)]\nfn boundary() {}\n")
     write(crate / "src/text.rs", "#![forbid(unsafe_code)]\n")
     write(crate / "src/formats/mod.rs",
-          "#![forbid(unsafe_code)]\npub(crate) mod asterix;\npub(crate) mod grib2;\npub(crate) mod zip;\n")
-    write(crate / "src/formats/asterix.rs", "#![forbid(unsafe_code)]\n")
-    write(crate / "src/formats/grib2.rs", "#![forbid(unsafe_code)]\n")
-    write(crate / "src/formats/zip.rs", "#![forbid(unsafe_code)]\n")
-    for dep in ("oa-geo", "oa-ieee", "oa-math", "oa-sha256", "oa-csv", "oa-json", "oa-xml", "oa-zip", "oa-deflate", "oa-tar", "oa-asterix", "oa-grib2"):
+          "#![forbid(unsafe_code)]\npub(crate) mod asterix;\npub(crate) mod cifp;\npub(crate) mod grib2;\npub(crate) mod notam;\npub(crate) mod zip;\n")
+    for adapter in ("asterix", "cifp", "grib2", "notam", "zip"):
+        write(crate / f"src/formats/{adapter}.rs", "#![forbid(unsafe_code)]\n")
+    for dep in ("oa-geo", "oa-ieee", "oa-math", "oa-sha256", "oa-csv", "oa-json", "oa-xml", "oa-zip", "oa-deflate", "oa-tar", "oa-asterix", "oa-grib2", "oa-notam", "oa-time-window", "oa-arinc424"):
         write(root / "crates" / dep / "Cargo.toml", f'[package]\nname = "{dep}"\nversion = "0.1.0"\n')
 
 
@@ -594,6 +596,16 @@ class AllocatorLayoutTests(unittest.TestCase):
                     'oa-json = { path = "../oa-json" }',
                     'oa-json = { path = "../oa-wrong" }'),
                 encoding="utf-8"),
+            lambda manifest: manifest.write_text(
+                manifest.read_text(encoding="utf-8").replace(
+                    'oa-notam = { path = "../oa-notam" }',
+                    'oa-notam = { path = "../oa-wrong" }'),
+                encoding="utf-8"),
+            lambda manifest: manifest.write_text(
+                manifest.read_text(encoding="utf-8").replace(
+                    'oa-time-window = { path = "../oa-time-window" }',
+                    'oa-time-window = { path = "../oa-wrong" }'),
+                encoding="utf-8"),
         )
         for mutate in mutations:
             with self.subTest(mutate=mutate), tempfile.TemporaryDirectory() as temp:
@@ -603,22 +615,25 @@ class AllocatorLayoutTests(unittest.TestCase):
                 mutate(root / "crates/openatca-core-ffi/Cargo.toml")
                 self.assertTrue(gate.allocation_layout_errors(root))
 
-    def test_core_ffi_grib2_adapter_and_module_set_are_exact(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            layout_tree(root)
-            add_core_ffi_exception(root)
-            write(root / "crates/openatca-core-ffi/src/formats/grib2.rs",
-                  "#![forbid(unsafe_code)]\nfn adapter() { unsafe {} }\n")
-            self.assertTrue(any("formats/grib2.rs must contain no unsafe, allocator, or ABI declarations" in error
-                                for error in gate.allocation_layout_errors(root)))
+    def test_core_ffi_safe_adapters_and_module_set_are_exact(self):
+        for adapter in ("cifp", "grib2", "notam"):
+            with self.subTest(adapter=adapter), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                layout_tree(root)
+                add_core_ffi_exception(root)
+                write(root / f"crates/openatca-core-ffi/src/formats/{adapter}.rs",
+                      "#![forbid(unsafe_code)]\nfn adapter() { unsafe {} }\n")
+                self.assertTrue(any(
+                    f"formats/{adapter}.rs must contain no unsafe, allocator, or ABI declarations" in error
+                    for error in gate.allocation_layout_errors(root)
+                ))
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             layout_tree(root)
             add_core_ffi_exception(root)
             write(root / "crates/openatca-core-ffi/src/formats/mod.rs",
-                  "#![forbid(unsafe_code)]\npub(crate) mod asterix;\npub(crate) mod grib2;\npub(crate) mod zip;\npub(crate) mod unreviewed;\n")
-            self.assertTrue(any("must declare exactly the reviewed ASTERIX, GRIB2, and ZIP adapters" in error
+                  "#![forbid(unsafe_code)]\npub(crate) mod asterix;\npub(crate) mod cifp;\npub(crate) mod grib2;\npub(crate) mod notam;\npub(crate) mod zip;\npub(crate) mod unreviewed;\n")
+            self.assertTrue(any("must declare exactly the reviewed ASTERIX, CIFP, GRIB2, NOTAM" in error
                                 for error in gate.allocation_layout_errors(root)))
 
     def test_core_ffi_exception_rejects_unreviewed_crate_type_and_source(self):
@@ -636,6 +651,23 @@ class AllocatorLayoutTests(unittest.TestCase):
                 add_core_ffi_exception(root)
                 mutate(root / "crates/openatca-core-ffi")
                 self.assertTrue(gate.allocation_layout_errors(root))
+
+    def test_core_ffi_cifp_adapter_is_a_scoped_safe_module(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            layout_tree(root)
+            add_core_ffi_exception(root)
+            self.assertEqual(gate.allocation_layout_errors(root), [])
+
+            crate = root / "crates/openatca-core-ffi"
+            (crate / "src/formats/cifp.rs").write_text("pub fn projection() {}\n", encoding="utf-8")
+            self.assertTrue(any("cifp.rs must retain" in error
+                                for error in gate.allocation_layout_errors(root)))
+
+            (crate / "src/formats/cifp.rs").write_text("#![forbid(unsafe_code)]\n", encoding="utf-8")
+            write(crate / "src/formats/unreviewed.rs", "#![forbid(unsafe_code)]\n")
+            self.assertTrue(any("source inventory" in error
+                                for error in gate.allocation_layout_errors(root)))
 
     def test_presentation_exception_rejects_sibling_path_name_and_class_spoofs(self):
         cases = (

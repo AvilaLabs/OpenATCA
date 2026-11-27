@@ -7785,6 +7785,15 @@ FAA value.
   capacity-query/fill behavior. Shared Rust/C/ctypes synthetic vectors cover valid bitmap decode, truncation,
   unsupported packing, and capacity atomicity. The binding does not establish GRIB2 freshness, weather
   coverage, or operational consumer behavior; HZ-WEATHER-001 remains a consumer hazard.
+- **OA-FFI-004** The provisional FNS AIXM 5.1 profile C and ctypes binding delegates to the existing
+  `oa-notam` decoder and returns its row, every retained feature time slice, polygon ownership and E7 vertices,
+  UTF-8 text/schedule arena, field/reject counts, unknown-path records and overflow counts without collapsing
+  presence/error/source codes. It requires an explicit half-open Unix-millisecond drop interval; equal endpoints
+  deliberately select an empty interval and an inverted interval is refused. The 1 MiB input, XML default
+  parser limits, one-row output, element-bounded feature/polygon counts, 4,096 vertices per polygon, aggregate
+  vertex bound `input_bytes / 3`, 8,192 bytes per text or schedule, 128 unknown paths and 16 MiB working-memory
+  ceiling are checked before parsing. Count query and fill use the same decoder profile, and insufficient caller
+  capacity leaves every result array untouched. The binding is Preview and has no raw SWIM-data qualification.
 
 ## Reproducible ZAU comparison package (p002 `--export-eram`, `--eram-export`, tools/reproduce_zau.sh)
 

@@ -11,9 +11,9 @@ import ctypes
 import array
 import os
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, make_dataclass
 from pathlib import Path
-from typing import Final, Iterable, Sequence
+from typing import Final, Iterable, Sequence, TypeAlias, Union
 
 ABI_VERSION_PROVISIONAL: Final[int] = 1
 _MAX_MESSAGE_BYTES: Final[int] = 4096
@@ -34,7 +34,14 @@ _MAX_ZIP_NAME_POOL_BYTES: Final[int] = _MAX_ZIP_ENTRIES * 4096
 _MAX_GRIB2_INPUT_BYTES: Final[int] = 256 * 1024 * 1024
 _MAX_GRIB2_FIELDS: Final[int] = 16
 _MAX_GRIB2_VALUES: Final[int] = 64 * 1024 * 1024
+_MAX_NOTAM_INPUT_BYTES: Final[int] = 1 << 20
+_MAX_NOTAM_WORKING_BYTES: Final[int] = 16 * 1024 * 1024
+_MAX_NOTAM_TEXT_BYTES: Final[int] = 8192
+_MAX_NOTAM_POLYGON_VERTICES: Final[int] = 4096
+_MAX_NOTAM_UNKNOWN_PATHS: Final[int] = 128
 
+_MAX_CIFP_INPUT_BYTES: Final[int] = 128 * 1024 * 1024
+_MAX_CIFP_OUTPUT_BYTES: Final[int] = 768 * 1024 * 1024
 
 class _ErrorInfo(ctypes.Structure):
     _fields_ = [
@@ -124,6 +131,954 @@ class _AsterixError(ctypes.Structure):
                 ("reserved_bytes", ctypes.c_uint8 * 8), ("offset", ctypes.c_uint64)]
 
 
+class _NotamRow(ctypes.Structure):
+    _fields_ = [
+        ("present", ctypes.c_uint64), ("errors", ctypes.c_uint64),
+        ("issued_ms", ctypes.c_int64), ("start_ms", ctypes.c_int64),
+        ("end_ms", ctypes.c_int64), ("canceled_ms", ctypes.c_int64),
+        ("flags", ctypes.c_uint32), ("number", ctypes.c_uint32),
+        ("ref_number", ctypes.c_uint32), ("sched_off", ctypes.c_uint32),
+        ("sched_len", ctypes.c_uint32), ("text_off", ctypes.c_uint32),
+        ("text_len", ctypes.c_uint32), ("radius_m", ctypes.c_uint32),
+        ("poly_first", ctypes.c_uint32), ("poly_count", ctypes.c_uint32),
+        ("feature_first", ctypes.c_uint32), ("feature_count", ctypes.c_uint32),
+        ("feat_mask", ctypes.c_uint32), ("lat_e7", ctypes.c_int32),
+        ("lon_e7", ctypes.c_int32), ("floor_ft", ctypes.c_int32),
+        ("ceil_ft", ctypes.c_int32), ("year", ctypes.c_uint16),
+        ("ref_year", ctypes.c_uint16), ("scenario", ctypes.c_uint16),
+        ("ntype", ctypes.c_uint8), ("class_code", ctypes.c_uint8),
+        ("traffic", ctypes.c_uint8), ("purpose", ctypes.c_uint8),
+        ("scope", ctypes.c_uint8), ("floor_ref", ctypes.c_uint8),
+        ("ceil_ref", ctypes.c_uint8), ("feat_kind", ctypes.c_uint8),
+        ("interpretation", ctypes.c_uint8), ("slice_meta", ctypes.c_uint8),
+        ("slice_errors", ctypes.c_uint8), ("sequence_number", ctypes.c_uint32),
+        ("correction_number", ctypes.c_uint32), ("event_id", ctypes.c_uint8 * 16),
+        ("series", ctypes.c_uint8 * 12), ("ref_series", ctypes.c_uint8 * 12),
+        ("xover", ctypes.c_uint8 * 16), ("feat_desig", ctypes.c_uint8 * 12),
+        ("runway", ctypes.c_uint8 * 12), ("airport", ctypes.c_uint8 * 8),
+        ("navaid", ctypes.c_uint8 * 8), ("unit", ctypes.c_uint8 * 8),
+        ("selection", ctypes.c_uint8 * 5), ("location", ctypes.c_uint8 * 4),
+        ("fir", ctypes.c_uint8 * 4), ("icao_location", ctypes.c_uint8 * 4),
+        ("airport_icao", ctypes.c_uint8 * 4),
+    ]
+
+
+class _NotamFeature(ctypes.Structure):
+    _fields_ = [("kind", ctypes.c_uint8), ("time_kind", ctypes.c_uint8),
+                ("interpretation", ctypes.c_uint8), ("meta", ctypes.c_uint8),
+                ("time_meta", ctypes.c_uint8), ("errors", ctypes.c_uint8),
+                ("reserved", ctypes.c_uint8 * 2), ("begin_ms", ctypes.c_int64),
+                ("end_ms", ctypes.c_int64), ("sequence_number", ctypes.c_uint32),
+                ("correction_number", ctypes.c_uint32), ("designator", ctypes.c_uint8 * 12),
+                ("designator_len", ctypes.c_uint8), ("icao", ctypes.c_uint8 * 4),
+                ("icao_len", ctypes.c_uint8)]
+
+
+class _NotamPolygon(ctypes.Structure):
+    _fields_ = [("first_vertex", ctypes.c_uint32), ("vertex_count", ctypes.c_uint32),
+                ("feature_index", ctypes.c_uint32), ("kind", ctypes.c_uint8),
+                ("reserved", ctypes.c_uint8 * 3)]
+
+
+class _NotamVertex(ctypes.Structure):
+    _fields_ = [("lat_e7", ctypes.c_int32), ("lon_e7", ctypes.c_int32)]
+
+
+class _NotamUnknownPath(ctypes.Structure):
+    _fields_ = [("hash", ctypes.c_uint64), ("count", ctypes.c_uint64),
+                ("is_attribute", ctypes.c_uint8), ("text_len", ctypes.c_uint8),
+                ("reserved", ctypes.c_uint8 * 6), ("text", ctypes.c_uint8 * 160)]
+
+
+class _NotamSummary(ctypes.Structure):
+    _fields_ = [("status", ctypes.c_uint32), ("refusal_kind", ctypes.c_uint32),
+                ("source_offset", ctypes.c_uint64), ("row_count", ctypes.c_uint64),
+                ("feature_count", ctypes.c_uint64), ("polygon_count", ctypes.c_uint64),
+                ("vertex_count", ctypes.c_uint64), ("string_bytes", ctypes.c_uint64),
+                ("unknown_path_count", ctypes.c_uint64), ("unknown_elements", ctypes.c_uint64),
+                ("unknown_attributes", ctypes.c_uint64), ("unknown_overflow", ctypes.c_uint64),
+                ("sealed_dropped", ctypes.c_uint64), ("field_errors", ctypes.c_uint64 * 31),
+                ("rejects", ctypes.c_uint64 * 9), ("features", ctypes.c_uint64 * 12)]
+
+
+class _NotamBuffers(ctypes.Structure):
+    _fields_ = [("row", ctypes.POINTER(_NotamRow)), ("row_capacity", ctypes.c_uint64),
+                ("features", ctypes.POINTER(_NotamFeature)), ("feature_capacity", ctypes.c_uint64),
+                ("polygons", ctypes.POINTER(_NotamPolygon)), ("polygon_capacity", ctypes.c_uint64),
+                ("vertices", ctypes.POINTER(_NotamVertex)), ("vertex_capacity", ctypes.c_uint64),
+                ("strings", ctypes.POINTER(ctypes.c_uint8)), ("string_capacity", ctypes.c_uint64),
+                ("unknown_paths", ctypes.POINTER(_NotamUnknownPath)),
+                ("unknown_path_capacity", ctypes.c_uint64)]
+
+_CIFP_CTYPES = {
+    "uint8_t": ctypes.c_uint8,
+    "int8_t": ctypes.c_int8,
+    "uint16_t": ctypes.c_uint16,
+    "int16_t": ctypes.c_int16,
+    "uint32_t": ctypes.c_uint32,
+    "int32_t": ctypes.c_int32,
+    "uint64_t": ctypes.c_uint64,
+    "int64_t": ctypes.c_int64,
+    "double": ctypes.c_double,
+}
+
+def _cifp_type(name: str):
+    if name in _CIFP_CTYPES:
+        return _CIFP_CTYPES[name]
+    return globals()["_" + name]
+
+class _OaCifpSpan(ctypes.Structure):
+    _fields_ = [
+        ("offset", _cifp_type("uint64_t")),
+        ("length", _cifp_type("uint64_t")),
+    ]
+
+class _OaCifpPosition(ctypes.Structure):
+    _fields_ = [
+        ("lat", _cifp_type("double")),
+        ("lon", _cifp_type("double")),
+    ]
+
+class _OaCifpMeta(ctypes.Structure):
+    _fields_ = [
+        ("line", _cifp_type("uint64_t")),
+        ("cycle_year", _cifp_type("uint8_t")),
+        ("cycle_release", _cifp_type("uint8_t")),
+        ("reserved", _cifp_type("uint8_t") * 6),
+        ("customer_area", _cifp_type("OaCifpSpan")),
+        ("file_record_number", _cifp_type("OaCifpSpan")),
+    ]
+
+class _OaCifpAltitude(ctypes.Structure):
+    _fields_ = [
+        ("kind", _cifp_type("uint8_t")),
+        ("reserved", _cifp_type("uint8_t") * 3),
+        ("value", _cifp_type("int32_t")),
+    ]
+
+class _OaCifpFixRef(ctypes.Structure):
+    _fields_ = [
+        ("ident", _cifp_type("OaCifpSpan")),
+        ("region", _cifp_type("OaCifpSpan")),
+        ("section", _cifp_type("uint8_t")),
+        ("subsection", _cifp_type("uint8_t")),
+        ("reserved", _cifp_type("uint8_t") * 6),
+    ]
+
+class _OaCifpAirport(ctypes.Structure):
+    _fields_ = [
+        ("meta", _cifp_type("OaCifpMeta")),
+        ("present", _cifp_type("uint64_t")),
+        ("ident", _cifp_type("OaCifpSpan")),
+        ("icao_region", _cifp_type("OaCifpSpan")),
+        ("iata", _cifp_type("OaCifpSpan")),
+        ("datum", _cifp_type("OaCifpSpan")),
+        ("name", _cifp_type("OaCifpSpan")),
+        ("position", _cifp_type("OaCifpPosition")),
+        ("magnetic_variation", _cifp_type("double")),
+        ("elevation_ft", _cifp_type("int32_t")),
+        ("longest_runway_ft", _cifp_type("uint32_t")),
+        ("transition_altitude", _cifp_type("OaCifpAltitude")),
+        ("transition_level", _cifp_type("OaCifpAltitude")),
+        ("ifr_capable", _cifp_type("uint8_t")),
+        ("longest_runway_surface", _cifp_type("uint8_t")),
+        ("public_military", _cifp_type("uint8_t")),
+        ("north_reference", _cifp_type("uint8_t")),
+        ("reserved", _cifp_type("uint8_t") * 4),
+    ]
+
+class _OaCifpRunway(ctypes.Structure):
+    _fields_ = [
+        ("meta", _cifp_type("OaCifpMeta")),
+        ("present", _cifp_type("uint64_t")),
+        ("airport_ident", _cifp_type("OaCifpSpan")),
+        ("airport_region", _cifp_type("OaCifpSpan")),
+        ("ident", _cifp_type("OaCifpSpan")),
+        ("localizer_ident", _cifp_type("OaCifpSpan")),
+        ("threshold", _cifp_type("OaCifpPosition")),
+        ("length_ft", _cifp_type("uint32_t")),
+        ("displaced_threshold_ft", _cifp_type("uint32_t")),
+        ("magnetic_bearing", _cifp_type("double")),
+        ("ellipsoid_height_m", _cifp_type("double")),
+        ("threshold_elevation_ft", _cifp_type("int32_t")),
+        ("threshold_crossing_height_ft", _cifp_type("uint32_t")),
+        ("width_ft", _cifp_type("uint32_t")),
+        ("tch_indicator", _cifp_type("uint8_t")),
+        ("localizer_category", _cifp_type("uint8_t")),
+        ("reserved", _cifp_type("uint8_t") * 6),
+        ("reserved2", _cifp_type("uint8_t") * 4),
+    ]
+
+class _OaCifpLocalizer(ctypes.Structure):
+    _fields_ = [
+        ("meta", _cifp_type("OaCifpMeta")),
+        ("present", _cifp_type("uint64_t")),
+        ("airport_ident", _cifp_type("OaCifpSpan")),
+        ("airport_region", _cifp_type("OaCifpSpan")),
+        ("ident", _cifp_type("OaCifpSpan")),
+        ("runway_ident", _cifp_type("OaCifpSpan")),
+        ("localizer_position", _cifp_type("OaCifpPosition")),
+        ("glide_slope_position", _cifp_type("OaCifpPosition")),
+        ("category", _cifp_type("uint8_t")),
+        ("reserved0", _cifp_type("uint8_t") * 7),
+        ("frequency_mhz", _cifp_type("double")),
+        ("bearing", _cifp_type("double")),
+        ("localizer_width_deg", _cifp_type("double")),
+        ("glide_slope_angle_deg", _cifp_type("double")),
+        ("station_declination", _cifp_type("double")),
+        ("glide_slope_tch_ft", _cifp_type("uint32_t")),
+        ("glide_slope_elevation_ft", _cifp_type("int32_t")),
+    ]
+
+class _OaCifpVhfNavaid(ctypes.Structure):
+    _fields_ = [
+        ("meta", _cifp_type("OaCifpMeta")),
+        ("present", _cifp_type("uint64_t")),
+        ("airport_ident", _cifp_type("OaCifpSpan")),
+        ("airport_region", _cifp_type("OaCifpSpan")),
+        ("ident", _cifp_type("OaCifpSpan")),
+        ("icao_region", _cifp_type("OaCifpSpan")),
+        ("dme_ident", _cifp_type("OaCifpSpan")),
+        ("datum", _cifp_type("OaCifpSpan")),
+        ("name", _cifp_type("OaCifpSpan")),
+        ("vor_position", _cifp_type("OaCifpPosition")),
+        ("dme_position", _cifp_type("OaCifpPosition")),
+        ("frequency_mhz", _cifp_type("double")),
+        ("station_declination", _cifp_type("double")),
+        ("dme_elevation_ft", _cifp_type("int32_t")),
+        ("class", _cifp_type("uint8_t") * 5),
+        ("figure_of_merit", _cifp_type("uint8_t")),
+        ("reserved", _cifp_type("uint8_t") * 2),
+        ("reserved2", _cifp_type("uint8_t") * 4),
+    ]
+
+class _OaCifpNdb(ctypes.Structure):
+    _fields_ = [
+        ("meta", _cifp_type("OaCifpMeta")),
+        ("present", _cifp_type("uint64_t")),
+        ("airport_ident", _cifp_type("OaCifpSpan")),
+        ("airport_region", _cifp_type("OaCifpSpan")),
+        ("ident", _cifp_type("OaCifpSpan")),
+        ("icao_region", _cifp_type("OaCifpSpan")),
+        ("class", _cifp_type("OaCifpSpan")),
+        ("datum", _cifp_type("OaCifpSpan")),
+        ("name", _cifp_type("OaCifpSpan")),
+        ("position", _cifp_type("OaCifpPosition")),
+        ("frequency_khz", _cifp_type("double")),
+        ("magnetic_variation", _cifp_type("double")),
+        ("terminal", _cifp_type("uint8_t")),
+        ("reserved", _cifp_type("uint8_t") * 7),
+    ]
+
+class _OaCifpWaypoint(ctypes.Structure):
+    _fields_ = [
+        ("meta", _cifp_type("OaCifpMeta")),
+        ("present", _cifp_type("uint64_t")),
+        ("area", _cifp_type("OaCifpSpan")),
+        ("area_region", _cifp_type("OaCifpSpan")),
+        ("ident", _cifp_type("OaCifpSpan")),
+        ("icao_region", _cifp_type("OaCifpSpan")),
+        ("waypoint_type", _cifp_type("OaCifpSpan")),
+        ("usage", _cifp_type("OaCifpSpan")),
+        ("datum", _cifp_type("OaCifpSpan")),
+        ("name", _cifp_type("OaCifpSpan")),
+        ("position", _cifp_type("OaCifpPosition")),
+        ("magnetic_variation", _cifp_type("double")),
+        ("kind", _cifp_type("uint8_t")),
+        ("reserved", _cifp_type("uint8_t") * 7),
+    ]
+
+class _OaCifpAirway(ctypes.Structure):
+    _fields_ = [
+        ("customer_area", _cifp_type("OaCifpSpan")),
+        ("ident", _cifp_type("OaCifpSpan")),
+        ("first_line", _cifp_type("uint64_t")),
+        ("fix_start", _cifp_type("uint64_t")),
+        ("fix_count", _cifp_type("uint64_t")),
+        ("route_type", _cifp_type("uint8_t")),
+        ("level", _cifp_type("uint8_t")),
+        ("reserved", _cifp_type("uint8_t") * 6),
+    ]
+
+class _OaCifpAirwayFix(ctypes.Structure):
+    _fields_ = [
+        ("meta", _cifp_type("OaCifpMeta")),
+        ("route_ident", _cifp_type("OaCifpSpan")),
+        ("fix", _cifp_type("OaCifpFixRef")),
+        ("sequence", _cifp_type("uint32_t")),
+        ("description", _cifp_type("uint8_t") * 4),
+        ("route_type", _cifp_type("uint8_t")),
+        ("level", _cifp_type("uint8_t")),
+        ("reserved0", _cifp_type("uint8_t") * 6),
+        ("present", _cifp_type("uint64_t")),
+        ("outbound_course", _cifp_type("double")),
+        ("distance_nm", _cifp_type("double")),
+        ("inbound_course", _cifp_type("double")),
+        ("min_altitude", _cifp_type("OaCifpAltitude")),
+        ("min_altitude_2", _cifp_type("OaCifpAltitude")),
+        ("max_altitude", _cifp_type("OaCifpAltitude")),
+    ]
+
+class _OaCifpProcedure(ctypes.Structure):
+    _fields_ = [
+        ("customer_area", _cifp_type("OaCifpSpan")),
+        ("airport_ident", _cifp_type("OaCifpSpan")),
+        ("airport_region", _cifp_type("OaCifpSpan")),
+        ("ident", _cifp_type("OaCifpSpan")),
+        ("first_line", _cifp_type("uint64_t")),
+        ("route_start", _cifp_type("uint64_t")),
+        ("route_count", _cifp_type("uint64_t")),
+        ("kind", _cifp_type("uint8_t")),
+        ("reserved", _cifp_type("uint8_t") * 7),
+    ]
+
+class _OaCifpRoute(ctypes.Structure):
+    _fields_ = [
+        ("transition", _cifp_type("OaCifpSpan")),
+        ("first_line", _cifp_type("uint64_t")),
+        ("leg_start", _cifp_type("uint64_t")),
+        ("leg_count", _cifp_type("uint64_t")),
+        ("route_type", _cifp_type("uint8_t")),
+        ("reserved", _cifp_type("uint8_t") * 7),
+    ]
+
+class _OaCifpLeg(ctypes.Structure):
+    _fields_ = [
+        ("meta", _cifp_type("OaCifpMeta")),
+        ("present", _cifp_type("uint64_t")),
+        ("airport_ident", _cifp_type("OaCifpSpan")),
+        ("airport_region", _cifp_type("OaCifpSpan")),
+        ("ident", _cifp_type("OaCifpSpan")),
+        ("transition", _cifp_type("OaCifpSpan")),
+        ("rnp_code", _cifp_type("OaCifpSpan")),
+        ("fix", _cifp_type("OaCifpFixRef")),
+        ("recommended_navaid", _cifp_type("OaCifpFixRef")),
+        ("center_fix", _cifp_type("OaCifpFixRef")),
+        ("sequence", _cifp_type("uint32_t")),
+        ("description", _cifp_type("uint8_t") * 4),
+        ("kind", _cifp_type("uint8_t")),
+        ("route_type", _cifp_type("uint8_t")),
+        ("turn_direction", _cifp_type("uint8_t")),
+        ("path_terminator", _cifp_type("uint8_t")),
+        ("altitude_description", _cifp_type("uint8_t")),
+        ("gnss_fms_indication", _cifp_type("uint8_t")),
+        ("speed_limit_description", _cifp_type("uint8_t")),
+        ("reserved0", _cifp_type("uint8_t")),
+        ("arc_radius_nm", _cifp_type("double")),
+        ("theta_deg", _cifp_type("double")),
+        ("rho_nm", _cifp_type("double")),
+        ("course_deg", _cifp_type("double")),
+        ("distance_or_time_value", _cifp_type("double")),
+        ("distance_or_time_kind", _cifp_type("uint8_t")),
+        ("reserved1", _cifp_type("uint8_t") * 7),
+        ("altitude1", _cifp_type("OaCifpAltitude")),
+        ("altitude2", _cifp_type("OaCifpAltitude")),
+        ("transition_altitude", _cifp_type("OaCifpAltitude")),
+        ("speed_limit_kt", _cifp_type("uint32_t")),
+        ("reserved2", _cifp_type("uint8_t") * 4),
+        ("vertical_angle_deg", _cifp_type("double")),
+    ]
+
+class _OaCifpContinuation(ctypes.Structure):
+    _fields_ = [
+        ("meta", _cifp_type("OaCifpMeta")),
+        ("owner_index", _cifp_type("uint64_t")),
+        ("text", _cifp_type("OaCifpSpan")),
+        ("number", _cifp_type("uint8_t")),
+        ("application_type", _cifp_type("uint8_t")),
+        ("owner_kind", _cifp_type("uint8_t")),
+        ("reserved", _cifp_type("uint8_t") * 5),
+    ]
+
+class _OaCifpLevelOfService(ctypes.Structure):
+    _fields_ = [
+        ("continuation_index", _cifp_type("uint64_t")),
+        ("name", _cifp_type("OaCifpSpan")),
+        ("authorized", _cifp_type("uint8_t")),
+        ("reserved", _cifp_type("uint8_t") * 7),
+    ]
+
+class _OaCifpAirspace(ctypes.Structure):
+    _fields_ = [
+        ("meta", _cifp_type("OaCifpMeta")),
+        ("present", _cifp_type("uint64_t")),
+        ("icao_region", _cifp_type("OaCifpSpan")),
+        ("designation", _cifp_type("OaCifpSpan")),
+        ("name", _cifp_type("OaCifpSpan")),
+        ("boundary_start", _cifp_type("uint64_t")),
+        ("boundary_count", _cifp_type("uint64_t")),
+        ("continuation_start", _cifp_type("uint64_t")),
+        ("continuation_count", _cifp_type("uint64_t")),
+        ("kind", _cifp_type("uint8_t")),
+        ("airspace_type", _cifp_type("uint8_t")),
+        ("classification", _cifp_type("uint8_t")),
+        ("multiple_code", _cifp_type("uint8_t")),
+        ("level", _cifp_type("uint8_t")),
+        ("time_code", _cifp_type("uint8_t")),
+        ("reserved", _cifp_type("uint8_t") * 2),
+        ("lower", _cifp_type("OaCifpAltitude")),
+        ("lower_unit", _cifp_type("uint8_t")),
+        ("upper_unit", _cifp_type("uint8_t")),
+        ("reserved2", _cifp_type("uint8_t") * 6),
+        ("upper", _cifp_type("OaCifpAltitude")),
+    ]
+
+class _OaCifpBoundary(ctypes.Structure):
+    _fields_ = [
+        ("position", _cifp_type("OaCifpPosition")),
+        ("arc_origin", _cifp_type("OaCifpPosition")),
+        ("sequence", _cifp_type("uint32_t")),
+        ("via", _cifp_type("uint8_t")),
+        ("end", _cifp_type("uint8_t")),
+        ("present", _cifp_type("uint8_t")),
+        ("reserved", _cifp_type("uint8_t")),
+        ("arc_distance_nm", _cifp_type("double")),
+        ("arc_bearing_deg", _cifp_type("double")),
+        ("source_line", _cifp_type("uint64_t")),
+    ]
+
+class _OaCifpMora(ctypes.Structure):
+    _fields_ = [
+        ("meta", _cifp_type("OaCifpMeta")),
+        ("start_lat", _cifp_type("int16_t")),
+        ("start_lon", _cifp_type("int16_t")),
+        ("present_mask", _cifp_type("uint32_t")),
+        ("cells_ft", _cifp_type("uint32_t") * 30),
+    ]
+
+class _OaCifpHeader(ctypes.Structure):
+    _fields_ = [
+        ("file_name", _cifp_type("OaCifpSpan")),
+        ("version", _cifp_type("OaCifpSpan")),
+        ("creation_date", _cifp_type("OaCifpSpan")),
+        ("creation_time", _cifp_type("OaCifpSpan")),
+        ("data_supplier", _cifp_type("OaCifpSpan")),
+        ("crc", _cifp_type("OaCifpSpan")),
+        ("record_length", _cifp_type("uint32_t")),
+        ("reserved0", _cifp_type("uint8_t") * 4),
+        ("record_count", _cifp_type("uint64_t")),
+        ("cycle_year", _cifp_type("uint8_t")),
+        ("cycle_release", _cifp_type("uint8_t")),
+        ("production_flag", _cifp_type("uint8_t")),
+        ("crc_verified", _cifp_type("uint8_t")),
+        ("reserved", _cifp_type("uint8_t") * 4),
+    ]
+
+class _OaCifpHeaderText(ctypes.Structure):
+    _fields_ = [
+        ("text", _cifp_type("OaCifpSpan")),
+    ]
+
+class _OaCifpSectionCount(ctypes.Structure):
+    _fields_ = [
+        ("section", _cifp_type("OaCifpSpan")),
+        ("count", _cifp_type("uint64_t")),
+        ("supported", _cifp_type("uint8_t")),
+        ("reserved", _cifp_type("uint8_t") * 7),
+    ]
+
+class _OaCifpCycleCount(ctypes.Structure):
+    _fields_ = [
+        ("count", _cifp_type("uint64_t")),
+        ("year", _cifp_type("uint8_t")),
+        ("release", _cifp_type("uint8_t")),
+        ("reserved", _cifp_type("uint8_t") * 6),
+    ]
+
+class _OaCifpError(ctypes.Structure):
+    _fields_ = [
+        ("status", _cifp_type("uint32_t")),
+        ("kind", _cifp_type("uint32_t")),
+        ("line", _cifp_type("uint64_t")),
+        ("first_column", _cifp_type("uint32_t")),
+        ("last_column", _cifp_type("uint32_t")),
+        ("limit", _cifp_type("uint64_t")),
+        ("actual", _cifp_type("uint64_t")),
+        ("previous", _cifp_type("uint64_t")),
+        ("found", _cifp_type("uint64_t")),
+        ("code", _cifp_type("uint32_t")),
+        ("flags", _cifp_type("uint32_t")),
+        ("field", _cifp_type("uint8_t") * 32),
+        ("value", _cifp_type("uint8_t") * 132),
+        ("reason", _cifp_type("uint8_t") * 64),
+        ("reserved", _cifp_type("uint8_t") * 4),
+    ]
+
+class _OaCifpCounts(ctypes.Structure):
+    _fields_ = [
+        ("airports", _cifp_type("uint64_t")),
+        ("runways", _cifp_type("uint64_t")),
+        ("localizers", _cifp_type("uint64_t")),
+        ("vhf_navaids", _cifp_type("uint64_t")),
+        ("ndbs", _cifp_type("uint64_t")),
+        ("waypoints", _cifp_type("uint64_t")),
+        ("moras", _cifp_type("uint64_t")),
+        ("airspaces", _cifp_type("uint64_t")),
+        ("airways", _cifp_type("uint64_t")),
+        ("airway_fixes", _cifp_type("uint64_t")),
+        ("procedures", _cifp_type("uint64_t")),
+        ("routes", _cifp_type("uint64_t")),
+        ("legs", _cifp_type("uint64_t")),
+        ("continuations", _cifp_type("uint64_t")),
+        ("levels_of_service", _cifp_type("uint64_t")),
+        ("boundaries", _cifp_type("uint64_t")),
+        ("header_records", _cifp_type("uint64_t")),
+        ("sections", _cifp_type("uint64_t")),
+        ("cycles", _cifp_type("uint64_t")),
+        ("errors", _cifp_type("uint64_t")),
+        ("errors_dropped", _cifp_type("uint64_t")),
+        ("strings_bytes", _cifp_type("uint64_t")),
+        ("output_bytes", _cifp_type("uint64_t")),
+        ("is_clean", _cifp_type("uint8_t")),
+        ("reserved", _cifp_type("uint8_t") * 7),
+    ]
+
+class _OaCifpBuffers(ctypes.Structure):
+    _fields_ = [
+        ("header", ctypes.POINTER(_cifp_type("OaCifpHeader"))),
+        ("header_capacity", _cifp_type("uint64_t")),
+        ("header_text", ctypes.POINTER(_cifp_type("OaCifpHeaderText"))),
+        ("header_text_capacity", _cifp_type("uint64_t")),
+        ("airports", ctypes.POINTER(_cifp_type("OaCifpAirport"))),
+        ("airports_capacity", _cifp_type("uint64_t")),
+        ("runways", ctypes.POINTER(_cifp_type("OaCifpRunway"))),
+        ("runways_capacity", _cifp_type("uint64_t")),
+        ("localizers", ctypes.POINTER(_cifp_type("OaCifpLocalizer"))),
+        ("localizers_capacity", _cifp_type("uint64_t")),
+        ("vhf_navaids", ctypes.POINTER(_cifp_type("OaCifpVhfNavaid"))),
+        ("vhf_navaids_capacity", _cifp_type("uint64_t")),
+        ("ndbs", ctypes.POINTER(_cifp_type("OaCifpNdb"))),
+        ("ndbs_capacity", _cifp_type("uint64_t")),
+        ("waypoints", ctypes.POINTER(_cifp_type("OaCifpWaypoint"))),
+        ("waypoints_capacity", _cifp_type("uint64_t")),
+        ("moras", ctypes.POINTER(_cifp_type("OaCifpMora"))),
+        ("moras_capacity", _cifp_type("uint64_t")),
+        ("airspaces", ctypes.POINTER(_cifp_type("OaCifpAirspace"))),
+        ("airspaces_capacity", _cifp_type("uint64_t")),
+        ("airways", ctypes.POINTER(_cifp_type("OaCifpAirway"))),
+        ("airways_capacity", _cifp_type("uint64_t")),
+        ("airway_fixes", ctypes.POINTER(_cifp_type("OaCifpAirwayFix"))),
+        ("airway_fixes_capacity", _cifp_type("uint64_t")),
+        ("procedures", ctypes.POINTER(_cifp_type("OaCifpProcedure"))),
+        ("procedures_capacity", _cifp_type("uint64_t")),
+        ("routes", ctypes.POINTER(_cifp_type("OaCifpRoute"))),
+        ("routes_capacity", _cifp_type("uint64_t")),
+        ("legs", ctypes.POINTER(_cifp_type("OaCifpLeg"))),
+        ("legs_capacity", _cifp_type("uint64_t")),
+        ("continuations", ctypes.POINTER(_cifp_type("OaCifpContinuation"))),
+        ("continuations_capacity", _cifp_type("uint64_t")),
+        ("levels_of_service", ctypes.POINTER(_cifp_type("OaCifpLevelOfService"))),
+        ("levels_of_service_capacity", _cifp_type("uint64_t")),
+        ("boundaries", ctypes.POINTER(_cifp_type("OaCifpBoundary"))),
+        ("boundaries_capacity", _cifp_type("uint64_t")),
+        ("sections", ctypes.POINTER(_cifp_type("OaCifpSectionCount"))),
+        ("sections_capacity", _cifp_type("uint64_t")),
+        ("cycles", ctypes.POINTER(_cifp_type("OaCifpCycleCount"))),
+        ("cycles_capacity", _cifp_type("uint64_t")),
+        ("errors", ctypes.POINTER(_cifp_type("OaCifpError"))),
+        ("errors_capacity", _cifp_type("uint64_t")),
+        ("strings", ctypes.POINTER(_cifp_type("uint8_t"))),
+        ("strings_capacity", _cifp_type("uint64_t")),
+    ]
+
+_CifpCounts = _OaCifpCounts
+_CifpError = _OaCifpError
+_CifpBuffers = _OaCifpBuffers
+_CIFP_COUNT_NAMES: Final[tuple[str, ...]] = tuple(name for name, _ in _CifpCounts._fields_ if name not in ("is_clean", "reserved"))
+_CIFP_ROW_TYPES: Final[tuple[tuple[str, type[ctypes.Structure]], ...]] = (
+    ("header", _OaCifpHeader),
+    ("header_text", _OaCifpHeaderText),
+    ("airports", _OaCifpAirport),
+    ("runways", _OaCifpRunway),
+    ("localizers", _OaCifpLocalizer),
+    ("vhf_navaids", _OaCifpVhfNavaid),
+    ("ndbs", _OaCifpNdb),
+    ("waypoints", _OaCifpWaypoint),
+    ("moras", _OaCifpMora),
+    ("airspaces", _OaCifpAirspace),
+    ("airways", _OaCifpAirway),
+    ("airway_fixes", _OaCifpAirwayFix),
+    ("procedures", _OaCifpProcedure),
+    ("routes", _OaCifpRoute),
+    ("legs", _OaCifpLeg),
+    ("continuations", _OaCifpContinuation),
+    ("levels_of_service", _OaCifpLevelOfService),
+    ("boundaries", _OaCifpBoundary),
+    ("sections", _OaCifpSectionCount),
+    ("cycles", _OaCifpCycleCount),
+    ("errors", _OaCifpError),)
+
+assert ctypes.sizeof(_OaCifpSpan) == 16 and ctypes.alignment(_OaCifpSpan) == 8
+assert ctypes.sizeof(_OaCifpPosition) == 16 and ctypes.alignment(_OaCifpPosition) == 8
+assert ctypes.sizeof(_OaCifpMeta) == 48 and ctypes.alignment(_OaCifpMeta) == 8
+assert ctypes.sizeof(_OaCifpAltitude) == 8 and ctypes.alignment(_OaCifpAltitude) == 4
+assert ctypes.sizeof(_OaCifpFixRef) == 40 and ctypes.alignment(_OaCifpFixRef) == 8
+assert ctypes.sizeof(_OaCifpAirport) == 192 and ctypes.alignment(_OaCifpAirport) == 8
+assert ctypes.sizeof(_OaCifpRunway) == 184 and ctypes.alignment(_OaCifpRunway) == 8
+assert ctypes.sizeof(_OaCifpLocalizer) == 208 and ctypes.alignment(_OaCifpLocalizer) == 8
+assert ctypes.sizeof(_OaCifpVhfNavaid) == 232 and ctypes.alignment(_OaCifpVhfNavaid) == 8
+assert ctypes.sizeof(_OaCifpNdb) == 208 and ctypes.alignment(_OaCifpNdb) == 8
+assert ctypes.sizeof(_OaCifpWaypoint) == 216 and ctypes.alignment(_OaCifpWaypoint) == 8
+assert ctypes.sizeof(_OaCifpAirway) == 64 and ctypes.alignment(_OaCifpAirway) == 8
+assert ctypes.sizeof(_OaCifpAirwayFix) == 176 and ctypes.alignment(_OaCifpAirwayFix) == 8
+assert ctypes.sizeof(_OaCifpProcedure) == 96 and ctypes.alignment(_OaCifpProcedure) == 8
+assert ctypes.sizeof(_OaCifpRoute) == 48 and ctypes.alignment(_OaCifpRoute) == 8
+assert ctypes.sizeof(_OaCifpLeg) == 360 and ctypes.alignment(_OaCifpLeg) == 8
+assert ctypes.sizeof(_OaCifpContinuation) == 80 and ctypes.alignment(_OaCifpContinuation) == 8
+assert ctypes.sizeof(_OaCifpLevelOfService) == 32 and ctypes.alignment(_OaCifpLevelOfService) == 8
+assert ctypes.sizeof(_OaCifpAirspace) == 168 and ctypes.alignment(_OaCifpAirspace) == 8
+assert ctypes.sizeof(_OaCifpBoundary) == 64 and ctypes.alignment(_OaCifpBoundary) == 8
+assert ctypes.sizeof(_OaCifpMora) == 176 and ctypes.alignment(_OaCifpMora) == 8
+assert ctypes.sizeof(_OaCifpHeader) == 120 and ctypes.alignment(_OaCifpHeader) == 8
+assert ctypes.sizeof(_OaCifpHeaderText) == 16 and ctypes.alignment(_OaCifpHeaderText) == 8
+assert ctypes.sizeof(_OaCifpSectionCount) == 32 and ctypes.alignment(_OaCifpSectionCount) == 8
+assert ctypes.sizeof(_OaCifpCycleCount) == 16 and ctypes.alignment(_OaCifpCycleCount) == 8
+assert ctypes.sizeof(_OaCifpError) == 296 and ctypes.alignment(_OaCifpError) == 8
+assert ctypes.sizeof(_OaCifpCounts) == 192 and ctypes.alignment(_OaCifpCounts) == 8
+assert ctypes.sizeof(_OaCifpBuffers) == 352 and ctypes.alignment(_OaCifpBuffers) == 8
+assert getattr(_OaCifpSpan, "offset").offset == 0
+assert getattr(_OaCifpSpan, "length").offset == 8
+assert getattr(_OaCifpPosition, "lat").offset == 0
+assert getattr(_OaCifpPosition, "lon").offset == 8
+assert getattr(_OaCifpMeta, "line").offset == 0
+assert getattr(_OaCifpMeta, "cycle_year").offset == 8
+assert getattr(_OaCifpMeta, "cycle_release").offset == 9
+assert getattr(_OaCifpMeta, "reserved").offset == 10
+assert getattr(_OaCifpMeta, "customer_area").offset == 16
+assert getattr(_OaCifpMeta, "file_record_number").offset == 32
+assert getattr(_OaCifpAltitude, "kind").offset == 0
+assert getattr(_OaCifpAltitude, "reserved").offset == 1
+assert getattr(_OaCifpAltitude, "value").offset == 4
+assert getattr(_OaCifpFixRef, "ident").offset == 0
+assert getattr(_OaCifpFixRef, "region").offset == 16
+assert getattr(_OaCifpFixRef, "section").offset == 32
+assert getattr(_OaCifpFixRef, "subsection").offset == 33
+assert getattr(_OaCifpFixRef, "reserved").offset == 34
+assert getattr(_OaCifpAirport, "meta").offset == 0
+assert getattr(_OaCifpAirport, "present").offset == 48
+assert getattr(_OaCifpAirport, "ident").offset == 56
+assert getattr(_OaCifpAirport, "icao_region").offset == 72
+assert getattr(_OaCifpAirport, "iata").offset == 88
+assert getattr(_OaCifpAirport, "datum").offset == 104
+assert getattr(_OaCifpAirport, "name").offset == 120
+assert getattr(_OaCifpAirport, "position").offset == 136
+assert getattr(_OaCifpAirport, "magnetic_variation").offset == 152
+assert getattr(_OaCifpAirport, "elevation_ft").offset == 160
+assert getattr(_OaCifpAirport, "longest_runway_ft").offset == 164
+assert getattr(_OaCifpAirport, "transition_altitude").offset == 168
+assert getattr(_OaCifpAirport, "transition_level").offset == 176
+assert getattr(_OaCifpAirport, "ifr_capable").offset == 184
+assert getattr(_OaCifpAirport, "longest_runway_surface").offset == 185
+assert getattr(_OaCifpAirport, "public_military").offset == 186
+assert getattr(_OaCifpAirport, "north_reference").offset == 187
+assert getattr(_OaCifpAirport, "reserved").offset == 188
+assert getattr(_OaCifpRunway, "meta").offset == 0
+assert getattr(_OaCifpRunway, "present").offset == 48
+assert getattr(_OaCifpRunway, "airport_ident").offset == 56
+assert getattr(_OaCifpRunway, "airport_region").offset == 72
+assert getattr(_OaCifpRunway, "ident").offset == 88
+assert getattr(_OaCifpRunway, "localizer_ident").offset == 104
+assert getattr(_OaCifpRunway, "threshold").offset == 120
+assert getattr(_OaCifpRunway, "length_ft").offset == 136
+assert getattr(_OaCifpRunway, "displaced_threshold_ft").offset == 140
+assert getattr(_OaCifpRunway, "magnetic_bearing").offset == 144
+assert getattr(_OaCifpRunway, "ellipsoid_height_m").offset == 152
+assert getattr(_OaCifpRunway, "threshold_elevation_ft").offset == 160
+assert getattr(_OaCifpRunway, "threshold_crossing_height_ft").offset == 164
+assert getattr(_OaCifpRunway, "width_ft").offset == 168
+assert getattr(_OaCifpRunway, "tch_indicator").offset == 172
+assert getattr(_OaCifpRunway, "localizer_category").offset == 173
+assert getattr(_OaCifpRunway, "reserved").offset == 174
+assert getattr(_OaCifpRunway, "reserved2").offset == 180
+assert getattr(_OaCifpLocalizer, "meta").offset == 0
+assert getattr(_OaCifpLocalizer, "present").offset == 48
+assert getattr(_OaCifpLocalizer, "airport_ident").offset == 56
+assert getattr(_OaCifpLocalizer, "airport_region").offset == 72
+assert getattr(_OaCifpLocalizer, "ident").offset == 88
+assert getattr(_OaCifpLocalizer, "runway_ident").offset == 104
+assert getattr(_OaCifpLocalizer, "localizer_position").offset == 120
+assert getattr(_OaCifpLocalizer, "glide_slope_position").offset == 136
+assert getattr(_OaCifpLocalizer, "category").offset == 152
+assert getattr(_OaCifpLocalizer, "reserved0").offset == 153
+assert getattr(_OaCifpLocalizer, "frequency_mhz").offset == 160
+assert getattr(_OaCifpLocalizer, "bearing").offset == 168
+assert getattr(_OaCifpLocalizer, "localizer_width_deg").offset == 176
+assert getattr(_OaCifpLocalizer, "glide_slope_angle_deg").offset == 184
+assert getattr(_OaCifpLocalizer, "station_declination").offset == 192
+assert getattr(_OaCifpLocalizer, "glide_slope_tch_ft").offset == 200
+assert getattr(_OaCifpLocalizer, "glide_slope_elevation_ft").offset == 204
+assert getattr(_OaCifpVhfNavaid, "meta").offset == 0
+assert getattr(_OaCifpVhfNavaid, "present").offset == 48
+assert getattr(_OaCifpVhfNavaid, "airport_ident").offset == 56
+assert getattr(_OaCifpVhfNavaid, "airport_region").offset == 72
+assert getattr(_OaCifpVhfNavaid, "ident").offset == 88
+assert getattr(_OaCifpVhfNavaid, "icao_region").offset == 104
+assert getattr(_OaCifpVhfNavaid, "dme_ident").offset == 120
+assert getattr(_OaCifpVhfNavaid, "datum").offset == 136
+assert getattr(_OaCifpVhfNavaid, "name").offset == 152
+assert getattr(_OaCifpVhfNavaid, "vor_position").offset == 168
+assert getattr(_OaCifpVhfNavaid, "dme_position").offset == 184
+assert getattr(_OaCifpVhfNavaid, "frequency_mhz").offset == 200
+assert getattr(_OaCifpVhfNavaid, "station_declination").offset == 208
+assert getattr(_OaCifpVhfNavaid, "dme_elevation_ft").offset == 216
+assert getattr(_OaCifpVhfNavaid, "class").offset == 220
+assert getattr(_OaCifpVhfNavaid, "figure_of_merit").offset == 225
+assert getattr(_OaCifpVhfNavaid, "reserved").offset == 226
+assert getattr(_OaCifpVhfNavaid, "reserved2").offset == 228
+assert getattr(_OaCifpNdb, "meta").offset == 0
+assert getattr(_OaCifpNdb, "present").offset == 48
+assert getattr(_OaCifpNdb, "airport_ident").offset == 56
+assert getattr(_OaCifpNdb, "airport_region").offset == 72
+assert getattr(_OaCifpNdb, "ident").offset == 88
+assert getattr(_OaCifpNdb, "icao_region").offset == 104
+assert getattr(_OaCifpNdb, "class").offset == 120
+assert getattr(_OaCifpNdb, "datum").offset == 136
+assert getattr(_OaCifpNdb, "name").offset == 152
+assert getattr(_OaCifpNdb, "position").offset == 168
+assert getattr(_OaCifpNdb, "frequency_khz").offset == 184
+assert getattr(_OaCifpNdb, "magnetic_variation").offset == 192
+assert getattr(_OaCifpNdb, "terminal").offset == 200
+assert getattr(_OaCifpNdb, "reserved").offset == 201
+assert getattr(_OaCifpWaypoint, "meta").offset == 0
+assert getattr(_OaCifpWaypoint, "present").offset == 48
+assert getattr(_OaCifpWaypoint, "area").offset == 56
+assert getattr(_OaCifpWaypoint, "area_region").offset == 72
+assert getattr(_OaCifpWaypoint, "ident").offset == 88
+assert getattr(_OaCifpWaypoint, "icao_region").offset == 104
+assert getattr(_OaCifpWaypoint, "waypoint_type").offset == 120
+assert getattr(_OaCifpWaypoint, "usage").offset == 136
+assert getattr(_OaCifpWaypoint, "datum").offset == 152
+assert getattr(_OaCifpWaypoint, "name").offset == 168
+assert getattr(_OaCifpWaypoint, "position").offset == 184
+assert getattr(_OaCifpWaypoint, "magnetic_variation").offset == 200
+assert getattr(_OaCifpWaypoint, "kind").offset == 208
+assert getattr(_OaCifpWaypoint, "reserved").offset == 209
+assert getattr(_OaCifpAirway, "customer_area").offset == 0
+assert getattr(_OaCifpAirway, "ident").offset == 16
+assert getattr(_OaCifpAirway, "first_line").offset == 32
+assert getattr(_OaCifpAirway, "fix_start").offset == 40
+assert getattr(_OaCifpAirway, "fix_count").offset == 48
+assert getattr(_OaCifpAirway, "route_type").offset == 56
+assert getattr(_OaCifpAirway, "level").offset == 57
+assert getattr(_OaCifpAirway, "reserved").offset == 58
+assert getattr(_OaCifpAirwayFix, "meta").offset == 0
+assert getattr(_OaCifpAirwayFix, "route_ident").offset == 48
+assert getattr(_OaCifpAirwayFix, "fix").offset == 64
+assert getattr(_OaCifpAirwayFix, "sequence").offset == 104
+assert getattr(_OaCifpAirwayFix, "description").offset == 108
+assert getattr(_OaCifpAirwayFix, "route_type").offset == 112
+assert getattr(_OaCifpAirwayFix, "level").offset == 113
+assert getattr(_OaCifpAirwayFix, "reserved0").offset == 114
+assert getattr(_OaCifpAirwayFix, "present").offset == 120
+assert getattr(_OaCifpAirwayFix, "outbound_course").offset == 128
+assert getattr(_OaCifpAirwayFix, "distance_nm").offset == 136
+assert getattr(_OaCifpAirwayFix, "inbound_course").offset == 144
+assert getattr(_OaCifpAirwayFix, "min_altitude").offset == 152
+assert getattr(_OaCifpAirwayFix, "min_altitude_2").offset == 160
+assert getattr(_OaCifpAirwayFix, "max_altitude").offset == 168
+assert getattr(_OaCifpProcedure, "customer_area").offset == 0
+assert getattr(_OaCifpProcedure, "airport_ident").offset == 16
+assert getattr(_OaCifpProcedure, "airport_region").offset == 32
+assert getattr(_OaCifpProcedure, "ident").offset == 48
+assert getattr(_OaCifpProcedure, "first_line").offset == 64
+assert getattr(_OaCifpProcedure, "route_start").offset == 72
+assert getattr(_OaCifpProcedure, "route_count").offset == 80
+assert getattr(_OaCifpProcedure, "kind").offset == 88
+assert getattr(_OaCifpProcedure, "reserved").offset == 89
+assert getattr(_OaCifpRoute, "transition").offset == 0
+assert getattr(_OaCifpRoute, "first_line").offset == 16
+assert getattr(_OaCifpRoute, "leg_start").offset == 24
+assert getattr(_OaCifpRoute, "leg_count").offset == 32
+assert getattr(_OaCifpRoute, "route_type").offset == 40
+assert getattr(_OaCifpRoute, "reserved").offset == 41
+assert getattr(_OaCifpLeg, "meta").offset == 0
+assert getattr(_OaCifpLeg, "present").offset == 48
+assert getattr(_OaCifpLeg, "airport_ident").offset == 56
+assert getattr(_OaCifpLeg, "airport_region").offset == 72
+assert getattr(_OaCifpLeg, "ident").offset == 88
+assert getattr(_OaCifpLeg, "transition").offset == 104
+assert getattr(_OaCifpLeg, "rnp_code").offset == 120
+assert getattr(_OaCifpLeg, "fix").offset == 136
+assert getattr(_OaCifpLeg, "recommended_navaid").offset == 176
+assert getattr(_OaCifpLeg, "center_fix").offset == 216
+assert getattr(_OaCifpLeg, "sequence").offset == 256
+assert getattr(_OaCifpLeg, "description").offset == 260
+assert getattr(_OaCifpLeg, "kind").offset == 264
+assert getattr(_OaCifpLeg, "route_type").offset == 265
+assert getattr(_OaCifpLeg, "turn_direction").offset == 266
+assert getattr(_OaCifpLeg, "path_terminator").offset == 267
+assert getattr(_OaCifpLeg, "altitude_description").offset == 268
+assert getattr(_OaCifpLeg, "gnss_fms_indication").offset == 269
+assert getattr(_OaCifpLeg, "speed_limit_description").offset == 270
+assert getattr(_OaCifpLeg, "reserved0").offset == 271
+assert getattr(_OaCifpLeg, "arc_radius_nm").offset == 272
+assert getattr(_OaCifpLeg, "theta_deg").offset == 280
+assert getattr(_OaCifpLeg, "rho_nm").offset == 288
+assert getattr(_OaCifpLeg, "course_deg").offset == 296
+assert getattr(_OaCifpLeg, "distance_or_time_value").offset == 304
+assert getattr(_OaCifpLeg, "distance_or_time_kind").offset == 312
+assert getattr(_OaCifpLeg, "reserved1").offset == 313
+assert getattr(_OaCifpLeg, "altitude1").offset == 320
+assert getattr(_OaCifpLeg, "altitude2").offset == 328
+assert getattr(_OaCifpLeg, "transition_altitude").offset == 336
+assert getattr(_OaCifpLeg, "speed_limit_kt").offset == 344
+assert getattr(_OaCifpLeg, "reserved2").offset == 348
+assert getattr(_OaCifpLeg, "vertical_angle_deg").offset == 352
+assert getattr(_OaCifpContinuation, "meta").offset == 0
+assert getattr(_OaCifpContinuation, "owner_index").offset == 48
+assert getattr(_OaCifpContinuation, "text").offset == 56
+assert getattr(_OaCifpContinuation, "number").offset == 72
+assert getattr(_OaCifpContinuation, "application_type").offset == 73
+assert getattr(_OaCifpContinuation, "owner_kind").offset == 74
+assert getattr(_OaCifpContinuation, "reserved").offset == 75
+assert getattr(_OaCifpLevelOfService, "continuation_index").offset == 0
+assert getattr(_OaCifpLevelOfService, "name").offset == 8
+assert getattr(_OaCifpLevelOfService, "authorized").offset == 24
+assert getattr(_OaCifpLevelOfService, "reserved").offset == 25
+assert getattr(_OaCifpAirspace, "meta").offset == 0
+assert getattr(_OaCifpAirspace, "present").offset == 48
+assert getattr(_OaCifpAirspace, "icao_region").offset == 56
+assert getattr(_OaCifpAirspace, "designation").offset == 72
+assert getattr(_OaCifpAirspace, "name").offset == 88
+assert getattr(_OaCifpAirspace, "boundary_start").offset == 104
+assert getattr(_OaCifpAirspace, "boundary_count").offset == 112
+assert getattr(_OaCifpAirspace, "continuation_start").offset == 120
+assert getattr(_OaCifpAirspace, "continuation_count").offset == 128
+assert getattr(_OaCifpAirspace, "kind").offset == 136
+assert getattr(_OaCifpAirspace, "airspace_type").offset == 137
+assert getattr(_OaCifpAirspace, "classification").offset == 138
+assert getattr(_OaCifpAirspace, "multiple_code").offset == 139
+assert getattr(_OaCifpAirspace, "level").offset == 140
+assert getattr(_OaCifpAirspace, "time_code").offset == 141
+assert getattr(_OaCifpAirspace, "reserved").offset == 142
+assert getattr(_OaCifpAirspace, "lower").offset == 144
+assert getattr(_OaCifpAirspace, "lower_unit").offset == 152
+assert getattr(_OaCifpAirspace, "upper_unit").offset == 153
+assert getattr(_OaCifpAirspace, "reserved2").offset == 154
+assert getattr(_OaCifpAirspace, "upper").offset == 160
+assert getattr(_OaCifpBoundary, "position").offset == 0
+assert getattr(_OaCifpBoundary, "arc_origin").offset == 16
+assert getattr(_OaCifpBoundary, "sequence").offset == 32
+assert getattr(_OaCifpBoundary, "via").offset == 36
+assert getattr(_OaCifpBoundary, "end").offset == 37
+assert getattr(_OaCifpBoundary, "present").offset == 38
+assert getattr(_OaCifpBoundary, "reserved").offset == 39
+assert getattr(_OaCifpBoundary, "arc_distance_nm").offset == 40
+assert getattr(_OaCifpBoundary, "arc_bearing_deg").offset == 48
+assert getattr(_OaCifpBoundary, "source_line").offset == 56
+assert getattr(_OaCifpMora, "meta").offset == 0
+assert getattr(_OaCifpMora, "start_lat").offset == 48
+assert getattr(_OaCifpMora, "start_lon").offset == 50
+assert getattr(_OaCifpMora, "present_mask").offset == 52
+assert getattr(_OaCifpMora, "cells_ft").offset == 56
+assert getattr(_OaCifpHeader, "file_name").offset == 0
+assert getattr(_OaCifpHeader, "version").offset == 16
+assert getattr(_OaCifpHeader, "creation_date").offset == 32
+assert getattr(_OaCifpHeader, "creation_time").offset == 48
+assert getattr(_OaCifpHeader, "data_supplier").offset == 64
+assert getattr(_OaCifpHeader, "crc").offset == 80
+assert getattr(_OaCifpHeader, "record_length").offset == 96
+assert getattr(_OaCifpHeader, "reserved0").offset == 100
+assert getattr(_OaCifpHeader, "record_count").offset == 104
+assert getattr(_OaCifpHeader, "cycle_year").offset == 112
+assert getattr(_OaCifpHeader, "cycle_release").offset == 113
+assert getattr(_OaCifpHeader, "production_flag").offset == 114
+assert getattr(_OaCifpHeader, "crc_verified").offset == 115
+assert getattr(_OaCifpHeader, "reserved").offset == 116
+assert getattr(_OaCifpHeaderText, "text").offset == 0
+assert getattr(_OaCifpSectionCount, "section").offset == 0
+assert getattr(_OaCifpSectionCount, "count").offset == 16
+assert getattr(_OaCifpSectionCount, "supported").offset == 24
+assert getattr(_OaCifpSectionCount, "reserved").offset == 25
+assert getattr(_OaCifpCycleCount, "count").offset == 0
+assert getattr(_OaCifpCycleCount, "year").offset == 8
+assert getattr(_OaCifpCycleCount, "release").offset == 9
+assert getattr(_OaCifpCycleCount, "reserved").offset == 10
+assert getattr(_OaCifpError, "status").offset == 0
+assert getattr(_OaCifpError, "kind").offset == 4
+assert getattr(_OaCifpError, "line").offset == 8
+assert getattr(_OaCifpError, "first_column").offset == 16
+assert getattr(_OaCifpError, "last_column").offset == 20
+assert getattr(_OaCifpError, "limit").offset == 24
+assert getattr(_OaCifpError, "actual").offset == 32
+assert getattr(_OaCifpError, "previous").offset == 40
+assert getattr(_OaCifpError, "found").offset == 48
+assert getattr(_OaCifpError, "code").offset == 56
+assert getattr(_OaCifpError, "flags").offset == 60
+assert getattr(_OaCifpError, "field").offset == 64
+assert getattr(_OaCifpError, "value").offset == 96
+assert getattr(_OaCifpError, "reason").offset == 228
+assert getattr(_OaCifpError, "reserved").offset == 292
+assert getattr(_OaCifpCounts, "airports").offset == 0
+assert getattr(_OaCifpCounts, "runways").offset == 8
+assert getattr(_OaCifpCounts, "localizers").offset == 16
+assert getattr(_OaCifpCounts, "vhf_navaids").offset == 24
+assert getattr(_OaCifpCounts, "ndbs").offset == 32
+assert getattr(_OaCifpCounts, "waypoints").offset == 40
+assert getattr(_OaCifpCounts, "moras").offset == 48
+assert getattr(_OaCifpCounts, "airspaces").offset == 56
+assert getattr(_OaCifpCounts, "airways").offset == 64
+assert getattr(_OaCifpCounts, "airway_fixes").offset == 72
+assert getattr(_OaCifpCounts, "procedures").offset == 80
+assert getattr(_OaCifpCounts, "routes").offset == 88
+assert getattr(_OaCifpCounts, "legs").offset == 96
+assert getattr(_OaCifpCounts, "continuations").offset == 104
+assert getattr(_OaCifpCounts, "levels_of_service").offset == 112
+assert getattr(_OaCifpCounts, "boundaries").offset == 120
+assert getattr(_OaCifpCounts, "header_records").offset == 128
+assert getattr(_OaCifpCounts, "sections").offset == 136
+assert getattr(_OaCifpCounts, "cycles").offset == 144
+assert getattr(_OaCifpCounts, "errors").offset == 152
+assert getattr(_OaCifpCounts, "errors_dropped").offset == 160
+assert getattr(_OaCifpCounts, "strings_bytes").offset == 168
+assert getattr(_OaCifpCounts, "output_bytes").offset == 176
+assert getattr(_OaCifpCounts, "is_clean").offset == 184
+assert getattr(_OaCifpCounts, "reserved").offset == 185
+assert getattr(_OaCifpBuffers, "header").offset == 0
+assert getattr(_OaCifpBuffers, "header_capacity").offset == 8
+assert getattr(_OaCifpBuffers, "header_text").offset == 16
+assert getattr(_OaCifpBuffers, "header_text_capacity").offset == 24
+assert getattr(_OaCifpBuffers, "airports").offset == 32
+assert getattr(_OaCifpBuffers, "airports_capacity").offset == 40
+assert getattr(_OaCifpBuffers, "runways").offset == 48
+assert getattr(_OaCifpBuffers, "runways_capacity").offset == 56
+assert getattr(_OaCifpBuffers, "localizers").offset == 64
+assert getattr(_OaCifpBuffers, "localizers_capacity").offset == 72
+assert getattr(_OaCifpBuffers, "vhf_navaids").offset == 80
+assert getattr(_OaCifpBuffers, "vhf_navaids_capacity").offset == 88
+assert getattr(_OaCifpBuffers, "ndbs").offset == 96
+assert getattr(_OaCifpBuffers, "ndbs_capacity").offset == 104
+assert getattr(_OaCifpBuffers, "waypoints").offset == 112
+assert getattr(_OaCifpBuffers, "waypoints_capacity").offset == 120
+assert getattr(_OaCifpBuffers, "moras").offset == 128
+assert getattr(_OaCifpBuffers, "moras_capacity").offset == 136
+assert getattr(_OaCifpBuffers, "airspaces").offset == 144
+assert getattr(_OaCifpBuffers, "airspaces_capacity").offset == 152
+assert getattr(_OaCifpBuffers, "airways").offset == 160
+assert getattr(_OaCifpBuffers, "airways_capacity").offset == 168
+assert getattr(_OaCifpBuffers, "airway_fixes").offset == 176
+assert getattr(_OaCifpBuffers, "airway_fixes_capacity").offset == 184
+assert getattr(_OaCifpBuffers, "procedures").offset == 192
+assert getattr(_OaCifpBuffers, "procedures_capacity").offset == 200
+assert getattr(_OaCifpBuffers, "routes").offset == 208
+assert getattr(_OaCifpBuffers, "routes_capacity").offset == 216
+assert getattr(_OaCifpBuffers, "legs").offset == 224
+assert getattr(_OaCifpBuffers, "legs_capacity").offset == 232
+assert getattr(_OaCifpBuffers, "continuations").offset == 240
+assert getattr(_OaCifpBuffers, "continuations_capacity").offset == 248
+assert getattr(_OaCifpBuffers, "levels_of_service").offset == 256
+assert getattr(_OaCifpBuffers, "levels_of_service_capacity").offset == 264
+assert getattr(_OaCifpBuffers, "boundaries").offset == 272
+assert getattr(_OaCifpBuffers, "boundaries_capacity").offset == 280
+assert getattr(_OaCifpBuffers, "sections").offset == 288
+assert getattr(_OaCifpBuffers, "sections_capacity").offset == 296
+assert getattr(_OaCifpBuffers, "cycles").offset == 304
+assert getattr(_OaCifpBuffers, "cycles_capacity").offset == 312
+assert getattr(_OaCifpBuffers, "errors").offset == 320
+assert getattr(_OaCifpBuffers, "errors_capacity").offset == 328
+assert getattr(_OaCifpBuffers, "strings").offset == 336
+assert getattr(_OaCifpBuffers, "strings_capacity").offset == 344
+
 assert ctypes.sizeof(_AsterixPosition) == 12 and ctypes.alignment(_AsterixPosition) == 4
 assert ctypes.sizeof(_AsterixVertical) == 12 and ctypes.alignment(_AsterixVertical) == 4
 assert ctypes.sizeof(_AsterixRecord) == 192 and ctypes.alignment(_AsterixRecord) == 8
@@ -131,6 +1086,11 @@ assert _AsterixRecord.present_frn_mask.offset == 8 and _AsterixRecord.positions.
 assert _AsterixRecord.vertical.offset == 120
 assert ctypes.sizeof(_AsterixCounts) == 32 and _AsterixCounts.consumed_bytes.offset == 8
 assert ctypes.sizeof(_AsterixError) == 32 and _AsterixError.offset.offset == 24
+assert ctypes.sizeof(_NotamRow) == 272 and ctypes.alignment(_NotamRow) == 8
+assert ctypes.sizeof(_NotamFeature) == 56 and ctypes.alignment(_NotamFeature) == 8
+assert ctypes.sizeof(_NotamPolygon) == 16 and ctypes.alignment(_NotamPolygon) == 4
+assert ctypes.sizeof(_NotamVertex) == 8 and ctypes.sizeof(_NotamUnknownPath) == 184
+assert ctypes.sizeof(_NotamSummary) == 512 and ctypes.sizeof(_NotamBuffers) == 96
 
 
 _STATUS_NAMES: Final[dict[int, str]] = {
@@ -169,6 +1129,13 @@ _STATUS_NAMES: Final[dict[int, str]] = {
     80: "GRIB2_FORMAT",
     81: "GRIB2_UNSUPPORTED",
     82: "GRIB2_LIMIT",
+    42: "NOTAM_INPUT_LIMIT",
+    43: "NOTAM_XML_REFUSAL",
+    44: "NOTAM_DOCUMENT_REFUSAL",
+    45: "NOTAM_ELEMENT_LIMIT",
+    46: "NOTAM_CAPACITY",
+    47: "NOTAM_SEALED_DROP",
+    48: "NOTAM_MEMORY_BUDGET",
 }
 
 
@@ -333,6 +1300,16 @@ class AsterixError(OpenAtcaError):
         super().__init__(status, message=f"ASTERIX error kind {kind}")
 
 
+class NotamError(OpenAtcaError):
+    """Whole-document or binding refusal from the FAA FNS AIXM 5.1 profile decoder."""
+
+    def __init__(self, summary: NotamSummary, code: int) -> None:
+        self.summary = summary
+        self.refusal_kind = summary.refusal_kind
+        self.source_offset = summary.source_offset
+        super().__init__(code, message=f"NOTAM refusal kind {self.refusal_kind}")
+
+
 @dataclass(frozen=True, slots=True)
 class Grib2Field:
     discipline: int
@@ -387,6 +1364,130 @@ class ZipEntry:
 @dataclass(frozen=True, slots=True)
 class ZipResult:
     entries: tuple[ZipEntry, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class NotamRow:
+    """One decoded FNS event row; time is Unix milliseconds and geometry is signed E7."""
+
+    present: int
+    errors: int
+    issued_ms: int
+    start_ms: int
+    end_ms: int
+    canceled_ms: int
+    flags: int
+    number: int
+    ref_number: int
+    sched_off: int
+    sched_len: int
+    text_off: int
+    text_len: int
+    radius_m: int
+    poly_first: int
+    poly_count: int
+    feature_first: int
+    feature_count: int
+    feat_mask: int
+    lat_e7: int
+    lon_e7: int
+    floor_ft: int
+    ceil_ft: int
+    year: int
+    ref_year: int
+    scenario: int
+    ntype: int
+    class_code: int
+    traffic: int
+    purpose: int
+    scope: int
+    floor_ref: int
+    ceil_ref: int
+    feat_kind: int
+    interpretation: int
+    slice_meta: int
+    slice_errors: int
+    sequence_number: int
+    correction_number: int
+    event_id: bytes
+    series: bytes
+    ref_series: bytes
+    xover: bytes
+    feat_desig: bytes
+    runway: bytes
+    airport: bytes
+    navaid: bytes
+    unit: bytes
+    selection: bytes
+    location: bytes
+    fir: bytes
+    icao_location: bytes
+    airport_icao: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class NotamFeature:
+    kind: int
+    time_kind: int
+    interpretation: int
+    meta: int
+    time_meta: int
+    errors: int
+    begin_ms: int
+    end_ms: int
+    sequence_number: int
+    correction_number: int
+    designator: bytes
+    designator_len: int
+    icao: bytes
+    icao_len: int
+
+
+@dataclass(frozen=True, slots=True)
+class NotamPolygon:
+    first_vertex: int
+    vertex_count: int
+    feature_index: int
+    kind: int
+
+
+@dataclass(frozen=True, slots=True)
+class NotamVertex:
+    lat_e7: int
+    lon_e7: int
+
+
+@dataclass(frozen=True, slots=True)
+class NotamUnknownPath:
+    hash: int
+    count: int
+    is_attribute: bool
+    text: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class NotamSummary:
+    status: int
+    refusal_kind: int
+    source_offset: int | None
+    unknown_elements: int
+    unknown_attributes: int
+    unknown_overflow: int
+    sealed_dropped: int
+    field_errors: tuple[int, ...]
+    rejects: tuple[int, ...]
+    features: tuple[int, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class NotamResult:
+    row: NotamRow | None
+    features: tuple[NotamFeature, ...]
+    polygons: tuple[NotamPolygon, ...]
+    vertices: tuple[NotamVertex, ...]
+    strings: bytes
+    unknown_paths: tuple[NotamUnknownPath, ...]
+    summary: NotamSummary
 
 
 @dataclass(frozen=True, slots=True)
@@ -807,6 +1908,373 @@ class AsterixBindings:
                              counts.consumed_bytes)
 
 
+class NotamBindings:
+    """Bounded one-document FAA FNS AIXM 5.1 profile decoder."""
+
+_CIFP_ROW_SIZES: Final[tuple[tuple[str, int], ...]] = (
+    ("header", 120), ("header_text", 16), ("airports", 192), ("runways", 184),
+    ("localizers", 208), ("vhf_navaids", 232), ("ndbs", 208), ("waypoints", 216),
+    ("moras", 176), ("airspaces", 168), ("airways", 64), ("airway_fixes", 176),
+    ("procedures", 96), ("routes", 48), ("legs", 360), ("continuations", 80),
+    ("levels_of_service", 32), ("boundaries", 64), ("sections", 32), ("cycles", 16),
+    ("errors", 296),
+)
+
+
+
+@dataclass(frozen=True, slots=True)
+class CifpCounts:
+    """Required fixed-table and string-arena sizes from one CIFP parse."""
+
+    airports: int
+    runways: int
+    localizers: int
+    vhf_navaids: int
+    ndbs: int
+    waypoints: int
+    moras: int
+    airspaces: int
+    airways: int
+    airway_fixes: int
+    procedures: int
+    routes: int
+    legs: int
+    continuations: int
+    levels_of_service: int
+    boundaries: int
+    header_records: int
+    sections: int
+    cycles: int
+    errors: int
+    errors_dropped: int
+    strings_bytes: int
+    output_bytes: int
+    is_clean: bool
+
+
+@dataclass(frozen=True, slots=True)
+class CifpText:
+    """UTF-8 field value and its original offset in the call's immutable string arena."""
+
+    text: str
+    offset: int
+    length: int
+
+    def __str__(self) -> str:
+        return self.text
+
+
+_CIFP_PUBLIC_RECORD_TYPES: dict[type[ctypes.Structure], type] = {}
+_nested_ctypes = (
+    _OaCifpMeta, _OaCifpAltitude, _OaCifpFixRef, _OaCifpPosition,
+    *tuple(cls for _, cls in _CIFP_ROW_TYPES),
+)
+_CIFP_PUBLIC_NAMES = {
+    _ctype: ("CifpDiagnostic" if _ctype is _OaCifpError else
+             _ctype.__name__.removeprefix("_Oa"))
+    for _ctype in _nested_ctypes
+}
+
+
+def _cifp_public_annotation(ctype: type) -> str:
+    if ctype is _OaCifpSpan:
+        return "CifpText | None"
+    if ctype in _CIFP_PUBLIC_NAMES:
+        return _CIFP_PUBLIC_NAMES[ctype]
+    if issubclass(ctype, ctypes.Array):
+        if ctype._type_ is ctypes.c_uint8:
+            return "bytes"
+        return f"tuple[{_cifp_public_annotation(ctype._type_)}, ...]"
+    if ctype is ctypes.c_double:
+        return "float"
+    if ctype in _CIFP_CTYPES.values():
+        return "int"
+    raise TypeError(f"unsupported CIFP public field type: {ctype!r}")
+
+
+for _ctype in _nested_ctypes:
+    _public_fields = []
+    for _field, _field_type in _ctype._fields_:
+        if _field.startswith("reserved") or _field == "reserved":
+            continue
+        _public_fields.append((
+            "class_codes" if _field == "class" else _field,
+            _cifp_public_annotation(_field_type),
+        ))
+    _public_class = make_dataclass(
+        _CIFP_PUBLIC_NAMES[_ctype], _public_fields, frozen=True, slots=True,
+        namespace={"__module__": __name__},
+    )
+    _CIFP_PUBLIC_RECORD_TYPES[_ctype] = _public_class
+    globals()[_CIFP_PUBLIC_NAMES[_ctype]] = _public_class
+
+_CIFP_ROW_CLASS_TYPES = tuple(
+    _CIFP_PUBLIC_RECORD_TYPES[ctype] for _, ctype in _CIFP_ROW_TYPES
+)
+CifpRow: TypeAlias = Union[_CIFP_ROW_CLASS_TYPES]
+
+
+def _cifp_value(value: object, strings: bytes) -> object:
+    if isinstance(value, _OaCifpSpan):
+        offset, length = int(value.offset), int(value.length)
+        if offset == (1 << 64) - 1:
+            if length != 0:
+                raise RuntimeError("native CIFP output used a missing span with nonzero length")
+            return None
+        end = offset + length
+        if end < offset or end > len(strings):
+            raise RuntimeError("native CIFP output span exceeds its string arena")
+        try:
+            text = strings[offset:end].decode("utf-8", errors="strict")
+        except UnicodeDecodeError as exc:
+            raise RuntimeError("native CIFP output contains invalid UTF-8") from exc
+        return CifpText(text, offset, length)
+    if isinstance(value, ctypes.Structure):
+        cls = _CIFP_PUBLIC_RECORD_TYPES.get(type(value))
+        if cls is None:
+            raise RuntimeError(f"no immutable Python projection for {type(value).__name__}")
+        fields = {}
+        for name, _ in value._fields_:
+            if name.startswith("reserved") or name == "reserved":
+                continue
+            fields["class_codes" if name == "class" else name] = _cifp_value(getattr(value, name), strings)
+        return cls(**fields)
+    if isinstance(value, ctypes.Array):
+        if value._type_ is ctypes.c_uint8:
+            return bytes(value)
+        return tuple(_cifp_value(item, strings) for item in value)
+    if isinstance(value, (int, float)):
+        return value
+    if isinstance(value, (ctypes._SimpleCData,)):
+        return value.value
+    raise RuntimeError(f"unsupported CIFP ctypes value {type(value).__name__}")
+
+
+@dataclass(frozen=True, slots=True)
+class CifpResult:
+    """Decoded immutable record families; all string fields retain value and source span."""
+
+    counts: CifpCounts
+    clean: bool
+    strings: bytes
+    header: tuple[CifpHeader, ...]
+    header_text: tuple[CifpHeaderText, ...]
+    airports: tuple[CifpAirport, ...]
+    runways: tuple[CifpRunway, ...]
+    localizers: tuple[CifpLocalizer, ...]
+    vhf_navaids: tuple[CifpVhfNavaid, ...]
+    ndbs: tuple[CifpNdb, ...]
+    waypoints: tuple[CifpWaypoint, ...]
+    moras: tuple[CifpMora, ...]
+    airspaces: tuple[CifpAirspace, ...]
+    airways: tuple[CifpAirway, ...]
+    airway_fixes: tuple[CifpAirwayFix, ...]
+    procedures: tuple[CifpProcedure, ...]
+    routes: tuple[CifpRoute, ...]
+    legs: tuple[CifpLeg, ...]
+    continuations: tuple[CifpContinuation, ...]
+    levels_of_service: tuple[CifpLevelOfService, ...]
+    boundaries: tuple[CifpBoundary, ...]
+    sections: tuple[CifpSectionCount, ...]
+    cycles: tuple[CifpCycleCount, ...]
+    errors: tuple[CifpDiagnostic, ...]
+
+    @property
+    def tables(self) -> tuple[tuple[str, tuple[CifpRow, ...]], ...]:
+        return tuple((name, getattr(self, name)) for name, _ in _CIFP_ROW_TYPES)
+
+    def table(self, name: str) -> tuple[CifpRow, ...]:
+        if name not in {key for key, _ in _CIFP_ROW_TYPES}:
+            raise KeyError(name)
+        value = getattr(self, name)
+        if not isinstance(value, tuple):
+            raise KeyError(name)
+        return value
+
+
+class CifpError(OpenAtcaError):
+    """Structured refusal; ``code`` remains the generic status and diagnostic_code the CIFP code."""
+
+    def __init__(self, detail: _CifpError) -> None:
+        self.kind = int(detail.kind)
+        self.status = int(detail.status)
+        self.line = int(detail.line)
+        self.first_column = int(detail.first_column)
+        self.last_column = int(detail.last_column)
+        self.limit = int(detail.limit)
+        self.actual = int(detail.actual)
+        self.previous = int(detail.previous)
+        self.found = int(detail.found)
+        self.diagnostic_code = int(detail.code)
+        self.flags = int(detail.flags)
+        self.field = bytes(detail.field).split(b"\0", 1)[0]
+        self.value = bytes(detail.value).split(b"\0", 1)[0]
+        self.reason = bytes(detail.reason).split(b"\0", 1)[0]
+        super().__init__(int(detail.status), message=self.reason.decode("utf-8", "replace"))
+
+
+class CifpBindings:
+    """Bounded binding for the existing FAA CIFP decoder and its approved profiles."""
+    def __init__(self, library: ctypes.CDLL) -> None:
+        self._library = library
+        byte_p = ctypes.POINTER(ctypes.c_uint8)
+        library.oa_notam_fns_decode.argtypes = [byte_p, ctypes.c_uint64, ctypes.c_int64,
+            ctypes.c_int64, ctypes.POINTER(_NotamBuffers), ctypes.POINTER(_NotamSummary),
+            ctypes.POINTER(_ErrorInfo)]
+        library.oa_notam_fns_decode.restype = ctypes.c_uint32
+
+    @staticmethod
+    def _summary(value: _NotamSummary) -> NotamSummary:
+        offset = int(value.source_offset)
+        return NotamSummary(
+            status=int(value.status), refusal_kind=int(value.refusal_kind),
+            source_offset=None if offset == (1 << 64) - 1 else offset,
+            unknown_elements=int(value.unknown_elements),
+            unknown_attributes=int(value.unknown_attributes),
+            unknown_overflow=int(value.unknown_overflow),
+            sealed_dropped=int(value.sealed_dropped),
+            field_errors=tuple(int(v) for v in value.field_errors),
+            rejects=tuple(int(v) for v in value.rejects),
+            features=tuple(int(v) for v in value.features),
+        )
+
+    @staticmethod
+    def _row(value: _NotamRow) -> NotamRow:
+        byte_fields = {"event_id": 16, "series": 12, "ref_series": 12, "xover": 16,
+                       "feat_desig": 12, "runway": 12, "airport": 8, "navaid": 8,
+                       "unit": 8, "selection": 5, "location": 4, "fir": 4,
+                       "icao_location": 4, "airport_icao": 4}
+        values: dict[str, int | bytes] = {}
+        for name, _field_type in _NotamRow._fields_:
+            raw = getattr(value, name)
+            values[name] = bytes(raw) if name in byte_fields else int(raw)
+        return NotamRow(**values)  # type: ignore[arg-type]
+
+    def decode(self, data: bytes, *, drop_window_ms: tuple[int, int]) -> NotamResult:
+        """Decode bytes with an explicit half-open issue/cancellation filter in Unix ms.
+
+        Equal endpoints deliberately select an empty interval. Omitting the filter is an error;
+        tools that open protected files must still apply their normal source-path guards.
+        """
+        if not isinstance(data, bytes):
+            raise TypeError("data must be bytes")
+        if len(data) > _MAX_NOTAM_INPUT_BYTES:
+            raise ValueError("data exceeds the NOTAM profile input limit")
+        if (not isinstance(drop_window_ms, tuple) or len(drop_window_ms) != 2 or
+                any(isinstance(value, bool) or not isinstance(value, int)
+                    for value in drop_window_ms)):
+            raise TypeError("drop_window_ms must be a pair of integer Unix-millisecond endpoints")
+        drop_from, drop_to = drop_window_ms
+        if drop_from < -(1 << 63) or drop_from >= (1 << 63) or drop_to < -(1 << 63) or drop_to >= (1 << 63):
+            raise ValueError("drop-window endpoints must fit signed 64-bit milliseconds")
+        source = (ctypes.c_uint8 * len(data)).from_buffer_copy(data) if data else None
+        summary_raw, generic = _NotamSummary(), _ErrorInfo()
+        call = self._library.oa_notam_fns_decode
+        status = int(call(source, len(data), drop_from, drop_to, None,
+                          ctypes.byref(summary_raw), ctypes.byref(generic)))
+        summary = self._summary(summary_raw)
+        if status == 47:
+            return NotamResult(None, (), (), (), b"", (), summary)
+        if status != 6:
+            raise NotamError(summary, status)
+        counts = (int(summary_raw.row_count), int(summary_raw.feature_count),
+                  int(summary_raw.polygon_count), int(summary_raw.vertex_count),
+                  int(summary_raw.string_bytes), int(summary_raw.unknown_path_count))
+        if (counts[0] > 1 or counts[1] > 50_000 or counts[2] > 50_000 or
+                counts[3] > len(data) // 3 or counts[4] > 2 * _MAX_NOTAM_TEXT_BYTES or
+                counts[5] > _MAX_NOTAM_UNKNOWN_PATHS):
+            raise RuntimeError("native NOTAM counts exceeded the documented bounded profile")
+        rows = (_NotamRow * counts[0])() if counts[0] else None
+        features = (_NotamFeature * counts[1])() if counts[1] else None
+        polygons = (_NotamPolygon * counts[2])() if counts[2] else None
+        vertices = (_NotamVertex * counts[3])() if counts[3] else None
+        strings = (ctypes.c_uint8 * counts[4])() if counts[4] else None
+        unknown = (_NotamUnknownPath * counts[5])() if counts[5] else None
+        buffers = _NotamBuffers(
+            rows, counts[0], features, counts[1], polygons, counts[2], vertices, counts[3],
+            strings, counts[4], unknown, counts[5])
+        status = int(call(source, len(data), drop_from, drop_to, ctypes.byref(buffers),
+                          ctypes.byref(summary_raw), ctypes.byref(generic)))
+        summary = self._summary(summary_raw)
+        if status != 0:
+            raise NotamError(summary, status)
+        row = self._row(rows[0]) if rows else None
+        feature_rows = tuple(NotamFeature(
+            int(value.kind), int(value.time_kind), int(value.interpretation), int(value.meta),
+            int(value.time_meta), int(value.errors), int(value.begin_ms), int(value.end_ms),
+            int(value.sequence_number), int(value.correction_number), bytes(value.designator),
+            int(value.designator_len), bytes(value.icao), int(value.icao_len)) for value in features or ())
+        polygon_rows = tuple(NotamPolygon(int(value.first_vertex), int(value.vertex_count),
+            int(value.feature_index), int(value.kind)) for value in polygons or ())
+        vertex_rows = tuple(NotamVertex(int(value.lat_e7), int(value.lon_e7)) for value in vertices or ())
+        string_bytes = bytes(strings) if strings is not None else b""
+        unknown_rows = tuple(NotamUnknownPath(int(value.hash), int(value.count),
+            bool(value.is_attribute), bytes(value.text[:value.text_len])) for value in unknown or ())
+        return NotamResult(row, feature_rows, polygon_rows, vertex_rows, string_bytes,
+                           unknown_rows, summary)
+
+        library.oa_cifp_parse.argtypes = [byte_p, ctypes.c_uint64, byte_p, ctypes.c_uint64,
+            ctypes.POINTER(_CifpBuffers), ctypes.POINTER(_CifpCounts),
+            ctypes.POINTER(_CifpError), ctypes.POINTER(_ErrorInfo)]
+        library.oa_cifp_parse.restype = ctypes.c_uint32
+
+    def parse(self, data: bytes, *, source: str = "<bytes>") -> CifpResult:
+        if not isinstance(data, bytes):
+            raise TypeError("data must be bytes")
+        if len(data) > _MAX_CIFP_INPUT_BYTES:
+            raise ValueError("data exceeds the CIFP input bound")
+        if not isinstance(source, str):
+            raise TypeError("source must be str")
+        source_bytes = source.encode("utf-8", errors="strict")
+        if len(source_bytes) > 256:
+            raise ValueError("source exceeds the CIFP source-label bound")
+        input_buffer = (ctypes.c_uint8 * len(data)).from_buffer_copy(data) if data else None
+        source_buffer = ((ctypes.c_uint8 * len(source_bytes)).from_buffer_copy(source_bytes)
+                         if source_bytes else None)
+        counts, detail, generic = _CifpCounts(), _CifpError(), _ErrorInfo()
+        query_buffers = _CifpBuffers()
+        status = int(self._library.oa_cifp_parse(input_buffer, len(data), source_buffer,
+            len(source_bytes), ctypes.byref(query_buffers), ctypes.byref(counts),
+            ctypes.byref(detail), ctypes.byref(generic)))
+        if status not in (0, 6):
+            raise CifpError(detail)
+        count_values = {name: int(getattr(counts, name)) for name in _CIFP_COUNT_NAMES}
+        if int(counts.output_bytes) > _MAX_CIFP_OUTPUT_BYTES:
+            raise MemoryError("CIFP output exceeds the documented 768 MiB bound")
+        owners: list[object] = []
+        table_buffers: list[tuple[str, type[ctypes.Structure], int, object | None]] = []
+        buffers = _CifpBuffers()
+        for name, row_type in _CIFP_ROW_TYPES:
+            count = (1 if name == "header" else
+                     int(counts.header_records) if name == "header_text" else
+                     int(getattr(counts, name)))
+            storage = (row_type * count)() if count else None
+            owners.append(storage)
+            setattr(buffers, name, storage)
+            setattr(buffers, f"{name}_capacity", count)
+            table_buffers.append((name, row_type, count, storage))
+        string_storage = (ctypes.c_uint8 * int(counts.strings_bytes))() if counts.strings_bytes else None
+        owners.append(string_storage)
+        buffers.strings = string_storage
+        buffers.strings_capacity = int(counts.strings_bytes)
+        status = int(self._library.oa_cifp_parse(input_buffer, len(data), source_buffer,
+            len(source_bytes), ctypes.byref(buffers), ctypes.byref(counts),
+            ctypes.byref(detail), ctypes.byref(generic)))
+        if status:
+            raise CifpError(detail)
+        strings = ctypes.string_at(string_storage, int(counts.strings_bytes)) if string_storage else b""
+        tables = {}
+        for name, row_type, count, storage in table_buffers:
+            rows = tuple(_cifp_value(storage[index], strings) for index in range(count)) if storage else ()
+            tables[name] = rows
+        typed_counts = CifpCounts(**count_values, is_clean=bool(counts.is_clean))
+        return CifpResult(
+            counts=typed_counts,
+            clean=bool(counts.is_clean),
+            strings=strings,
+            **tables,
+        )
+
 class Polygon:
     """Immutable prepared WGS-84 geodesic-edge polygon with explicit native handle lifetime."""
 
@@ -1134,7 +2602,9 @@ class Geodesy:
         self.archives = Archives(library)
         self.asterix = AsterixBindings(library)
         self.grib2 = Grib2Bindings(library)
+        self.notams = NotamBindings(library)
 
+        self.cifp = CifpBindings(library)
     def _bind(self) -> None:
         lib = self._library
         lib.oa_core_abi_version.argtypes = []
@@ -1500,6 +2970,12 @@ __all__ = [
     "AsterixRecord",
     "AsterixResult",
     "AsterixVertical",
+    "CifpBindings",
+    "CifpCounts",
+    "CifpError",
+    "CifpResult",
+    "CifpRow",
+    "CifpText",
     "CsvField",
     "Compression",
     "CsvResult",
@@ -1533,3 +3009,5 @@ __all__ = [
     "XmlText",
     "load",
 ]
+
+__all__.extend(_CIFP_PUBLIC_NAMES.values())

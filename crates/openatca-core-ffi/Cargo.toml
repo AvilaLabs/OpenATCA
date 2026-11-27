@@ -40,7 +40,13 @@ oa-zip = { path = "../oa-zip" }
 oa-deflate = { path = "../oa-deflate" }
 # F1a: bounded metadata-only tar facade delegates parsing to the existing streaming reader.
 oa-tar = { path = "../oa-tar" }
+# F1a: bounded FNS AIXM NOTAM binding delegates decoding to the existing profile decoder.
+oa-notam = { path = "../oa-notam" }
+# F1a: the caller supplies an explicit neutral interval; tools remain responsible for their own sealed-data policy.
+oa-time-window = { path = "../oa-time-window" }
 # F1a: fixed C/ctypes projection delegates bounded decode to the existing ASTERIX core.
 oa-asterix = { path = "../oa-asterix" }
 # F1a: the GRIB2 binding projects the existing bounded Preview decoder; it adds no decoder.
 oa-grib2 = { path = "../oa-grib2" }
+# F1a: the CIFP binding projects the existing FAA ARINC 424-18 decoder only.
+oa-arinc424 = { path = "../oa-arinc424" }

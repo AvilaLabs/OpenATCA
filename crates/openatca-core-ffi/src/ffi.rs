@@ -2,7 +2,18 @@
 #![allow(unsafe_code)] // RULESET A0: the sole unsafe module of openatca-core-ffi.
 
 use crate::formats::asterix::{self, OaAsterixCounts, OaAsterixError, OaAsterixRecord};
+use crate::formats::cifp::{
+    self, CifpFailure, OaCifpAirport, OaCifpAirspace, OaCifpAirway, OaCifpAirwayFix,
+    OaCifpBoundary, OaCifpContinuation, OaCifpCounts, OaCifpCycleCount, OaCifpError, OaCifpHeader,
+    OaCifpHeaderText, OaCifpLeg, OaCifpLevelOfService, OaCifpLocalizer, OaCifpMora, OaCifpNdb,
+    OaCifpProcedure, OaCifpRoute, OaCifpRunway, OaCifpSectionCount, OaCifpVhfNavaid,
+    OaCifpWaypoint,
+};
 use crate::formats::grib2::{self as grib2, AdapterError as Grib2AdapterError, OaGrib2Field};
+use crate::formats::notam::{
+    self, OaNotamFeature, OaNotamPolygon, OaNotamRow, OaNotamSummary, OaNotamUnknownPath,
+    OaNotamVertex,
+};
 use crate::formats::zip::{self, OaZipEntry, ZipAdapterError};
 use crate::text;
 use oa_asterix::{AsterixError, ErrorKind as AsterixErrorKind, NO_ITEM, NO_OFFSET, NO_RECORD};
@@ -100,8 +111,125 @@ pub struct OaTarEntry {
     pub reserved: [u8; 7],
 }
 
+/// Caller-owned output regions for one provisional FAA CIFP decode. Every capacity is in rows,
+/// except `strings_capacity`, which is bytes. A zero-capacity query may pass all pointers null.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct OaCifpBuffers {
+    pub header: *mut OaCifpHeader,
+    pub header_capacity: u64,
+    pub header_text: *mut OaCifpHeaderText,
+    pub header_text_capacity: u64,
+    pub airports: *mut OaCifpAirport,
+    pub airports_capacity: u64,
+    pub runways: *mut OaCifpRunway,
+    pub runways_capacity: u64,
+    pub localizers: *mut OaCifpLocalizer,
+    pub localizers_capacity: u64,
+    pub vhf_navaids: *mut OaCifpVhfNavaid,
+    pub vhf_navaids_capacity: u64,
+    pub ndbs: *mut OaCifpNdb,
+    pub ndbs_capacity: u64,
+    pub waypoints: *mut OaCifpWaypoint,
+    pub waypoints_capacity: u64,
+    pub moras: *mut OaCifpMora,
+    pub moras_capacity: u64,
+    pub airspaces: *mut OaCifpAirspace,
+    pub airspaces_capacity: u64,
+    pub airways: *mut OaCifpAirway,
+    pub airways_capacity: u64,
+    pub airway_fixes: *mut OaCifpAirwayFix,
+    pub airway_fixes_capacity: u64,
+    pub procedures: *mut OaCifpProcedure,
+    pub procedures_capacity: u64,
+    pub routes: *mut OaCifpRoute,
+    pub routes_capacity: u64,
+    pub legs: *mut OaCifpLeg,
+    pub legs_capacity: u64,
+    pub continuations: *mut OaCifpContinuation,
+    pub continuations_capacity: u64,
+    pub levels_of_service: *mut OaCifpLevelOfService,
+    pub levels_of_service_capacity: u64,
+    pub boundaries: *mut OaCifpBoundary,
+    pub boundaries_capacity: u64,
+    pub sections: *mut OaCifpSectionCount,
+    pub sections_capacity: u64,
+    pub cycles: *mut OaCifpCycleCount,
+    pub cycles_capacity: u64,
+    pub errors: *mut OaCifpError,
+    pub errors_capacity: u64,
+    pub strings: *mut u8,
+    pub strings_capacity: u64,
+}
+const _: () = assert!(core::mem::size_of::<OaCifpBuffers>() == 352);
+const _: () = assert!(core::mem::align_of::<OaCifpBuffers>() == 8);
+const _: () = assert!(core::mem::offset_of!(OaCifpBuffers, header) == 0);
+const _: () = assert!(core::mem::offset_of!(OaCifpBuffers, header_capacity) == 8);
+const _: () = assert!(core::mem::offset_of!(OaCifpBuffers, header_text) == 16);
+const _: () = assert!(core::mem::offset_of!(OaCifpBuffers, header_text_capacity) == 24);
+const _: () = assert!(core::mem::offset_of!(OaCifpBuffers, airports) == 32);
+const _: () = assert!(core::mem::offset_of!(OaCifpBuffers, airports_capacity) == 40);
+const _: () = assert!(core::mem::offset_of!(OaCifpBuffers, runways) == 48);
+const _: () = assert!(core::mem::offset_of!(OaCifpBuffers, runways_capacity) == 56);
+const _: () = assert!(core::mem::offset_of!(OaCifpBuffers, localizers) == 64);
+const _: () = assert!(core::mem::offset_of!(OaCifpBuffers, localizers_capacity) == 72);
+const _: () = assert!(core::mem::offset_of!(OaCifpBuffers, vhf_navaids) == 80);
+const _: () = assert!(core::mem::offset_of!(OaCifpBuffers, vhf_navaids_capacity) == 88);
+const _: () = assert!(core::mem::offset_of!(OaCifpBuffers, ndbs) == 96);
+const _: () = assert!(core::mem::offset_of!(OaCifpBuffers, ndbs_capacity) == 104);
+const _: () = assert!(core::mem::offset_of!(OaCifpBuffers, waypoints) == 112);
+const _: () = assert!(core::mem::offset_of!(OaCifpBuffers, waypoints_capacity) == 120);
+const _: () = assert!(core::mem::offset_of!(OaCifpBuffers, moras) == 128);
+const _: () = assert!(core::mem::offset_of!(OaCifpBuffers, moras_capacity) == 136);
+const _: () = assert!(core::mem::offset_of!(OaCifpBuffers, airspaces) == 144);
+const _: () = assert!(core::mem::offset_of!(OaCifpBuffers, airspaces_capacity) == 152);
+const _: () = assert!(core::mem::offset_of!(OaCifpBuffers, airways) == 160);
+const _: () = assert!(core::mem::offset_of!(OaCifpBuffers, airways_capacity) == 168);
+const _: () = assert!(core::mem::offset_of!(OaCifpBuffers, airway_fixes) == 176);
+const _: () = assert!(core::mem::offset_of!(OaCifpBuffers, airway_fixes_capacity) == 184);
+const _: () = assert!(core::mem::offset_of!(OaCifpBuffers, procedures) == 192);
+const _: () = assert!(core::mem::offset_of!(OaCifpBuffers, procedures_capacity) == 200);
+const _: () = assert!(core::mem::offset_of!(OaCifpBuffers, routes) == 208);
+const _: () = assert!(core::mem::offset_of!(OaCifpBuffers, routes_capacity) == 216);
+const _: () = assert!(core::mem::offset_of!(OaCifpBuffers, legs) == 224);
+const _: () = assert!(core::mem::offset_of!(OaCifpBuffers, legs_capacity) == 232);
+const _: () = assert!(core::mem::offset_of!(OaCifpBuffers, continuations) == 240);
+const _: () = assert!(core::mem::offset_of!(OaCifpBuffers, continuations_capacity) == 248);
+const _: () = assert!(core::mem::offset_of!(OaCifpBuffers, levels_of_service) == 256);
+const _: () = assert!(core::mem::offset_of!(OaCifpBuffers, levels_of_service_capacity) == 264);
+const _: () = assert!(core::mem::offset_of!(OaCifpBuffers, boundaries) == 272);
+const _: () = assert!(core::mem::offset_of!(OaCifpBuffers, boundaries_capacity) == 280);
+const _: () = assert!(core::mem::offset_of!(OaCifpBuffers, sections) == 288);
+const _: () = assert!(core::mem::offset_of!(OaCifpBuffers, sections_capacity) == 296);
+const _: () = assert!(core::mem::offset_of!(OaCifpBuffers, cycles) == 304);
+const _: () = assert!(core::mem::offset_of!(OaCifpBuffers, cycles_capacity) == 312);
+const _: () = assert!(core::mem::offset_of!(OaCifpBuffers, errors) == 320);
+const _: () = assert!(core::mem::offset_of!(OaCifpBuffers, errors_capacity) == 328);
+const _: () = assert!(core::mem::offset_of!(OaCifpBuffers, strings) == 336);
+const _: () = assert!(core::mem::offset_of!(OaCifpBuffers, strings_capacity) == 344);
+
 const _: () = assert!(core::mem::size_of::<OaTarEntry>() == 48);
 const _: () = assert!(core::mem::align_of::<OaTarEntry>() == 8);
+
+/// Caller-owned output slices for one FNS AIXM NOTAM decode.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct OaNotamBuffers {
+    pub row: *mut OaNotamRow,
+    pub row_capacity: u64,
+    pub features: *mut OaNotamFeature,
+    pub feature_capacity: u64,
+    pub polygons: *mut OaNotamPolygon,
+    pub polygon_capacity: u64,
+    pub vertices: *mut OaNotamVertex,
+    pub vertex_capacity: u64,
+    pub strings: *mut u8,
+    pub string_capacity: u64,
+    pub unknown_paths: *mut OaNotamUnknownPath,
+    pub unknown_path_capacity: u64,
+}
+const _: () = assert!(core::mem::size_of::<OaNotamBuffers>() == 96);
+const _: () = assert!(core::mem::align_of::<OaNotamBuffers>() == 8);
 
 fn map_tar_error(error: TarError) -> Failure {
     match error {
@@ -2588,6 +2716,581 @@ pub unsafe extern "C" fn oa_asterix_decode_block(
             parse_error,
             asterix_error_record(OA_STATUS_INTERNAL_PANIC, OA_AST_E_INTERNAL_PANIC),
         );
+    }
+    status
+}
+
+fn write_notam_summary(pointer: *mut OaNotamSummary, value: OaNotamSummary) {
+    // SAFETY: the public entry point checks non-null; the caller promises aligned writable storage.
+    unsafe { pointer.write(value) };
+}
+
+fn notam_error(code: u32, location_kind: u32, location: u64) -> OaErrorInfo {
+    OaErrorInfo {
+        code,
+        location_kind,
+        location,
+    }
+}
+
+/// Decode one FAA FNS AIXM 5.1 profile document. `drop_from_ms` and `drop_to_ms` are required
+/// caller policy endpoints in Unix milliseconds; the half-open interval drops a document whose
+/// issue/cancellation time is inside it. Equal endpoints deliberately select an empty interval.
+/// Pass null `buffers` to query required capacities. A short buffer writes only `summary` and
+/// `error`; all data slices are written together after every capacity has been checked.
+///
+/// The parser is capped at 1 MiB, 50,000 elements, 100,000 attributes, 50,000 text nodes and the
+/// remaining `oa-xml` defaults. One row, all feature slices within the element limit, all
+/// polygons within that limit, and at most `input_length / 3` vertices are staged per call.
+/// Strings, geometry and timestamps retain the `oa-notam` units and presence/error bits.
+///
+/// # Safety
+/// Every non-null pointer must refer to valid, aligned storage for its claimed extent. Input must
+/// remain immutable for the call. Input, buffer descriptor, summary, error and output slices must
+/// be pairwise non-overlapping. Null output pointers are allowed only for zero required capacity.
+#[no_mangle]
+pub unsafe extern "C" fn oa_notam_fns_decode(
+    input: *const u8,
+    input_length: u64,
+    drop_from_ms: i64,
+    drop_to_ms: i64,
+    buffers: *const OaNotamBuffers,
+    summary: *mut OaNotamSummary,
+    error: *mut OaErrorInfo,
+) -> u32 {
+    if summary.is_null() || error.is_null() {
+        if !error.is_null() {
+            write_error(
+                error,
+                notam_error(notam::STATUS_INVALID_ARGUMENT, OA_LOCATION_ARGUMENT, 5),
+            );
+        }
+        return notam::STATUS_INVALID_ARGUMENT;
+    }
+    if input_length > notam::MAX_INPUT_BYTES as u64 || (input.is_null() && input_length != 0) {
+        let reported = OaNotamSummary {
+            status: if input_length > notam::MAX_INPUT_BYTES as u64 {
+                notam::STATUS_INPUT_LIMIT
+            } else {
+                notam::STATUS_INVALID_ARGUMENT
+            },
+            ..OaNotamSummary::default()
+        };
+        write_notam_summary(summary, reported);
+        write_error(error, notam_error(reported.status, OA_LOCATION_ARGUMENT, 0));
+        return reported.status;
+    }
+    let length = match usize::try_from(input_length) {
+        Ok(value) => value,
+        Err(_) => {
+            let reported = OaNotamSummary {
+                status: notam::STATUS_INPUT_LIMIT,
+                ..OaNotamSummary::default()
+            };
+            write_notam_summary(summary, reported);
+            write_error(error, notam_error(reported.status, OA_LOCATION_ARGUMENT, 1));
+            return reported.status;
+        }
+    };
+    // SAFETY: the caller guarantees an immutable readable region of `length`; empty input is
+    // represented without dereferencing a null pointer.
+    let bytes = unsafe {
+        if length == 0 {
+            &[]
+        } else {
+            core::slice::from_raw_parts(input, length)
+        }
+    };
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let mut prepared = notam::prepare(bytes, drop_from_ms, drop_to_ms);
+        if prepared.summary.status == notam::STATUS_OK {
+            let capacities = if buffers.is_null() {
+                None
+            } else {
+                // SAFETY: the caller promises a valid aligned descriptor pointer.
+                Some(unsafe { buffers.read() })
+            };
+            let sufficient = capacities.is_some_and(|capacity| {
+                capacity.row_capacity >= prepared.summary.row_count
+                    && (prepared.summary.row_count == 0 || !capacity.row.is_null())
+                    && capacity.feature_capacity >= prepared.summary.feature_count
+                    && (prepared.summary.feature_count == 0 || !capacity.features.is_null())
+                    && capacity.polygon_capacity >= prepared.summary.polygon_count
+                    && (prepared.summary.polygon_count == 0 || !capacity.polygons.is_null())
+                    && capacity.vertex_capacity >= prepared.summary.vertex_count
+                    && (prepared.summary.vertex_count == 0 || !capacity.vertices.is_null())
+                    && capacity.string_capacity >= prepared.summary.string_bytes
+                    && (prepared.summary.string_bytes == 0 || !capacity.strings.is_null())
+                    && capacity.unknown_path_capacity >= prepared.summary.unknown_path_count
+                    && (prepared.summary.unknown_path_count == 0
+                        || !capacity.unknown_paths.is_null())
+            });
+            if !sufficient {
+                prepared.summary.status = notam::STATUS_BUFFER_TOO_SMALL;
+            } else if let Some(capacity) = capacities {
+                let data = &prepared.data;
+                let stats = &prepared.stats;
+                // Validate every source accessor before the first caller buffer is touched. These
+                // are invariants of a successfully decoded Notams table; a failure is refused.
+                let rows_ok = prepared.summary.row_count == 0 || notam::row(data).is_some();
+                let features_ok = (0..prepared.summary.feature_count as usize)
+                    .all(|index| notam::feature(data, index).is_some());
+                let polygons_ok = (0..prepared.summary.polygon_count as usize)
+                    .all(|index| notam::polygon(data, index).is_some());
+                let vertices_ok = (0..prepared.summary.vertex_count as usize)
+                    .all(|index| notam::vertex(data, index).is_some());
+                let unknown_ok = (0..prepared.summary.unknown_path_count as usize)
+                    .all(|index| notam::unknown(stats, index).is_some());
+                if !(rows_ok && features_ok && polygons_ok && vertices_ok && unknown_ok) {
+                    prepared.summary.status = notam::STATUS_INTERNAL_PANIC;
+                } else {
+                    // SAFETY: the caller supplied valid non-overlapping writable extents and all
+                    // capacities were checked above. The source tables stay borrowed and stable.
+                    unsafe {
+                        if prepared.summary.row_count != 0 {
+                            if let Some(value) = notam::row(data) {
+                                capacity.row.write(value);
+                            }
+                        }
+                        for index in 0..prepared.summary.feature_count as usize {
+                            if let Some(value) = notam::feature(data, index) {
+                                capacity.features.add(index).write(value);
+                            }
+                        }
+                        for index in 0..prepared.summary.polygon_count as usize {
+                            if let Some(value) = notam::polygon(data, index) {
+                                capacity.polygons.add(index).write(value);
+                            }
+                        }
+                        for index in 0..prepared.summary.vertex_count as usize {
+                            if let Some(value) = notam::vertex(data, index) {
+                                capacity.vertices.add(index).write(value);
+                            }
+                        }
+                        let string_len = prepared.summary.string_bytes as usize;
+                        if string_len != 0 {
+                            if let Some(value) = data.strings.get(..string_len) {
+                                core::ptr::copy_nonoverlapping(
+                                    value.as_ptr(),
+                                    capacity.strings,
+                                    string_len,
+                                );
+                            }
+                        }
+                        for index in 0..prepared.summary.unknown_path_count as usize {
+                            if let Some(value) = notam::unknown(stats, index) {
+                                capacity.unknown_paths.add(index).write(value);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let status = prepared.summary.status;
+        write_notam_summary(summary, prepared.summary);
+        write_error(
+            error,
+            notam_error(
+                status,
+                if status == notam::STATUS_OK {
+                    OA_LOCATION_NONE
+                } else {
+                    OA_LOCATION_ARGUMENT
+                },
+                if status == notam::STATUS_OK { 0 } else { 1 },
+            ),
+        );
+        status
+    }));
+    match result {
+        Ok(status) => status,
+        Err(_) => {
+            let reported = OaNotamSummary {
+                status: notam::STATUS_INTERNAL_PANIC,
+                ..OaNotamSummary::default()
+            };
+            write_notam_summary(summary, reported);
+            write_error(error, notam_error(reported.status, OA_LOCATION_NONE, 0));
+            reported.status
+        }
+    }
+}
+
+fn write_cifp_error(pointer: *mut OaCifpError, value: OaCifpError) {
+    // SAFETY: the public function checks non-null; writable aligned storage is a caller precondition.
+    unsafe { pointer.write(value) };
+}
+
+fn cifp_status_detail(status: u32) -> OaCifpError {
+    OaCifpError {
+        status,
+        ..OaCifpError::default()
+    }
+}
+
+fn cifp_failure(error: CifpFailure) -> (u32, OaCifpError) {
+    match error {
+        CifpFailure::Decode(detail) => {
+            let mut detail = *detail;
+            detail.status = OA_STATUS_PARSE_ERROR;
+            (OA_STATUS_PARSE_ERROR, detail)
+        }
+        CifpFailure::Allocation => (
+            OA_STATUS_ALLOCATION_FAILED,
+            cifp_status_detail(OA_STATUS_ALLOCATION_FAILED),
+        ),
+        CifpFailure::InputTooLarge
+        | CifpFailure::TooManyLines
+        | CifpFailure::SourceTooLarge
+        | CifpFailure::OutputTooLarge => (
+            OA_STATUS_LENGTH_TOO_LARGE,
+            cifp_status_detail(OA_STATUS_LENGTH_TOO_LARGE),
+        ),
+    }
+}
+
+/// Parse the existing FAA CIFP profile into caller-owned fixed-layout tables.
+/// A full zero-capacity query reports exact table/arena sizes without writing output arrays.
+/// All output regions must be valid, aligned, writable and pairwise disjoint from input,
+/// buffers, counts and error records for the duration of this call.
+///
+/// # Safety
+/// Non-null pointers must describe their claimed storage. Input and source byte extents must be
+/// readable. Output regions must not overlap one another or any input/control region.
+#[no_mangle]
+pub unsafe extern "C" fn oa_cifp_parse(
+    input: *const u8,
+    input_length: u64,
+    source: *const u8,
+    source_length: u64,
+    buffers: *const OaCifpBuffers,
+    counts: *mut OaCifpCounts,
+    parse_error: *mut OaCifpError,
+    error: *mut OaErrorInfo,
+) -> u32 {
+    if error.is_null() {
+        return OA_STATUS_INVALID_ARGUMENT;
+    }
+    let status = dispatch(error, || {
+        if buffers.is_null()
+            || counts.is_null()
+            || parse_error.is_null()
+            || (input.is_null() && input_length != 0)
+            || (source.is_null() && source_length != 0)
+        {
+            if !parse_error.is_null() {
+                let detail = cifp_status_detail(OA_STATUS_INVALID_ARGUMENT);
+                write_cifp_error(parse_error, detail);
+            }
+            return Err(Failure::general(OA_STATUS_INVALID_ARGUMENT));
+        }
+        if input_length > cifp::MAX_INPUT_BYTES as u64
+            || source_length > cifp::MAX_SOURCE_BYTES as u64
+        {
+            let detail = cifp_status_detail(OA_STATUS_LENGTH_TOO_LARGE);
+            write_cifp_error(parse_error, detail);
+            return Err(Failure::general(OA_STATUS_LENGTH_TOO_LARGE));
+        }
+        let input_len = usize::try_from(input_length)
+            .map_err(|_| Failure::general(OA_STATUS_LENGTH_TOO_LARGE))?;
+        let source_len = usize::try_from(source_length)
+            .map_err(|_| Failure::general(OA_STATUS_LENGTH_TOO_LARGE))?;
+        // SAFETY: caller preconditions guarantee the announced readable extents; empty nulls
+        // become empty slices without dereferencing.
+        let input_bytes = unsafe {
+            if input_len == 0 {
+                &[]
+            } else {
+                core::slice::from_raw_parts(input, input_len)
+            }
+        };
+        // SAFETY: same input contract applies to the source label bytes.
+        let source_bytes = unsafe {
+            if source_len == 0 {
+                &[]
+            } else {
+                core::slice::from_raw_parts(source, source_len)
+            }
+        };
+        let source_text = match core::str::from_utf8(source_bytes) {
+            Ok(v) => v,
+            Err(_) => {
+                let detail = cifp_status_detail(OA_STATUS_INVALID_ARGUMENT);
+                write_cifp_error(parse_error, detail);
+                return Err(Failure::general(OA_STATUS_INVALID_ARGUMENT));
+            }
+        };
+        // SAFETY: non-null was checked; valid aligned and readable storage is a caller precondition.
+        let outputs = unsafe { buffers.read() };
+        let flat = match cifp::decode(input_bytes, source_text) {
+            Ok(v) => v,
+            Err(e) => {
+                let (status, detail) = cifp_failure(e);
+                write_cifp_error(parse_error, detail);
+                return Err(Failure::general(status));
+            }
+        };
+        let enough = outputs.header_capacity >= 1
+            && !outputs.header.is_null()
+            && outputs.header_text_capacity >= flat.counts.header_records
+            && (flat.counts.header_records == 0 || !outputs.header_text.is_null())
+            && outputs.airports_capacity >= flat.counts.airports
+            && (flat.counts.airports == 0 || !outputs.airports.is_null())
+            && outputs.runways_capacity >= flat.counts.runways
+            && (flat.counts.runways == 0 || !outputs.runways.is_null())
+            && outputs.localizers_capacity >= flat.counts.localizers
+            && (flat.counts.localizers == 0 || !outputs.localizers.is_null())
+            && outputs.vhf_navaids_capacity >= flat.counts.vhf_navaids
+            && (flat.counts.vhf_navaids == 0 || !outputs.vhf_navaids.is_null())
+            && outputs.ndbs_capacity >= flat.counts.ndbs
+            && (flat.counts.ndbs == 0 || !outputs.ndbs.is_null())
+            && outputs.waypoints_capacity >= flat.counts.waypoints
+            && (flat.counts.waypoints == 0 || !outputs.waypoints.is_null())
+            && outputs.moras_capacity >= flat.counts.moras
+            && (flat.counts.moras == 0 || !outputs.moras.is_null())
+            && outputs.airspaces_capacity >= flat.counts.airspaces
+            && (flat.counts.airspaces == 0 || !outputs.airspaces.is_null())
+            && outputs.airways_capacity >= flat.counts.airways
+            && (flat.counts.airways == 0 || !outputs.airways.is_null())
+            && outputs.airway_fixes_capacity >= flat.counts.airway_fixes
+            && (flat.counts.airway_fixes == 0 || !outputs.airway_fixes.is_null())
+            && outputs.procedures_capacity >= flat.counts.procedures
+            && (flat.counts.procedures == 0 || !outputs.procedures.is_null())
+            && outputs.routes_capacity >= flat.counts.routes
+            && (flat.counts.routes == 0 || !outputs.routes.is_null())
+            && outputs.legs_capacity >= flat.counts.legs
+            && (flat.counts.legs == 0 || !outputs.legs.is_null())
+            && outputs.continuations_capacity >= flat.counts.continuations
+            && (flat.counts.continuations == 0 || !outputs.continuations.is_null())
+            && outputs.levels_of_service_capacity >= flat.counts.levels_of_service
+            && (flat.counts.levels_of_service == 0 || !outputs.levels_of_service.is_null())
+            && outputs.boundaries_capacity >= flat.counts.boundaries
+            && (flat.counts.boundaries == 0 || !outputs.boundaries.is_null())
+            && outputs.sections_capacity >= flat.counts.sections
+            && (flat.counts.sections == 0 || !outputs.sections.is_null())
+            && outputs.cycles_capacity >= flat.counts.cycles
+            && (flat.counts.cycles == 0 || !outputs.cycles.is_null())
+            && outputs.errors_capacity >= flat.counts.errors
+            && (flat.counts.errors == 0 || !outputs.errors.is_null())
+            && outputs.strings_capacity >= flat.counts.strings_bytes
+            && (flat.counts.strings_bytes == 0 || !outputs.strings.is_null());
+        if !enough {
+            // SAFETY: counts and parse_error are non-null writable output records by contract.
+            unsafe { counts.write(flat.counts) };
+            let detail = cifp_status_detail(OA_STATUS_BUFFER_TOO_SMALL);
+            write_cifp_error(parse_error, detail);
+            return Err(Failure::general(OA_STATUS_BUFFER_TOO_SMALL));
+        }
+        // SAFETY: header is one row and its non-null pointer/capacity were checked above.
+        unsafe { outputs.header.write(flat.header) };
+        if !flat.header_records.is_empty() {
+            // SAFETY: capacity/null checks above and the caller's disjoint-region precondition.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    flat.header_records.as_ptr(),
+                    outputs.header_text,
+                    flat.header_records.len(),
+                )
+            };
+        }
+        if !flat.airports.is_empty() {
+            // SAFETY: capacity/null checks above and the caller's disjoint-region precondition.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    flat.airports.as_ptr(),
+                    outputs.airports,
+                    flat.airports.len(),
+                )
+            };
+        }
+        if !flat.runways.is_empty() {
+            // SAFETY: capacity/null checks above and the caller's disjoint-region precondition.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    flat.runways.as_ptr(),
+                    outputs.runways,
+                    flat.runways.len(),
+                )
+            };
+        }
+        if !flat.localizers.is_empty() {
+            // SAFETY: capacity/null checks above and the caller's disjoint-region precondition.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    flat.localizers.as_ptr(),
+                    outputs.localizers,
+                    flat.localizers.len(),
+                )
+            };
+        }
+        if !flat.vhf_navaids.is_empty() {
+            // SAFETY: capacity/null checks above and the caller's disjoint-region precondition.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    flat.vhf_navaids.as_ptr(),
+                    outputs.vhf_navaids,
+                    flat.vhf_navaids.len(),
+                )
+            };
+        }
+        if !flat.ndbs.is_empty() {
+            // SAFETY: capacity/null checks above and the caller's disjoint-region precondition.
+            unsafe {
+                core::ptr::copy_nonoverlapping(flat.ndbs.as_ptr(), outputs.ndbs, flat.ndbs.len())
+            };
+        }
+        if !flat.waypoints.is_empty() {
+            // SAFETY: capacity/null checks above and the caller's disjoint-region precondition.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    flat.waypoints.as_ptr(),
+                    outputs.waypoints,
+                    flat.waypoints.len(),
+                )
+            };
+        }
+        if !flat.moras.is_empty() {
+            // SAFETY: capacity/null checks above and the caller's disjoint-region precondition.
+            unsafe {
+                core::ptr::copy_nonoverlapping(flat.moras.as_ptr(), outputs.moras, flat.moras.len())
+            };
+        }
+        if !flat.airspaces.is_empty() {
+            // SAFETY: capacity/null checks above and the caller's disjoint-region precondition.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    flat.airspaces.as_ptr(),
+                    outputs.airspaces,
+                    flat.airspaces.len(),
+                )
+            };
+        }
+        if !flat.airways.is_empty() {
+            // SAFETY: capacity/null checks above and the caller's disjoint-region precondition.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    flat.airways.as_ptr(),
+                    outputs.airways,
+                    flat.airways.len(),
+                )
+            };
+        }
+        if !flat.airway_fixes.is_empty() {
+            // SAFETY: capacity/null checks above and the caller's disjoint-region precondition.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    flat.airway_fixes.as_ptr(),
+                    outputs.airway_fixes,
+                    flat.airway_fixes.len(),
+                )
+            };
+        }
+        if !flat.procedures.is_empty() {
+            // SAFETY: capacity/null checks above and the caller's disjoint-region precondition.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    flat.procedures.as_ptr(),
+                    outputs.procedures,
+                    flat.procedures.len(),
+                )
+            };
+        }
+        if !flat.routes.is_empty() {
+            // SAFETY: capacity/null checks above and the caller's disjoint-region precondition.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    flat.routes.as_ptr(),
+                    outputs.routes,
+                    flat.routes.len(),
+                )
+            };
+        }
+        if !flat.legs.is_empty() {
+            // SAFETY: capacity/null checks above and the caller's disjoint-region precondition.
+            unsafe {
+                core::ptr::copy_nonoverlapping(flat.legs.as_ptr(), outputs.legs, flat.legs.len())
+            };
+        }
+        if !flat.continuations.is_empty() {
+            // SAFETY: capacity/null checks above and the caller's disjoint-region precondition.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    flat.continuations.as_ptr(),
+                    outputs.continuations,
+                    flat.continuations.len(),
+                )
+            };
+        }
+        if !flat.levels_of_service.is_empty() {
+            // SAFETY: capacity/null checks above and the caller's disjoint-region precondition.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    flat.levels_of_service.as_ptr(),
+                    outputs.levels_of_service,
+                    flat.levels_of_service.len(),
+                )
+            };
+        }
+        if !flat.boundaries.is_empty() {
+            // SAFETY: capacity/null checks above and the caller's disjoint-region precondition.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    flat.boundaries.as_ptr(),
+                    outputs.boundaries,
+                    flat.boundaries.len(),
+                )
+            };
+        }
+        if !flat.sections.is_empty() {
+            // SAFETY: capacity/null checks above and the caller's disjoint-region precondition.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    flat.sections.as_ptr(),
+                    outputs.sections,
+                    flat.sections.len(),
+                )
+            };
+        }
+        if !flat.cycles.is_empty() {
+            // SAFETY: capacity/null checks above and the caller's disjoint-region precondition.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    flat.cycles.as_ptr(),
+                    outputs.cycles,
+                    flat.cycles.len(),
+                )
+            };
+        }
+        if !flat.errors.is_empty() {
+            // SAFETY: capacity/null checks above and the caller's disjoint-region precondition.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    flat.errors.as_ptr(),
+                    outputs.errors,
+                    flat.errors.len(),
+                )
+            };
+        }
+        if !flat.strings.is_empty() {
+            // SAFETY: byte capacity/non-null checks above prove writable destination extent.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    flat.strings.as_ptr(),
+                    outputs.strings,
+                    flat.strings.len(),
+                )
+            };
+        }
+        // SAFETY: counts is non-null writable storage by the caller contract.
+        unsafe { counts.write(flat.counts) };
+        let detail = cifp_status_detail(OA_STATUS_OK);
+        write_cifp_error(parse_error, detail);
+        Ok(())
+    })
+    .0;
+    if status == OA_STATUS_INTERNAL_PANIC && !parse_error.is_null() {
+        let detail = cifp_status_detail(OA_STATUS_INTERNAL_PANIC);
+        write_cifp_error(parse_error, detail);
     }
     status
 }

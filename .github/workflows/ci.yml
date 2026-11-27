@@ -142,6 +142,15 @@ jobs:
           cc -std=c11 -Wall -Wextra -Werror -I include \
             crates/openatca-core-ffi/tests/ffi_grib2_vectors.c "$ffi_lib" \
             "-Wl,-rpath,$(dirname "$ffi_lib")" -lm -o "$RUNNER_TEMP/oa-ffi-grib2"
+          cc -std=c11 -Wall -Wextra -Werror -I include \
+            crates/openatca-core-ffi/tests/ffi_notam_vectors.c "$ffi_lib" \
+            "-Wl,-rpath,$(dirname "$ffi_lib")" -o "$RUNNER_TEMP/oa-ffi-notam"
+          cc -std=c11 -Wall -Wextra -Werror -I include -c \
+            crates/openatca-core-ffi/tests/cifp_layout.c \
+            -o "$RUNNER_TEMP/oa-ffi-cifp-layout.o"
+          cc -std=c11 -Wall -Wextra -Werror -I include \
+            crates/openatca-core-ffi/tests/cifp_vectors.c "$ffi_lib" \
+            "-Wl,-rpath,$(dirname "$ffi_lib")" -lm -o "$RUNNER_TEMP/oa-ffi-cifp"
           "$RUNNER_TEMP/oa-ffi-geodesy" crates/openatca-core-ffi/tests/fixtures/wgs84.csv
           "$RUNNER_TEMP/oa-ffi-l0" crates/openatca-core-ffi/tests/fixtures/l0.csv \
             crates/openatca-core-ffi/tests/fixtures/polygon.csv
@@ -154,6 +163,9 @@ jobs:
           "$RUNNER_TEMP/oa-ffi-asterix" crates/openatca-core-ffi/tests/fixtures/asterix-v1.tsv
           "$RUNNER_TEMP/oa-ffi-zip" crates/openatca-core-ffi/tests/fixtures/zip-v1.tsv
           "$RUNNER_TEMP/oa-ffi-grib2" crates/openatca-core-ffi/tests/fixtures/grib2-bitmap-v1.tsv
+          "$RUNNER_TEMP/oa-ffi-notam" crates/openatca-core-ffi/tests/fixtures/notam-v1.xml
+          "$RUNNER_TEMP/oa-ffi-cifp" "$ffi_lib" \
+            crates/openatca-core-ffi/tests/fixtures/cifp-v1.tsv
           python3 crates/openatca-core-ffi/tests/test_ctypes_vectors.py "$ffi_lib"
           python3 crates/openatca-core-ffi/tests/test_ctypes_l0.py "$ffi_lib"
           python3 crates/openatca-core-ffi/tests/test_ctypes_text.py "$ffi_lib" \
@@ -170,6 +182,10 @@ jobs:
             crates/openatca-core-ffi/tests/fixtures/zip-v1.tsv
           python3 crates/openatca-core-ffi/tests/test_ctypes_grib2.py "$ffi_lib" \
             crates/openatca-core-ffi/tests/fixtures/grib2-bitmap-v1.tsv
+          python3 crates/openatca-core-ffi/tests/test_ctypes_notam.py "$ffi_lib"
+          python3 python/tests/test_ffi_status_registry.py
+          PYTHONPATH=python python3 python/tests/cifp_ctypes_vectors.py "$ffi_lib" \
+            crates/openatca-core-ffi/tests/fixtures/cifp-v1.tsv
           python3 crates/openatca-core-ffi/tests/test_polygon_thread_safety.py
           test "$library_sha" = "$(sha256sum "$ffi_lib" | cut -d' ' -f1)"
       - name: Diagnostic example regressions
@@ -330,6 +346,15 @@ jobs:
           cc -std=c11 -Wall -Wextra -Werror -I include \
             crates/openatca-core-ffi/tests/ffi_grib2_vectors.c "$ffi_lib" \
             "-Wl,-rpath,$(dirname "$ffi_lib")" -lm -o "$RUNNER_TEMP/oa-ffi-grib2"
+          cc -std=c11 -Wall -Wextra -Werror -I include \
+            crates/openatca-core-ffi/tests/ffi_notam_vectors.c "$ffi_lib" \
+            "-Wl,-rpath,$(dirname "$ffi_lib")" -o "$RUNNER_TEMP/oa-ffi-notam"
+          cc -std=c11 -Wall -Wextra -Werror -I include -c \
+            crates/openatca-core-ffi/tests/cifp_layout.c \
+            -o "$RUNNER_TEMP/oa-ffi-cifp-layout.o"
+          cc -std=c11 -Wall -Wextra -Werror -I include \
+            crates/openatca-core-ffi/tests/cifp_vectors.c "$ffi_lib" \
+            "-Wl,-rpath,$(dirname "$ffi_lib")" -lm -o "$RUNNER_TEMP/oa-ffi-cifp"
           "$RUNNER_TEMP/oa-ffi-geodesy" crates/openatca-core-ffi/tests/fixtures/wgs84.csv
           "$RUNNER_TEMP/oa-ffi-l0" crates/openatca-core-ffi/tests/fixtures/l0.csv \
             crates/openatca-core-ffi/tests/fixtures/polygon.csv
@@ -342,6 +367,9 @@ jobs:
           "$RUNNER_TEMP/oa-ffi-asterix" crates/openatca-core-ffi/tests/fixtures/asterix-v1.tsv
           "$RUNNER_TEMP/oa-ffi-zip" crates/openatca-core-ffi/tests/fixtures/zip-v1.tsv
           "$RUNNER_TEMP/oa-ffi-grib2" crates/openatca-core-ffi/tests/fixtures/grib2-bitmap-v1.tsv
+          "$RUNNER_TEMP/oa-ffi-notam" crates/openatca-core-ffi/tests/fixtures/notam-v1.xml
+          "$RUNNER_TEMP/oa-ffi-cifp" "$ffi_lib" \
+            crates/openatca-core-ffi/tests/fixtures/cifp-v1.tsv
           python3 crates/openatca-core-ffi/tests/test_ctypes_vectors.py "$ffi_lib"
           python3 crates/openatca-core-ffi/tests/test_ctypes_l0.py "$ffi_lib"
           python3 crates/openatca-core-ffi/tests/test_ctypes_text.py "$ffi_lib" \
@@ -358,6 +386,10 @@ jobs:
             crates/openatca-core-ffi/tests/fixtures/zip-v1.tsv
           python3 crates/openatca-core-ffi/tests/test_ctypes_grib2.py "$ffi_lib" \
             crates/openatca-core-ffi/tests/fixtures/grib2-bitmap-v1.tsv
+          python3 crates/openatca-core-ffi/tests/test_ctypes_notam.py "$ffi_lib"
+          python3 python/tests/test_ffi_status_registry.py
+          PYTHONPATH=python python3 python/tests/cifp_ctypes_vectors.py "$ffi_lib" \
+            crates/openatca-core-ffi/tests/fixtures/cifp-v1.tsv
           python3 crates/openatca-core-ffi/tests/test_polygon_thread_safety.py
           test "$library_sha" = "$(sha256sum "$ffi_lib" | cut -d' ' -f1)"
   # The dev profile (opt-level 1, debug assertions and overflow checks on). The debug_assert! checks

@@ -51,6 +51,13 @@ enum {
     OA_STATUS_TAR_LIMIT = 20,
     OA_STATUS_TAR_NAME_TOO_LONG = 21,
     OA_STATUS_TAR_READ_ERROR = 22,
+    OA_STATUS_NOTAM_INPUT_LIMIT = 42,
+    OA_STATUS_NOTAM_XML_REFUSAL = 43,
+    OA_STATUS_NOTAM_DOCUMENT_REFUSAL = 44,
+    OA_STATUS_NOTAM_ELEMENT_LIMIT = 45,
+    OA_STATUS_NOTAM_CAPACITY = 46,
+    OA_STATUS_NOTAM_SEALED_DROP = 47,
+    OA_STATUS_NOTAM_MEMORY_BUDGET = 48,
     OA_STATUS_ZIP_FORMAT = 32,
     OA_STATUS_ZIP_TRUNCATED = 33,
     OA_STATUS_ZIP_UNSUPPORTED_METHOD = 34,
@@ -64,6 +71,92 @@ enum {
     OA_STATUS_GRIB2_UNSUPPORTED = 81,
     OA_STATUS_GRIB2_LIMIT = 82
 };
+
+#define OA_NOTAM_MAX_INPUT_BYTES UINT64_C(1048576)
+#define OA_NOTAM_MAX_WORKING_BYTES UINT64_C(16777216)
+#define OA_NOTAM_MAX_TEXT_BYTES UINT64_C(8192)
+#define OA_NOTAM_MAX_POLYGON_VERTICES UINT64_C(4096)
+#define OA_NOTAM_FIELD_COUNT UINT64_C(31)
+#define OA_NOTAM_REJECT_SLOT_COUNT UINT64_C(9)
+#define OA_NOTAM_FEATURE_KIND_COUNT UINT64_C(12)
+#define OA_NOTAM_UNKNOWN_PATH_MAX UINT64_C(128)
+#define OA_NOTAM_STATUS_BUFFER_TOO_SMALL OA_STATUS_BUFFER_TOO_SMALL
+
+enum {
+    OA_NOTAM_FIELD_SERIES = 0, OA_NOTAM_FIELD_NUMBER = 1, OA_NOTAM_FIELD_YEAR = 2,
+    OA_NOTAM_FIELD_TYPE = 3, OA_NOTAM_FIELD_REFERENCE = 4, OA_NOTAM_FIELD_LOCATION = 5,
+    OA_NOTAM_FIELD_FIR = 6, OA_NOTAM_FIELD_ICAO_LOCATION = 7, OA_NOTAM_FIELD_ISSUED = 8,
+    OA_NOTAM_FIELD_START = 9, OA_NOTAM_FIELD_END = 10, OA_NOTAM_FIELD_SCHEDULE = 11,
+    OA_NOTAM_FIELD_TEXT = 12, OA_NOTAM_FIELD_SELECTION = 13, OA_NOTAM_FIELD_SCENARIO = 14,
+    OA_NOTAM_FIELD_CLASSIFICATION = 15, OA_NOTAM_FIELD_TRAFFIC = 16,
+    OA_NOTAM_FIELD_PURPOSE = 17, OA_NOTAM_FIELD_SCOPE = 18, OA_NOTAM_FIELD_CANCELED = 19,
+    OA_NOTAM_FIELD_CROSS_REFERENCE = 20, OA_NOTAM_FIELD_CENTRE = 21,
+    OA_NOTAM_FIELD_RADIUS = 22, OA_NOTAM_FIELD_FLOOR = 23, OA_NOTAM_FIELD_CEILING = 24,
+    OA_NOTAM_FIELD_POLYGONS = 25, OA_NOTAM_FIELD_AIRPORT = 26,
+    OA_NOTAM_FIELD_AIRPORT_ICAO = 27, OA_NOTAM_FIELD_RUNWAY = 28,
+    OA_NOTAM_FIELD_NAVAID = 29, OA_NOTAM_FIELD_UNIT = 30
+};
+#define OA_NOTAM_FIELD_MASK(field) (UINT64_C(1) << (field))
+enum {
+    OA_NOTAM_FEATURE_AIRPORT = 1, OA_NOTAM_FEATURE_RUNWAY = 2,
+    OA_NOTAM_FEATURE_RUNWAY_DIRECTION = 3, OA_NOTAM_FEATURE_RUNWAY_ELEMENT = 4,
+    OA_NOTAM_FEATURE_TAXIWAY = 5, OA_NOTAM_FEATURE_TAXIWAY_ELEMENT = 6,
+    OA_NOTAM_FEATURE_NAVAID = 7, OA_NOTAM_FEATURE_UNIT = 8,
+    OA_NOTAM_FEATURE_OBSTACLE_AREA = 9, OA_NOTAM_FEATURE_VERTICAL_STRUCTURE = 10,
+    OA_NOTAM_FEATURE_RADAR_SYSTEM = 11, OA_NOTAM_FEATURE_PRIMARY_RADAR = 12
+};
+
+/* Stable only within this provisional, profile-specific preview. Fixed-width values retain
+ * oa-notam's source codes; present/error masks distinguish absent, invalid, and populated fields. */
+typedef struct OaNotamRow {
+    uint64_t present, errors;
+    int64_t issued_ms, start_ms, end_ms, canceled_ms;
+    uint32_t flags, number, ref_number, sched_off, sched_len, text_off, text_len, radius_m;
+    uint32_t poly_first, poly_count, feature_first, feature_count, feat_mask;
+    int32_t lat_e7, lon_e7, floor_ft, ceil_ft;
+    uint16_t year, ref_year, scenario;
+    uint8_t ntype, class_code, traffic, purpose, scope, floor_ref, ceil_ref, feat_kind;
+    uint8_t interpretation, slice_meta, slice_errors;
+    uint32_t sequence_number, correction_number;
+    uint8_t event_id[16], series[12], ref_series[12], xover[16], feat_desig[12], runway[12];
+    uint8_t airport[8], navaid[8], unit[8], selection[5], location[4], fir[4];
+    uint8_t icao_location[4], airport_icao[4];
+} OaNotamRow;
+
+typedef struct OaNotamFeature {
+    uint8_t kind, time_kind, interpretation, meta, time_meta, errors, reserved[2];
+    int64_t begin_ms, end_ms;
+    uint32_t sequence_number, correction_number;
+    uint8_t designator[12], designator_len, icao[4], icao_len;
+} OaNotamFeature;
+
+typedef struct OaNotamPolygon {
+    uint32_t first_vertex, vertex_count, feature_index;
+    uint8_t kind, reserved[3];
+} OaNotamPolygon;
+
+typedef struct OaNotamVertex { int32_t lat_e7, lon_e7; } OaNotamVertex;
+
+typedef struct OaNotamUnknownPath {
+    uint64_t hash, count;
+    uint8_t is_attribute, text_len, reserved[6], text[160];
+} OaNotamUnknownPath;
+
+typedef struct OaNotamSummary {
+    uint32_t status, refusal_kind;
+    uint64_t source_offset, row_count, feature_count, polygon_count, vertex_count, string_bytes;
+    uint64_t unknown_path_count, unknown_elements, unknown_attributes, unknown_overflow, sealed_dropped;
+    uint64_t field_errors[31], rejects[9], features[12];
+} OaNotamSummary;
+
+typedef struct OaNotamBuffers {
+    OaNotamRow *row; uint64_t row_capacity;
+    OaNotamFeature *features; uint64_t feature_capacity;
+    OaNotamPolygon *polygons; uint64_t polygon_capacity;
+    OaNotamVertex *vertices; uint64_t vertex_capacity;
+    uint8_t *strings; uint64_t string_capacity;
+    OaNotamUnknownPath *unknown_paths; uint64_t unknown_path_capacity;
+} OaNotamBuffers;
 
 #define OA_DEFLATE_MAX_INPUT_BYTES UINT64_C(67108864)
 #define OA_DEFLATE_MAX_OUTPUT_BYTES UINT64_C(268435456)
@@ -96,6 +189,12 @@ typedef struct OaErrorInfo {
     uint32_t location_kind; /* NONE, ARGUMENT, or ELEMENT. */
     uint64_t location;      /* Zero-based argument/element index; raw value is preserved. */
 } OaErrorInfo;
+
+/* FNS profile decoder. Required policy endpoints are a caller-owned Unix-ms half-open interval;
+ * equal endpoints explicitly mean no filtering. Null buffers queries required capacities. */
+OaStatus oa_notam_fns_decode(const uint8_t *input, uint64_t input_length,
+    int64_t drop_from_ms, int64_t drop_to_ms, const OaNotamBuffers *buffers,
+    OaNotamSummary *summary, OaErrorInfo *error);
 
 #define OA_ASTERIX_MAX_INPUT_BYTES UINT64_C(65535)
 #define OA_ASTERIX_MAX_RECORDS UINT64_C(21844)
@@ -200,6 +299,103 @@ typedef struct OaAsterixError {
 
 /* `status` repeats the generic return status; `kind` 1–23 maps to oa-asterix ErrorKind variants.
  * The generic status values 23–31 are currently unassigned. */
+
+#define OA_CIFP_MAX_INPUT_BYTES UINT64_C(134217728)
+#define OA_CIFP_MAX_PHYSICAL_LINES UINT64_C(600000)
+#define OA_CIFP_MAX_SOURCE_BYTES UINT64_C(256)
+#define OA_CIFP_MAX_OUTPUT_BYTES UINT64_C(805306368)
+#define OA_CIFP_NO_OFFSET UINT64_MAX
+/* `present` bit assignments; masks are row-family specific. */
+#define OA_CIFP_PRESENT_IATA (UINT64_C(1) << 0)
+#define OA_CIFP_PRESENT_LONGEST_RUNWAY (UINT64_C(1) << 1)
+#define OA_CIFP_PRESENT_MAGVAR (UINT64_C(1) << 2)
+#define OA_CIFP_PRESENT_ELEVATION (UINT64_C(1) << 3)
+#define OA_CIFP_PRESENT_TRANSITION_ALT (UINT64_C(1) << 4)
+#define OA_CIFP_PRESENT_TRANSITION_LEVEL (UINT64_C(1) << 5)
+#define OA_CIFP_PRESENT_PUBLIC_MILITARY (UINT64_C(1) << 6)
+#define OA_CIFP_PRESENT_NORTH_REFERENCE (UINT64_C(1) << 7)
+#define OA_CIFP_PRESENT_BEARING (UINT64_C(1) << 8)
+#define OA_CIFP_PRESENT_ELLIPSOID_HEIGHT (UINT64_C(1) << 9)
+#define OA_CIFP_PRESENT_THRESHOLD_ELEVATION (UINT64_C(1) << 10)
+#define OA_CIFP_PRESENT_TCH (UINT64_C(1) << 11)
+#define OA_CIFP_PRESENT_WIDTH (UINT64_C(1) << 12)
+#define OA_CIFP_PRESENT_LOCALIZER_IDENT (UINT64_C(1) << 13)
+#define OA_CIFP_PRESENT_LOCALIZER_CATEGORY (UINT64_C(1) << 14)
+#define OA_CIFP_PRESENT_GLIDE_POSITION (UINT64_C(1) << 15)
+#define OA_CIFP_PRESENT_GLIDE_ANGLE (UINT64_C(1) << 16)
+#define OA_CIFP_PRESENT_STATION_DECLINATION (UINT64_C(1) << 17)
+#define OA_CIFP_PRESENT_GLIDE_ELEVATION (UINT64_C(1) << 18)
+#define OA_CIFP_PRESENT_AIRPORT_IDENT (UINT64_C(1) << 19)
+#define OA_CIFP_PRESENT_AIRPORT_REGION (UINT64_C(1) << 20)
+#define OA_CIFP_PRESENT_FREQUENCY (UINT64_C(1) << 21)
+#define OA_CIFP_PRESENT_VOR_POSITION (UINT64_C(1) << 22)
+#define OA_CIFP_PRESENT_DME_IDENT (UINT64_C(1) << 23)
+#define OA_CIFP_PRESENT_DME_POSITION (UINT64_C(1) << 24)
+#define OA_CIFP_PRESENT_DME_ELEVATION (UINT64_C(1) << 25)
+#define OA_CIFP_PRESENT_FIGURE_OF_MERIT (UINT64_C(1) << 26)
+#define OA_CIFP_PRESENT_POSITION (UINT64_C(1) << 27)
+#define OA_CIFP_PRESENT_USAGE (UINT64_C(1) << 28)
+#define OA_CIFP_PRESENT_WAYPOINT_TYPE (UINT64_C(1) << 29)
+#define OA_CIFP_PRESENT_ALTITUDE_1 (UINT64_C(1) << 30)
+#define OA_CIFP_PRESENT_ALTITUDE_2 (UINT64_C(1) << 31)
+#define OA_CIFP_PRESENT_LEVEL (UINT64_C(1) << 33)
+#define OA_CIFP_PRESENT_OUTBOUND_COURSE (UINT64_C(1) << 34)
+#define OA_CIFP_PRESENT_DISTANCE (UINT64_C(1) << 35)
+#define OA_CIFP_PRESENT_INBOUND_COURSE (UINT64_C(1) << 36)
+#define OA_CIFP_PRESENT_MAX_ALTITUDE (UINT64_C(1) << 37)
+#define OA_CIFP_PRESENT_FIX (UINT64_C(1) << 38)
+#define OA_CIFP_PRESENT_TURN_DIRECTION (UINT64_C(1) << 39)
+#define OA_CIFP_PRESENT_RNP (UINT64_C(1) << 40)
+#define OA_CIFP_PRESENT_RECOMMENDED_NAVAID (UINT64_C(1) << 41)
+#define OA_CIFP_PRESENT_ARC_RADIUS (UINT64_C(1) << 42)
+#define OA_CIFP_PRESENT_THETA (UINT64_C(1) << 43)
+#define OA_CIFP_PRESENT_RHO (UINT64_C(1) << 44)
+#define OA_CIFP_PRESENT_COURSE (UINT64_C(1) << 45)
+#define OA_CIFP_PRESENT_DISTANCE_OR_TIME (UINT64_C(1) << 46)
+#define OA_CIFP_PRESENT_ALT_DESC (UINT64_C(1) << 47)
+#define OA_CIFP_PRESENT_TRANSITION_ALTITUDE (UINT64_C(1) << 48)
+#define OA_CIFP_PRESENT_SPEED_LIMIT (UINT64_C(1) << 49)
+#define OA_CIFP_PRESENT_VERTICAL_ANGLE (UINT64_C(1) << 50)
+#define OA_CIFP_PRESENT_CENTER_FIX (UINT64_C(1) << 51)
+#define OA_CIFP_PRESENT_GNSS_FMS (UINT64_C(1) << 52)
+#define OA_CIFP_PRESENT_SPEED_DESC (UINT64_C(1) << 53)
+#define OA_CIFP_PRESENT_CLASSIFICATION (UINT64_C(1) << 54)
+#define OA_CIFP_PRESENT_TIME_CODE (UINT64_C(1) << 55)
+#define OA_CIFP_PRESENT_LOWER (UINT64_C(1) << 56)
+#define OA_CIFP_PRESENT_UPPER (UINT64_C(1) << 57)
+#define OA_CIFP_PRESENT_ARC_ORIGIN (UINT64_C(1) << 59)
+#define OA_CIFP_PRESENT_ARC_DISTANCE (UINT64_C(1) << 60)
+#define OA_CIFP_PRESENT_ARC_BEARING (UINT64_C(1) << 61)
+#define OA_CIFP_PRESENT_LONGEST_RUNWAY_SURFACE (UINT64_C(1) << 63)
+typedef struct OaCifpSpan { uint64_t offset, length; } OaCifpSpan;
+typedef struct OaCifpPosition { double lat, lon; } OaCifpPosition;
+typedef struct OaCifpMeta { uint64_t line; uint8_t cycle_year, cycle_release, reserved[6]; OaCifpSpan customer_area, file_record_number; } OaCifpMeta;
+typedef struct OaCifpAltitude { uint8_t kind, reserved[3]; int32_t value; } OaCifpAltitude;
+typedef struct OaCifpFixRef { OaCifpSpan ident, region; uint8_t section, subsection, reserved[6]; } OaCifpFixRef;
+typedef struct OaCifpAirport { OaCifpMeta meta; uint64_t present; OaCifpSpan ident, icao_region, iata, datum, name; OaCifpPosition position; double magnetic_variation; int32_t elevation_ft; uint32_t longest_runway_ft; OaCifpAltitude transition_altitude, transition_level; uint8_t ifr_capable, longest_runway_surface, public_military, north_reference, reserved[4]; } OaCifpAirport;
+typedef struct OaCifpRunway { OaCifpMeta meta; uint64_t present; OaCifpSpan airport_ident, airport_region, ident, localizer_ident; OaCifpPosition threshold; uint32_t length_ft, displaced_threshold_ft; double magnetic_bearing, ellipsoid_height_m; int32_t threshold_elevation_ft; uint32_t threshold_crossing_height_ft, width_ft; uint8_t tch_indicator, localizer_category, reserved[6], reserved2[4]; } OaCifpRunway;
+typedef struct OaCifpLocalizer { OaCifpMeta meta; uint64_t present; OaCifpSpan airport_ident, airport_region, ident, runway_ident; OaCifpPosition localizer_position, glide_slope_position; uint8_t category, reserved0[7]; double frequency_mhz, bearing, localizer_width_deg, glide_slope_angle_deg, station_declination; uint32_t glide_slope_tch_ft; int32_t glide_slope_elevation_ft; } OaCifpLocalizer;
+typedef struct OaCifpVhfNavaid { OaCifpMeta meta; uint64_t present; OaCifpSpan airport_ident, airport_region, ident, icao_region, dme_ident, datum, name; OaCifpPosition vor_position, dme_position; double frequency_mhz, station_declination; int32_t dme_elevation_ft; uint8_t class[5], figure_of_merit, reserved[2], reserved2[4]; } OaCifpVhfNavaid;
+typedef struct OaCifpNdb { OaCifpMeta meta; uint64_t present; OaCifpSpan airport_ident, airport_region, ident, icao_region, class, datum, name; OaCifpPosition position; double frequency_khz, magnetic_variation; uint8_t terminal, reserved[7]; } OaCifpNdb;
+typedef struct OaCifpWaypoint { OaCifpMeta meta; uint64_t present; OaCifpSpan area, area_region, ident, icao_region, waypoint_type, usage, datum, name; OaCifpPosition position; double magnetic_variation; uint8_t kind, reserved[7]; } OaCifpWaypoint;
+typedef struct OaCifpAirway { OaCifpSpan customer_area, ident; uint64_t first_line, fix_start, fix_count; uint8_t route_type, level, reserved[6]; } OaCifpAirway;
+typedef struct OaCifpAirwayFix { OaCifpMeta meta; OaCifpSpan route_ident; OaCifpFixRef fix; uint32_t sequence; uint8_t description[4], route_type, level, reserved0[6]; uint64_t present; double outbound_course, distance_nm, inbound_course; OaCifpAltitude min_altitude, min_altitude_2, max_altitude; } OaCifpAirwayFix;
+typedef struct OaCifpProcedure { OaCifpSpan customer_area, airport_ident, airport_region, ident; uint64_t first_line, route_start, route_count; uint8_t kind, reserved[7]; } OaCifpProcedure;
+typedef struct OaCifpRoute { OaCifpSpan transition; uint64_t first_line, leg_start, leg_count; uint8_t route_type, reserved[7]; } OaCifpRoute;
+typedef struct OaCifpLeg { OaCifpMeta meta; uint64_t present; OaCifpSpan airport_ident, airport_region, ident, transition, rnp_code; OaCifpFixRef fix, recommended_navaid, center_fix; uint32_t sequence; uint8_t description[4], kind, route_type, turn_direction, path_terminator, altitude_description, gnss_fms_indication, speed_limit_description, reserved0; double arc_radius_nm, theta_deg, rho_nm, course_deg, distance_or_time_value; uint8_t distance_or_time_kind, reserved1[7]; OaCifpAltitude altitude1, altitude2, transition_altitude; uint32_t speed_limit_kt; uint8_t reserved2[4]; double vertical_angle_deg; } OaCifpLeg;
+typedef struct OaCifpContinuation { OaCifpMeta meta; uint64_t owner_index; OaCifpSpan text; uint8_t number, application_type, owner_kind, reserved[5]; } OaCifpContinuation;
+typedef struct OaCifpLevelOfService { uint64_t continuation_index; OaCifpSpan name; uint8_t authorized, reserved[7]; } OaCifpLevelOfService;
+typedef struct OaCifpAirspace { OaCifpMeta meta; uint64_t present; OaCifpSpan icao_region, designation, name; uint64_t boundary_start, boundary_count, continuation_start, continuation_count; uint8_t kind, airspace_type, classification, multiple_code, level, time_code, reserved[2]; OaCifpAltitude lower; uint8_t lower_unit, upper_unit, reserved2[6]; OaCifpAltitude upper; } OaCifpAirspace;
+typedef struct OaCifpBoundary { OaCifpPosition position, arc_origin; uint32_t sequence; uint8_t via, end, present, reserved; double arc_distance_nm, arc_bearing_deg; uint64_t source_line; } OaCifpBoundary;
+typedef struct OaCifpMora { OaCifpMeta meta; int16_t start_lat, start_lon; uint32_t present_mask, cells_ft[30]; } OaCifpMora;
+typedef struct OaCifpHeader { OaCifpSpan file_name, version, creation_date, creation_time, data_supplier, crc; uint32_t record_length; uint8_t reserved0[4]; uint64_t record_count; uint8_t cycle_year, cycle_release, production_flag, crc_verified, reserved[4]; } OaCifpHeader;
+typedef struct OaCifpHeaderText { OaCifpSpan text; } OaCifpHeaderText;
+typedef struct OaCifpSectionCount { OaCifpSpan section; uint64_t count; uint8_t supported, reserved[7]; } OaCifpSectionCount;
+typedef struct OaCifpCycleCount { uint64_t count; uint8_t year, release, reserved[6]; } OaCifpCycleCount;
+typedef struct OaCifpError { uint32_t status, kind; uint64_t line; uint32_t first_column, last_column; uint64_t limit, actual, previous, found; uint32_t code, flags; uint8_t field[32], value[132], reason[64], reserved[4]; } OaCifpError;
+typedef struct OaCifpCounts { uint64_t airports, runways, localizers, vhf_navaids, ndbs, waypoints, moras, airspaces, airways, airway_fixes, procedures, routes, legs, continuations, levels_of_service, boundaries, header_records, sections, cycles, errors, errors_dropped, strings_bytes, output_bytes; uint8_t is_clean, reserved[7]; } OaCifpCounts;
+typedef struct OaCifpBuffers { OaCifpHeader *header; uint64_t header_capacity; OaCifpHeaderText *header_text; uint64_t header_text_capacity; OaCifpAirport *airports; uint64_t airports_capacity; OaCifpRunway *runways; uint64_t runways_capacity; OaCifpLocalizer *localizers; uint64_t localizers_capacity; OaCifpVhfNavaid *vhf_navaids; uint64_t vhf_navaids_capacity; OaCifpNdb *ndbs; uint64_t ndbs_capacity; OaCifpWaypoint *waypoints; uint64_t waypoints_capacity; OaCifpMora *moras; uint64_t moras_capacity; OaCifpAirspace *airspaces; uint64_t airspaces_capacity; OaCifpAirway *airways; uint64_t airways_capacity; OaCifpAirwayFix *airway_fixes; uint64_t airway_fixes_capacity; OaCifpProcedure *procedures; uint64_t procedures_capacity; OaCifpRoute *routes; uint64_t routes_capacity; OaCifpLeg *legs; uint64_t legs_capacity; OaCifpContinuation *continuations; uint64_t continuations_capacity; OaCifpLevelOfService *levels_of_service; uint64_t levels_of_service_capacity; OaCifpBoundary *boundaries; uint64_t boundaries_capacity; OaCifpSectionCount *sections; uint64_t sections_capacity; OaCifpCycleCount *cycles; uint64_t cycles_capacity; OaCifpError *errors; uint64_t errors_capacity; uint8_t *strings; uint64_t strings_capacity; } OaCifpBuffers;
+uint32_t oa_cifp_parse(const uint8_t *input, uint64_t input_length, const uint8_t *source, uint64_t source_length, const OaCifpBuffers *buffers, OaCifpCounts *counts, OaCifpError *parse_error, OaErrorInfo *error);
 
 enum { OA_TEXT_XML = 1, OA_TEXT_JSON = 2, OA_TEXT_CSV = 3 };
 /* Parser kind is module-specific; offsets are byte positions except CSV's physical line. */
