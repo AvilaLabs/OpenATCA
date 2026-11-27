@@ -217,6 +217,7 @@ mod tests {
     }
 
     fn guard(root: &Path) -> Sealed {
+        std::fs::write(root.join(".openatca-data-root"), b"openatca-data-root-v1\n").unwrap();
         Sealed::with_list(&format!("root {}\nseal sealed\n", root.display()), None)
     }
 
