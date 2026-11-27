@@ -697,6 +697,18 @@ pub fn surveillance_finish(
     surveillance_finish_with_visibility(s, ownership, true, None)
 }
 
+/// Read the shared tracker prediction for one address at an explicit scan time. This is an
+/// estimate from the admitted tracker state, not a separate constant-velocity predictor.
+pub fn surveillance_track_forecast(
+    s: &Surveillance,
+    address: u32,
+    at_ns: i64,
+) -> Result<(oa_track::OutRow, bool, i64), String> {
+    oa_track::tracker_forecast(&s.tracker, address, at_ns)
+        .map(|(row, confirmed, newest_ns, _)| (row, confirmed, newest_ns))
+        .map_err(|error| format!("tracker forecast refused: {error:?}"))
+}
+
 pub(crate) fn surveillance_finish_with_visibility(
     s: &mut Surveillance,
     ownership: Option<&OwnershipStatus>,
