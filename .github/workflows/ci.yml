@@ -35,6 +35,30 @@ jobs:
         run: |
           python3 .github/scripts/test_commit_hygiene.py
           python3 .github/scripts/check_commit_hygiene.py
+  quality-negative-proof:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/train/quality-proof-')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        escape: [E01, E02, E03]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prove the class checker refuses the isolated defect
+        env:
+          PROOF_CLASS: ${{ matrix.escape }}
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/test_commit_hygiene.py --proof-class "$PROOF_CLASS" \
+            | tee "$RUNNER_TEMP/quality-proof-$PROOF_CLASS.txt"
+      - name: Attach safe checker refusal receipt
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: quality-refusal-${{ matrix.escape }}
+          path: ${{ runner.temp }}/quality-proof-${{ matrix.escape }}.txt
+          if-no-files-found: error
   check:
     runs-on: ubuntu-24.04
     steps:
