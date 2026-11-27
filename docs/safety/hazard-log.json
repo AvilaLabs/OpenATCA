@@ -10466,6 +10466,7 @@
         "OA-DSP-081",
         "OA-DSP-082",
         "OA-DSP-083",
+        "OA-DSP-084",
         "OA-WS-004"
       ],
       "source_refs": [
@@ -10475,7 +10476,7 @@
         },
         {
           "document": "REQUIREMENTS.md",
-          "locator": "OA-DSP-079 through OA-DSP-083"
+          "locator": "OA-DSP-079 through OA-DSP-084"
         }
       ],
       "verification_refs": [
@@ -15604,7 +15605,7 @@
         {
           "requirement_id": "OA-REG-024",
           "file": "tools/oa-regional-session/tests/protocol.rs",
-          "test_name": "version_two_position_evidence_is_domain_checked_and_round_trips_without_changing_v1"
+          "test_name": "v2_preserves_native_adsb_source_quality_without_upgrading_it_to_reliability"
         },
         {
           "requirement_id": "OA-REG-024",
@@ -15614,7 +15615,7 @@
         {
           "requirement_id": "OA-REG-024",
           "file": "tools/oa-regional-session/src/runtime.rs",
-          "test_name": "regional_v2_adsb_evidence_does_not_claim_reliability_or_enable_fusion_cue"
+          "test_name": "v2_adsb_provenance_reaches_mode_result_but_does_not_claim_reliability"
         },
         {
           "requirement_id": "OA-REG-023",

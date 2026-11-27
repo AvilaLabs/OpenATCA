@@ -89,7 +89,7 @@ fn measurement_noise_comes_from_nacp_and_nacv() {
     }
 }
 
-// REQ: OA-TRK-018
+// REQ: OA-TRK-018, OA-REG-024
 #[test]
 fn indexed_measurements_keep_exact_same_time_source_row_lineage() {
     let mut first = row(10, 0xABCDEF, 41.9, -88.3);
