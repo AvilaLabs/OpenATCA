@@ -1,17 +1,20 @@
 #!/usr/bin/env python3
-"""Fail when exported safety flag constants have no compiled external consumer.
+"""Fail when exported safety flag constants have no external source consumer.
 
 This is a bounded source check, not a Rust type checker. It examines integer `pub const`
 declarations with flag-style names or flag/bit documentation, then requires a non-test Rust
-source use in another workspace package that depends on the defining crate. Comments, string
-literals, declaration sites, and cfg(test) modules do not count as uses.
+    source use in another workspace package that depends on the defining crate. This is a bounded
+    lexical source check, not proof that the use is reachable in a built binary. Comments, string
+    literals, declaration sites, and test-only items do not count as uses.
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import json
 import re
+import stat
 import sys
 import tomllib
 from dataclasses import dataclass
@@ -40,10 +43,21 @@ INTEGER_TYPES = frozenset(
 FLAG_PREFIXES = ("F_", "AF_", "O_", "T_", "M_", "FLAG_", "VIOLATION_", "HAS_")
 FLAG_SUFFIXES = ("_FLAG", "_FLAGS", "_MASK", "_BIT")
 FLAG_EXACT_NAMES = frozenset({"COMMON_LOCAL_FRAME"})
+MAX_MANIFEST_BYTES = 1 << 20
+MAX_SOURCE_FILE_BYTES = 4 << 20
+MAX_ALLOWLIST_BYTES = 256 << 10
+MAX_TOTAL_MANIFEST_BYTES = 16 << 20
+MAX_TOTAL_SOURCE_BYTES = 256 << 20
+MAX_MANIFEST_COUNT = 2048
+MAX_PACKAGE_COUNT = 512
+MAX_SOURCE_FILES_PER_PACKAGE = 8192
+MAX_TOTAL_SOURCE_FILES = 65536
+MAX_PACKAGE_SCAN_DIRECTORIES = 32768
 TOKEN_RE = re.compile(
     r"[A-Za-z_][A-Za-z0-9_]*|(?:0[xX][0-9A-Fa-f_]+|0[bB][01_]+|0[oO][0-7_]+|[0-9][0-9_]*)"
     r"(?:[ui](?:8|16|32|64|128|size))?|::|<<|>>|&&|\|\||==|!=|<=|>=|=>|[^\s]"
 )
+RAW_STRING_RE = re.compile(r"(?:b)?r(#{0,255})\"")
 INTEGER_RE = re.compile(r"^(0[xX][0-9A-Fa-f_]+|0[bB][01_]+|0[oO][0-7_]+|[0-9][0-9_]*)(?:[ui](?:8|16|32|64|128|size))?$")
 
 
@@ -67,10 +81,83 @@ class Flag:
 class Finding:
     flag: Flag
     consumers: tuple[str, ...]
+    ambiguous_name: bool = False
 
     @property
     def key(self) -> tuple[str, str, str]:
         return (self.flag.package, self.flag.name, self.flag.declaration)
+
+
+class BoundedReader:
+    def __init__(self, workspace: Path, file_limit: int, total_limit: int):
+        self.workspace = workspace
+        self.file_limit = file_limit
+        self.total_limit = total_limit
+        self.bytes_read = 0
+        self.cache: dict[Path, str] = {}
+
+    def read_text(self, path: Path) -> str:
+        key = path.absolute()
+        if key in self.cache:
+            return self.cache[key]
+        try:
+            relative = key.relative_to(self.workspace)
+        except ValueError as exc:
+            raise ValueError("source path is outside the configured workspace") from exc
+        if any(part in {".", ".."} for part in relative.parts):
+            raise ValueError("source path contains a workspace escape component")
+        try:
+            key.resolve(strict=True).relative_to(self.workspace)
+        except (OSError, ValueError) as exc:
+            raise ValueError("resolved source path is outside the configured workspace") from exc
+        cursor = self.workspace
+        for part in relative.parts:
+            cursor = cursor / part
+            try:
+                info = cursor.lstat()
+            except OSError as exc:
+                raise ValueError("source path is missing or unreadable") from exc
+            if stat.S_ISLNK(info.st_mode):
+                raise ValueError("symlink source path refused")
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(key, flags)
+        except OSError as exc:
+            raise ValueError("source file could not be opened safely") from exc
+        try:
+            before = os.fstat(descriptor)
+            if not stat.S_ISREG(before.st_mode):
+                raise ValueError("source path is not a regular file")
+            if before.st_size > self.file_limit:
+                raise ValueError("source file exceeds its configured byte cap")
+            if self.bytes_read + before.st_size > self.total_limit:
+                raise ValueError("source scan exceeds its aggregate byte cap")
+            chunks: list[bytes] = []
+            remaining = self.file_limit + 1
+            while remaining:
+                chunk = os.read(descriptor, min(65536, remaining))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            content = b"".join(chunks)
+            after = os.fstat(descriptor)
+            named = os.stat(key, follow_symlinks=False)
+            if (before.st_dev, before.st_ino, before.st_size) != (after.st_dev, after.st_ino, after.st_size):
+                raise ValueError("source file changed while being read")
+            if (after.st_dev, after.st_ino) != (named.st_dev, named.st_ino):
+                raise ValueError("source file identity changed while being read")
+            if len(content) > self.file_limit or len(content) != after.st_size:
+                raise ValueError("source file exceeded its stable byte bound")
+            self.bytes_read += len(content)
+            try:
+                text = content.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise ValueError("source file is not valid UTF-8") from exc
+            self.cache[key] = text
+            return text
+        finally:
+            os.close(descriptor)
 
 
 def _strip_rust_noncode(source: str) -> str:
@@ -109,7 +196,7 @@ def _strip_rust_noncode(source: str) -> str:
             continue
 
         # Raw strings and byte raw strings: b?r###"..."###.
-        raw = re.match(r"(?:b)?r(#{0,255})\"", source[i:])
+        raw = RAW_STRING_RE.match(source, i)
         if raw:
             start = i
             hashes = raw.group(1)
@@ -162,10 +249,32 @@ def _strip_rust_noncode(source: str) -> str:
 
 def _remove_cfg_test_modules(source: str) -> str:
     clean = _strip_rust_noncode(source)
-    pattern = re.compile(r"#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]")
+    attribute = re.compile(r"#\s*\[(?P<body>[^\]]*)\]")
     edits: list[tuple[int, int]] = []
-    for match in pattern.finditer(clean):
-        pos = match.end()
+    pos = 0
+    while pos < len(clean):
+        match = attribute.search(clean, pos)
+        if match is None:
+            break
+        attr_start = match.start()
+        cursor = match.end()
+        attributes = [match.group("body").strip()]
+        item_start = cursor
+        while True:
+            while item_start < len(clean) and clean[item_start].isspace():
+                item_start += 1
+            next_attr = attribute.match(clean, item_start)
+            if next_attr is None:
+                break
+            attributes.append(next_attr.group("body").strip())
+            item_start = next_attr.end()
+        excluded = any(
+            re.fullmatch(r"cfg\s*\(\s*test\s*\)", body)
+            or re.fullmatch(r"cfg\s*\(\s*any\s*\(\s*\)\s*\)", body)
+            or body == "test"
+            for body in attributes
+        )
+        pos = item_start
         while pos < len(clean) and clean[pos].isspace():
             pos += 1
         # Skip an optional visibility and common function qualifiers before the item keyword.
@@ -178,6 +287,7 @@ def _remove_cfg_test_modules(source: str) -> str:
             pos += qualifiers.end()
         item = re.match(r"(mod|fn|impl|struct|enum|trait|use|const|static|type)\b", clean[pos:])
         if not item:
+            pos = max(match.end(), pos)
             continue
         kind = item.group(1)
         item_start = pos
@@ -230,7 +340,8 @@ def _remove_cfg_test_modules(source: str) -> str:
                     pos += 1
                     break
                 pos += 1
-        edits.append((match.start(), pos))
+        if excluded:
+            edits.append((attr_start, pos))
     if not edits:
         return source
     chars = list(source)
@@ -350,10 +461,10 @@ def _flag_named(name: str, docs: str) -> bool:
     )
 
 
-def _decls(package: Package, workspace: Path) -> list[Flag]:
+def _decls(package: Package, workspace: Path, files: list[Path], reader: BoundedReader) -> list[Flag]:
     found: list[Flag] = []
-    for path in sorted((package.root / "src").rglob("*.rs")):
-        source = path.read_text(encoding="utf-8")
+    for path in files:
+        source = reader.read_text(path)
         named_flag_decl = re.search(
             r"\bpub\s+const\s+(?:F_|AF_|O_|T_|M_|FLAG_|VIOLATION_|HAS_)[A-Z0-9_]+\b|"
             r"\bpub\s+const\s+COMMON_LOCAL_FRAME\b|\bpub\s+const\s+[A-Z0-9_]+_(?:FLAG|FLAGS|MASK|BIT)\b",
@@ -421,18 +532,39 @@ def _decls(package: Package, workspace: Path) -> list[Flag]:
     return found
 
 
-def _package_roots(workspace: Path) -> list[Package]:
+def _package_roots(workspace: Path, reader: BoundedReader) -> list[Package]:
     roots: list[Package] = []
+    manifest_count = 0
+    visited_directories = 0
     for base in (workspace / "crates", workspace / "tools"):
         if not base.is_dir():
             continue
-        for manifest in base.rglob("Cargo.toml"):
-            if any(part in {"target", ".git", "tests", "examples"} for part in manifest.parts):
+        if base.is_symlink():
+            raise ValueError("workspace package directory is a symlink")
+        for current, directories, filenames in os.walk(base, followlinks=False):
+            current_path = Path(current)
+            visited_directories += 1
+            if visited_directories > MAX_PACKAGE_SCAN_DIRECTORIES:
+                raise ValueError("workspace package directory scan exceeds its configured cap")
+            kept: list[str] = []
+            for directory in directories:
+                child = current_path / directory
+                if directory in {"target", ".git", "tests", "examples"}:
+                    continue
+                if child.is_symlink():
+                    raise ValueError("workspace package tree contains a symlink directory")
+                kept.append(directory)
+            directories[:] = sorted(kept)
+            if "Cargo.toml" not in filenames:
                 continue
+            manifest = current_path / "Cargo.toml"
+            manifest_count += 1
+            if manifest_count > MAX_MANIFEST_COUNT:
+                raise ValueError("workspace manifest count exceeds its configured cap")
             try:
-                doc = tomllib.loads(manifest.read_text(encoding="utf-8"))
-            except (OSError, tomllib.TOMLDecodeError):
-                continue
+                doc = tomllib.loads(reader.read_text(manifest))
+            except tomllib.TOMLDecodeError as exc:
+                raise ValueError("workspace contains a malformed Cargo manifest") from exc
             meta = doc.get("package")
             if not isinstance(meta, dict) or not isinstance(meta.get("name"), str):
                 continue
@@ -456,6 +588,8 @@ def _package_roots(workspace: Path) -> list[Package]:
                                 target_name = value.get("package", key) if isinstance(value, dict) else key
                                 deps[key.replace("-", "_")] = target_name.replace("-", "_")
             roots.append(Package(name, crate_name, manifest.parent, deps))
+            if len(roots) > MAX_PACKAGE_COUNT:
+                raise ValueError("workspace package count exceeds its configured cap")
     return roots
 
 
@@ -463,7 +597,33 @@ def _source_files(package: Package) -> list[Path]:
     src = package.root / "src"
     if not src.is_dir():
         return []
-    return sorted(p for p in src.rglob("*.rs") if "tests" not in p.parts)
+    if src.is_symlink():
+        raise ValueError("package source directory is a symlink")
+    files: list[Path] = []
+    directory_count = 0
+    for current, directories, names in os.walk(src, followlinks=False):
+        directory = Path(current)
+        directory_count += 1
+        if directory_count > MAX_SOURCE_FILES_PER_PACKAGE * 2:
+            raise ValueError("package source directory count exceeds its configured cap")
+        kept: list[str] = []
+        for name in directories:
+            child = directory / name
+            if name in {"tests", "examples"}:
+                continue
+            if child.is_symlink():
+                raise ValueError("package source tree contains a symlink directory")
+            kept.append(name)
+        directories[:] = kept
+        for name in names:
+            if name.endswith(".rs"):
+                path = directory / name
+                if path.is_symlink():
+                    raise ValueError("package source tree contains a symlink file")
+                files.append(path)
+                if len(files) > MAX_SOURCE_FILES_PER_PACKAGE:
+                    raise ValueError("package Rust source count exceeds its configured cap")
+    return files
 
 
 def _use_statements(tokens: list[str]) -> list[tuple[int, int, bool, list[str]]]:
@@ -526,7 +686,9 @@ def _extend_module_aliases(
                 aliases[local_name] = target
 
 
-def _consumer_references(flags: list[Flag], packages: list[Package]) -> dict[tuple[str, str, str], tuple[str, ...]]:
+def _consumer_references(
+    flags: list[Flag], packages: list[Package], files_by_package: dict[str, list[Path]], reader: BoundedReader
+) -> dict[tuple[str, str, str], tuple[str, ...]]:
     flags_by_package: dict[str, dict[str, set[tuple[str, str, str]]]] = {}
     for flag in flags:
         flags_by_package.setdefault(flag.package, {}).setdefault(flag.name, set()).add(
@@ -546,8 +708,8 @@ def _consumer_references(flags: list[Flag], packages: list[Package]) -> dict[tup
     names_pattern = re.compile(r"\b(?:" + "|".join(re.escape(flag.name) for flag in flags) + r")\b")
     for package in relevant_packages:
         source_cache[package.name] = []
-        for path in _source_files(package):
-            source = path.read_text(encoding="utf-8")
+        for path in files_by_package[package.name]:
+            source = reader.read_text(path)
             if not names_pattern.search(source):
                 continue
             tokens = _tokens(source)
@@ -615,8 +777,8 @@ def _consumer_references(flags: list[Flag], packages: list[Package]) -> dict[tup
             continue
         visible_pattern = re.compile(r"\b(?:" + "|".join(re.escape(name) for name in sorted(visible_names)) + r")\b")
         use_sources = []
-        for path in _source_files(package):
-            source = path.read_text(encoding="utf-8")
+        for path in files_by_package[package.name]:
+            source = reader.read_text(path)
             if not visible_pattern.search(source):
                 continue
             tokens = _tokens(source)
@@ -662,11 +824,11 @@ def _consumer_references(flags: list[Flag], packages: list[Package]) -> dict[tup
     return {key: tuple(sorted(consumers)) for key, consumers in consumers_by_key.items()}
 
 
-def _load_allowlist(path: Path) -> dict[tuple[str, str, str], str]:
+def _load_allowlist(path: Path, workspace: Path) -> dict[tuple[str, str, str], str]:
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        raise ValueError("safety flag allowlist is missing")
+        data = json.loads(BoundedReader(workspace, MAX_ALLOWLIST_BYTES, MAX_ALLOWLIST_BYTES).read_text(path))
+    except (FileNotFoundError, OSError, json.JSONDecodeError) as exc:
+        raise ValueError("safety flag allowlist is missing or invalid") from exc
     if not isinstance(data, dict) or data.get("version") != 1 or not isinstance(data.get("entries"), list):
         raise ValueError("allowlist must be version 1 with an entries array")
     entries: dict[tuple[str, str, str], str] = {}
@@ -684,22 +846,48 @@ def _load_allowlist(path: Path) -> dict[tuple[str, str, str], str]:
 
 
 def check(workspace: Path, allowlist_path: Path) -> tuple[list[Finding], list[tuple[str, str, str]]]:
+    try:
+        workspace = workspace.resolve(strict=True)
+    except OSError as exc:
+        raise ValueError("configured workspace path is missing or invalid") from exc
+    if workspace == Path("/"):
+        raise ValueError("filesystem root cannot be the configured workspace")
     if not (workspace / "Cargo.toml").is_file():
         raise ValueError("workspace Cargo.toml is missing")
-    packages = _package_roots(workspace)
+    manifests = BoundedReader(workspace, MAX_MANIFEST_BYTES, MAX_TOTAL_MANIFEST_BYTES)
+    packages = _package_roots(workspace, manifests)
     package_by_name = {package.name: package for package in packages}
+    if len(package_by_name) != len(packages):
+        raise ValueError("workspace contains duplicate package metadata names")
     missing_safety_packages = sorted(SAFETY_PACKAGES - package_by_name.keys())
     if missing_safety_packages:
         raise ValueError("safety packages are missing: " + ", ".join(missing_safety_packages))
+    files_by_package = {package.name: _source_files(package) for package in packages}
+    total_source_files = sum(len(files) for files in files_by_package.values())
+    if total_source_files > MAX_TOTAL_SOURCE_FILES:
+        raise ValueError("workspace Rust source count exceeds its configured cap")
+    source_reader = BoundedReader(workspace, MAX_SOURCE_FILE_BYTES, MAX_TOTAL_SOURCE_BYTES)
     flags: list[Flag] = []
     for name in SAFETY_PACKAGES:
         package = package_by_name.get(name)
         if package is not None:
-            flags.extend(_decls(package, workspace))
-    allowlist = _load_allowlist(allowlist_path)
-    consumers = _consumer_references(flags, packages)
-    findings = [Finding(flag, consumers[(flag.package, flag.name, flag.declaration)]) for flag in flags]
-    violations = [finding for finding in findings if not finding.consumers and finding.key not in allowlist]
+            flags.extend(_decls(package, workspace, files_by_package[name], source_reader))
+    allowlist = _load_allowlist(allowlist_path, workspace)
+    consumers = _consumer_references(flags, packages, files_by_package, source_reader)
+    name_counts: dict[tuple[str, str], int] = {}
+    for flag in flags:
+        identity = (flag.package, flag.name)
+        name_counts[identity] = name_counts.get(identity, 0) + 1
+    ambiguous_names = {identity for identity, count in name_counts.items() if count > 1}
+    findings = [
+        Finding(
+            flag,
+            () if (flag.package, flag.name) in ambiguous_names else consumers[(flag.package, flag.name, flag.declaration)],
+            (flag.package, flag.name) in ambiguous_names,
+        )
+        for flag in flags
+    ]
+    violations = [finding for finding in findings if (not finding.consumers or finding.ambiguous_name) and finding.key not in allowlist]
     stale = sorted(key for key in allowlist if key not in {finding.key for finding in findings})
     return violations, stale
 
@@ -718,6 +906,11 @@ def main(argv: Iterable[str] | None = None) -> int:
         return 2
     for finding in violations:
         f = finding.flag
+        if finding.ambiguous_name:
+            print(
+                f"ambiguous_safety_flag_name package={f.package} constant={f.name} "
+                f"declaration={f.declaration}; basename resolution refused"
+            )
         print(f"unconsumed_safety_flag package={f.package} constant={f.name} declaration={f.declaration}")
     for package, name, declaration in stale:
         print(f"stale_safety_flag_allowlist package={package} constant={name} declaration={declaration}")

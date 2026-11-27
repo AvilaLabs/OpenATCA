@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import io
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 
@@ -147,13 +149,34 @@ class SafetyFlagConsumerTests(unittest.TestCase):
             '    use safety_dep::{F_ACTIVE, F_VISIBLE};\n'
             '    fn test_only() { let _ = F_ACTIVE | F_VISIBLE; }\n'
             '}\n'
-            '#[cfg(test)] fn standalone_test_only() { let _ = safety_dep::F_ACTIVE; }\n'
+            '#[allow(dead_code)] #[cfg(test)] fn standalone_test_only() { let _ = safety_dep::F_ACTIVE; }\n'
+            '#[cfg(any())] mod disabled { fn never_built() { let _ = safety_dep::F_VISIBLE; } }\n'
+            '#[cfg(any())] fn disabled_function() { let _ = safety_dep::F_ALL_FLAGS; }\n'
         )
         violations, _ = self.findings()
         self.assertEqual(
             {item.flag.name for item in violations},
             {"F_ACTIVE", "F_VISIBLE", "F_ALL_FLAGS", "INPUT_PRESENT"},
         )
+
+    def test_duplicate_flag_basenames_fail_closed_across_modules(self) -> None:
+        first = self.provider / "src" / "first.rs"
+        second = self.provider / "src" / "second.rs"
+        first.write_text("pub const F_SHARED: u8 = 1 << 4;\n", encoding="utf-8")
+        second.write_text("pub const F_SHARED: u8 = 1 << 5;\n", encoding="utf-8")
+        self.write_consumer(
+            "use safety_dep::first::F_SHARED;\n"
+            "pub fn consume_one(bits: u8) -> bool { bits & F_SHARED != 0 }\n"
+        )
+        violations, _ = self.findings()
+        shared = [item for item in violations if item.flag.name == "F_SHARED"]
+        self.assertEqual(len(shared), 2)
+        self.assertTrue(all(item.ambiguous_name and not item.consumers for item in shared))
+        output = io.StringIO()
+        with redirect_stdout(output):
+            exit_code = CHECKER.main(["--root", str(self.root), "--allowlist", str(self.allowlist)])
+        self.assertEqual(exit_code, 1)
+        self.assertIn("ambiguous_safety_flag_name package=oa-safety constant=F_SHARED", output.getvalue())
 
     def test_exact_allowlist_entry_suppresses_one_flag_and_stale_entry_fails(self) -> None:
         self.write_consumer("pub fn unrelated() {}\n")
@@ -195,6 +218,73 @@ class SafetyFlagConsumerTests(unittest.TestCase):
         self.allowlist.unlink()
         with self.assertRaises(ValueError):
             self.findings()
+
+    def test_cli_missing_wrong_and_root_configurations_refuse(self) -> None:
+        for root in (self.root / "missing-workspace", Path("/tmp"), Path("/")):
+            errors = io.StringIO()
+            with redirect_stderr(errors):
+                code = CHECKER.main(["--root", str(root), "--allowlist", str(self.allowlist)])
+            self.assertEqual(code, 2)
+            self.assertIn("safety_flag_consumer_check_failed:", errors.getvalue())
+        self.allowlist.unlink()
+        errors = io.StringIO()
+        with redirect_stderr(errors):
+            code = CHECKER.main(["--root", str(self.root), "--allowlist", str(self.allowlist)])
+        self.assertEqual(code, 2)
+
+    def test_bounded_reader_rejects_oversize_and_symlink_source(self) -> None:
+        self.write_consumer("pub fn unrelated() {}\n")
+        oversized = self.consumer / "src" / "oversized.rs"
+        oversized.write_bytes(b"x" * (CHECKER.MAX_SOURCE_FILE_BYTES + 1))
+        with self.assertRaisesRegex(ValueError, "byte cap"):
+            self.findings()
+        oversized.unlink()
+
+        outside = self.root.parent / f"{self.root.name}-outside.rs"
+        outside.write_text("pub const F_ACTIVE: u8 = 1;\n", encoding="utf-8")
+        link = self.consumer / "src" / "linked.rs"
+        try:
+            link.symlink_to(outside)
+            with self.assertRaisesRegex(ValueError, "symlink"):
+                self.findings()
+        finally:
+            link.unlink(missing_ok=True)
+            outside.unlink(missing_ok=True)
+
+    def test_malformed_and_duplicate_package_manifests_fail_closed(self) -> None:
+        malformed = self.consumer / "Cargo.toml"
+        malformed.write_text("[package\n", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "malformed Cargo manifest"):
+            self.findings()
+        malformed.write_text(
+            '[package]\nname="consumer"\nversion="0.1.0"\n'
+            '[dependencies]\nsafety_dep={package="oa-safety",path="../oa-safety"}\n',
+            encoding="utf-8",
+        )
+        duplicate = self.root / "tools" / "oa-safety-duplicate"
+        (duplicate / "src").mkdir(parents=True)
+        (duplicate / "Cargo.toml").write_text(
+            '[package]\nname="oa-safety"\nversion="0.2.0"\n', encoding="utf-8"
+        )
+        (duplicate / "src" / "lib.rs").write_text("", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "duplicate package metadata"):
+            self.findings()
+
+    def test_package_discovery_refuses_symlink_directories(self) -> None:
+        outside = Path(self.tmp.name).parent / f"{Path(self.tmp.name).name}-pkg"
+        (outside / "src").mkdir(parents=True)
+        (outside / "Cargo.toml").write_text('[package]\nname="outside"\nversion="0.1.0"\n', encoding="utf-8")
+        link = self.root / "tools" / "linked-package"
+        link.parent.mkdir(exist_ok=True)
+        try:
+            link.symlink_to(outside, target_is_directory=True)
+            with self.assertRaisesRegex(ValueError, "symlink directory"):
+                self.findings()
+        finally:
+            link.unlink(missing_ok=True)
+            (outside / "Cargo.toml").unlink(missing_ok=True)
+            (outside / "src").rmdir()
+            outside.rmdir()
 
 
 if __name__ == "__main__":
