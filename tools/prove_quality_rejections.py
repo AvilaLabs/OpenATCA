@@ -229,6 +229,82 @@ def _prove_e07(repo: Path) -> tuple[str, str]:
         return baseline_digest, "long-function,wide-arguments,duplicate-block-refused"
 
 
+def _e09_binary() -> Path:
+    value = os.environ.get("OPENATCA_OA_TRACE_BIN")
+    if not value:
+        raise RuntimeError("OPENATCA_OA_TRACE_BIN must name the trusted oa-trace executable")
+    binary = Path(value)
+    if not binary.is_absolute() or not binary.is_file() or not os.access(binary, os.X_OK):
+        raise RuntimeError("OPENATCA_OA_TRACE_BIN is not an absolute executable file")
+    return binary
+
+
+def _e09_env(root: Path | None) -> dict[str, str]:
+    env = {"PATH": os.defpath}
+    if root is not None:
+        env["OPENATCA_DATA"] = str(root)
+    return env
+
+
+def _expect_e09_refusal(
+    command: list[str], cwd: Path, env: dict[str, str], expected: str, label: str
+) -> str:
+    result = _run(command, cwd=cwd, env=env)
+    if result.returncode != 2 or expected not in result.stderr:
+        raise RuntimeError(f"E09 {label} was not refused by the sealed-root check")
+    return label
+
+
+def _prove_e09(repo: Path) -> tuple[str, str]:
+    binary = _e09_binary()
+    source = "crates/oa-geo/tests/general.rs"
+    test_ref = f"{source}::every_source_file_is_unsafe_free_and_lib_forbids_unsafe"
+    script = repo / "tools/sealed_guard.py"
+    roots: dict[str, Path] = {}
+    with tempfile.TemporaryDirectory(prefix="oa-e09-sealed-root-") as temporary:
+        base = Path(temporary)
+        valid = base / "valid"
+        valid.mkdir()
+        (valid / ".openatca-data-root").write_bytes(b"openatca-data-root-v1\n")
+        roots["valid"] = valid
+        markerless = base / "markerless"
+        markerless.mkdir()
+        roots["markerless"] = markerless
+        wrong = base / "wrong"
+        wrong.mkdir()
+        (wrong / ".openatca-data-root").write_bytes(b"wrong-root-marker\n")
+        roots["wrong"] = wrong
+        roots["missing"] = base / "absent"
+
+        py_command = [sys.executable, str(script), source]
+        trace_command = [str(binary), "--root", str(repo), "--verify-test", test_ref]
+        for command in (py_command, trace_command):
+            result = _run(command, cwd=repo, env=_e09_env(valid))
+            if result.returncode != 0:
+                raise RuntimeError("E09 valid synthetic root did not admit the public source")
+
+        refusals = []
+        cases: tuple[tuple[str, Path | None], ...] = (
+            ("markerless", roots["markerless"]),
+            ("wrong-marker", roots["wrong"]),
+            ("missing-root", roots["missing"]),
+            ("slash-root", Path("/")),
+            ("empty-configuration", None),
+        )
+        for label, root in cases:
+            env = _e09_env(root)
+            if label == "empty-configuration":
+                env["OPENATCA_DATA"] = ""
+            refusals.append(_expect_e09_refusal(
+                py_command, repo, env, "refused by OA-SEAL-001", f"python-{label}"
+            ))
+            refusals.append(_expect_e09_refusal(
+                trace_command, repo, env, "test source is not a bounded UTF-8 file", f"trace-{label}"
+            ))
+        receipt = json.dumps(refusals, separators=(",", ":")).encode()
+        return _digest(receipt), ",".join(refusals)
+
+
 def _duplicate_functions() -> str:
     lines = []
     for prefix in ("left", "right"):
@@ -244,11 +320,16 @@ def main(argv: list[str] | None = None) -> int:
     import argparse
 
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--class", dest="proof_class", choices=("E05", "E07"), required=True)
+    parser.add_argument("--class", dest="proof_class", choices=("E05", "E07", "E09"), required=True)
     args = parser.parse_args(argv)
     repo = Path(__file__).resolve().parents[1]
     try:
-        digest, refused = _prove_e05(repo) if args.proof_class == "E05" else _prove_e07(repo)
+        if args.proof_class == "E05":
+            digest, refused = _prove_e05(repo)
+        elif args.proof_class == "E07":
+            digest, refused = _prove_e07(repo)
+        else:
+            digest, refused = _prove_e09(repo)
     except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
         print(f"proof_setup_error class={args.proof_class} reason={error}", file=sys.stderr)
         return 2

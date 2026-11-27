@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from tools import prove_quality_rejections as proof
 
@@ -54,6 +55,33 @@ class QualityRejectionProofTests(unittest.TestCase):
             check=False,
         )
         self.assertEqual(result.returncode, 2)
+
+    def test_e09_actual_clis_refuse_untrusted_roots_without_inherited_config(self) -> None:
+        binary = os.environ.get("OPENATCA_OA_TRACE_BIN")
+        if not binary or not Path(binary).is_file() or not os.access(binary, os.X_OK):
+            self.skipTest("qualified oa-trace executable is not configured")
+        with tempfile.TemporaryDirectory(prefix="oa-e09-inherited-root-") as temporary:
+            inherited = Path(temporary)
+            (inherited / ".openatca-data-root").write_bytes(b"openatca-data-root-v1\n")
+            with patch.dict(os.environ, {"OPENATCA_DATA": str(inherited)}):
+                digest, refused = proof._prove_e09(Path(__file__).resolve().parents[1])
+        self.assertEqual(len(digest), 64)
+        for label in ("markerless", "wrong-marker", "missing-root", "slash-root", "empty-configuration"):
+            self.assertIn(f"python-{label}", refused)
+            self.assertIn(f"trace-{label}", refused)
+
+    def test_e09_requires_explicit_trace_executable_configuration(self) -> None:
+        env = os.environ.copy()
+        env.pop("OPENATCA_OA_TRACE_BIN", None)
+        result = subprocess.run(
+            [sys.executable, str(Path(proof.__file__)), "--class", "E09"],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("OPENATCA_OA_TRACE_BIN", result.stderr)
 
 
 if __name__ == "__main__":
