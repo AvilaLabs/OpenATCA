@@ -1417,11 +1417,11 @@ mod tests {
             "{output_one}"
         );
         assert!(
-            output_one.contains("processor\t1\tlocal=match\tflags=0x00000000"),
+            output_one.contains("processor\t1\trole=generic\tlocal=match\tflags=0x00000000"),
             "{output_one}"
         );
         assert!(
-            output_one.contains("processor\t2\tlocal=match\tflags=0x00000000"),
+            output_one.contains("processor\t2\trole=generic\tlocal=match\tflags=0x00000000"),
             "{output_one}"
         );
         let processor3_row = output_one
