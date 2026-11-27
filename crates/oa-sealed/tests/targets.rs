@@ -363,7 +363,7 @@ const ALLOW: &str = "seal-allow:";
 // Synthetic guard fixtures: seven parser subprocess, fixture enumeration/open and fixture-link sites.
 // STDDS reference publication: four generated-report reads, output enumeration, and two
 // synthetic preservation checks; these are included in the exact live scanner count below.
-const ALLOW_COUNT: usize = 226;
+const ALLOW_COUNT: usize = 228;
 
 /// Text that names the real data root: a file that holds one must read through `oa_sealed`.
 /// Written in two pieces so this file does not name the root itself.
