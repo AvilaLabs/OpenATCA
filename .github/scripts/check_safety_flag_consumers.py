@@ -887,7 +887,11 @@ def check(workspace: Path, allowlist_path: Path) -> tuple[list[Finding], list[tu
         )
         for flag in flags
     ]
-    violations = [finding for finding in findings if (not finding.consumers or finding.ambiguous_name) and finding.key not in allowlist]
+    violations = [
+        finding
+        for finding in findings
+        if finding.ambiguous_name or (not finding.consumers and finding.key not in allowlist)
+    ]
     stale = sorted(key for key in allowlist if key not in {finding.key for finding in findings})
     return violations, stale
 

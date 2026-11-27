@@ -172,6 +172,18 @@ class SafetyFlagConsumerTests(unittest.TestCase):
         shared = [item for item in violations if item.flag.name == "F_SHARED"]
         self.assertEqual(len(shared), 2)
         self.assertTrue(all(item.ambiguous_name and not item.consumers for item in shared))
+        allow_entries = [
+            {
+                "package": item.flag.package,
+                "constant": item.flag.name,
+                "declaration": item.flag.declaration,
+                "reason": "Exact legacy entry used to prove ambiguity cannot be allowlisted away.",
+            }
+            for item in shared
+        ]
+        self.allowlist.write_text(json.dumps({"version": 1, "entries": allow_entries}), encoding="utf-8")
+        violations, _ = self.findings()
+        self.assertTrue(all(item.ambiguous_name for item in violations if item.flag.name == "F_SHARED"))
         output = io.StringIO()
         with redirect_stdout(output):
             exit_code = CHECKER.main(["--root", str(self.root), "--allowlist", str(self.allowlist)])
