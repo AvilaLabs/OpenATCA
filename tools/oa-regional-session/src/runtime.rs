@@ -2901,7 +2901,9 @@ fn regional_assign_runway(
     }
     let (audit_checkpoint, audit_receipt) =
         oa_audit_log::shell::append_receipt(request.audit_log, request.expected_checkpoint, event)
-            .map_err(|error| format!("runway assignment audit append outcome uncertain: {error:?}"))?;
+            .map_err(|error| {
+                format!("runway assignment audit append outcome uncertain: {error:?}")
+            })?;
     validate_runway_audit_receipt(
         request.expected_checkpoint,
         event,
@@ -2927,26 +2929,38 @@ fn regional_assign_runway(
             || view.generation != request.generation
             || view.identity != request.identity
         {
-            return Err("durable runway assignment intent recorded but full identity changed before commit".into());
+            return Err(
+                "durable runway assignment intent recorded but full identity changed before commit"
+                    .into(),
+            );
         }
     }
     if post_view_count != 1 {
-        return Err("durable runway assignment intent recorded but target disappeared before commit".into());
+        return Err(
+            "durable runway assignment intent recorded but target disappeared before commit".into(),
+        );
     }
     match slot_index {
         Some(index) => {
             let Some(prior) = runtime.runway_assignments.get(index) else {
-                return Err("durable runway assignment intent recorded but assignment slot disappeared".into());
+                return Err(
+                    "durable runway assignment intent recorded but assignment slot disappeared"
+                        .into(),
+                );
             };
             if prior.identity != request.identity
                 || prior.generation != request.generation
                 || request.service_sequence <= prior.sequence
             {
-                return Err("durable runway assignment intent recorded but prior assignment changed".into());
+                return Err(
+                    "durable runway assignment intent recorded but prior assignment changed".into(),
+                );
             }
         }
         None if runtime.runway_assignments.len() >= runtime.profile.max_flights => {
-            return Err("durable runway assignment intent recorded but active capacity changed".into());
+            return Err(
+                "durable runway assignment intent recorded but active capacity changed".into(),
+            );
         }
         None => {}
     }
@@ -3256,7 +3270,9 @@ fn regional_acknowledge_runway_alert(
         .ok_or("ARV acknowledgement audit sequence exhausted")?;
     let (audit_checkpoint, audit_receipt) =
         oa_audit_log::shell::append_receipt(request.audit_log, request.expected_checkpoint, event)
-            .map_err(|error| format!("ARV acknowledgement audit append outcome uncertain: {error:?}"))?;
+            .map_err(|error| {
+                format!("ARV acknowledgement audit append outcome uncertain: {error:?}")
+            })?;
     validate_runway_audit_receipt(
         request.expected_checkpoint,
         event,

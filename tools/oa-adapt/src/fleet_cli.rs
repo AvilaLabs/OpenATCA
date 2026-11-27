@@ -945,12 +945,7 @@ mod tests {
                 ..all_loaded
             },
         ] {
-            let complete = components_match_role(
-                ProcessRole::Generic,
-                [9; 32],
-                issued,
-                loaded,
-            );
+            let complete = components_match_role(ProcessRole::Generic, [9; 32], issued, loaded);
             assert!(!complete, "each issued companion mutation blocks coverage");
             let expected = [ExpectedProcessor {
                 processor_id: ProcessorId(1),
