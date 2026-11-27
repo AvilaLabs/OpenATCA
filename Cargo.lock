@@ -528,6 +528,7 @@ dependencies = [
  "oa-flight-sfdps",
  "oa-ieee",
  "oa-legacy-traj",
+ "oa-math",
  "oa-migration-shadow",
  "oa-msaw",
  "oa-msaw-run",

@@ -6,12 +6,20 @@ use crate::flight::{
     self, FlightApplyOutcome, FlightDriver, FlightDriverConfig, FlightDriverReport,
     FlightViewStatus, SharedFlightView, MAX_DRIVER_FLIGHTS, MAX_DRIVER_LOG_ENTRIES,
 };
+use crate::holding::{
+    FlightLifecycles, HoldEntryCourseBasis, HoldEntryReport, HoldInstruction, HoldPredictionIntent,
+    HoldProbeUnavailableReason, HoldRevisions, HoldStore, HoldUpdate, HoldViewRow,
+    PairHoldProbeUnavailable, SuaHoldProbeUnavailable,
+};
 use crate::nam_flight::{self, NamFlightContext, NamFlightResult, NamFlightRuntime};
 use crate::route::{self, RouteStore};
 use crate::session::{summarize_input_batch, FrameEvidence, ReceiptBatch, MAX_EVENTS_PER_RECEIPT};
 use crate::surveillance::{self, Surveillance, SurveillanceConfig, SurveillanceFrame};
 use oa_adapt::manifest::VerifiedPackage;
-use oa_airspace::core::model::Model;
+use oa_airspace::core::conflict_probe::{SuaProbeResult, SuaStatus};
+use oa_airspace::core::geom::{self, Area};
+use oa_airspace::core::model::{self as air_model, Model};
+use oa_ca::probe::{ProbeResult, ProbeStatus};
 use oa_legacy_traj::core::trajectory::{
     PerformanceEnvelope, TrajectoryIssueOutput, VerticalProfileOutput,
 };
@@ -40,6 +48,17 @@ const MAX_FLIGHT_KEY_RECLAIM_PROBE_WORK: usize =
 const MAX_FLIGHT_DATA_VIEW_WORK: usize = flight::MAX_OFFLINE_DRIVER_FLIGHTS;
 const MAX_RUNTIME_ITEM_WORK: u32 =
     oa_airspace::core::route::MAX_ROUTE_WORK + crate::input::MAX_FILED_ROUTE_BYTES as u32 + 16;
+/// Derived maximum work units for bounded hold/profile joins in one scan. It covers full-key
+/// sorts at 4,096 tracks and 8,192 holds, binary joins for at most 65,536 pair probes plus
+/// 65,536 SUA probes, linear reconciliation/retirement, and fixed 240-point profile copies and
+/// clears possible during bulk retirement. The aggregate is preflighted before lifecycle and
+/// hold processing; probe caps are unchanged.
+const MAX_HOLD_SCAN_JOIN_WORK: usize = 16_000_000;
+/// C7 cap for resolving latest accepted position provenance against active tracker rows.
+/// The nested scan is preflighted exactly; an oversized frame refuses before hold state changes.
+const MAX_HOLD_REPORT_EVENT_ASSOCIATION_WORK: usize = 8_000_000;
+/// C7 cap for sorting canonical active plans/tracks and joining each plan to its current track.
+const MAX_ACTIVE_PLAN_TRACK_JOIN_WORK: usize = 1_000_000;
 
 /// OpenATCA functional selection. These names describe this runtime and do not claim a legacy
 /// FSL/EFSL flag mapping.
@@ -78,6 +97,280 @@ pub struct RegionalAutomationStatus {
     pub fusion_off: bool,
 }
 
+/// A8 bounded scan work. Any candidate beyond these caps is counted as unexamined, never Clear.
+pub const MAX_RUNTIME_PAIR_PROBES: usize = 65_536;
+pub const MAX_RUNTIME_SUA_PROBES: usize = 65_536;
+pub const MAX_RUNTIME_SUA_ZONES: usize = 4_096;
+
+fn compare_full_flight_keys(
+    left: &oa_legacy_traj::core::trajectory::FlightKey,
+    right: &oa_legacy_traj::core::trajectory::FlightKey,
+) -> std::cmp::Ordering {
+    (left.gufi, left.aircraft_address, left.centre, left.plan_id).cmp(&(
+        right.gufi,
+        right.aircraft_address,
+        right.centre,
+        right.plan_id,
+    ))
+}
+
+fn sort_work_bound(len: usize) -> Result<usize, &'static str> {
+    if len <= 1 {
+        return Ok(0);
+    }
+    let log2 = usize::BITS as usize - (len - 1).leading_zeros() as usize;
+    len.checked_mul(log2)
+        .and_then(|work| work.checked_mul(16))
+        .ok_or("hold scan sort work bound overflow")
+}
+
+fn binary_search_work_bound(len: usize, searches: usize) -> Result<usize, &'static str> {
+    if searches == 0 || len <= 1 {
+        return Ok(searches);
+    }
+    let steps = usize::BITS as usize - (len - 1).leading_zeros() as usize;
+    searches
+        .checked_mul(steps.saturating_add(1))
+        .ok_or("hold scan binary-join work bound overflow")
+}
+
+fn find_probe_input(
+    inputs: &[(SharedFlightView, crate::surveillance::ObservedTrack)],
+    key: oa_legacy_traj::core::trajectory::FlightKey,
+) -> Option<&(SharedFlightView, crate::surveillance::ObservedTrack)> {
+    let index = inputs
+        .binary_search_by(|(view, _)| compare_full_flight_keys(&route::flight_key(view), &key))
+        .ok()?;
+    inputs.get(index)
+}
+
+fn find_report(
+    reports: &[HoldEntryReport],
+    key: oa_legacy_traj::core::trajectory::FlightKey,
+) -> Option<HoldEntryReport> {
+    let index = reports
+        .binary_search_by(|report| compare_full_flight_keys(&report.key, &key))
+        .ok()?;
+    reports.get(index).copied()
+}
+
+fn find_hold_row(
+    rows: &[HoldViewRow],
+    key: oa_legacy_traj::core::trajectory::FlightKey,
+) -> Option<&HoldViewRow> {
+    let index = rows
+        .binary_search_by(|row| compare_full_flight_keys(&row.instruction.flight_key, &key))
+        .ok()?;
+    rows.get(index)
+}
+
+fn preflight_hold_scan_work(
+    active_count: usize,
+    lifecycle_count: usize,
+    held_count: usize,
+    prior_report_count: usize,
+    current_report_count: usize,
+    zone_count: usize,
+    hold_capacity: usize,
+) -> Result<(usize, usize), &'static str> {
+    let pair_count = active_count
+        .checked_mul(active_count.saturating_sub(1))
+        .map(|pairs| pairs / 2)
+        .ok_or("hold scan pair-count overflow")?;
+    let pair_limit = pair_count.min(MAX_RUNTIME_PAIR_PROBES);
+    let sua_candidates = active_count
+        .checked_mul(zone_count)
+        .ok_or("hold scan SUA candidate-count overflow")?;
+    let sua_limit = sua_candidates.min(MAX_RUNTIME_SUA_PROBES);
+    let mut work = 0usize;
+    for count in [
+        active_count, // pair/SUA key order
+        current_report_count,
+        prior_report_count,
+        held_count,
+    ] {
+        work = work
+            .checked_add(sort_work_bound(count)?)
+            .ok_or("hold scan sort-work aggregate overflow")?;
+    }
+    work = work
+        .checked_add(
+            lifecycle_count
+                .checked_add(active_count)
+                .and_then(|value| value.checked_mul(6))
+                .ok_or("hold lifecycle merge-work bound overflow")?,
+        )
+        .ok_or("hold scan merge-work aggregate overflow")?;
+    work = work
+        .checked_add(
+            prior_report_count
+                .checked_add(current_report_count)
+                .ok_or("hold report merge-work bound overflow")?,
+        )
+        .ok_or("hold scan merge-work aggregate overflow")?;
+    let hold_searches = held_count
+        .checked_mul(2)
+        .and_then(|value| value.checked_add(pair_limit.saturating_mul(2)))
+        .and_then(|value| value.checked_add(sua_limit))
+        .ok_or("hold scan row-join count overflow")?;
+    work = work
+        .checked_add(binary_search_work_bound(held_count, hold_searches)?)
+        .ok_or("hold scan binary-join aggregate overflow")?;
+    let active_searches = held_count
+        .checked_mul(2)
+        .and_then(|value| value.checked_add(prior_report_count))
+        .and_then(|value| value.checked_add(current_report_count))
+        .ok_or("hold scan active-view join count overflow")?;
+    work = work
+        .checked_add(binary_search_work_bound(active_count, active_searches)?)
+        .ok_or("hold scan active-view join aggregate overflow")?;
+    let report_searches = held_count
+        .checked_mul(2)
+        .ok_or("hold scan report join count overflow")?;
+    work = work
+        .checked_add(binary_search_work_bound(
+            prior_report_count,
+            report_searches,
+        )?)
+        .and_then(|value| {
+            value.checked_add(binary_search_work_bound(current_report_count, report_searches).ok()?)
+        })
+        .ok_or("hold scan report-join aggregate overflow")?;
+    let retirement_searches = held_count
+        .checked_add(lifecycle_count)
+        .ok_or("hold retirement lookup count overflow")?;
+    work = work
+        .checked_add(binary_search_work_bound(
+            lifecycle_count,
+            retirement_searches,
+        )?)
+        .ok_or("hold retirement lookup aggregate overflow")?;
+    let hold_profile_points = hold_capacity
+        .checked_mul(crate::route::HOLD_PROFILE_POINTS)
+        .ok_or("hold retirement profile capacity overflow")?;
+    work = work
+        .checked_add(
+            hold_profile_points
+                .checked_mul(2)
+                .ok_or("hold retirement profile move/clear aggregate overflow")?,
+        )
+        .ok_or("hold scan profile-work aggregate overflow")?;
+    let retirement_soa_moves = held_count
+        .checked_mul(20)
+        .and_then(|value| value.checked_add(lifecycle_count.saturating_mul(3)))
+        .and_then(|value| value.checked_add(zone_count))
+        .ok_or("hold retirement SoA/work aggregate overflow")?;
+    work = work
+        .checked_add(retirement_soa_moves)
+        .ok_or("hold scan SoA/work aggregate overflow")?;
+    if work > MAX_HOLD_SCAN_JOIN_WORK {
+        return Err("held trajectory joins exceed the named per-scan C7 work budget");
+    }
+    Ok((pair_limit, sua_limit))
+}
+
+fn merge_hold_entry_reports(
+    previous: &[HoldEntryReport],
+    current: &[HoldEntryReport],
+    active_keys: &[oa_legacy_traj::core::trajectory::FlightKey],
+    output: &mut Vec<HoldEntryReport>,
+    capacity: usize,
+) -> Result<(), &'static str> {
+    if previous.len() > capacity
+        || current.len() > capacity
+        || output.capacity() < capacity
+        || active_keys.len() > capacity
+    {
+        return Err("hold report merge exceeded its preflight capacity");
+    }
+    output.clear();
+    let mut old_index = 0usize;
+    let mut current_index = 0usize;
+    let mut merge_steps = 0usize;
+    let step_limit = previous
+        .len()
+        .checked_add(current.len())
+        .ok_or("hold report merge bound overflow")?;
+    while old_index < previous.len() || current_index < current.len() {
+        merge_steps = merge_steps
+            .checked_add(1)
+            .ok_or("hold report merge counter overflow")?;
+        if merge_steps > step_limit {
+            return Err("hold report merge exceeded its C7 preflight work bound");
+        }
+        let old = previous.get(old_index).copied();
+        let new = current.get(current_index).copied();
+        let selected = match (old, new) {
+            (Some(old), Some(new)) => match compare_full_flight_keys(&old.key, &new.key) {
+                std::cmp::Ordering::Less => {
+                    old_index += 1;
+                    old
+                }
+                std::cmp::Ordering::Equal => {
+                    old_index += 1;
+                    current_index += 1;
+                    new
+                }
+                std::cmp::Ordering::Greater => {
+                    current_index += 1;
+                    new
+                }
+            },
+            (Some(old), None) => {
+                old_index += 1;
+                old
+            }
+            (None, Some(new)) => {
+                current_index += 1;
+                new
+            }
+            (None, None) => break,
+        };
+        if active_keys
+            .binary_search_by(|candidate| compare_full_flight_keys(candidate, &selected.key))
+            .is_ok()
+        {
+            if output.len() >= capacity {
+                return Err("hold report merge output capacity exhausted");
+            }
+            output.push(selected);
+        }
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RuntimeSuaAvailability {
+    Ready,
+    Incomplete,
+    NoncontinuousSchedule,
+    AglAltitude,
+    UnknownAltitude,
+    UnsupportedGeometry,
+}
+
+struct RuntimeSuaZone {
+    boundary_index: usize,
+    floor_ft: i32,
+    ceiling_ft: i32,
+    availability: RuntimeSuaAvailability,
+    area: Option<Area>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RuntimeSuaZoneEvidence {
+    pub boundary_index: usize,
+    pub availability: RuntimeSuaAvailability,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RuntimeSuaEvidence {
+    pub flight_gufi: u128,
+    pub aircraft_address: u32,
+    pub boundary_index: usize,
+    pub result: SuaProbeResult,
+}
+
 // A7.2: cold subsystem composition. All core memory belongs to its originating subsystem.
 pub struct RegionalRuntime {
     model: Model,
@@ -95,6 +388,17 @@ pub struct RegionalRuntime {
     interaction: oa_display::interaction::InteractionState,
     views: Vec<oa_display::interaction::TargetView>,
     observed: Vec<crate::surveillance::ObservedTrack>,
+    /// Latest raw report provenance per complete active flight key, bounded by active flights.
+    hold_entry_reports: Vec<HoldEntryReport>,
+    hold_entry_report_merge: Vec<HoldEntryReport>,
+    latest_active_views: Vec<SharedFlightView>,
+    active_key_scratch: Vec<oa_legacy_traj::core::trajectory::FlightKey>,
+    last_scan_receipt_ns: Option<i64>,
+    /// Strictly increasing receipt time of durable hold-command intents in this session.
+    last_hold_command_receipt_ns: Option<i64>,
+    conflict_scratch: crate::conflict_probe::ConflictProbeScratch,
+    sua_zones: Vec<RuntimeSuaZone>,
+    sua_zones_unexamined: usize,
     next_generation: u32,
     console_text: String,
     profile: RegionalRunProfile,
@@ -102,6 +406,12 @@ pub struct RegionalRuntime {
     last_automation: RegionalAutomationStatus,
     known_flights: Vec<oa_flight::FlightKey>,
     msaw_service_audit: Option<MsawServiceAuditState>,
+    /// Explicit OpenATCA hold annotations. Never inferred from circles or route state.
+    holdings: HoldStore,
+    /// Accepted revisions outlive cancellation only within each active flight lifecycle.
+    hold_revisions: HoldRevisions,
+    hold_lifecycles: FlightLifecycles,
+    next_hold_lifecycle_generation: u64,
 }
 
 struct MsawServiceAuditState {
@@ -304,6 +614,31 @@ pub struct RegionalFrame {
     pub flight_data_as_of: Vec<flight::SharedFlightAsOf>,
     /// Known keys without a current view for this centre; never silently folded into the list.
     pub flight_data_unavailable: u32,
+    /// Same-scan list outputs from the admitted active-centre flight views.
+    pub aircraft_list: Vec<SharedFlightView>,
+    pub departure_list: Vec<SharedFlightView>,
+    /// Parallel active-key and lifecycle-generation columns for typed hold updates.
+    pub active_flight_keys: Vec<oa_legacy_traj::core::trajectory::FlightKey>,
+    pub active_flight_generations: Vec<u64>,
+    /// Scan-local active-plan pair screenings; unavailable and unexamined work stays explicit.
+    pub pair_probes: Vec<ProbeResult>,
+    pub pair_probe_input_refusals: u64,
+    pub pair_probes_unavailable: u64,
+    pub pair_probes_unexamined: u64,
+    /// Pair rows suppressed because at least one flight has explicit hold instructions.
+    pub pair_hold_probe_unavailable: Vec<PairHoldProbeUnavailable>,
+    /// Continuous CIFP UR screenings plus per-zone availability for unsupported inputs.
+    pub sua_probes: Vec<RuntimeSuaEvidence>,
+    pub sua_probes_unavailable: u64,
+    pub sua_probes_unexamined: u64,
+    /// SUA rows suppressed because the shared predictor has no holding-pattern trajectory.
+    pub sua_hold_probe_unavailable: Vec<SuaHoldProbeUnavailable>,
+    pub sua_zone_status: Vec<RuntimeSuaZoneEvidence>,
+    pub sua_zones_unexamined: usize,
+    /// Number of direct-hold profiles constructed once for this scan and shared by probes.
+    pub hold_phase_profiles_built: u64,
+    /// Explicit caller-supplied Hold View annotations, in update order.
+    pub hold_view: Vec<HoldViewRow>,
     pub flight_report: FlightDriverReport,
     pub refused_legacy_route_events: u64,
     pub controller_views: Vec<oa_display::interaction::TargetView>,
@@ -314,6 +649,22 @@ pub struct RegionalFrame {
     pub controller_selection: Option<oa_display::interaction::FlightIdentity>,
     pub console_text: String,
     pub quarantine: RuntimeQuarantineReport,
+}
+
+impl RegionalFrame {
+    /// Lookup the current typed update generation for one complete active flight key.
+    pub fn hold_lifecycle_generation(
+        &self,
+        key: oa_legacy_traj::core::trajectory::FlightKey,
+    ) -> Option<u64> {
+        if self.active_flight_keys.len() != self.active_flight_generations.len() {
+            return None;
+        }
+        self.active_flight_keys
+            .iter()
+            .position(|&candidate| candidate == key)
+            .and_then(|index| self.active_flight_generations.get(index).copied())
+    }
 }
 // A7.2: cold shell evidence, bounded by runtime capacities.
 
@@ -979,6 +1330,121 @@ pub fn regional_receive_nam_flight(
     )
 }
 
+fn runtime_sua_zones(model: &Model) -> (Vec<RuntimeSuaZone>, usize) {
+    use air_model::{
+        self, boundary_source, time_code, BoundaryIx, ALT_GROUND, ALT_NONE, ALT_UNKNOWN,
+        ALT_UNLIMITED, POS_NONE,
+    };
+    let mut zones = Vec::with_capacity(model.boundaries.source.len().min(MAX_RUNTIME_SUA_ZONES));
+    let mut unexamined = 0usize;
+    for boundary_index in 0..model.boundaries.source.len() {
+        if model.boundaries.source.get(boundary_index).copied() != Some(boundary_source::CIFP_UR) {
+            continue;
+        }
+        if zones.len() >= MAX_RUNTIME_SUA_ZONES {
+            unexamined = unexamined.saturating_add(1);
+            continue;
+        }
+        let floor_ft = model
+            .boundaries
+            .floor_ft
+            .get(boundary_index)
+            .copied()
+            .unwrap_or(ALT_NONE);
+        let ceiling_ft = model
+            .boundaries
+            .ceiling_ft
+            .get(boundary_index)
+            .copied()
+            .unwrap_or(ALT_NONE);
+        let complete = u32::try_from(boundary_index)
+            .ok()
+            .and_then(|index| air_model::boundary_is_complete(model, BoundaryIx::new(index)))
+            == Some(true);
+        let availability = if !complete {
+            RuntimeSuaAvailability::Incomplete
+        } else if air_model::bit_get(&model.boundaries.floor_agl, boundary_index)
+            || air_model::bit_get(&model.boundaries.ceiling_agl, boundary_index)
+        {
+            RuntimeSuaAvailability::AglAltitude
+        } else if model.boundaries.time_code.get(boundary_index).copied()
+            != Some(time_code::CONTINUOUS)
+        {
+            RuntimeSuaAvailability::NoncontinuousSchedule
+        } else if [ALT_NONE, ALT_GROUND, ALT_UNKNOWN, ALT_UNLIMITED].contains(&floor_ft)
+            || [ALT_NONE, ALT_GROUND, ALT_UNKNOWN, ALT_UNLIMITED].contains(&ceiling_ft)
+            || floor_ft > ceiling_ft
+        {
+            RuntimeSuaAvailability::UnknownAltitude
+        } else {
+            RuntimeSuaAvailability::Ready
+        };
+        let area = if availability != RuntimeSuaAvailability::Ready {
+            None
+        } else {
+            let span = model.boundaries.segs.get(boundary_index).copied();
+            let segments = span
+                .and_then(|span| {
+                    let start = span.start.row();
+                    let end = start.checked_add(span.len as usize)?;
+                    (end <= model.segments.via.len()
+                        && end <= model.segments.lat.len()
+                        && end <= model.segments.lon.len()
+                        && end <= model.segments.arc_lat.len()
+                        && end <= model.segments.arc_lon.len()
+                        && end <= model.segments.radius_m.len())
+                    .then_some(start..end)
+                })
+                .and_then(|range| {
+                    range
+                        .map(|index| {
+                            let lat = *model.segments.lat.get(index)?;
+                            let lon = *model.segments.lon.get(index)?;
+                            let arc_lat = *model.segments.arc_lat.get(index)?;
+                            let arc_lon = *model.segments.arc_lon.get(index)?;
+                            let pos = if lat == POS_NONE || lon == POS_NONE {
+                                None
+                            } else {
+                                Some(geom::latlon_e7(lat, lon).ok()?)
+                            };
+                            let centre = if arc_lat == POS_NONE || arc_lon == POS_NONE {
+                                None
+                            } else {
+                                Some(geom::latlon_e7(arc_lat, arc_lon).ok()?)
+                            };
+                            Some(geom::SegIn {
+                                via: *model.segments.via.get(index)?,
+                                pos,
+                                centre,
+                                radius_m: f64::from(*model.segments.radius_m.get(index)?),
+                            })
+                        })
+                        .collect::<Option<Vec<_>>>()
+                });
+            segments.and_then(|segments| {
+                geom::segment_samples_wgs84(&segments)
+                    .ok()
+                    .filter(|ring| ring.len() >= 3)
+                    .and_then(|ring| geom::build_area(vec![ring], 0.0).ok())
+            })
+        };
+        let final_availability = if availability == RuntimeSuaAvailability::Ready && area.is_none()
+        {
+            RuntimeSuaAvailability::UnsupportedGeometry
+        } else {
+            availability
+        };
+        zones.push(RuntimeSuaZone {
+            boundary_index,
+            floor_ft,
+            ceiling_ft,
+            availability: final_availability,
+            area,
+        });
+    }
+    (zones, unexamined)
+}
+
 fn regional_new_with_profile_and_namespace(
     model: Model,
     snapshot_sha256: [u8; 32],
@@ -1080,6 +1546,7 @@ fn regional_new_with_source_identity_and_checkpoint(
     if route_bytes > route::MAX_CURRENT_ROUTE_POOL_BYTES {
         return Err("route startup reservation exceeds fixed 320 MiB budget".into());
     }
+    let (sua_zones, sua_zones_unexamined) = runtime_sua_zones(&model);
     Ok(RegionalRuntime {
         surveillance: surveillance::surveillance_new_with_profile(
             model.clone(),
@@ -1108,6 +1575,15 @@ fn regional_new_with_source_identity_and_checkpoint(
         interaction: oa_display::interaction::interaction_new(),
         views: Vec::with_capacity(profile.max_flights),
         observed: Vec::with_capacity(profile.surveillance.max_tracks),
+        hold_entry_reports: Vec::with_capacity(profile.max_flights),
+        hold_entry_report_merge: Vec::with_capacity(profile.max_flights),
+        latest_active_views: Vec::with_capacity(profile.max_flights),
+        active_key_scratch: Vec::with_capacity(profile.max_flights),
+        last_scan_receipt_ns: None,
+        last_hold_command_receipt_ns: None,
+        conflict_scratch: crate::conflict_probe::ConflictProbeScratch::new(),
+        sua_zones,
+        sua_zones_unexamined,
         next_generation: 0,
         console_text: String::with_capacity(128),
         profile,
@@ -1120,6 +1596,10 @@ fn regional_new_with_source_identity_and_checkpoint(
         },
         known_flights: Vec::with_capacity(profile.max_flights),
         msaw_service_audit: None,
+        holdings: HoldStore::new(profile.max_flights),
+        hold_revisions: HoldRevisions::new(profile.max_flights),
+        hold_lifecycles: FlightLifecycles::new(profile.max_flights),
+        next_hold_lifecycle_generation: 0,
     })
 }
 
@@ -1358,13 +1838,6 @@ fn execute(
         &mut runtime.flights,
         &runtime.views,
     )?;
-    if runtime.profile.surveillance.render_scope {
-        surveillance.frame_sha256 = surveillance::surveillance_present_controls(
-            &mut runtime.surveillance,
-            &runtime.interaction,
-            &automation_console_text(&runtime.console_text, automation),
-        )?;
-    }
     runtime.frame_sequence = next_frame_sequence;
     let mut flights = Vec::with_capacity(runtime.profile.surveillance.max_tracks);
     let mut views = Vec::with_capacity(runtime.profile.max_flights);
@@ -1464,12 +1937,806 @@ fn execute(
         }
         flights.push(row);
     }
+    if runtime.known_flights.len() > MAX_FLIGHT_DATA_VIEW_WORK {
+        return Err("active plan view work budget exceeded before lifecycle reconciliation".into());
+    }
+    let flight_cutoff_ms = route::receipt_cutoff_ms(batch.receipt_ns)?;
+    let mut aircraft_list = Vec::with_capacity(runtime.known_flights.len());
+    let mut departure_list = Vec::with_capacity(runtime.known_flights.len());
+    let mut active_plan_views = Vec::with_capacity(runtime.known_flights.len());
+    for key in &runtime.known_flights {
+        match flight::flight_view_for_key(
+            &mut runtime.flights,
+            *key,
+            runtime.centre,
+            flight_cutoff_ms,
+        ) {
+            Ok(view)
+                if matches!(
+                    view.plan_state,
+                    oa_flight::ST_ACTIVE | oa_flight::ST_DEPARTED
+                ) =>
+            {
+                active_plan_views.push(view);
+            }
+            Ok(_) | Err(FlightViewStatus::UnknownFlight | FlightViewStatus::UnknownCentre) => {}
+            Err(FlightViewStatus::FutureSnapshot) => {
+                return Err(
+                    "future active plan snapshot refused before lifecycle reconciliation".into(),
+                );
+            }
+            Err(
+                FlightViewStatus::Found
+                | FlightViewStatus::AmbiguousAddress
+                | FlightViewStatus::OutputCapacity,
+            ) => {
+                return Err(
+                    "unexpected active plan view status before lifecycle reconciliation".into(),
+                );
+            }
+        }
+    }
+    let plan_sort_limit = sort_work_bound(active_plan_views.len())?;
+    let track_sort_limit = sort_work_bound(surveillance.tracks.len())?;
+    let track_join_limit =
+        binary_search_work_bound(surveillance.tracks.len(), active_plan_views.len())?;
+    let address_sort_limit = sort_work_bound(active_plan_views.len())?;
+    let plan_track_work = plan_sort_limit
+        .checked_add(address_sort_limit)
+        .and_then(|work| work.checked_add(track_sort_limit))
+        .and_then(|work| work.checked_add(track_join_limit))
+        .ok_or("active plan/track C7 work preflight overflow")?;
+    if plan_track_work > MAX_ACTIVE_PLAN_TRACK_JOIN_WORK {
+        return Err("active plan/track join exceeded its named C7 work budget".into());
+    }
+    let mut plan_sort_comparisons = 0usize;
+    active_plan_views.sort_unstable_by(|left, right| {
+        plan_sort_comparisons = plan_sort_comparisons.saturating_add(1);
+        compare_full_flight_keys(&route::flight_key(left), &route::flight_key(right))
+    });
+    if plan_sort_comparisons > plan_sort_limit
+        || active_plan_views.windows(2).any(|pair| {
+            pair.first().zip(pair.get(1)).is_some_and(|(left, right)| {
+                compare_full_flight_keys(&route::flight_key(left), &route::flight_key(right))
+                    .is_eq()
+            })
+        })
+    {
+        return Err("active plan views failed the bounded unique full-key index check".into());
+    }
+    aircraft_list.extend(active_plan_views.iter().copied());
+    for view in &active_plan_views {
+        if view.departure.iter().any(|&byte| byte != 0) {
+            departure_list.push(*view);
+        }
+    }
+    let mut active_address_index = active_plan_views
+        .iter()
+        .enumerate()
+        .map(|(index, view)| (view.address, index))
+        .collect::<Vec<_>>();
+    let mut address_sort_comparisons = 0usize;
+    active_address_index.sort_unstable_by(|left, right| {
+        address_sort_comparisons = address_sort_comparisons.saturating_add(1);
+        left.0.cmp(&right.0)
+    });
+    if address_sort_comparisons > address_sort_limit {
+        return Err("active address index sort exceeded its C7 work bound".into());
+    }
+    let mut ambiguous_plan_tracks = vec![false; active_plan_views.len()];
+    let mut address_start = 0usize;
+    while address_start < active_address_index.len() {
+        let Some((address, _)) = active_address_index.get(address_start).copied() else {
+            return Err("active address index position invariant failed".into());
+        };
+        let mut address_end = address_start.saturating_add(1);
+        while active_address_index
+            .get(address_end)
+            .is_some_and(|(candidate, _)| *candidate == address)
+        {
+            address_end = address_end.saturating_add(1);
+        }
+        if address_end.saturating_sub(address_start) > 1 {
+            for (_, index) in active_address_index
+                .get(address_start..address_end)
+                .ok_or("active address group range invariant failed")?
+            {
+                let Some(is_ambiguous) = ambiguous_plan_tracks.get_mut(*index) else {
+                    return Err("active address ambiguity index invariant failed".into());
+                };
+                *is_ambiguous = true;
+            }
+        }
+        address_start = address_end;
+    }
+    let mut track_index = surveillance
+        .tracks
+        .iter()
+        .map(|track| (track.address, *track))
+        .collect::<Vec<_>>();
+    let mut track_sort_comparisons = 0usize;
+    track_index.sort_unstable_by(|left, right| {
+        track_sort_comparisons = track_sort_comparisons.saturating_add(1);
+        left.0.cmp(&right.0)
+    });
+    if track_sort_comparisons > track_sort_limit
+        || track_index.windows(2).any(|pair| {
+            pair.first()
+                .zip(pair.get(1))
+                .is_some_and(|(left, right)| left.0 == right.0)
+        })
+    {
+        return Err(
+            "current surveillance tracks failed the bounded unique-address index check".into(),
+        );
+    }
+    let mut track_join_comparisons = 0usize;
+    let mut active_plan_tracks = vec![None; active_plan_views.len()];
+    let mut probe_inputs = Vec::with_capacity(active_plan_views.len());
+    for (plan_address, index) in &active_address_index {
+        let Some(is_ambiguous) = ambiguous_plan_tracks.get(*index).copied() else {
+            return Err("active plan track join index invariant failed".into());
+        };
+        if is_ambiguous {
+            continue;
+        }
+        let track = track_index
+            .binary_search_by(|(track_address, _)| {
+                track_join_comparisons = track_join_comparisons.saturating_add(1);
+                track_address.cmp(plan_address)
+            })
+            .ok()
+            .and_then(|index| track_index.get(index).map(|(_, track)| *track));
+        let Some(track) = track else { continue };
+        if let Some(slot) = active_plan_tracks.get_mut(*index) {
+            *slot = Some(track);
+        }
+    }
+    if track_join_comparisons > track_join_limit {
+        return Err(
+            "active plan to surveillance join exceeded its binary-search C7 work bound".into(),
+        );
+    }
+    for (view, track) in active_plan_views.iter().zip(&active_plan_tracks) {
+        if let Some(track) = track {
+            probe_inputs.push((*view, *track));
+        }
+    }
+    let probe_sort_limit = sort_work_bound(probe_inputs.len())?;
+    let mut probe_sort_comparisons = 0usize;
+    probe_inputs.sort_unstable_by(|left, right| {
+        probe_sort_comparisons = probe_sort_comparisons.saturating_add(1);
+        compare_full_flight_keys(&route::flight_key(&left.0), &route::flight_key(&right.0))
+    });
+    if probe_sort_comparisons > probe_sort_limit {
+        return Err("active probe-key sort exceeded its preflight C7 work bound".into());
+    }
+    if probe_inputs.windows(2).any(|pair| {
+        pair.first().zip(pair.get(1)).is_some_and(|(left, right)| {
+            compare_full_flight_keys(&route::flight_key(&left.0), &route::flight_key(&right.0))
+                .is_eq()
+        })
+    }) {
+        return Err("duplicate active full flight key in hold probe inputs".into());
+    }
+    let event_association_work = probe_inputs
+        .len()
+        .checked_mul(batch.events.len())
+        .ok_or("hold report event association work overflow")?;
+    if event_association_work > MAX_HOLD_REPORT_EVENT_ASSOCIATION_WORK {
+        return Err("hold report event association exceeded its named C7 work budget".into());
+    }
+    let mut current_hold_reports = Vec::with_capacity(probe_inputs.len());
+    for (view, track) in &probe_inputs {
+        let key = route::flight_key(view);
+        let report_event = batch
+            .events
+            .iter()
+            .filter(|event| {
+                event.source == crate::input::SourceKind::Surveillance
+                    && event.identity.aircraft_address == track.address
+                    && event.identity.flight_gufi == view.gufi
+                    && event.source_ns == track.newest_source_ns
+            })
+            .filter(|event| matches!(event.kind, crate::input::EventKind::Position { .. }))
+            .max_by_key(|event| event.sequence);
+        if let Some(event) = report_event {
+            if let crate::input::EventKind::Position {
+                latitude_e7,
+                longitude_e7,
+                ..
+            } = event.kind
+            {
+                current_hold_reports.push(HoldEntryReport {
+                    key,
+                    source_epoch: u64::from(runtime.session_namespace),
+                    sequence: event.sequence,
+                    source_ns: event.source_ns,
+                    receipt_ns: event.receipt_ns,
+                    lat_e7: latitude_e7,
+                    lon_e7: longitude_e7,
+                    r95_mm: track.r95_mm,
+                });
+            }
+        }
+    }
+    let (pair_limit, sua_limit) = preflight_hold_scan_work(
+        active_plan_views.len(),
+        runtime.hold_lifecycles.len(),
+        runtime.holdings.len(),
+        runtime.hold_entry_reports.len(),
+        current_hold_reports.len(),
+        runtime.sua_zones.len(),
+        runtime.profile.max_flights,
+    )
+    .map_err(str::to_owned)?;
+    let report_sort_limit = sort_work_bound(current_hold_reports.len())?;
+    let mut report_sort_comparisons = 0usize;
+    current_hold_reports.sort_unstable_by(|left, right| {
+        report_sort_comparisons = report_sort_comparisons.saturating_add(1);
+        compare_full_flight_keys(&left.key, &right.key)
+    });
+    if report_sort_comparisons > report_sort_limit
+        || current_hold_reports.windows(2).any(|pair| {
+            pair.first().zip(pair.get(1)).is_some_and(|(left, right)| {
+                compare_full_flight_keys(&left.key, &right.key).is_eq()
+            })
+        })
+    {
+        return Err("current hold reports failed the bounded unique-key index check".into());
+    }
+    let prior_report_sort_limit = sort_work_bound(runtime.hold_entry_reports.len())?;
+    let mut prior_report_sort_comparisons = 0usize;
+    runtime.hold_entry_reports.sort_unstable_by(|left, right| {
+        prior_report_sort_comparisons = prior_report_sort_comparisons.saturating_add(1);
+        compare_full_flight_keys(&left.key, &right.key)
+    });
+    if prior_report_sort_comparisons > prior_report_sort_limit
+        || runtime.hold_entry_reports.windows(2).any(|pair| {
+            pair.first()
+                .zip(pair.get(1))
+                .is_some_and(|(left, right)| left.key == right.key)
+        })
+    {
+        return Err("prior hold reports failed the bounded unique-key index check".into());
+    }
+    runtime.latest_active_views.clear();
+    runtime
+        .latest_active_views
+        .extend(active_plan_views.iter().copied());
+    runtime.active_key_scratch.clear();
+    if runtime.latest_active_views.len() > runtime.active_key_scratch.capacity() {
+        return Err(
+            "active hold-key scratch capacity exceeded before lifecycle reconciliation".into(),
+        );
+    }
+    runtime
+        .active_key_scratch
+        .extend(runtime.latest_active_views.iter().map(route::flight_key));
+    runtime
+        .hold_lifecycles
+        .reconcile(
+            &runtime.active_key_scratch,
+            &mut runtime.next_hold_lifecycle_generation,
+        )
+        .map_err(|error| format!("flight lifecycle reconciliation: {error}"))?;
+    let retired_keys = runtime.hold_lifecycles.retired_keys();
+    runtime
+        .holdings
+        .remove_keys(retired_keys)
+        .map_err(|error| format!("retired hold cleanup: {error}"))?;
+    runtime
+        .hold_revisions
+        .remove_keys(retired_keys)
+        .map_err(|error| format!("retired hold revision cleanup: {error}"))?;
+    let (active_flight_keys, active_flight_generations) = runtime
+        .hold_lifecycles
+        .snapshot()
+        .map_err(|error| format!("flight lifecycle snapshot: {error}"))?;
+
+    // Infer parallel/teardrop entries only from consecutive admitted reports. Inferred crossing
+    // evidence becomes usable at the second report receipt; phase advancement then reconciles the
+    // actual current tracker state against the immutable shared hold model.
+    for index in 0..runtime.holdings.len() {
+        let Some(config) = runtime.holdings.prediction(index) else {
+            continue;
+        };
+        let Some(key) = runtime.holdings.key(index) else {
+            return Err("hold key column invariant failed".into());
+        };
+        let Some(fix) = runtime.holdings.fix(index) else {
+            return Err("hold fix column invariant failed".into());
+        };
+        let Some((view, track)) = find_probe_input(&probe_inputs, key) else {
+            continue;
+        };
+        if view.address != key.aircraft_address {
+            continue;
+        }
+        let mut phase = runtime.holdings.phase_state(index);
+        if phase.is_none() && config.entry_procedure != crate::holding::HoldEntryProcedure::Direct {
+            let Some(previous) = find_report(&runtime.hold_entry_reports, key) else {
+                continue;
+            };
+            let Some(current) = find_report(&current_hold_reports, key) else {
+                continue;
+            };
+            if current.receipt_ns != track.state_ns
+                || current.source_ns != track.newest_source_ns
+                || config.course_basis != HoldEntryCourseBasis::SyntheticNoWindCourse
+            {
+                continue;
+            }
+            let turn = match runtime.holdings.turn(index) {
+                Some(crate::holding::HoldTurn::Left) => 1,
+                Some(crate::holding::HoldTurn::Right) => 2,
+                None => continue,
+            };
+            let evidence = crate::holding::infer_hold_entry(
+                previous,
+                current,
+                crate::holding::HoldEntryInferenceConfig {
+                    fix_lat_e7: fix.latitude_e7,
+                    fix_lon_e7: fix.longitude_e7,
+                    inbound_true_course_cdeg: config.inbound_true_course_cdeg,
+                    turn: if turn == 1 {
+                        crate::holding::HoldTurn::Left
+                    } else {
+                        crate::holding::HoldTurn::Right
+                    },
+                    max_scan_gap_ns: config.max_scan_gap_ns,
+                    capture_radius_mm: config.entry_capture_radius_mm,
+                    sector_ambiguity_cdeg: 500,
+                    course_basis: config.course_basis,
+                },
+            );
+            let Ok(evidence) = evidence else {
+                continue;
+            };
+            let expected_procedure = match config.entry_procedure {
+                crate::holding::HoldEntryProcedure::Direct => 1,
+                crate::holding::HoldEntryProcedure::Parallel => 2,
+                crate::holding::HoldEntryProcedure::Teardrop => 3,
+            };
+            let inferred_procedure = match evidence.procedure {
+                crate::holding::HoldEntryProcedure::Direct => 1,
+                crate::holding::HoldEntryProcedure::Parallel => 2,
+                crate::holding::HoldEntryProcedure::Teardrop => 3,
+            };
+            if expected_procedure != inferred_procedure {
+                continue;
+            }
+            let speed = oa_math::hypot(f64::from(track.east_mmps), f64::from(track.north_mmps));
+            if !speed.is_finite() || !(1.0..=300_000.0).contains(&speed) {
+                continue;
+            }
+            let Ok(speed_mmps) = u32::try_from(oa_ieee::round(speed) as u64) else {
+                continue;
+            };
+            let Ok((started, _)) = oa_legacy_traj::core::trajectory::hold_phase_start_entry(
+                oa_legacy_traj::core::trajectory::HoldEntryPhaseInput {
+                    key,
+                    crossing_state_ns: evidence.crossing_ns,
+                    available_at_ns: evidence.available_at_ns,
+                    start_lat_e7: evidence.crossing_lat_e7,
+                    start_lon_e7: evidence.crossing_lon_e7,
+                    start_heading_true_cdeg: evidence.course_true_cdeg,
+                    fix_lat_e7: fix.latitude_e7,
+                    fix_lon_e7: fix.longitude_e7,
+                    inbound_true_course_cdeg: config.inbound_true_course_cdeg,
+                    turn,
+                    procedure: expected_procedure,
+                    groundspeed_mmps: speed_mmps,
+                    leg_duration_ms: config.leg_duration_ms,
+                    turn_rate_cdeg_s: config.turn_rate_cdeg_s,
+                    max_scan_gap_ns: config.max_scan_gap_ns,
+                    max_speed_error_mmps: config.max_speed_error_mmps,
+                },
+            ) else {
+                continue;
+            };
+            phase = Some(started);
+        }
+        let Some(mut phase) = phase else {
+            continue;
+        };
+        let observation = oa_legacy_traj::core::trajectory::HoldTrackReconciliationInput {
+            key,
+            at_ns: track.state_ns,
+            lat_e7: track.lat_e7,
+            lon_e7: track.lon_e7,
+            east_mmps: track.east_mmps,
+            north_mmps: track.north_mmps,
+            max_position_error_mm: config.max_position_error_mm,
+            max_heading_error_cdeg: config.max_heading_error_cdeg,
+        };
+        if oa_legacy_traj::core::trajectory::hold_phase_reconcile_and_advance(
+            &mut phase,
+            observation,
+        )
+        .is_ok()
+        {
+            runtime
+                .holdings
+                .update_phase(index, phase)
+                .map_err(str::to_owned)?;
+        }
+    }
+    let mut hold_phase_profiles_built = 0u64;
+    for index in 0..runtime.holdings.len() {
+        let Some(state) = runtime.holdings.phase_state(index) else {
+            continue;
+        };
+        let Some(config) = runtime.holdings.prediction(index) else {
+            continue;
+        };
+        let Some(revision) = runtime.holdings.revision(index) else {
+            continue;
+        };
+        let Some((view, track)) = find_probe_input(&probe_inputs, state.key) else {
+            continue;
+        };
+        let built = {
+            let Some(points) = runtime.holdings.profile_points_mut(index) else {
+                return Err("hold profile buffer index invariant failed".into());
+            };
+            route::fill_hold_phase_profile(view, track, batch.receipt_ns, &state, config, points)
+        };
+        if built.is_ok() {
+            runtime
+                .holdings
+                .cache_profile(index, state, config, revision, runtime.frame_sequence)
+                .map_err(str::to_owned)?;
+            hold_phase_profiles_built = hold_phase_profiles_built.saturating_add(1);
+        }
+    }
+
+    let mut hold_rows = runtime
+        .holdings
+        .view_rows()
+        .map_err(|error| format!("hold view: {error}"))?;
+    let hold_row_sort_limit = sort_work_bound(hold_rows.len())?;
+    let mut hold_row_sort_comparisons = 0usize;
+    hold_rows.sort_unstable_by(|left, right| {
+        hold_row_sort_comparisons = hold_row_sort_comparisons.saturating_add(1);
+        compare_full_flight_keys(&left.instruction.flight_key, &right.instruction.flight_key)
+    });
+    if hold_row_sort_comparisons > hold_row_sort_limit
+        || hold_rows.windows(2).any(|pair| {
+            pair.first().zip(pair.get(1)).is_some_and(|(left, right)| {
+                left.instruction.flight_key == right.instruction.flight_key
+            })
+        })
+    {
+        return Err("hold rows failed the bounded unique-key index check".into());
+    }
+
+    let pair_count = active_plan_views
+        .len()
+        .checked_mul(active_plan_views.len().saturating_sub(1))
+        .map(|count| count / 2)
+        .ok_or("runtime pair-probe count overflow")?;
+    let mut pair_probes = Vec::with_capacity(pair_limit);
+    let mut pair_hold_probe_unavailable = Vec::new();
+    let mut pair_probe_input_refusals = 0u64;
+    let mut pair_probes_unavailable = 0u64;
+    let mut pairs_examined = 0usize;
+    'pairs: for first in 0..active_plan_views.len() {
+        for second in (first + 1)..active_plan_views.len() {
+            if pairs_examined >= pair_limit {
+                break 'pairs;
+            }
+            let (Some(first_view), Some(second_view)) =
+                (active_plan_views.get(first), active_plan_views.get(second))
+            else {
+                pair_probe_input_refusals = pair_probe_input_refusals.saturating_add(1);
+                pairs_examined += 1;
+                continue;
+            };
+            let first_key = route::flight_key(first_view);
+            let second_key = route::flight_key(second_view);
+            let first_track = active_plan_tracks.get(first).copied().flatten();
+            let second_track = active_plan_tracks.get(second).copied().flatten();
+            let (Some(first_track), Some(second_track)) = (first_track, second_track) else {
+                let Some(first_ambiguous) = ambiguous_plan_tracks.get(first).copied() else {
+                    return Err("first pair address-state index invariant failed".into());
+                };
+                let Some(second_ambiguous) = ambiguous_plan_tracks.get(second).copied() else {
+                    return Err("second pair address-state index invariant failed".into());
+                };
+                let ambiguous = first_ambiguous || second_ambiguous;
+                pair_probes.push(ProbeResult {
+                    status: ProbeStatus::Unavailable,
+                    refusal: if ambiguous {
+                        oa_ca::probe::ProbeRefusal::InvalidIdentity
+                    } else {
+                        oa_ca::probe::ProbeRefusal::MissingTrack
+                    },
+                    examined_segments: 0,
+                    reserved_header: [0; 4],
+                    first_gufi: first_key.gufi,
+                    first_aircraft_address: first_key.aircraft_address,
+                    second_gufi: second_key.gufi,
+                    second_aircraft_address: second_key.aircraft_address,
+                    first_loss_ms: oa_ca::probe::NO_PROBE_TIME_MS,
+                    cpa_ms: oa_ca::probe::NO_PROBE_TIME_MS,
+                    cpa_horizontal_m: oa_ca::probe::NO_PROBE_DISTANCE_M,
+                    cpa_vertical_ft: oa_ca::probe::NO_PROBE_VERTICAL_FT,
+                    reserved_tail: [0; 8],
+                });
+                pair_probes_unavailable = pair_probes_unavailable.saturating_add(1);
+                pairs_examined += 1;
+                continue;
+            };
+            let first_hold = find_hold_row(&hold_rows, first_key);
+            let second_hold = find_hold_row(&hold_rows, second_key);
+            let first_phase = first_hold
+                .and_then(|row| {
+                    row.phase_state
+                        .zip(row.instruction.prediction)
+                        .map(|(state, config)| (state, config, row.revision))
+                })
+                .filter(|(state, _, _)| state.last_advance_ns == first_track.state_ns);
+            let second_phase = second_hold
+                .and_then(|row| {
+                    row.phase_state
+                        .zip(row.instruction.prediction)
+                        .map(|(state, config)| (state, config, row.revision))
+                })
+                .filter(|(state, _, _)| state.last_advance_ns == second_track.state_ns);
+            let first_profile = first_phase.as_ref().and_then(|(state, config, revision)| {
+                let index = first_hold?.store_index;
+                Some(route::HoldRouteProfile {
+                    state,
+                    config: *config,
+                    revision: *revision,
+                    points: runtime.holdings.cached_profile(
+                        index,
+                        *state,
+                        *config,
+                        *revision,
+                        runtime.frame_sequence,
+                    )?,
+                })
+            });
+            let second_profile = second_phase.as_ref().and_then(|(state, config, revision)| {
+                let index = second_hold?.store_index;
+                Some(route::HoldRouteProfile {
+                    state,
+                    config: *config,
+                    revision: *revision,
+                    points: runtime.holdings.cached_profile(
+                        index,
+                        *state,
+                        *config,
+                        *revision,
+                        runtime.frame_sequence,
+                    )?,
+                })
+            });
+            if (first_hold.is_some() && first_profile.is_none())
+                || (second_hold.is_some() && second_profile.is_none())
+            {
+                pair_probes.push(ProbeResult {
+                    status: ProbeStatus::Unavailable,
+                    refusal: oa_ca::probe::ProbeRefusal::None,
+                    examined_segments: 0,
+                    reserved_header: [0; 4],
+                    first_gufi: first_key.gufi,
+                    first_aircraft_address: first_key.aircraft_address,
+                    second_gufi: second_key.gufi,
+                    second_aircraft_address: second_key.aircraft_address,
+                    first_loss_ms: oa_ca::probe::NO_PROBE_TIME_MS,
+                    cpa_ms: oa_ca::probe::NO_PROBE_TIME_MS,
+                    cpa_horizontal_m: oa_ca::probe::NO_PROBE_DISTANCE_M,
+                    cpa_vertical_ft: oa_ca::probe::NO_PROBE_VERTICAL_FT,
+                    reserved_tail: [0; 8],
+                });
+                pair_hold_probe_unavailable.push(PairHoldProbeUnavailable {
+                    first: first_key,
+                    second: second_key,
+                    reason: unavailable_hold_reason(
+                        if first_hold.is_some() && first_profile.is_none() {
+                            first_hold
+                        } else {
+                            second_hold
+                        },
+                    ),
+                });
+                pair_probes_unavailable = pair_probes_unavailable.saturating_add(1);
+                pairs_examined += 1;
+                continue;
+            }
+            match route::route_pair_probe_with_holds(
+                &runtime.routes,
+                route::PairRouteProbeInput {
+                    first: route::ActiveRouteInput {
+                        view: first_view,
+                        observed: &first_track,
+                    },
+                    first_hold: first_profile,
+                    second: route::ActiveRouteInput {
+                        view: second_view,
+                        observed: &second_track,
+                    },
+                    second_hold: second_profile,
+                    cutoff_ns: batch.receipt_ns,
+                    frame_sequence: runtime.frame_sequence,
+                },
+                &mut runtime.conflict_scratch,
+            ) {
+                Ok(result) => {
+                    if result.status == ProbeStatus::Unavailable {
+                        pair_probes_unavailable = pair_probes_unavailable.saturating_add(1);
+                    }
+                    pair_probes.push(result);
+                }
+                Err(_) => {
+                    pair_probe_input_refusals = pair_probe_input_refusals.saturating_add(1);
+                    pair_probes_unavailable = pair_probes_unavailable.saturating_add(1);
+                }
+            }
+            pairs_examined += 1;
+        }
+    }
+    let pair_probes_unexamined = pair_count.saturating_sub(pairs_examined) as u64;
+
+    let sua_zone_status = runtime
+        .sua_zones
+        .iter()
+        .map(|zone| RuntimeSuaZoneEvidence {
+            boundary_index: zone.boundary_index,
+            availability: zone.availability,
+        })
+        .collect::<Vec<_>>();
+    let sua_candidates = active_plan_views
+        .len()
+        .checked_mul(runtime.sua_zones.len())
+        .ok_or("runtime SUA probe count overflow")?;
+    let mut sua_probes = Vec::with_capacity(sua_limit);
+    let mut sua_hold_probe_unavailable = Vec::new();
+    let mut sua_probes_unavailable = 0u64;
+    let mut sua_examined = 0usize;
+    'sua: for (plan_index, view) in active_plan_views.iter().enumerate() {
+        let Some(track) = active_plan_tracks.get(plan_index).copied().flatten() else {
+            let Some(ambiguous) = ambiguous_plan_tracks.get(plan_index).copied() else {
+                return Err("SUA address-state index invariant failed".into());
+            };
+            for zone in &runtime.sua_zones {
+                if sua_examined >= sua_limit {
+                    break 'sua;
+                }
+                sua_probes.push(RuntimeSuaEvidence {
+                    flight_gufi: view.gufi,
+                    aircraft_address: view.address,
+                    boundary_index: zone.boundary_index,
+                    result: SuaProbeResult {
+                        status: SuaStatus::Unavailable,
+                        refusal: if ambiguous {
+                            oa_airspace::core::conflict_probe::SuaRefusal::AmbiguousIdentity
+                        } else {
+                            oa_airspace::core::conflict_probe::SuaRefusal::MissingTrack
+                        },
+                        reserved: [0; 6],
+                        entry_ms: oa_airspace::core::conflict_probe::NO_SUA_ENTRY_MS,
+                    },
+                });
+                sua_probes_unavailable = sua_probes_unavailable.saturating_add(1);
+                sua_examined += 1;
+            }
+            continue;
+        };
+        for zone in &runtime.sua_zones {
+            if sua_examined >= sua_limit {
+                break 'sua;
+            }
+            let key = route::flight_key(view);
+            let hold = find_hold_row(&hold_rows, key);
+            let phase = hold
+                .and_then(|row| {
+                    row.phase_state
+                        .zip(row.instruction.prediction)
+                        .map(|(state, config)| (state, config, row.revision))
+                })
+                .filter(|(state, _, _)| state.last_advance_ns == track.state_ns);
+            let hold_profile = phase.as_ref().and_then(|(state, config, revision)| {
+                let index = hold?.store_index;
+                Some(route::HoldRouteProfile {
+                    state,
+                    config: *config,
+                    revision: *revision,
+                    points: runtime.holdings.cached_profile(
+                        index,
+                        *state,
+                        *config,
+                        *revision,
+                        runtime.frame_sequence,
+                    )?,
+                })
+            });
+            if zone.availability == RuntimeSuaAvailability::Ready
+                && hold.is_some()
+                && hold_profile.is_none()
+            {
+                sua_hold_probe_unavailable.push(SuaHoldProbeUnavailable {
+                    flight: key,
+                    boundary_index: zone.boundary_index,
+                    reason: unavailable_hold_reason(hold),
+                });
+                sua_probes_unavailable = sua_probes_unavailable.saturating_add(1);
+                sua_examined += 1;
+                continue;
+            }
+            if zone.availability == RuntimeSuaAvailability::Ready {
+                if let Some(area) = &zone.area {
+                    let input = route::SuaRouteProbeInput {
+                        active: route::ActiveRouteInput {
+                            view,
+                            observed: &track,
+                        },
+                        cutoff_ns: batch.receipt_ns,
+                        frame_sequence: runtime.frame_sequence,
+                        area,
+                        floor_ft: zone.floor_ft,
+                        ceiling_ft: zone.ceiling_ft,
+                    };
+                    let result = match hold_profile {
+                        Some(profile) => route::route_hold_sua_probe(
+                            input,
+                            profile,
+                            &mut runtime.conflict_scratch,
+                        ),
+                        None => route::route_sua_probe(
+                            &runtime.routes,
+                            input,
+                            &mut runtime.conflict_scratch,
+                        ),
+                    };
+                    match result {
+                        Ok(result) => {
+                            if result.status == SuaStatus::Unavailable {
+                                sua_probes_unavailable = sua_probes_unavailable.saturating_add(1);
+                            }
+                            sua_probes.push(RuntimeSuaEvidence {
+                                flight_gufi: view.gufi,
+                                aircraft_address: view.address,
+                                boundary_index: zone.boundary_index,
+                                result,
+                            });
+                        }
+                        Err(_) => {
+                            sua_probes_unavailable = sua_probes_unavailable.saturating_add(1);
+                        }
+                    }
+                } else {
+                    sua_probes_unavailable = sua_probes_unavailable.saturating_add(1);
+                }
+            } else {
+                sua_probes_unavailable = sua_probes_unavailable.saturating_add(1);
+            }
+            sua_examined += 1;
+        }
+    }
+    let sua_probes_unexamined = sua_candidates.saturating_sub(sua_examined) as u64
+        + runtime.sua_zones_unexamined as u64 * active_plan_views.len() as u64;
     runtime.views = commands::current_views(
         &runtime.views,
         &flights,
         &mut runtime.next_generation,
         runtime.profile.max_flights,
     )?;
+    merge_hold_entry_reports(
+        &runtime.hold_entry_reports,
+        &current_hold_reports,
+        runtime.hold_lifecycles.active_keys(),
+        &mut runtime.hold_entry_report_merge,
+        runtime.profile.max_flights,
+    )
+    .map_err(str::to_owned)?;
+    core::mem::swap(
+        &mut runtime.hold_entry_reports,
+        &mut runtime.hold_entry_report_merge,
+    );
     runtime.observed.clone_from(&surveillance.tracks);
     let flight_cutoff_ms = route::receipt_cutoff_ms(batch.receipt_ns)?;
     if runtime.known_flights.len() > MAX_FLIGHT_DATA_VIEW_WORK {
@@ -1506,6 +2773,43 @@ fn execute(
             ) => return Err("unexpected full-key flight view status".into()),
         }
     }
+    runtime.last_scan_receipt_ns = Some(batch.receipt_ns);
+    let hold_view = hold_rows;
+    if runtime.profile.surveillance.render_scope {
+        let display_holds = hold_view
+            .iter()
+            .map(|row| oa_display::hold_view::HoldViewEntry {
+                gufi: row.instruction.flight_key.gufi,
+                aircraft_address: row.instruction.flight_key.aircraft_address,
+                centre: row.instruction.flight_key.centre,
+                plan_id: row.instruction.flight_key.plan_id,
+                fix_name: row.instruction.fix.name,
+                direction_from_fix_deg: row.instruction.direction_from_fix_deg,
+                inbound_course_deg: row.instruction.inbound_course_deg,
+                turn: match row.instruction.turn {
+                    None => 0,
+                    Some(crate::holding::HoldTurn::Left) => 1,
+                    Some(crate::holding::HoldTurn::Right) => 2,
+                },
+                leg_value: row.instruction.leg.map(|leg| leg.value),
+                leg_unit: match row.instruction.leg.map(|leg| leg.unit) {
+                    None => 0,
+                    Some(crate::holding::HoldLegUnit::Miles) => 1,
+                    Some(crate::holding::HoldLegUnit::Minutes) => 2,
+                },
+                efc_utc_minute: row.instruction.efc_utc_minute,
+                updated_receipt_ns: row.updated_receipt_ns,
+                revision: row.revision,
+                lifecycle_generation: row.lifecycle_generation,
+            })
+            .collect::<Vec<_>>();
+        surveillance.frame_sha256 = surveillance::surveillance_present_controls_with_holds(
+            &mut runtime.surveillance,
+            &runtime.interaction,
+            &automation_console_text(&runtime.console_text, automation),
+            &display_holds,
+        )?;
+    }
     Ok(RegionalFrame {
         sequence: runtime.frame_sequence,
         input,
@@ -1516,6 +2820,23 @@ fn execute(
         flight_data,
         flight_data_as_of,
         flight_data_unavailable,
+        aircraft_list,
+        departure_list,
+        active_flight_keys,
+        active_flight_generations,
+        pair_probes,
+        pair_probe_input_refusals,
+        pair_probes_unavailable,
+        pair_probes_unexamined,
+        pair_hold_probe_unavailable,
+        sua_probes,
+        sua_probes_unavailable,
+        sua_probes_unexamined,
+        sua_hold_probe_unavailable,
+        sua_zone_status,
+        sua_zones_unexamined: runtime.sua_zones_unexamined,
+        hold_phase_profiles_built,
+        hold_view,
         flight_report: flight::flight_driver_report(&runtime.flights),
         refused_legacy_route_events: runtime.routes.rejected_legacy_routes,
         controller_views: runtime.views.clone(),
@@ -1561,6 +2882,906 @@ pub fn regional_step_with_performance(
         ));
     }
     regional_step_inner(runtime, batch, Some(performance))
+}
+
+/// Explicit OpenATCA offline trial request. The route body must be supplied by the caller;
+/// this API does not infer an amendment from observed tracks or claim an FAA wire contract.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TrialRouteProbeRequest {
+    pub candidate_route: crate::input::NormalizedEvent,
+    pub counterpart_gufi: u128,
+}
+
+/// Evaluate a caller-supplied filed-route candidate against one other active plan from the latest
+/// completed scan. This is a detached query: a successful result does not admit the route or
+/// mutate active flight, route, controller, or surveillance state.
+fn cached_hold_route_profile<'a>(
+    holdings: &'a HoldStore,
+    store_index: usize,
+    state: &'a oa_legacy_traj::core::trajectory::HoldPhaseState,
+    config: HoldPredictionIntent,
+    revision: u64,
+    scan_sequence: u64,
+) -> Option<route::HoldRouteProfile<'a>> {
+    Some(route::HoldRouteProfile {
+        state,
+        config,
+        revision,
+        points: holdings.cached_profile(store_index, *state, config, revision, scan_sequence)?,
+    })
+}
+
+pub fn regional_trial_route_probe(
+    runtime: &mut RegionalRuntime,
+    request: TrialRouteProbeRequest,
+) -> Result<ProbeResult, String> {
+    if runtime.failed {
+        return Err("session failed; reconstruct from the admitted input prefix".into());
+    }
+    let cutoff_ns = runtime
+        .last_scan_receipt_ns
+        .ok_or("trial request requires a completed active scan")?;
+    if request.candidate_route.receipt_ns != cutoff_ns {
+        return Err("trial route receipt must match the latest completed scan".into());
+    }
+    let candidate_gufi = request.candidate_route.identity.flight_gufi;
+    let candidate_view = runtime
+        .latest_active_views
+        .iter()
+        .find(|view| view.gufi == candidate_gufi)
+        .ok_or("trial candidate is not an active observed flight in the latest scan")?;
+    let counterpart_view = runtime
+        .latest_active_views
+        .iter()
+        .find(|view| view.gufi == request.counterpart_gufi)
+        .ok_or("trial counterpart is not an active observed flight in the latest scan")?;
+    for view in [candidate_view, counterpart_view] {
+        let active_identity_count = runtime
+            .latest_active_views
+            .iter()
+            .filter(|candidate| candidate.address == view.address)
+            .count();
+        let track_count = runtime
+            .observed
+            .iter()
+            .filter(|track| track.address == view.address)
+            .count();
+        if active_identity_count != 1 || track_count != 1 {
+            return Err("trial route probe requires unique active track identities".into());
+        }
+    }
+    let candidate_track = runtime
+        .observed
+        .iter()
+        .find(|track| track.address == candidate_view.address)
+        .ok_or("trial candidate has no latest observed track")?;
+    let counterpart_track = runtime
+        .observed
+        .iter()
+        .find(|track| track.address == counterpart_view.address)
+        .ok_or("trial counterpart has no latest observed track")?;
+    let mut hold_rows = runtime
+        .holdings
+        .view_rows()
+        .map_err(|error| format!("hold view: {error}"))?;
+    if hold_rows.len() > runtime.profile.max_flights {
+        return Err("trial hold-row sort exceeded its C7 capacity preflight".into());
+    }
+    let trial_join_work = sort_work_bound(hold_rows.len())?
+        .checked_add(binary_search_work_bound(hold_rows.len(), 2)?)
+        .ok_or("trial hold-row join work overflow")?;
+    if trial_join_work > MAX_HOLD_SCAN_JOIN_WORK {
+        return Err("trial hold-row joins exceed their named C7 work budget".into());
+    }
+    let hold_row_sort_limit = sort_work_bound(hold_rows.len()).map_err(str::to_owned)?;
+    let mut hold_row_sort_comparisons = 0usize;
+    hold_rows.sort_unstable_by(|left, right| {
+        hold_row_sort_comparisons = hold_row_sort_comparisons.saturating_add(1);
+        compare_full_flight_keys(&left.instruction.flight_key, &right.instruction.flight_key)
+    });
+    if hold_row_sort_comparisons > hold_row_sort_limit
+        || hold_rows.windows(2).any(|pair| {
+            pair.first().zip(pair.get(1)).is_some_and(|(left, right)| {
+                left.instruction.flight_key == right.instruction.flight_key
+            })
+        })
+    {
+        return Err("trial hold rows failed the bounded unique-key index check".into());
+    }
+    let candidate_hold = find_hold_row(&hold_rows, route::flight_key(candidate_view));
+    let counterpart_hold = find_hold_row(&hold_rows, route::flight_key(counterpart_view));
+    let current_phase = |row: Option<&HoldViewRow>, track: &crate::surveillance::ObservedTrack| {
+        row.and_then(|row| {
+            row.phase_state
+                .zip(row.instruction.prediction)
+                .and_then(|(state, config)| {
+                    (state.last_advance_ns == track.state_ns).then_some((
+                        state,
+                        config,
+                        row.revision,
+                    ))
+                })
+        })
+    };
+    let candidate_phase = current_phase(candidate_hold, candidate_track);
+    let counterpart_phase = current_phase(counterpart_hold, counterpart_track);
+    let candidate_profile = candidate_phase
+        .as_ref()
+        .and_then(|(state, config, revision)| {
+            cached_hold_route_profile(
+                &runtime.holdings,
+                candidate_hold?.store_index,
+                state,
+                *config,
+                *revision,
+                runtime.frame_sequence,
+            )
+        });
+    let counterpart_profile = counterpart_phase
+        .as_ref()
+        .and_then(|(state, config, revision)| {
+            cached_hold_route_profile(
+                &runtime.holdings,
+                counterpart_hold?.store_index,
+                state,
+                *config,
+                *revision,
+                runtime.frame_sequence,
+            )
+        });
+    if (candidate_hold.is_some() && candidate_phase.is_none())
+        || (counterpart_hold.is_some() && counterpart_phase.is_none())
+        || (candidate_phase.is_some() && candidate_profile.is_none())
+        || (counterpart_phase.is_some() && counterpart_profile.is_none())
+    {
+        return Err(
+            "trial is unavailable until each active hold reconciles the latest track".into(),
+        );
+    }
+    route::route_trial_pair_probe_with_holds(
+        &runtime.routes,
+        &runtime.model,
+        route::TrialRouteProbeInput {
+            candidate_event: &request.candidate_route,
+            candidate_view,
+            candidate_track,
+            counterpart_view,
+            counterpart_track,
+            cutoff_ns,
+            frame_sequence: runtime.frame_sequence,
+        },
+        candidate_profile,
+        counterpart_profile,
+        &mut runtime.conflict_scratch,
+    )
+}
+
+fn valid_hold_field<const N: usize>(bytes: &[u8; N]) -> bool {
+    let mut padding = false;
+    let mut present = false;
+    for &byte in bytes {
+        if byte == 0 {
+            padding = true;
+        } else if padding || !byte.is_ascii_graphic() {
+            return false;
+        } else {
+            present = true;
+        }
+    }
+    present
+}
+
+fn valid_hold_key(key: oa_legacy_traj::core::trajectory::FlightKey) -> bool {
+    key.gufi.iter().any(|&byte| byte != 0)
+        && (1..=0x01ff_ffff).contains(&key.aircraft_address)
+        && valid_hold_field(&key.centre)
+        && valid_hold_field(&key.plan_id)
+}
+
+fn validate_hold_instruction(instruction: HoldInstruction) -> Result<(), String> {
+    let fix = instruction.fix;
+    if !valid_hold_key(instruction.flight_key) {
+        return Err("hold instruction requires a positive full flight key".into());
+    }
+    if !valid_hold_field(&fix.name)
+        || !valid_hold_field(&fix.region)
+        || !(-900_000_000..=900_000_000).contains(&fix.latitude_e7)
+        || !(-1_800_000_000..=1_800_000_000).contains(&fix.longitude_e7)
+        || instruction.direction_from_fix_deg >= 360
+        || instruction.inbound_course_deg >= 360
+        || instruction.leg.is_some_and(|leg| leg.value == 0)
+        || instruction.turn.is_none() && instruction.prediction.is_some()
+        || instruction.prediction.is_some_and(|config| {
+            instruction.inbound_course_deg != config.inbound_true_course_cdeg / 100
+        })
+        || instruction
+            .efc_utc_minute
+            .is_some_and(|minute| minute >= 1440)
+        || instruction.prediction.is_some_and(|config| {
+            (config.entry_procedure == crate::holding::HoldEntryProcedure::Direct
+                && config.entry_state_ns <= 0)
+                || (config.entry_procedure != crate::holding::HoldEntryProcedure::Direct
+                    && config.entry_state_ns != 0)
+                || !(1..=1_000_000).contains(&config.entry_capture_radius_mm)
+                || config.inbound_true_course_cdeg >= 36_000
+                || !(1..=600_000).contains(&config.leg_duration_ms)
+                || !(1..=600).contains(&config.turn_rate_cdeg_s)
+                || !(1..=60_000_000_000).contains(&config.max_scan_gap_ns)
+                || !(1..=1_000_000).contains(&config.max_position_error_mm)
+                || !(1..=4_500).contains(&config.max_heading_error_cdeg)
+                || !(1..=300_000).contains(&config.max_speed_error_mmps)
+        })
+    {
+        return Err("hold instruction contains an invalid fix or explicit value".into());
+    }
+    Ok(())
+}
+
+fn start_hold_phase(
+    instruction: HoldInstruction,
+    entry: crate::surveillance::ObservedTrack,
+) -> Result<Option<oa_legacy_traj::core::trajectory::HoldPhaseState>, String> {
+    let Some(config) = instruction.prediction else {
+        return Ok(None);
+    };
+    if config.entry_procedure != crate::holding::HoldEntryProcedure::Direct {
+        return Ok(None);
+    }
+    if instruction.turn.is_none()
+        || config.entry_state_ns != entry.state_ns
+        || instruction.inbound_course_deg != config.inbound_true_course_cdeg / 100
+        || instruction.fix.latitude_e7 != entry.lat_e7
+        || instruction.fix.longitude_e7 != entry.lon_e7
+    {
+        return Err(
+            "hold phase requires an exact direct-entry scan at the configured fix/course".into(),
+        );
+    }
+    let east = f64::from(entry.east_mmps);
+    let north = f64::from(entry.north_mmps);
+    let speed = oa_math::hypot(east, north);
+    if !speed.is_finite() || !(1.0..=300_000.0).contains(&speed) {
+        return Err("hold entry groundspeed is outside the shared predictor envelope".into());
+    }
+    let speed_mmps = oa_ieee::round(speed) as u32;
+    let phase_input = oa_legacy_traj::core::trajectory::HoldPhaseInput {
+        key: instruction.flight_key,
+        entry_state_ns: config.entry_state_ns,
+        fix_lat_e7: instruction.fix.latitude_e7,
+        fix_lon_e7: instruction.fix.longitude_e7,
+        inbound_true_course_cdeg: config.inbound_true_course_cdeg,
+        turn: match instruction.turn {
+            Some(crate::holding::HoldTurn::Left) => 1,
+            Some(crate::holding::HoldTurn::Right) => 2,
+            None => return Err("hold turn direction is required for prediction".into()),
+        },
+        groundspeed_mmps: speed_mmps,
+        leg_duration_ms: config.leg_duration_ms,
+        turn_rate_cdeg_s: config.turn_rate_cdeg_s,
+        max_scan_gap_ns: config.max_scan_gap_ns,
+        max_speed_error_mmps: config.max_speed_error_mmps,
+    };
+    let (state, snapshot) = oa_legacy_traj::core::trajectory::hold_phase_start(phase_input)
+        .map_err(|reason| format!("hold phase configuration refused: {reason:?}"))?;
+    let heading = oa_math::rem_euclid(
+        oa_math::atan2(east, north) * (180.0 / core::f64::consts::PI),
+        360.0,
+    ) * 100.0;
+    let delta = oa_math::rem_euclid(
+        heading - f64::from(snapshot.heading_true_cdeg) + 54_000.0,
+        36_000.0,
+    ) - 18_000.0;
+    if !heading.is_finite() || delta.abs() > f64::from(config.max_heading_error_cdeg) {
+        return Err("hold entry track heading does not match configured direct-entry state".into());
+    }
+    Ok(Some(state))
+}
+
+fn unavailable_hold_reason(row: Option<&HoldViewRow>) -> HoldProbeUnavailableReason {
+    match row.and_then(|row| row.instruction.prediction) {
+        Some(config) if config.entry_procedure != crate::holding::HoldEntryProcedure::Direct => {
+            HoldProbeUnavailableReason::UnsupportedEntryProcedure
+        }
+        Some(_) => HoldProbeUnavailableReason::TrackStateNotReconciled,
+        None => HoldProbeUnavailableReason::MissingAcceptedEntry,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PreparedHoldUpdate {
+    key: oa_legacy_traj::core::trajectory::FlightKey,
+    operation: u8,
+    lifecycle_generation: u64,
+    previous_revision: Option<u64>,
+    revision: u64,
+    updated_receipt_ns: i64,
+}
+
+fn prepare_hold_update(
+    runtime: &RegionalRuntime,
+    update: HoldUpdate,
+    command_receipt_ns: i64,
+    allow_reserved_receipt: bool,
+) -> Result<PreparedHoldUpdate, String> {
+    if runtime.failed {
+        return Err("session failed; reconstruct from the admitted input prefix".into());
+    }
+    let scan_receipt_ns = runtime
+        .last_scan_receipt_ns
+        .ok_or("hold update requires a completed active scan")?;
+    if command_receipt_ns <= 0 || command_receipt_ns < scan_receipt_ns {
+        return Err("hold command receipt must be positive and not precede the latest scan".into());
+    }
+    if runtime.last_hold_command_receipt_ns.is_some_and(|last| {
+        command_receipt_ns < last || (!allow_reserved_receipt && command_receipt_ns == last)
+    }) {
+        return Err("hold command receipt is stale or not strictly increasing".into());
+    }
+    let (operation, lifecycle_generation, revision, key, instruction) = match update {
+        HoldUpdate::Assign {
+            lifecycle_generation,
+            revision,
+            instruction,
+        } => (
+            1,
+            lifecycle_generation,
+            revision,
+            instruction.flight_key,
+            Some(instruction),
+        ),
+        HoldUpdate::Amend {
+            lifecycle_generation,
+            revision,
+            instruction,
+        } => (
+            2,
+            lifecycle_generation,
+            revision,
+            instruction.flight_key,
+            Some(instruction),
+        ),
+        HoldUpdate::Cancel {
+            lifecycle_generation,
+            revision,
+            flight_key,
+        } => (3, lifecycle_generation, revision, flight_key, None),
+    };
+    if lifecycle_generation == 0 || revision == 0 || !valid_hold_key(key) {
+        return Err(
+            "hold command requires a positive revision, lifecycle, and full flight key".into(),
+        );
+    }
+    if let Some(instruction) = instruction {
+        validate_hold_instruction(instruction)?;
+        if instruction.flight_key != key {
+            return Err("hold command instruction key changed during preparation".into());
+        }
+    }
+    runtime
+        .hold_lifecycles
+        .validate_generation(key, lifecycle_generation)
+        .map_err(str::to_owned)?;
+    runtime
+        .hold_revisions
+        .validate(key, lifecycle_generation, revision)
+        .map_err(str::to_owned)?;
+    // Validate every parallel hold column before the durable intent is written. The mutable
+    // methods below have no remaining refusal branch after this consistency check.
+    let _ = runtime.holdings.view_rows().map_err(str::to_owned)?;
+    let mut active_matches = 0usize;
+    for view in &runtime.latest_active_views {
+        if route::flight_key(view) == key {
+            active_matches = active_matches.saturating_add(1);
+        }
+    }
+    let existing = runtime.holdings.position(key);
+    match operation {
+        1 => {
+            if active_matches != 1 {
+                return Err("hold assignment requires one exact active full-key flight".into());
+            }
+            if existing.is_some() {
+                return Err("hold already exists; use explicit amend".into());
+            }
+            if runtime.holdings.len() >= runtime.profile.max_flights {
+                return Err("hold view capacity exhausted; assignment refused".into());
+            }
+        }
+        2 => {
+            if active_matches != 1 {
+                return Err("hold amendment requires one exact active full-key flight".into());
+            }
+            if existing.is_none() {
+                return Err("hold amendment requires an existing hold".into());
+            }
+        }
+        3 => {
+            if active_matches != 1 {
+                return Err("hold cancellation requires one exact active full-key flight".into());
+            }
+            if existing.is_none() {
+                return Err("hold cancellation requires an existing hold".into());
+            }
+        }
+        _ => return Err("unknown typed hold operation".into()),
+    }
+    if let Some(instruction) = instruction.filter(|instruction| instruction.prediction.is_some()) {
+        let entry = runtime
+            .observed
+            .iter()
+            .find(|track| track.address == instruction.flight_key.aircraft_address)
+            .copied()
+            .ok_or("hold phase command requires the accepted entry track")?;
+        let _ = start_hold_phase(instruction, entry)?;
+    }
+    let previous_revision = runtime
+        .hold_revisions
+        .last_revision(key, lifecycle_generation);
+    if let Some(index) = existing {
+        if previous_revision != runtime.holdings.revision(index) {
+            return Err("hold revision ledger differs from active hold state".into());
+        }
+    }
+    Ok(PreparedHoldUpdate {
+        key,
+        operation,
+        lifecycle_generation,
+        previous_revision,
+        revision,
+        updated_receipt_ns: command_receipt_ns,
+    })
+}
+
+fn push_hold_digest_bytes(
+    bytes: &mut [u8; 192],
+    offset: &mut usize,
+    value: &[u8],
+) -> Result<(), String> {
+    let end = offset
+        .checked_add(value.len())
+        .ok_or("hold command digest offset overflow")?;
+    let slot = bytes
+        .get_mut(*offset..end)
+        .ok_or("hold command digest buffer capacity exceeded")?;
+    slot.copy_from_slice(value);
+    *offset = end;
+    Ok(())
+}
+
+fn hold_command_digest(
+    update: HoldUpdate,
+    previous_revision: Option<u64>,
+) -> Result<[u8; 32], String> {
+    use crate::holding::{HoldEntryProcedure, HoldLegUnit, HoldTurn};
+    let mut bytes = [0_u8; 192];
+    let mut offset = 0usize;
+    let (operation, lifecycle_generation, revision, key, instruction) = match update {
+        HoldUpdate::Assign {
+            lifecycle_generation,
+            revision,
+            instruction,
+        } => (
+            1,
+            lifecycle_generation,
+            revision,
+            instruction.flight_key,
+            Some(instruction),
+        ),
+        HoldUpdate::Amend {
+            lifecycle_generation,
+            revision,
+            instruction,
+        } => (
+            2,
+            lifecycle_generation,
+            revision,
+            instruction.flight_key,
+            Some(instruction),
+        ),
+        HoldUpdate::Cancel {
+            lifecycle_generation,
+            revision,
+            flight_key,
+        } => (3, lifecycle_generation, revision, flight_key, None),
+    };
+    push_hold_digest_bytes(&mut bytes, &mut offset, b"OA-HOLD-COMMAND-V1\0")?;
+    push_hold_digest_bytes(&mut bytes, &mut offset, &[operation])?;
+    push_hold_digest_bytes(&mut bytes, &mut offset, &key.gufi)?;
+    push_hold_digest_bytes(&mut bytes, &mut offset, &key.aircraft_address.to_le_bytes())?;
+    push_hold_digest_bytes(&mut bytes, &mut offset, &key.centre)?;
+    push_hold_digest_bytes(&mut bytes, &mut offset, &key.plan_id)?;
+    push_hold_digest_bytes(&mut bytes, &mut offset, &lifecycle_generation.to_le_bytes())?;
+    push_hold_digest_bytes(
+        &mut bytes,
+        &mut offset,
+        &[u8::from(previous_revision.is_some())],
+    )?;
+    push_hold_digest_bytes(
+        &mut bytes,
+        &mut offset,
+        &previous_revision.unwrap_or(0).to_le_bytes(),
+    )?;
+    push_hold_digest_bytes(&mut bytes, &mut offset, &revision.to_le_bytes())?;
+    if let Some(instruction) = instruction {
+        push_hold_digest_bytes(&mut bytes, &mut offset, &instruction.fix.name)?;
+        push_hold_digest_bytes(&mut bytes, &mut offset, &instruction.fix.region)?;
+        push_hold_digest_bytes(
+            &mut bytes,
+            &mut offset,
+            &instruction.fix.latitude_e7.to_le_bytes(),
+        )?;
+        push_hold_digest_bytes(
+            &mut bytes,
+            &mut offset,
+            &instruction.fix.longitude_e7.to_le_bytes(),
+        )?;
+        push_hold_digest_bytes(
+            &mut bytes,
+            &mut offset,
+            &instruction.direction_from_fix_deg.to_le_bytes(),
+        )?;
+        push_hold_digest_bytes(
+            &mut bytes,
+            &mut offset,
+            &instruction.inbound_course_deg.to_le_bytes(),
+        )?;
+        push_hold_digest_bytes(
+            &mut bytes,
+            &mut offset,
+            &[match instruction.turn {
+                None => 0,
+                Some(HoldTurn::Left) => 1,
+                Some(HoldTurn::Right) => 2,
+            }],
+        )?;
+        if let Some(leg) = instruction.leg {
+            push_hold_digest_bytes(&mut bytes, &mut offset, &[1])?;
+            push_hold_digest_bytes(&mut bytes, &mut offset, &leg.value.to_le_bytes())?;
+            push_hold_digest_bytes(
+                &mut bytes,
+                &mut offset,
+                &[match leg.unit {
+                    HoldLegUnit::Miles => 1,
+                    HoldLegUnit::Minutes => 2,
+                }],
+            )?;
+        } else {
+            push_hold_digest_bytes(&mut bytes, &mut offset, &[0, 0, 0])?;
+        }
+        if let Some(efc) = instruction.efc_utc_minute {
+            push_hold_digest_bytes(&mut bytes, &mut offset, &[1])?;
+            push_hold_digest_bytes(&mut bytes, &mut offset, &efc.to_le_bytes())?;
+        } else {
+            push_hold_digest_bytes(&mut bytes, &mut offset, &[0, 0, 0])?;
+        }
+        if let Some(config) = instruction.prediction {
+            push_hold_digest_bytes(&mut bytes, &mut offset, &[1])?;
+            push_hold_digest_bytes(
+                &mut bytes,
+                &mut offset,
+                &[match config.entry_procedure {
+                    HoldEntryProcedure::Direct => 1,
+                    HoldEntryProcedure::Parallel => 2,
+                    HoldEntryProcedure::Teardrop => 3,
+                }],
+            )?;
+            push_hold_digest_bytes(
+                &mut bytes,
+                &mut offset,
+                &config.entry_state_ns.to_le_bytes(),
+            )?;
+            push_hold_digest_bytes(
+                &mut bytes,
+                &mut offset,
+                &[match config.course_basis {
+                    HoldEntryCourseBasis::SyntheticNoWindCourse => 1,
+                    HoldEntryCourseBasis::WindOrHeadingUnknown => 2,
+                }],
+            )?;
+            push_hold_digest_bytes(
+                &mut bytes,
+                &mut offset,
+                &config.entry_capture_radius_mm.to_le_bytes(),
+            )?;
+            push_hold_digest_bytes(
+                &mut bytes,
+                &mut offset,
+                &config.inbound_true_course_cdeg.to_le_bytes(),
+            )?;
+            push_hold_digest_bytes(
+                &mut bytes,
+                &mut offset,
+                &config.leg_duration_ms.to_le_bytes(),
+            )?;
+            push_hold_digest_bytes(
+                &mut bytes,
+                &mut offset,
+                &config.turn_rate_cdeg_s.to_le_bytes(),
+            )?;
+            push_hold_digest_bytes(
+                &mut bytes,
+                &mut offset,
+                &config.max_scan_gap_ns.to_le_bytes(),
+            )?;
+            push_hold_digest_bytes(
+                &mut bytes,
+                &mut offset,
+                &config.max_position_error_mm.to_le_bytes(),
+            )?;
+            push_hold_digest_bytes(
+                &mut bytes,
+                &mut offset,
+                &config.max_heading_error_cdeg.to_le_bytes(),
+            )?;
+            push_hold_digest_bytes(
+                &mut bytes,
+                &mut offset,
+                &config.max_speed_error_mmps.to_le_bytes(),
+            )?;
+        } else {
+            push_hold_digest_bytes(&mut bytes, &mut offset, &[0])?;
+        }
+    }
+    Ok(oa_sha256::core::sha256::sha256(
+        bytes
+            .get(..offset)
+            .ok_or("hold command digest range invalid")?,
+    ))
+}
+
+fn hold_audit_target(key: oa_legacy_traj::core::trajectory::FlightKey) -> Result<String, String> {
+    // Fixed-width, versioned hex prevents valid punctuation in centre/plan fields from
+    // making distinct FlightKeys alias in the audit target.
+    let mut identity = [0_u8; 36];
+    identity[..16].copy_from_slice(&key.gufi);
+    identity[16..20].copy_from_slice(&key.aircraft_address.to_be_bytes());
+    identity[20..24].copy_from_slice(&key.centre);
+    identity[24..36].copy_from_slice(&key.plan_id);
+    Ok(format!("hold-key-v1:{}", oa_sha256::to_hex(&identity)))
+}
+
+/// Outcome after a hold intent has reached the durable audit log.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HoldCommandDisposition {
+    Applied,
+    /// The intent is durable, but the runtime mutation did not commit. Callers must reconcile
+    /// this record; it is deliberately not reported as a completed hold command.
+    IntentRecordedButNotCommitted {
+        reason: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HoldCommandResult {
+    pub checkpoint: oa_audit_core::Checkpoint,
+    pub disposition: HoldCommandDisposition,
+}
+
+/// Audited typed OpenATCA hold command dispatch. This is not an FAA/ERAM command parser or an
+/// authenticated operator UI. The caller supplies an independently pinned registry and trusted
+/// audit checkpoint; the local registry contributes role authorization only.
+pub fn regional_dispatch_hold_command(
+    runtime: &mut RegionalRuntime,
+    update: HoldUpdate,
+    authority: crate::commands::HoldCommandAuthority<'_>,
+) -> Result<HoldCommandResult, String> {
+    use oa_audit_core::{details, target, Action, Event};
+    use oa_audit_log::shell::{append_receipt, load_principal_registry};
+
+    let registry =
+        load_principal_registry(authority.registry_path, authority.expected_registry_sha256)
+            .map_err(|error| format!("hold command registry refused: {error}"))?;
+    let role =
+        oa_audit_core::authorize_principal(&registry, authority.principal_id, Action::HoldCommand)
+            .map_err(|error| format!("hold command authorization refused: {error:?}"))?;
+    let prepared = prepare_hold_update(runtime, update, authority.command_receipt_ns, false)?;
+    let digest = hold_command_digest(update, prepared.previous_revision)?;
+    let (target_bytes, target_len) = target(hold_audit_target(prepared.key)?.as_bytes())
+        .map_err(|error| format!("hold audit target refused: {error:?}"))?;
+    let operation = match prepared.operation {
+        1 => "ASSIGN",
+        2 => "AMEND",
+        3 => "CANCEL",
+        _ => return Err("unknown typed hold command operation".into()),
+    };
+    let previous = prepared
+        .previous_revision
+        .map_or_else(|| "NONE".to_owned(), |value| value.to_string());
+    let details_text = format!(
+        "phase=INTENT;operation={operation};lifecycle={};previous_revision={previous};revision={};command_sha256={}",
+        prepared.lifecycle_generation,
+        prepared.revision,
+        oa_sha256::to_hex(&digest),
+    );
+    let (details_bytes, details_len) = details(details_text.as_bytes())
+        .map_err(|error| format!("hold audit details refused: {error:?}"))?;
+    let event = Event {
+        principal: authority.principal_id,
+        role,
+        action: Action::HoldCommand,
+        target: target_bytes,
+        target_len,
+        time_ns: u64::try_from(prepared.updated_receipt_ns)
+            .map_err(|_| "hold command audit time is invalid")?,
+        details: details_bytes,
+        details_len,
+    };
+    let (checkpoint, receipt) =
+        append_receipt(authority.audit_path, authority.expected_checkpoint, event)
+            .map_err(|error| format!("hold command audit refused before mutation: {error:?}"))?;
+    Ok(finish_hold_command_after_append(
+        runtime,
+        update,
+        prepared,
+        authority.command_receipt_ns,
+        checkpoint,
+        receipt,
+        event,
+    ))
+}
+
+fn finish_hold_command_after_append(
+    runtime: &mut RegionalRuntime,
+    update: HoldUpdate,
+    prepared: PreparedHoldUpdate,
+    command_receipt_ns: i64,
+    checkpoint: oa_audit_core::Checkpoint,
+    receipt: oa_audit_core::AuditReceipt,
+    event: oa_audit_core::Event,
+) -> HoldCommandResult {
+    runtime.last_hold_command_receipt_ns = Some(command_receipt_ns);
+    let uncommitted = |reason: String| HoldCommandResult {
+        checkpoint,
+        disposition: HoldCommandDisposition::IntentRecordedButNotCommitted { reason },
+    };
+    if !oa_audit_core::receipt_matches(&receipt, event) {
+        return uncommitted("durable hold intent receipt did not match the command".to_owned());
+    }
+    match prepare_hold_update(runtime, update, command_receipt_ns, true) {
+        Ok(current) if current == prepared => {}
+        Ok(_) => {
+            return uncommitted("runtime hold state changed after durable intent".to_owned());
+        }
+        Err(error) => {
+            return uncommitted(format!(
+                "runtime hold preflight failed after durable intent: {error}"
+            ));
+        }
+    }
+    match regional_apply_hold_update_at(runtime, update, command_receipt_ns) {
+        Ok(()) => HoldCommandResult {
+            checkpoint,
+            disposition: HoldCommandDisposition::Applied,
+        },
+        Err(error) => uncommitted(format!(
+            "runtime refused hold mutation after durable intent: {error}"
+        )),
+    }
+}
+
+fn regional_apply_hold_update_at(
+    runtime: &mut RegionalRuntime,
+    update: HoldUpdate,
+    updated_receipt_ns: i64,
+) -> Result<(), String> {
+    if runtime.failed {
+        return Err("session failed; reconstruct from the admitted input prefix".into());
+    }
+    let (lifecycle_generation, revision, key) = match update {
+        HoldUpdate::Assign {
+            lifecycle_generation,
+            revision,
+            instruction,
+        }
+        | HoldUpdate::Amend {
+            lifecycle_generation,
+            revision,
+            instruction,
+        } => {
+            validate_hold_instruction(instruction)?;
+            (lifecycle_generation, revision, instruction.flight_key)
+        }
+        HoldUpdate::Cancel {
+            lifecycle_generation,
+            revision,
+            flight_key,
+        } => {
+            if !valid_hold_key(flight_key) {
+                return Err("hold cancellation requires a positive full flight key".into());
+            }
+            (lifecycle_generation, revision, flight_key)
+        }
+    };
+    runtime
+        .hold_lifecycles
+        .validate_generation(key, lifecycle_generation)
+        .map_err(str::to_owned)?;
+    runtime
+        .hold_revisions
+        .validate(key, lifecycle_generation, revision)
+        .map_err(str::to_owned)?;
+    let mut active_matches = 0usize;
+    for view in &runtime.latest_active_views {
+        if route::flight_key(view) == key {
+            active_matches = active_matches.saturating_add(1);
+        }
+    }
+    let existing = runtime.holdings.position(key);
+    match update {
+        HoldUpdate::Assign { instruction, .. } => {
+            if active_matches != 1 {
+                return Err("hold assignment requires one exact active full-key flight".into());
+            }
+            if existing.is_some() {
+                return Err("hold already exists; use explicit amend".into());
+            }
+            if runtime.holdings.len() >= runtime.profile.max_flights {
+                return Err("hold view capacity exhausted; assignment refused".into());
+            }
+            let phase_state = if instruction.prediction.is_some() {
+                let entry = runtime
+                    .observed
+                    .iter()
+                    .find(|track| track.address == instruction.flight_key.aircraft_address)
+                    .copied()
+                    .ok_or("hold phase assignment requires the accepted entry track")?;
+                start_hold_phase(instruction, entry)?
+            } else {
+                None
+            };
+            runtime
+                .holdings
+                .push(
+                    instruction,
+                    updated_receipt_ns,
+                    revision,
+                    lifecycle_generation,
+                    phase_state,
+                )
+                .map_err(str::to_owned)?;
+        }
+        HoldUpdate::Amend { instruction, .. } => {
+            if active_matches != 1 {
+                return Err("hold amendment requires one exact active full-key flight".into());
+            }
+            let Some(index) = existing else {
+                return Err("hold amendment requires an existing hold".into());
+            };
+            let phase_state = if instruction.prediction.is_some() {
+                let entry = runtime
+                    .observed
+                    .iter()
+                    .find(|track| track.address == instruction.flight_key.aircraft_address)
+                    .copied()
+                    .ok_or("hold phase amendment requires the accepted re-entry track")?;
+                start_hold_phase(instruction, entry)?
+            } else {
+                None
+            };
+            runtime
+                .holdings
+                .replace(
+                    index,
+                    instruction,
+                    updated_receipt_ns,
+                    revision,
+                    lifecycle_generation,
+                    phase_state,
+                )
+                .map_err(str::to_owned)?;
+        }
+        HoldUpdate::Cancel { .. } => {
+            let Some(index) = existing else {
+                return Err("hold cancellation requires an existing hold".into());
+            };
+            runtime.holdings.remove(index).map_err(str::to_owned)?;
+        }
+    }
+    runtime
+        .hold_revisions
+        .record(key, lifecycle_generation, revision)
+        .map_err(str::to_owned)?;
+    Ok(())
 }
 
 fn regional_step_inner(
@@ -1884,6 +4105,130 @@ mod transaction_tests {
         );
         std::fs::remove_dir_all(root).expect("remove synthetic request directory");
     }
+    // REQ: OA-ENC-023
+    #[test]
+    fn hold_scan_work_preflight_covers_declared_maximum_and_refuses_excess() {
+        let (pair_limit, sua_limit) = preflight_hold_scan_work(
+            4_096,
+            8_192,
+            8_192,
+            8_192,
+            4_096,
+            MAX_RUNTIME_SUA_ZONES,
+            8_192,
+        )
+        .unwrap();
+        assert_eq!(pair_limit, MAX_RUNTIME_PAIR_PROBES);
+        assert_eq!(sua_limit, MAX_RUNTIME_SUA_PROBES);
+
+        assert!(preflight_hold_scan_work(
+            16_384,
+            16_384,
+            16_384,
+            16_384,
+            16_384,
+            MAX_RUNTIME_SUA_ZONES,
+            16_384,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn hold_audit_target_is_injective_for_delimiter_containing_valid_keys() {
+        let first = oa_legacy_traj::core::trajectory::FlightKey {
+            gufi: [7; 16],
+            aircraft_address: 0xabc123,
+            centre: *b"AB:C",
+            plan_id: *b"DEF\0\0\0\0\0\0\0\0\0",
+        };
+        let second = oa_legacy_traj::core::trajectory::FlightKey {
+            gufi: [7; 16],
+            aircraft_address: 0xabc123,
+            centre: *b"AB\0\0",
+            plan_id: *b"C:DEF\0\0\0\0\0\0\0",
+        };
+        assert!(valid_hold_key(first));
+        assert!(valid_hold_key(second));
+        assert_ne!(hold_audit_target(first), hold_audit_target(second));
+    }
+
+    #[test]
+    fn durable_hold_intent_with_post_append_refusal_is_not_applied() {
+        let model = synthetic_model().expect("synthetic model");
+        let snapshot = oa_airspace::core::snapshot::encode(&model).expect("snapshot");
+        let mut runtime = regional_new_with_profile_and_quarantine_audit_checkpoint(
+            model,
+            oa_sha256::sha256(&snapshot),
+            *b"ZAU1",
+            SurveillanceConfig {
+                centre_lat_e7: 410_000_000,
+                centre_lon_e7: -870_000_000,
+                range_nm: 180.0,
+            },
+            DEFAULT_REGIONAL_RUN_PROFILE,
+            oa_audit_core::genesis(),
+        )
+        .expect("runtime");
+        let key = oa_legacy_traj::core::trajectory::FlightKey {
+            gufi: [8; 16],
+            aircraft_address: 0xabc123,
+            centre: *b"ZAU1",
+            plan_id: *b"PLAN00000001",
+        };
+        let update = HoldUpdate::Cancel {
+            lifecycle_generation: 1,
+            revision: 1,
+            flight_key: key,
+        };
+        let prepared = PreparedHoldUpdate {
+            key,
+            operation: 3,
+            lifecycle_generation: 1,
+            previous_revision: None,
+            revision: 1,
+            updated_receipt_ns: 2,
+        };
+        let (target, target_len) =
+            oa_audit_core::target(hold_audit_target(key).expect("target").as_bytes())
+                .expect("valid audit target");
+        let (details, details_len) =
+            oa_audit_core::details(b"phase=INTENT;operation=CANCEL").expect("valid details");
+        let event = oa_audit_core::Event {
+            principal: 51,
+            role: oa_audit_core::Role::Operate,
+            action: oa_audit_core::Action::HoldCommand,
+            target,
+            target_len,
+            time_ns: 20,
+            details,
+            details_len,
+        };
+        let audit_path = std::env::temp_dir().join(format!(
+            "oa-hold-post-append-refusal-{}-{}.log",
+            std::process::id(),
+            NEXT_QUARANTINE_AUDIT_TEST.fetch_add(1, Ordering::Relaxed)
+        ));
+        let (checkpoint, receipt) =
+            oa_audit_log::shell::append_receipt(&audit_path, oa_audit_core::genesis(), event)
+                .expect("durable intent");
+        runtime.failed = true;
+        let result = finish_hold_command_after_append(
+            &mut runtime,
+            update,
+            prepared,
+            20,
+            checkpoint,
+            receipt,
+            event,
+        );
+        assert!(matches!(
+            result.disposition,
+            HoldCommandDisposition::IntentRecordedButNotCommitted { .. }
+        ));
+        assert_eq!(runtime.holdings.len(), 0);
+        assert_eq!(runtime.last_hold_command_receipt_ns, Some(20));
+        let _ = std::fs::remove_file(audit_path);
+    }
 
     fn intern(model: &mut Model, text: &str) -> oa_airspace::core::model::StrIx {
         let raw = model.strings.offsets.len().checked_sub(1).unwrap();
@@ -2145,6 +4490,69 @@ mod transaction_tests {
         .is_err());
         assert_eq!(flight::flight_driver_report(&engine.flights).flights, 1);
         assert_eq!(engine.known_flights.len(), 1);
+    }
+
+    fn synthetic_ur_model(time: u8, floor_agl: bool) -> Model {
+        use air_model::{
+            self, boundary_source, edge_interp, level, stratum, via, SegIx, Span, NONE_U16,
+            POS_NONE,
+        };
+        let mut model = crate::cli::synthetic_model().unwrap();
+        let boundaries = &mut model.boundaries;
+        boundaries.source.push(boundary_source::CIFP_UR);
+        boundaries.stratum.push(stratum::SUA_MOA);
+        boundaries.edge_interp.push(edge_interp::PER_SEGMENT);
+        boundaries.multiple.push(b'A');
+        boundaries.facility.push(air_model::StrIx::NONE);
+        boundaries.name.push(air_model::StrIx::NONE);
+        boundaries.floor_ft.push(10_000);
+        boundaries.ceiling_ft.push(20_000);
+        boundaries.vertices.push(Span {
+            start: air_model::VertexIx::NONE,
+            len: 0,
+        });
+        boundaries.segs.push(Span {
+            start: SegIx::new(0),
+            len: 4,
+        });
+        boundaries.time_code.push(time);
+        boundaries.level.push(level::LOW);
+        air_model::bit_push(&mut boundaries.floor_agl, floor_agl);
+        air_model::bit_push(&mut boundaries.ceiling_agl, false);
+        air_model::bit_push(&mut boundaries.incomplete, false);
+        model.segments.via = vec![via::GEODESIC; 4];
+        model.segments.lat = vec![410_000_000, 410_000_000, 410_100_000, 410_100_000];
+        model.segments.lon = vec![-870_000_000, -869_900_000, -869_900_000, -870_000_000];
+        model.segments.arc_lat = vec![POS_NONE; 4];
+        model.segments.arc_lon = vec![POS_NONE; 4];
+        model.segments.radius_m = vec![0; 4];
+        model.segments.bearing_cdeg = vec![NONE_U16; 4];
+        model
+    }
+
+    // REQ: OA-ENC-023
+    #[test]
+    fn runtime_ur_adapter_accepts_continuous_msl_and_refuses_part_time_or_agl() {
+        let (zones, unexamined) =
+            runtime_sua_zones(&synthetic_ur_model(air_model::time_code::CONTINUOUS, false));
+        assert_eq!(unexamined, 0);
+        assert_eq!(zones.len(), 1);
+        let zone = zones.first().expect("one SUA zone");
+        assert_eq!(zone.availability, RuntimeSuaAvailability::Ready);
+        assert!(zone.area.is_some());
+
+        let (part_time, _) =
+            runtime_sua_zones(&synthetic_ur_model(air_model::time_code::PART_TIME, false));
+        assert_eq!(
+            part_time.first().expect("part-time zone").availability,
+            RuntimeSuaAvailability::NoncontinuousSchedule
+        );
+        let (agl, _) =
+            runtime_sua_zones(&synthetic_ur_model(air_model::time_code::CONTINUOUS, true));
+        assert_eq!(
+            agl.first().expect("AGL zone").availability,
+            RuntimeSuaAvailability::AglAltitude
+        );
     }
 
     // REQ: OA-REG-018

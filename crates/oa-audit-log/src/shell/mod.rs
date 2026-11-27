@@ -474,9 +474,9 @@ mod tests {
         let _ = std::fs::remove_file(file);
     }
 
-    // REQ: OA-AUDIT-001, OA-AUDIT-003, OA-AUDIT-004
+    // REQ: OA-AUDIT-001, OA-AUDIT-003, OA-AUDIT-004, OA-AUDIT-010
     #[test]
-    fn append_verifies_trusted_tail_and_detects_deletion_reorder_and_tamper() {
+    fn append_roundtrips_distinct_msaw_and_hold_actions_and_detects_chain_tampering() {
         let file = path("chain");
         let _ = std::fs::remove_file(&file);
         let first = append(
@@ -486,28 +486,39 @@ mod tests {
         )
         .unwrap();
         let second = append(&file, first, event(Action::QuarantineRelease)).unwrap();
-        assert_eq!(verify(&file, second).unwrap(), second);
+        let third = append(&file, second, event(Action::MsawServiceRequest)).unwrap();
+        let fourth = append(&file, third, event(Action::HoldCommand)).unwrap();
+        assert_eq!(verify(&file, fourth).unwrap(), fourth);
+        let mut decoded_hold_command = false;
+        let mut decoded_msaw_service_request = false;
+        read_records(&file, fourth, &mut |record| {
+            decoded_hold_command |= record.event.action == Action::HoldCommand;
+            decoded_msaw_service_request |= record.event.action == Action::MsawServiceRequest;
+        })
+        .unwrap();
+        assert!(decoded_hold_command);
+        assert!(decoded_msaw_service_request);
         let data = std::fs::read(&file).unwrap();
-        assert_eq!(data.len(), RECORD_BYTES * 2);
+        assert_eq!(data.len(), RECORD_BYTES * 4);
 
-        std::fs::write(&file, data.get(..RECORD_BYTES).unwrap()).unwrap();
+        std::fs::write(&file, data.get(..(RECORD_BYTES * 3)).unwrap()).unwrap();
         assert!(matches!(
-            verify(&file, second),
-            Err(LogError::Truncated { sequence: 2 })
+            verify(&file, fourth),
+            Err(LogError::Truncated { sequence: 4 })
         ));
 
         let mut reordered = Vec::with_capacity(data.len());
         reordered.extend_from_slice(data.get(RECORD_BYTES..).unwrap());
         reordered.extend_from_slice(data.get(..RECORD_BYTES).unwrap());
         std::fs::write(&file, reordered).unwrap();
-        assert!(verify(&file, second).is_err());
+        assert!(verify(&file, fourth).is_err());
 
         let mut tampered = data;
         if let Some(byte) = tampered.get_mut(40) {
             *byte ^= 1;
         }
         std::fs::write(&file, tampered).unwrap();
-        assert!(verify(&file, second).is_err());
+        assert!(verify(&file, fourth).is_err());
         let _ = std::fs::remove_file(file);
     }
 

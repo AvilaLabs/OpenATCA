@@ -92,6 +92,7 @@ pub(super) fn decode(bytes: &[u8; RECORD_BYTES]) -> Result<Record, AuditError> {
         9 => Action::RunwayAssignment,
         10 => Action::AlertAcknowledge,
         13 => Action::MsawServiceRequest,
+        14 => Action::HoldCommand,
         _ => return Err(AuditError::InvalidChain),
     };
     let target_len = read_u8(bytes, &mut pos)?;

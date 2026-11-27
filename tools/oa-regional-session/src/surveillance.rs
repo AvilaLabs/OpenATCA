@@ -337,10 +337,13 @@ pub fn surveillance_new_with_profile(
         poly_vertices: 0,
         texts: 4
             + profile.max_tracks * oa_display::core::alert_markers::ALERT_TEXTS_PER_MARKER
-            + oa_display::core::alert_markers::ALERT_HEADER_TEXTS,
+            + oa_display::core::alert_markers::ALERT_HEADER_TEXTS
+            + oa_display::hold_view::MAX_HOLD_VIEW_VISIBLE_ROWS
+            + 1,
         text_bytes: 256
             + profile.max_tracks * oa_display::core::alert_markers::ALERT_TEXT_BYTES_PER_MARKER
-            + oa_display::core::alert_markers::ALERT_HEADER_TEXT_BYTES,
+            + oa_display::core::alert_markers::ALERT_HEADER_TEXT_BYTES
+            + (oa_display::hold_view::MAX_HOLD_VIEW_VISIBLE_ROWS + 1) * 72,
     };
     let caps = oa_display::traffic::caps_add(&scope.list.caps, &interaction_caps).map_err(err)?;
     scope.list = oa_display::list::list_new(caps).map_err(err)?;
@@ -1633,6 +1636,15 @@ pub fn surveillance_present_controls(
     interaction: &oa_display::interaction::InteractionState,
     console: &str,
 ) -> Result<[u8; 32], String> {
+    surveillance_present_controls_with_holds(s, interaction, console, &[])
+}
+
+pub fn surveillance_present_controls_with_holds(
+    s: &mut Surveillance,
+    interaction: &oa_display::interaction::InteractionState,
+    console: &str,
+    holds: &[oa_display::hold_view::HoldViewEntry],
+) -> Result<[u8; 32], String> {
     if !s.profile.render_scope {
         return Err("analysis-only profile does not produce a rendered control frame".into());
     }
@@ -1700,6 +1712,10 @@ pub fn surveillance_present_controls(
             text,
         )
         .map_err(err)?;
+    }
+    if !holds.is_empty() {
+        oa_display::hold_view::append_hold_view(&mut s.scope.list, &s.scope.view.proj, holds)
+            .map_err(err)?;
     }
     replay_raster(&mut s.scope).map_err(err)?;
     let digest = frame_digest(&s.scope.spec, &s.scope.buf).map_err(err)?;

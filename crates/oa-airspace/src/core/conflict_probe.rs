@@ -35,6 +35,8 @@ pub enum SuaRefusal {
     GeometryTooLarge = 4,
     InvalidPosition = 5,
     UnsampledPossibleEntry = 6,
+    MissingTrack = 7,
+    AmbiguousIdentity = 8,
 }
 
 /// Plain SoA trajectory view; samples include 30-second times and route vertices.

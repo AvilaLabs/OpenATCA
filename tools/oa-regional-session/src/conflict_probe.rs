@@ -777,6 +777,98 @@ mod tests {
 
     // REQ: OA-ENC-023
     #[test]
+    fn held_path_entry_is_limited_to_the_active_sua_time_window() {
+        let entry_ns = 2_000_000_000_i64;
+        let state = t::hold_phase_start(t::HoldPhaseInput {
+            key: t::FlightKey {
+                gufi: [1; 16],
+                aircraft_address: 0xabc101,
+                centre: *b"KORD",
+                plan_id: *b"PLAN00000001",
+            },
+            entry_state_ns: entry_ns,
+            fix_lat_e7: 410_000_000,
+            fix_lon_e7: -869_988_000,
+            inbound_true_course_cdeg: 9_000,
+            turn: 2,
+            groundspeed_mmps: 100_000,
+            leg_duration_ms: 30_000,
+            turn_rate_cdeg_s: 300,
+            max_scan_gap_ns: 10_000_000_000,
+            max_speed_error_mmps: 5_000,
+        })
+        .expect("valid synthetic direct hold")
+        .0;
+        let target = t::hold_phase_predict(&state, entry_ns + 90_000_000_000)
+            .expect("modeled point during outbound leg");
+        let lat_margin = 50_000;
+        let lon_margin = 60_000;
+        let ring = [
+            (target.lat_e7 - lat_margin, target.lon_e7 - lon_margin),
+            (target.lat_e7 - lat_margin, target.lon_e7 + lon_margin),
+            (target.lat_e7 + lat_margin, target.lon_e7 + lon_margin),
+            (target.lat_e7 + lat_margin, target.lon_e7 - lon_margin),
+        ];
+        let rings: [&[(i32, i32)]; 1] = [&ring];
+        let area = oa_airspace::core::geom::build_area_e7(&rings, 0.0)
+            .expect("bounded synthetic hold intercept");
+        let mut trajectory = ProbeTrajectory {
+            gufi: state.key.gufi,
+            aircraft_address: state.key.aircraft_address,
+            centre: state.key.centre,
+            plan_id: state.key.plan_id,
+            reserved_key_align: [0; 4],
+            state_ms: entry_ns / 1_000_000,
+            sample_count: 41,
+            reserved_sample_count: [0; 6],
+            time_ms: [0; oa_ca::probe::PROBE_MAX_SAMPLES],
+            lat_e7: [0; oa_ca::probe::PROBE_MAX_SAMPLES],
+            lon_e7: [0; oa_ca::probe::PROBE_MAX_SAMPLES],
+            altitude_ft: [10_000; oa_ca::probe::PROBE_MAX_SAMPLES],
+        };
+        for index in 0..41 {
+            let offset_ns = i64::try_from(index).expect("small sample index") * 30_000_000_000;
+            let snapshot =
+                t::hold_phase_predict(&state, entry_ns + offset_ns).expect("bounded phase sample");
+            *trajectory
+                .time_ms
+                .get_mut(index)
+                .expect("fixed profile time capacity") = (entry_ns + offset_ns) / 1_000_000;
+            *trajectory
+                .lat_e7
+                .get_mut(index)
+                .expect("fixed profile latitude capacity") = snapshot.lat_e7;
+            *trajectory
+                .lon_e7
+                .get_mut(index)
+                .expect("fixed profile longitude capacity") = snapshot.lon_e7;
+        }
+        let inside = probe_sua(
+            &trajectory,
+            &area,
+            true,
+            (entry_ns + 80_000_000_000) / 1_000_000,
+            (entry_ns + 100_000_000_000) / 1_000_000,
+            9_000,
+            11_000,
+        );
+        assert_eq!(inside.status, SuaStatus::Entry);
+        assert_eq!(inside.entry_ms, (entry_ns + 90_000_000_000) / 1_000_000);
+
+        let outside = probe_sua(
+            &trajectory,
+            &area,
+            true,
+            (entry_ns + 180_000_000_000) / 1_000_000,
+            (entry_ns + 210_000_000_000) / 1_000_000,
+            9_000,
+            11_000,
+        );
+        assert_eq!(outside.status, SuaStatus::Clear);
+    }
+
+    // REQ: OA-ENC-023
+    #[test]
     fn vertical_only_conflict_is_reported_by_shared_predictor_adapter() {
         let pa = [point(200_000_000)];
         let pb = [point(200_000_000)];

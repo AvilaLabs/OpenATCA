@@ -200,6 +200,1056 @@ pub struct RoutePoint {
 // per-flight snapshot is capped at 256 records (15,360 bytes), with longer routes refused.
 const _: () = assert!(core::mem::size_of::<RoutePoint>() == 60);
 
+/// Engineering parameters for a direct-entry holding racetrack. The caller has already
+/// accepted the entry event at `entry_state_ns`; this API never infers entry from position.
+/// Speed is fixed at the accepted entry, matching the issue-time baseline's constant-GS model.
+/// This is a project trajectory model, not an operationally qualified holding tolerance.
+pub struct HoldPhaseInput {
+    pub key: FlightKey,
+    pub entry_state_ns: i64,
+    pub fix_lat_e7: i32,
+    pub fix_lon_e7: i32,
+    /// Inbound true course in centidegrees; magnetic conversion belongs to the caller.
+    pub inbound_true_course_cdeg: u16,
+    /// 1=left, 2=right.
+    pub turn: u8,
+    pub groundspeed_mmps: u32,
+    /// Duration of each straight leg in milliseconds.
+    pub leg_duration_ms: u32,
+    /// Explicit turn rate in centidegrees per second.
+    pub turn_rate_cdeg_s: u16,
+    /// Caller-selected maximum interval between accepted scan states.
+    pub max_scan_gap_ns: i64,
+    /// Explicit caller-selected bound on observed speed change from the constant-GS model.
+    pub max_speed_error_mmps: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum HoldPhase {
+    OutboundTurn = 1,
+    OutboundLeg = 2,
+    InboundTurn = 3,
+    InboundLeg = 4,
+    EntryTurn = 5,
+    EntryLeg = 6,
+    EntryInterceptTurn = 7,
+    EntryInterceptLeg = 8,
+    EntryJoinTurn = 9,
+}
+const _: () = assert!(core::mem::size_of::<HoldPhase>() == 1);
+
+/// Causally advanced hold state. The full-key anchor and entry geometry are immutable; each
+/// accepted advancement changes only `last_advance_ns`. A7 exact size: 160 bytes including the
+/// bounded optional parallel/teardrop entry model.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(C)]
+pub struct HoldPhaseState {
+    pub key: FlightKey,
+    pub entry_state_ns: i64,
+    pub last_advance_ns: i64,
+    pub fix_lat_e7: i32,
+    pub fix_lon_e7: i32,
+    pub inbound_true_course_cdeg: u16,
+    pub turn: u8,
+    pub active: u8,
+    pub groundspeed_mmps: u32,
+    pub leg_duration_ms: u32,
+    pub turn_rate_cdeg_s: u16,
+    pub max_scan_gap_ns: i64,
+    pub max_speed_error_mmps: u32,
+    /// Zero is the original direct-entry profile. One is an observed, receipt-gated
+    /// parallel/teardrop entry model.
+    pub entry_model: u8,
+    pub entry_procedure: u8,
+    pub entry_turn_direction: u8,
+    pub entry_start_heading_true_cdeg: u16,
+    pub entry_start_lat_e7: i32,
+    pub entry_start_lon_e7: i32,
+    pub entry_available_ns: i64,
+    pub entry_first_turn_ns: i64,
+    pub entry_straight_leg_ns: i64,
+    pub entry_intercept_turn_ns: i64,
+    pub entry_join_ns: i64,
+    pub entry_regular_phase_offset_ns: i64,
+}
+const _: () = assert!(core::mem::size_of::<HoldPhaseState>() == 160);
+
+/// Inputs for the first receipt-gated parallel/teardrop engineering forecast. Heading is true
+/// course only when the caller has explicitly established the synthetic no-wind basis.
+pub struct HoldEntryPhaseInput {
+    pub key: FlightKey,
+    pub crossing_state_ns: i64,
+    pub available_at_ns: i64,
+    pub start_lat_e7: i32,
+    pub start_lon_e7: i32,
+    pub start_heading_true_cdeg: u16,
+    pub fix_lat_e7: i32,
+    pub fix_lon_e7: i32,
+    pub inbound_true_course_cdeg: u16,
+    /// 1=left, 2=right; 2=parallel, 3=teardrop.
+    pub turn: u8,
+    pub procedure: u8,
+    pub groundspeed_mmps: u32,
+    pub leg_duration_ms: u32,
+    pub turn_rate_cdeg_s: u16,
+    pub max_scan_gap_ns: i64,
+    pub max_speed_error_mmps: u32,
+}
+
+/// Position and phase at one accepted scan time. Exact-size A7 value: 80 bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(C)]
+pub struct HoldPhaseSnapshot {
+    pub key: FlightKey,
+    pub at_ns: i64,
+    pub phase: HoldPhase,
+    pub reserved_phase: [u8; 7],
+    pub cycle: u64,
+    pub phase_elapsed_ms: u32,
+    pub lat_e7: i32,
+    pub lon_e7: i32,
+    pub heading_true_cdeg: u16,
+    pub reserved_tail: [u8; 2],
+}
+const _: () = assert!(core::mem::size_of::<HoldPhaseSnapshot>() == 80);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum HoldPhaseRefusal {
+    InvalidInput = 1,
+    Inactive = 2,
+    NonMonotonicTime = 3,
+    ScanGapExceeded = 4,
+    TimeOverflow = 5,
+    InvalidGeometry = 6,
+    TrackMismatch = 7,
+    FlightKeyMismatch = 8,
+}
+const _: () = assert!(core::mem::size_of::<HoldPhaseRefusal>() == 1);
+
+/// One caller-supplied scan state and explicit engineering reconciliation bounds. Exact-size A7
+/// value: full flight key, timestamp, position, velocity, and both error limits = 72 bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(C)]
+pub struct HoldTrackReconciliationInput {
+    pub key: FlightKey,
+    pub at_ns: i64,
+    pub lat_e7: i32,
+    pub lon_e7: i32,
+    pub east_mmps: i32,
+    pub north_mmps: i32,
+    pub max_position_error_mm: u32,
+    pub max_heading_error_cdeg: u16,
+}
+const _: () = assert!(core::mem::size_of::<HoldTrackReconciliationInput>() == 72);
+
+const HOLD_NS_PER_MS: i64 = 1_000_000;
+// Engineering envelope for this bounded direct-entry model: 300 m/s and 600 s legs keep
+// generated local geometry within 20 km; turn-rate is bounded to preserve a calculable racetrack.
+// The 60 s advancement gap is a local stale-state guard, not an FAA update-rate requirement.
+const HOLD_MAX_SPEED_MMPS: u32 = 300_000;
+const HOLD_MAX_LEG_DURATION_MS: u32 = 600_000;
+const HOLD_MAX_TURN_RATE_CDEG_S: u16 = 600;
+const HOLD_MAX_SCAN_GAP_NS: i64 = 60_000_000_000;
+const HOLD_METRES_PER_DEGREE: f64 = 111_194.926_644_558_74;
+// Engineering model only: AIM gives no numeric intercept angle for parallel/teardrop
+// entries. A bounded right-angle intercept is chosen to solve the profile geometry.
+const HOLD_ENTRY_INTERCEPT_ANGLE_CDEG: i64 = 9_000;
+
+fn hold_input_valid(input: &HoldPhaseInput) -> bool {
+    flight_key_ok(input.key)
+        && input.entry_state_ns > 0
+        && coord_ok(input.fix_lat_e7, input.fix_lon_e7)
+        && input.inbound_true_course_cdeg < 36_000
+        && (1..=2).contains(&input.turn)
+        && (1..=HOLD_MAX_SPEED_MMPS).contains(&input.groundspeed_mmps)
+        && (1..=HOLD_MAX_LEG_DURATION_MS).contains(&input.leg_duration_ms)
+        && (1..=HOLD_MAX_TURN_RATE_CDEG_S).contains(&input.turn_rate_cdeg_s)
+        && (1..=HOLD_MAX_SCAN_GAP_NS).contains(&input.max_scan_gap_ns)
+        && (1..=HOLD_MAX_SPEED_MMPS).contains(&input.max_speed_error_mmps)
+}
+
+fn hold_state_valid(state: &HoldPhaseState) -> bool {
+    let direct_entry_valid = state.entry_model == 0
+        && state.entry_procedure == 0
+        && state.entry_turn_direction == 0
+        && state.entry_start_heading_true_cdeg == 0
+        && state.entry_start_lat_e7 == 0
+        && state.entry_start_lon_e7 == 0
+        && state.entry_available_ns == 0
+        && state.entry_first_turn_ns == 0
+        && state.entry_straight_leg_ns == 0
+        && state.entry_intercept_turn_ns == 0
+        && state.entry_join_ns == 0
+        && state.entry_regular_phase_offset_ns == 0;
+    let modeled_entry_valid = state.entry_model == 1
+        && (2..=3).contains(&state.entry_procedure)
+        && matches!(state.entry_turn_direction, 1 | 255)
+        && state.entry_start_heading_true_cdeg < 36_000
+        && coord_ok(state.entry_start_lat_e7, state.entry_start_lon_e7)
+        && state.entry_available_ns >= state.entry_state_ns
+        && state.last_advance_ns >= state.entry_state_ns
+        && state.entry_first_turn_ns > 0
+        && state.entry_straight_leg_ns == 60_000_000_000
+        && state.entry_intercept_turn_ns > 0
+        && state.entry_join_ns
+            > state
+                .entry_state_ns
+                .saturating_add(state.entry_first_turn_ns)
+                .saturating_add(state.entry_straight_leg_ns)
+                .saturating_add(state.entry_intercept_turn_ns)
+        && state.entry_regular_phase_offset_ns >= 0;
+    flight_key_ok(state.key)
+        && state.active == 1
+        && state.entry_state_ns > 0
+        && state.last_advance_ns >= state.entry_state_ns
+        && coord_ok(state.fix_lat_e7, state.fix_lon_e7)
+        && state.inbound_true_course_cdeg < 36_000
+        && (1..=2).contains(&state.turn)
+        && (1..=HOLD_MAX_SPEED_MMPS).contains(&state.groundspeed_mmps)
+        && (1..=HOLD_MAX_LEG_DURATION_MS).contains(&state.leg_duration_ms)
+        && (1..=HOLD_MAX_TURN_RATE_CDEG_S).contains(&state.turn_rate_cdeg_s)
+        && (1..=HOLD_MAX_SCAN_GAP_NS).contains(&state.max_scan_gap_ns)
+        && (1..=HOLD_MAX_SPEED_MMPS).contains(&state.max_speed_error_mmps)
+        && (direct_entry_valid || modeled_entry_valid)
+}
+
+/// Accept an explicitly validated entry event and anchor phase at its source-state time.
+pub fn hold_phase_start(
+    input: HoldPhaseInput,
+) -> Result<(HoldPhaseState, HoldPhaseSnapshot), HoldPhaseRefusal> {
+    if !hold_input_valid(&input) {
+        return Err(HoldPhaseRefusal::InvalidInput);
+    }
+    let state = HoldPhaseState {
+        key: input.key,
+        entry_state_ns: input.entry_state_ns,
+        last_advance_ns: input.entry_state_ns,
+        fix_lat_e7: input.fix_lat_e7,
+        fix_lon_e7: input.fix_lon_e7,
+        inbound_true_course_cdeg: input.inbound_true_course_cdeg,
+        turn: input.turn,
+        active: 1,
+        groundspeed_mmps: input.groundspeed_mmps,
+        leg_duration_ms: input.leg_duration_ms,
+        turn_rate_cdeg_s: input.turn_rate_cdeg_s,
+        max_scan_gap_ns: input.max_scan_gap_ns,
+        max_speed_error_mmps: input.max_speed_error_mmps,
+        entry_model: 0,
+        entry_procedure: 0,
+        entry_turn_direction: 0,
+        entry_start_heading_true_cdeg: 0,
+        entry_start_lat_e7: 0,
+        entry_start_lon_e7: 0,
+        entry_available_ns: 0,
+        entry_first_turn_ns: 0,
+        entry_straight_leg_ns: 0,
+        entry_intercept_turn_ns: 0,
+        entry_join_ns: 0,
+        entry_regular_phase_offset_ns: 0,
+    };
+    let snapshot = hold_phase_snapshot(&state, input.entry_state_ns)?;
+    Ok((state, snapshot))
+}
+
+/// Start a bounded parallel or teardrop entry model. The crossing time is inferred evidence;
+/// snapshots are unavailable until the second report's receipt time, and all subsequent points
+/// use this same state with the ordinary shared hold sampler.
+pub fn hold_phase_start_entry(
+    input: HoldEntryPhaseInput,
+) -> Result<(HoldPhaseState, HoldPhaseSnapshot), HoldPhaseRefusal> {
+    if !flight_key_ok(input.key)
+        || input.crossing_state_ns <= 0
+        || input.available_at_ns < input.crossing_state_ns
+        || !coord_ok(input.start_lat_e7, input.start_lon_e7)
+        || !coord_ok(input.fix_lat_e7, input.fix_lon_e7)
+        || input.start_heading_true_cdeg >= 36_000
+        || input.inbound_true_course_cdeg >= 36_000
+        || !(1..=2).contains(&input.turn)
+        || !(2..=3).contains(&input.procedure)
+        || !(1..=HOLD_MAX_SPEED_MMPS).contains(&input.groundspeed_mmps)
+        || !(1..=HOLD_MAX_LEG_DURATION_MS).contains(&input.leg_duration_ms)
+        || !(1..=HOLD_MAX_TURN_RATE_CDEG_S).contains(&input.turn_rate_cdeg_s)
+        || !(1..=HOLD_MAX_SCAN_GAP_NS).contains(&input.max_scan_gap_ns)
+        || !(1..=HOLD_MAX_SPEED_MMPS).contains(&input.max_speed_error_mmps)
+    {
+        return Err(HoldPhaseRefusal::InvalidInput);
+    }
+
+    let pattern_sign = if input.turn == 2 { 1_i64 } else { -1_i64 };
+    // Parallel first reaches the nonholding side; teardrop turns toward the holding side.
+    let first_sign = if input.procedure == 2 {
+        -pattern_sign
+    } else {
+        pattern_sign
+    };
+    let outbound = i64::rem_euclid(i64::from(input.inbound_true_course_cdeg) + 18_000, 36_000);
+    let target_outbound = if input.procedure == 3 {
+        i64::rem_euclid(outbound - pattern_sign * 3_000, 36_000)
+    } else {
+        outbound
+    };
+    let first_delta = directed_heading_delta(
+        i64::from(input.start_heading_true_cdeg),
+        target_outbound,
+        first_sign,
+    );
+    if first_delta == 0 {
+        return Err(HoldPhaseRefusal::InvalidGeometry);
+    }
+    let first_turn_ns = turn_duration_ns(first_delta, input.turn_rate_cdeg_s)?;
+    let straight_ns = 60_i64 * HOLD_NS_PER_MS * 1_000;
+
+    let fix_lat = f64::from(input.fix_lat_e7) / 10_000_000.0;
+    let fix_lon = f64::from(input.fix_lon_e7) / 10_000_000.0;
+    let start_lat = f64::from(input.start_lat_e7) / 10_000_000.0;
+    let start_lon = f64::from(input.start_lon_e7) / 10_000_000.0;
+    let cosine = oa_math::cos(fix_lat * (core::f64::consts::PI / 180.0));
+    if !cosine.is_finite() || cosine.abs() < 1.0e-6 {
+        return Err(HoldPhaseRefusal::InvalidGeometry);
+    }
+    let mut east = (start_lon - fix_lon) * cosine * HOLD_METRES_PER_DEGREE;
+    let mut north = (start_lat - fix_lat) * HOLD_METRES_PER_DEGREE;
+    let speed_mps = f64::from(input.groundspeed_mmps) / 1_000.0;
+    let rate_rad_s = f64::from(input.turn_rate_cdeg_s) / 100.0 * (core::f64::consts::PI / 180.0);
+    let first_heading = f64::from(input.start_heading_true_cdeg) / 100.0;
+    (east, north) = hold_turn_position(
+        east,
+        north,
+        first_heading,
+        first_sign,
+        speed_mps,
+        rate_rad_s,
+        first_turn_ns,
+    )?;
+    let outbound_radians = (target_outbound as f64 / 100.0) * (core::f64::consts::PI / 180.0);
+    let (out_east, out_north) = oa_math::sin_cos(outbound_radians);
+    let leg_m = speed_mps * 60.0;
+    east += out_east * leg_m;
+    north += out_north * leg_m;
+    let intercept_heading = i64::rem_euclid(
+        i64::from(input.inbound_true_course_cdeg)
+            + if input.procedure == 2 {
+                pattern_sign * HOLD_ENTRY_INTERCEPT_ANGLE_CDEG
+            } else {
+                -pattern_sign * HOLD_ENTRY_INTERCEPT_ANGLE_CDEG
+            },
+        36_000,
+    ) as u16;
+    let intercept_delta =
+        directed_heading_delta(target_outbound, i64::from(intercept_heading), pattern_sign);
+    if input.procedure == 2 && intercept_delta <= 18_000 {
+        return Err(HoldPhaseRefusal::InvalidGeometry);
+    }
+    let intercept_turn_ns = turn_duration_ns(intercept_delta, input.turn_rate_cdeg_s)?;
+    let (intercept_east, intercept_north) = hold_turn_position(
+        east,
+        north,
+        target_outbound as f64 / 100.0,
+        pattern_sign,
+        speed_mps,
+        rate_rad_s,
+        intercept_turn_ns,
+    )?;
+    let inbound_radians =
+        f64::from(input.inbound_true_course_cdeg) / 100.0 * (core::f64::consts::PI / 180.0);
+    let (in_east, in_north) = oa_math::sin_cos(inbound_radians);
+    let normal = (in_north, -in_east);
+    let join_turn_sign = if input.procedure == 2 {
+        -pattern_sign
+    } else {
+        pattern_sign
+    };
+    let join_turn_ns = turn_duration_ns(HOLD_ENTRY_INTERCEPT_ANGLE_CDEG, input.turn_rate_cdeg_s)?;
+    let radius = speed_mps / rate_rad_s;
+    if !radius.is_finite() || radius <= 0.0 || radius > 20_000.0 {
+        return Err(HoldPhaseRefusal::InvalidGeometry);
+    }
+    let intercept_radians = f64::from(intercept_heading) / 100.0 * (core::f64::consts::PI / 180.0);
+    let (intercept_east_unit, intercept_north_unit) = oa_math::sin_cos(intercept_radians);
+    // The final opposite-direction 30 degree turn is tangent to the inbound course. Solve
+    // the straight intercept to its start line, then check a bounded residual rather than
+    // snapping an independently computed arc endpoint onto the course.
+    let final_turn_start_normal = (join_turn_sign as f64)
+        * radius
+        * (1.0
+            - oa_math::cos(
+                HOLD_ENTRY_INTERCEPT_ANGLE_CDEG as f64 / 100.0 * core::f64::consts::PI / 180.0,
+            ));
+    let intercept_normal = intercept_east * normal.0 + intercept_north * normal.1;
+    let intercept_normal_rate = intercept_east_unit * normal.0 + intercept_north_unit * normal.1;
+    if !intercept_normal_rate.is_finite() || intercept_normal_rate.abs() < 1.0e-6 {
+        return Err(HoldPhaseRefusal::InvalidGeometry);
+    }
+    let intercept_distance = (final_turn_start_normal - intercept_normal) / intercept_normal_rate;
+    if !intercept_distance.is_finite() || !(0.0..=20_000.0).contains(&intercept_distance) {
+        return Err(HoldPhaseRefusal::InvalidGeometry);
+    }
+    let join_start_east = intercept_east + intercept_east_unit * intercept_distance;
+    let join_start_north = intercept_north + intercept_north_unit * intercept_distance;
+    let (join_east, join_north) = hold_turn_position(
+        join_start_east,
+        join_start_north,
+        f64::from(intercept_heading) / 100.0,
+        join_turn_sign,
+        speed_mps,
+        rate_rad_s,
+        join_turn_ns,
+    )?;
+    let join_cross_track = join_east * normal.0 + join_north * normal.1;
+    let join_along_m = join_east * in_east + join_north * in_north;
+    if !join_east.is_finite()
+        || !join_north.is_finite()
+        || !join_along_m.is_finite()
+        || join_cross_track.abs() > 0.5
+        || join_along_m >= 0.0
+        || oa_math::hypot(join_east, join_north) > 20_000.0
+    {
+        return Err(HoldPhaseRefusal::InvalidGeometry);
+    }
+    let join_ns = input
+        .crossing_state_ns
+        .checked_add(first_turn_ns)
+        .and_then(|value| value.checked_add(straight_ns))
+        .and_then(|value| value.checked_add(intercept_turn_ns))
+        .and_then(|value| {
+            let leg_ns = oa_ieee::round(intercept_distance / speed_mps * 1_000_000_000.0);
+            if !leg_ns.is_finite() || leg_ns <= 0.0 || leg_ns > i64::MAX as f64 {
+                return None;
+            }
+            value.checked_add(leg_ns as i64)
+        })
+        .and_then(|value| value.checked_add(join_turn_ns))
+        .ok_or(HoldPhaseRefusal::TimeOverflow)?;
+    if join_ns <= input.available_at_ns {
+        return Err(HoldPhaseRefusal::InvalidGeometry);
+    }
+    let regular_turn_ns = turn_duration_ns(18_000, input.turn_rate_cdeg_s)?;
+    let leg_duration_ns = i64::from(input.leg_duration_ms)
+        .checked_mul(HOLD_NS_PER_MS)
+        .ok_or(HoldPhaseRefusal::TimeOverflow)?;
+    let inbound_remaining_ns = oa_ieee::round(-join_along_m / speed_mps * 1_000_000_000.0);
+    if !inbound_remaining_ns.is_finite() || inbound_remaining_ns < 0.0 {
+        return Err(HoldPhaseRefusal::InvalidGeometry);
+    }
+    let desired_pattern_elapsed = regular_turn_ns
+        .checked_mul(2)
+        .and_then(|value| value.checked_add(leg_duration_ns))
+        .and_then(|value| value.checked_add(leg_duration_ns - inbound_remaining_ns as i64))
+        .ok_or(HoldPhaseRefusal::TimeOverflow)?;
+    let cycle_ns = regular_turn_ns
+        .checked_mul(2)
+        .and_then(|value| value.checked_add(leg_duration_ns.checked_mul(2)?))
+        .ok_or(HoldPhaseRefusal::TimeOverflow)?;
+    let elapsed_to_join = join_ns - input.crossing_state_ns;
+    let regular_phase_offset_ns =
+        i64::rem_euclid(desired_pattern_elapsed - elapsed_to_join, cycle_ns);
+    let state = HoldPhaseState {
+        key: input.key,
+        entry_state_ns: input.crossing_state_ns,
+        last_advance_ns: input.crossing_state_ns,
+        fix_lat_e7: input.fix_lat_e7,
+        fix_lon_e7: input.fix_lon_e7,
+        inbound_true_course_cdeg: input.inbound_true_course_cdeg,
+        turn: input.turn,
+        active: 1,
+        groundspeed_mmps: input.groundspeed_mmps,
+        leg_duration_ms: input.leg_duration_ms,
+        turn_rate_cdeg_s: input.turn_rate_cdeg_s,
+        max_scan_gap_ns: input.max_scan_gap_ns,
+        max_speed_error_mmps: input.max_speed_error_mmps,
+        entry_model: 1,
+        entry_procedure: input.procedure,
+        entry_turn_direction: first_sign as u8,
+        entry_start_heading_true_cdeg: input.start_heading_true_cdeg,
+        entry_start_lat_e7: input.start_lat_e7,
+        entry_start_lon_e7: input.start_lon_e7,
+        entry_available_ns: input.available_at_ns,
+        entry_first_turn_ns: first_turn_ns,
+        entry_straight_leg_ns: straight_ns,
+        entry_intercept_turn_ns: intercept_turn_ns,
+        entry_join_ns: join_ns,
+        entry_regular_phase_offset_ns: regular_phase_offset_ns,
+    };
+    if !hold_state_valid(&state) {
+        return Err(HoldPhaseRefusal::InvalidInput);
+    }
+    let snapshot = hold_phase_snapshot(&state, input.available_at_ns)?;
+    Ok((state, snapshot))
+}
+
+fn directed_heading_delta(from: i64, to: i64, sign: i64) -> i64 {
+    if sign > 0 {
+        i64::rem_euclid(to - from, 36_000)
+    } else {
+        i64::rem_euclid(from - to, 36_000)
+    }
+}
+
+fn turn_duration_ns(angle_cdeg: i64, rate_cdeg_s: u16) -> Result<i64, HoldPhaseRefusal> {
+    angle_cdeg
+        .checked_mul(1_000_000_000)
+        .and_then(|value| value.checked_add(i64::from(rate_cdeg_s) - 1))
+        .and_then(|value| value.checked_div(i64::from(rate_cdeg_s)))
+        .ok_or(HoldPhaseRefusal::TimeOverflow)
+}
+
+fn hold_turn_position(
+    east: f64,
+    north: f64,
+    heading_deg: f64,
+    turn_sign: i64,
+    speed_mps: f64,
+    rate_rad_s: f64,
+    elapsed_ns: i64,
+) -> Result<(f64, f64), HoldPhaseRefusal> {
+    if !east.is_finite()
+        || !north.is_finite()
+        || !heading_deg.is_finite()
+        || !speed_mps.is_finite()
+        || !rate_rad_s.is_finite()
+        || elapsed_ns < 0
+        || rate_rad_s <= 0.0
+    {
+        return Err(HoldPhaseRefusal::InvalidGeometry);
+    }
+    let radius = speed_mps / rate_rad_s;
+    if !radius.is_finite() || radius <= 0.0 || radius > 20_000.0 {
+        return Err(HoldPhaseRefusal::InvalidGeometry);
+    }
+    let heading = heading_deg * (core::f64::consts::PI / 180.0);
+    let delta = f64::from(turn_sign as i32) * rate_rad_s * (elapsed_ns as f64 / 1_000_000_000.0);
+    let (sin_start, cos_start) = oa_math::sin_cos(heading);
+    let (sin_end, cos_end) = oa_math::sin_cos(heading + delta);
+    let signed_rate = f64::from(turn_sign as i32) * rate_rad_s;
+    let result = (
+        east + speed_mps * (cos_start - cos_end) / signed_rate,
+        north + speed_mps * (sin_end - sin_start) / signed_rate,
+    );
+    if !result.0.is_finite() || !result.1.is_finite() {
+        return Err(HoldPhaseRefusal::InvalidGeometry);
+    }
+    Ok(result)
+}
+
+/// Evaluate the immutable anchor at any nonpast timestamp without mutating scan state. This is
+/// the bounded forecast seam; consumers must still reconcile the next observed scan before
+/// advancing persistent phase.
+pub fn hold_phase_predict(
+    state: &HoldPhaseState,
+    at_ns: i64,
+) -> Result<HoldPhaseSnapshot, HoldPhaseRefusal> {
+    if state.active != 1 {
+        return Err(HoldPhaseRefusal::Inactive);
+    }
+    if !hold_state_valid(state) {
+        return Err(HoldPhaseRefusal::InvalidInput);
+    }
+    if at_ns < state.entry_state_ns {
+        return Err(HoldPhaseRefusal::NonMonotonicTime);
+    }
+    if state.entry_model == 1 && at_ns < state.entry_available_ns {
+        return Err(HoldPhaseRefusal::NonMonotonicTime);
+    }
+    hold_phase_snapshot(state, at_ns)
+}
+
+/// Advance from the immutable accepted-entry anchor. Invalid or over-gap calls leave `state`
+/// unchanged; callers cannot reset the anchor to make a scan appear current.
+pub fn hold_phase_advance(
+    state: &mut HoldPhaseState,
+    at_ns: i64,
+) -> Result<HoldPhaseSnapshot, HoldPhaseRefusal> {
+    if state.active != 1 {
+        return Err(HoldPhaseRefusal::Inactive);
+    }
+    if !hold_state_valid(state) {
+        return Err(HoldPhaseRefusal::InvalidInput);
+    }
+    if at_ns <= state.last_advance_ns || at_ns < state.entry_state_ns {
+        return Err(HoldPhaseRefusal::NonMonotonicTime);
+    }
+    if at_ns
+        .checked_sub(state.last_advance_ns)
+        .is_none_or(|gap| gap > state.max_scan_gap_ns)
+    {
+        return Err(HoldPhaseRefusal::ScanGapExceeded);
+    }
+    let snapshot = hold_phase_snapshot(state, at_ns)?;
+    state.last_advance_ns = at_ns;
+    Ok(snapshot)
+}
+
+/// Reconcile one observed state to the immutable hold phase before accepting the scan time.
+/// Position and true-course error bounds are explicit caller inputs; mismatch leaves the
+/// persistent phase state unchanged. This does not decide whether the caller's entry event was
+/// operationally valid.
+pub fn hold_phase_reconcile_and_advance(
+    state: &mut HoldPhaseState,
+    observed: HoldTrackReconciliationInput,
+) -> Result<HoldPhaseSnapshot, HoldPhaseRefusal> {
+    if state.active != 1 {
+        return Err(HoldPhaseRefusal::Inactive);
+    }
+    if !hold_state_valid(state) {
+        return Err(HoldPhaseRefusal::InvalidInput);
+    }
+    if observed.key != state.key {
+        return Err(HoldPhaseRefusal::FlightKeyMismatch);
+    }
+    if observed.at_ns <= state.last_advance_ns || observed.at_ns < state.entry_state_ns {
+        return Err(HoldPhaseRefusal::NonMonotonicTime);
+    }
+    if observed
+        .at_ns
+        .checked_sub(state.last_advance_ns)
+        .is_none_or(|gap| gap > state.max_scan_gap_ns)
+    {
+        return Err(HoldPhaseRefusal::ScanGapExceeded);
+    }
+    if !coord_ok(observed.lat_e7, observed.lon_e7)
+        || observed.max_position_error_mm == 0
+        || observed.max_position_error_mm > 1_000_000
+        || observed.max_heading_error_cdeg == 0
+        || observed.max_heading_error_cdeg > 4_500
+    {
+        return Err(HoldPhaseRefusal::InvalidInput);
+    }
+    let speed = oa_math::hypot(
+        f64::from(observed.east_mmps),
+        f64::from(observed.north_mmps),
+    );
+    if !speed.is_finite() || speed <= 0.0 || speed > f64::from(HOLD_MAX_SPEED_MMPS) {
+        return Err(HoldPhaseRefusal::InvalidInput);
+    }
+    if (speed - f64::from(state.groundspeed_mmps)).abs() > f64::from(state.max_speed_error_mmps) {
+        return Err(HoldPhaseRefusal::TrackMismatch);
+    }
+    let snapshot = hold_phase_snapshot(state, observed.at_ns)?;
+    let expected_place = Place {
+        lat_deg: f64::from(snapshot.lat_e7) / 10_000_000.0,
+        lon_deg: f64::from(snapshot.lon_e7) / 10_000_000.0,
+    };
+    let observed_place = Place {
+        lat_deg: f64::from(observed.lat_e7) / 10_000_000.0,
+        lon_deg: f64::from(observed.lon_e7) / 10_000_000.0,
+    };
+    let position_error_mm = great_circle_m(expected_place, observed_place) * 1_000.0;
+    let observed_heading = oa_math::atan2(
+        f64::from(observed.east_mmps),
+        f64::from(observed.north_mmps),
+    ) * (180.0 / core::f64::consts::PI);
+    let observed_heading_cdeg = oa_math::rem_euclid(observed_heading, 360.0) * 100.0;
+    let expected_heading = f64::from(snapshot.heading_true_cdeg);
+    let heading_delta = oa_math::rem_euclid(
+        observed_heading_cdeg - expected_heading + 54_000.0,
+        36_000.0,
+    ) - 18_000.0;
+    if !position_error_mm.is_finite()
+        || position_error_mm > f64::from(observed.max_position_error_mm)
+        || !observed_heading_cdeg.is_finite()
+        || heading_delta.abs() > f64::from(observed.max_heading_error_cdeg)
+    {
+        return Err(HoldPhaseRefusal::TrackMismatch);
+    }
+    state.last_advance_ns = observed.at_ns;
+    Ok(snapshot)
+}
+
+/// Cancel only the exact full-key state. A cancelled state cannot be advanced or cancelled twice.
+pub fn hold_phase_cancel(
+    state: &mut HoldPhaseState,
+    key: FlightKey,
+) -> Result<(), HoldPhaseRefusal> {
+    if state.active != 1 || state.key != key {
+        return Err(HoldPhaseRefusal::Inactive);
+    }
+    state.active = 0;
+    Ok(())
+}
+
+fn hold_entry_snapshot(
+    state: &HoldPhaseState,
+    at_ns: i64,
+) -> Result<HoldPhaseSnapshot, HoldPhaseRefusal> {
+    let elapsed = at_ns
+        .checked_sub(state.entry_state_ns)
+        .ok_or(HoldPhaseRefusal::TimeOverflow)?;
+    if elapsed < 0 || at_ns < state.entry_available_ns || at_ns >= state.entry_join_ns {
+        return Err(HoldPhaseRefusal::NonMonotonicTime);
+    }
+    let first_turn_ns = state.entry_first_turn_ns;
+    let leg_end_ns = first_turn_ns
+        .checked_add(state.entry_straight_leg_ns)
+        .ok_or(HoldPhaseRefusal::TimeOverflow)?;
+    let intercept_end_ns = leg_end_ns
+        .checked_add(state.entry_intercept_turn_ns)
+        .ok_or(HoldPhaseRefusal::TimeOverflow)?;
+    let join_turn_ns = turn_duration_ns(HOLD_ENTRY_INTERCEPT_ANGLE_CDEG, state.turn_rate_cdeg_s)?;
+    let intercept_leg_ns = state
+        .entry_join_ns
+        .checked_sub(state.entry_state_ns)
+        .and_then(|value| value.checked_sub(intercept_end_ns))
+        .and_then(|value| value.checked_sub(join_turn_ns))
+        .ok_or(HoldPhaseRefusal::TimeOverflow)?;
+    if intercept_leg_ns <= 0 {
+        return Err(HoldPhaseRefusal::InvalidGeometry);
+    }
+    let intercept_leg_end_ns = intercept_end_ns
+        .checked_add(intercept_leg_ns)
+        .ok_or(HoldPhaseRefusal::TimeOverflow)?;
+    let start_east = (f64::from(state.entry_start_lon_e7) - f64::from(state.fix_lon_e7))
+        / 10_000_000.0
+        * HOLD_METRES_PER_DEGREE
+        * oa_math::cos(f64::from(state.fix_lat_e7) / 10_000_000.0 * core::f64::consts::PI / 180.0);
+    let start_north = (f64::from(state.entry_start_lat_e7) - f64::from(state.fix_lat_e7))
+        / 10_000_000.0
+        * HOLD_METRES_PER_DEGREE;
+    let pattern_sign = if state.turn == 2 { 1_i64 } else { -1_i64 };
+    let speed_mps = f64::from(state.groundspeed_mmps) / 1_000.0;
+    let rate_rad_s = f64::from(state.turn_rate_cdeg_s) / 100.0 * (core::f64::consts::PI / 180.0);
+    let first_turn_end = hold_turn_position(
+        start_east,
+        start_north,
+        f64::from(state.entry_start_heading_true_cdeg) / 100.0,
+        pattern_sign,
+        speed_mps,
+        rate_rad_s,
+        first_turn_ns,
+    )?;
+    let outbound_heading = entry_outbound_heading(state);
+    let (out_east, out_north) =
+        oa_math::sin_cos(f64::from(outbound_heading) / 100.0 * (core::f64::consts::PI / 180.0));
+    let outbound_distance = speed_mps * (state.entry_straight_leg_ns as f64 / 1_000_000_000.0);
+    let intercept_start = (
+        first_turn_end.0 + out_east * outbound_distance,
+        first_turn_end.1 + out_north * outbound_distance,
+    );
+    let intercept_heading = i64::rem_euclid(
+        i64::from(state.inbound_true_course_cdeg)
+            + if state.entry_procedure == 2 {
+                pattern_sign * HOLD_ENTRY_INTERCEPT_ANGLE_CDEG
+            } else {
+                -pattern_sign * HOLD_ENTRY_INTERCEPT_ANGLE_CDEG
+            },
+        36_000,
+    ) as u16;
+    let intercept_radians = f64::from(intercept_heading) / 100.0 * (core::f64::consts::PI / 180.0);
+    let (intercept_east_unit, intercept_north_unit) = oa_math::sin_cos(intercept_radians);
+    let intercept_end = hold_turn_position(
+        intercept_start.0,
+        intercept_start.1,
+        f64::from(outbound_heading) / 100.0,
+        pattern_sign,
+        speed_mps,
+        rate_rad_s,
+        state.entry_intercept_turn_ns,
+    )?;
+    let (phase, phase_elapsed_ns, east, north, heading) = if elapsed < first_turn_ns {
+        let (east, north) = hold_turn_position(
+            (f64::from(state.entry_start_lon_e7) - f64::from(state.fix_lon_e7)) / 10_000_000.0
+                * HOLD_METRES_PER_DEGREE
+                * oa_math::cos(
+                    f64::from(state.fix_lat_e7) / 10_000_000.0 * core::f64::consts::PI / 180.0,
+                ),
+            (f64::from(state.entry_start_lat_e7) - f64::from(state.fix_lat_e7)) / 10_000_000.0
+                * HOLD_METRES_PER_DEGREE,
+            f64::from(state.entry_start_heading_true_cdeg) / 100.0,
+            i64::from(state.entry_turn_direction as i8),
+            f64::from(state.groundspeed_mmps) / 1_000.0,
+            f64::from(state.turn_rate_cdeg_s) / 100.0 * (core::f64::consts::PI / 180.0),
+            elapsed,
+        )?;
+        let delta = i64::from(state.entry_turn_direction as i8)
+            * i64::from(state.turn_rate_cdeg_s)
+            * elapsed
+            / 1_000_000_000;
+        (
+            HoldPhase::EntryTurn,
+            elapsed,
+            east,
+            north,
+            i64::rem_euclid(
+                i64::from(state.entry_start_heading_true_cdeg) + delta,
+                36_000,
+            ) as u16,
+        )
+    } else if elapsed < leg_end_ns {
+        let leg_elapsed = elapsed - first_turn_ns;
+        (
+            HoldPhase::EntryLeg,
+            leg_elapsed,
+            first_turn_end.0 + out_east * speed_mps * (leg_elapsed as f64 / 1_000_000_000.0),
+            first_turn_end.1 + out_north * speed_mps * (leg_elapsed as f64 / 1_000_000_000.0),
+            outbound_heading,
+        )
+    } else if elapsed < intercept_end_ns {
+        let phase_elapsed = elapsed - leg_end_ns;
+        let (east, north) = hold_turn_position(
+            intercept_start.0,
+            intercept_start.1,
+            f64::from(outbound_heading) / 100.0,
+            pattern_sign,
+            speed_mps,
+            rate_rad_s,
+            phase_elapsed,
+        )?;
+        let delta =
+            pattern_sign * i64::from(state.turn_rate_cdeg_s) * phase_elapsed / 1_000_000_000;
+        (
+            HoldPhase::EntryInterceptTurn,
+            phase_elapsed,
+            east,
+            north,
+            i64::rem_euclid(i64::from(outbound_heading) + delta, 36_000) as u16,
+        )
+    } else if elapsed < intercept_leg_end_ns {
+        let phase_elapsed = elapsed - intercept_end_ns;
+        let distance = speed_mps * (phase_elapsed as f64 / 1_000_000_000.0);
+        (
+            HoldPhase::EntryInterceptLeg,
+            phase_elapsed,
+            intercept_end.0 + intercept_east_unit * distance,
+            intercept_end.1 + intercept_north_unit * distance,
+            intercept_heading,
+        )
+    } else {
+        let phase_elapsed = elapsed - intercept_leg_end_ns;
+        let distance = speed_mps * (intercept_leg_ns as f64 / 1_000_000_000.0);
+        let join_turn_sign = if state.entry_procedure == 2 {
+            -pattern_sign
+        } else {
+            pattern_sign
+        };
+        let join_start = (
+            intercept_end.0 + intercept_east_unit * distance,
+            intercept_end.1 + intercept_north_unit * distance,
+        );
+        let (east, north) = hold_turn_position(
+            join_start.0,
+            join_start.1,
+            f64::from(intercept_heading) / 100.0,
+            join_turn_sign,
+            speed_mps,
+            rate_rad_s,
+            phase_elapsed,
+        )?;
+        let delta =
+            join_turn_sign * i64::from(state.turn_rate_cdeg_s) * phase_elapsed / 1_000_000_000;
+        (
+            HoldPhase::EntryJoinTurn,
+            phase_elapsed,
+            east,
+            north,
+            i64::rem_euclid(i64::from(intercept_heading) + delta, 36_000) as u16,
+        )
+    };
+    if !east.is_finite() || !north.is_finite() {
+        return Err(HoldPhaseRefusal::InvalidGeometry);
+    }
+    let lat = f64::from(state.fix_lat_e7) / 10_000_000.0;
+    let lon = f64::from(state.fix_lon_e7) / 10_000_000.0;
+    let cosine = oa_math::cos(lat * core::f64::consts::PI / 180.0);
+    let lat_e7 = round_e7((lat + north / HOLD_METRES_PER_DEGREE) * 10_000_000.0)
+        .ok_or(HoldPhaseRefusal::InvalidGeometry)?;
+    let lon_e7 = round_e7((lon + east / (HOLD_METRES_PER_DEGREE * cosine)) * 10_000_000.0)
+        .ok_or(HoldPhaseRefusal::InvalidGeometry)?;
+    if !coord_ok(lat_e7, lon_e7) || oa_math::hypot(east, north) > 20_000.0 {
+        return Err(HoldPhaseRefusal::InvalidGeometry);
+    }
+    Ok(HoldPhaseSnapshot {
+        key: state.key,
+        at_ns,
+        phase,
+        reserved_phase: [0; 7],
+        cycle: 0,
+        phase_elapsed_ms: u32::try_from(phase_elapsed_ns / HOLD_NS_PER_MS)
+            .map_err(|_| HoldPhaseRefusal::TimeOverflow)?,
+        lat_e7,
+        lon_e7,
+        heading_true_cdeg: heading,
+        reserved_tail: [0; 2],
+    })
+}
+
+fn entry_outbound_heading(state: &HoldPhaseState) -> u16 {
+    let inbound = i64::from(state.inbound_true_course_cdeg);
+    if state.entry_procedure == 3 {
+        let sign = if state.turn == 2 { 1_i64 } else { -1_i64 };
+        i64::rem_euclid(inbound + 18_000 - sign * 3_000, 36_000) as u16
+    } else {
+        i64::rem_euclid(inbound + 18_000, 36_000) as u16
+    }
+}
+
+fn hold_phase_snapshot(
+    state: &HoldPhaseState,
+    at_ns: i64,
+) -> Result<HoldPhaseSnapshot, HoldPhaseRefusal> {
+    if state.entry_model == 1 {
+        if at_ns < state.entry_available_ns {
+            return Err(HoldPhaseRefusal::NonMonotonicTime);
+        }
+        if at_ns < state.entry_join_ns {
+            return hold_entry_snapshot(state, at_ns);
+        }
+    }
+    let elapsed_ns = if state.entry_model == 1 {
+        at_ns
+            .checked_sub(state.entry_join_ns)
+            .and_then(|elapsed| elapsed.checked_add(state.entry_regular_phase_offset_ns))
+            .ok_or(HoldPhaseRefusal::TimeOverflow)?
+    } else {
+        at_ns
+            .checked_sub(state.entry_state_ns)
+            .ok_or(HoldPhaseRefusal::TimeOverflow)?
+    };
+    if elapsed_ns < 0 {
+        return Err(HoldPhaseRefusal::NonMonotonicTime);
+    }
+    let rate = i64::from(state.turn_rate_cdeg_s);
+    let turn_ns = 18_000_000_000_000_i64
+        .checked_add(rate - 1)
+        .and_then(|value| value.checked_div(rate))
+        .ok_or(HoldPhaseRefusal::TimeOverflow)?;
+    let leg_ns = i64::from(state.leg_duration_ms)
+        .checked_mul(HOLD_NS_PER_MS)
+        .ok_or(HoldPhaseRefusal::TimeOverflow)?;
+    let cycle_ns = turn_ns
+        .checked_mul(2)
+        .and_then(|turns| {
+            leg_ns
+                .checked_mul(2)
+                .and_then(|legs| turns.checked_add(legs))
+        })
+        .filter(|&cycle| cycle > 0)
+        .ok_or(HoldPhaseRefusal::TimeOverflow)?;
+    let cycle = u64::try_from(elapsed_ns / cycle_ns).map_err(|_| HoldPhaseRefusal::TimeOverflow)?;
+    let within_ns = elapsed_ns % cycle_ns;
+    let (phase, phase_elapsed_ns) = if within_ns < turn_ns {
+        (HoldPhase::OutboundTurn, within_ns)
+    } else if within_ns < turn_ns + leg_ns {
+        (HoldPhase::OutboundLeg, within_ns - turn_ns)
+    } else if within_ns < turn_ns * 2 + leg_ns {
+        (HoldPhase::InboundTurn, within_ns - turn_ns - leg_ns)
+    } else {
+        (HoldPhase::InboundLeg, within_ns - turn_ns * 2 - leg_ns)
+    };
+    let course =
+        f64::from(state.inbound_true_course_cdeg) / 100.0 * (core::f64::consts::PI / 180.0);
+    let (sin_course, cos_course) = oa_math::sin_cos(course);
+    let direction = (sin_course, cos_course);
+    let turn_sign = if state.turn == 2 { 1.0 } else { -1.0 };
+    let side = (cos_course * turn_sign, -sin_course * turn_sign);
+    let speed_mps = f64::from(state.groundspeed_mmps) / 1_000.0;
+    let rate_rad_s = f64::from(state.turn_rate_cdeg_s) / 100.0 * (core::f64::consts::PI / 180.0);
+    let radius = speed_mps / rate_rad_s;
+    if !radius.is_finite() || radius <= 0.0 || radius > 20_000.0 {
+        return Err(HoldPhaseRefusal::InvalidGeometry);
+    }
+    let leg_m = speed_mps * f64::from(state.leg_duration_ms) / 1_000.0;
+    if !leg_m.is_finite() || leg_m > 20_000.0 {
+        return Err(HoldPhaseRefusal::InvalidGeometry);
+    }
+    let seconds = phase_elapsed_ns as f64 / 1_000_000_000.0;
+    let (east_m, north_m, heading_true_cdeg) = match phase {
+        HoldPhase::OutboundTurn | HoldPhase::InboundTurn => {
+            let outbound_turn = phase == HoldPhase::OutboundTurn;
+            let theta = rate_rad_s * seconds;
+            let (sin_turn, cos_turn) = oa_math::sin_cos(-turn_sign * theta);
+            let (center, start_vector) = if outbound_turn {
+                (
+                    (side.0 * radius, side.1 * radius),
+                    (-side.0 * radius, -side.1 * radius),
+                )
+            } else {
+                let outbound_end = (
+                    side.0 * 2.0 * radius - direction.0 * leg_m,
+                    side.1 * 2.0 * radius - direction.1 * leg_m,
+                );
+                (
+                    (
+                        outbound_end.0 - side.0 * radius,
+                        outbound_end.1 - side.1 * radius,
+                    ),
+                    (side.0 * radius, side.1 * radius),
+                )
+            };
+            let east = center.0 + start_vector.0 * cos_turn - start_vector.1 * sin_turn;
+            let north = center.1 + start_vector.0 * sin_turn + start_vector.1 * cos_turn;
+            let base = if outbound_turn { 0_i64 } else { 18_000_i64 };
+            let signed_turn = i64::from(state.turn_rate_cdeg_s)
+                .checked_mul(phase_elapsed_ns)
+                .and_then(|value| value.checked_div(1_000_000_000))
+                .and_then(|value| {
+                    value.checked_mul(i64::from(if state.turn == 2 { 1 } else { -1 }))
+                })
+                .ok_or(HoldPhaseRefusal::TimeOverflow)?;
+            (
+                east,
+                north,
+                i64::rem_euclid(
+                    i64::from(state.inbound_true_course_cdeg) + base + signed_turn,
+                    36_000,
+                ) as u16,
+            )
+        }
+        HoldPhase::OutboundLeg => {
+            let distance = speed_mps * seconds;
+            (
+                side.0 * 2.0 * radius - direction.0 * distance,
+                side.1 * 2.0 * radius - direction.1 * distance,
+                (u32::from(state.inbound_true_course_cdeg) + 18_000) as u16 % 36_000,
+            )
+        }
+        HoldPhase::InboundLeg => {
+            let remaining = speed_mps * seconds;
+            (
+                -direction.0 * (leg_m - remaining),
+                -direction.1 * (leg_m - remaining),
+                state.inbound_true_course_cdeg,
+            )
+        }
+        HoldPhase::EntryTurn
+        | HoldPhase::EntryLeg
+        | HoldPhase::EntryInterceptTurn
+        | HoldPhase::EntryInterceptLeg
+        | HoldPhase::EntryJoinTurn => {
+            return Err(HoldPhaseRefusal::InvalidInput);
+        }
+    };
+    if !east_m.is_finite() || !north_m.is_finite() || !seconds.is_finite() {
+        return Err(HoldPhaseRefusal::InvalidGeometry);
+    }
+    let lat = f64::from(state.fix_lat_e7) / 10_000_000.0;
+    let lon = f64::from(state.fix_lon_e7) / 10_000_000.0;
+    let cosine = oa_math::cos(lat * core::f64::consts::PI / 180.0);
+    if !cosine.is_finite() || cosine.abs() < 1.0e-6 {
+        return Err(HoldPhaseRefusal::InvalidGeometry);
+    }
+    let lat_e7 = round_e7((lat + north_m / HOLD_METRES_PER_DEGREE) * 10_000_000.0)
+        .ok_or(HoldPhaseRefusal::InvalidGeometry)?;
+    let lon_e7 = round_e7((lon + east_m / (HOLD_METRES_PER_DEGREE * cosine)) * 10_000_000.0)
+        .ok_or(HoldPhaseRefusal::InvalidGeometry)?;
+    if !coord_ok(lat_e7, lon_e7) {
+        return Err(HoldPhaseRefusal::InvalidGeometry);
+    }
+    Ok(HoldPhaseSnapshot {
+        key: state.key,
+        at_ns,
+        phase,
+        reserved_phase: [0; 7],
+        cycle,
+        phase_elapsed_ms: u32::try_from(phase_elapsed_ns / HOLD_NS_PER_MS)
+            .map_err(|_| HoldPhaseRefusal::TimeOverflow)?,
+        lat_e7,
+        lon_e7,
+        heading_true_cdeg,
+        reserved_tail: [0; 2],
+    })
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(C)]
 pub struct RouteProvenance {
@@ -1422,6 +2472,359 @@ pub fn issue_trajectory_samples(
         horizon_outputs,
         &mut horizons_valid,
     )
+}
+
+#[cfg(test)]
+mod hold_phase_tests {
+    #![allow(clippy::expect_used, clippy::unwrap_used)]
+
+    use super::*;
+
+    const ENTRY_NS: i64 = 1_000_000_000;
+    const MAX_GAP_NS: i64 = 60_000_000_000;
+
+    fn key() -> FlightKey {
+        FlightKey {
+            gufi: [0x2a; 16],
+            aircraft_address: 0xabc101,
+            centre: *b"KORD",
+            plan_id: *b"PLAN00000001",
+        }
+    }
+
+    fn input() -> HoldPhaseInput {
+        HoldPhaseInput {
+            key: key(),
+            entry_state_ns: ENTRY_NS,
+            fix_lat_e7: 410_000_000,
+            fix_lon_e7: -870_000_000,
+            inbound_true_course_cdeg: 27_000,
+            turn: 2,
+            groundspeed_mmps: 100_000,
+            leg_duration_ms: 60_000,
+            turn_rate_cdeg_s: 300,
+            max_scan_gap_ns: MAX_GAP_NS,
+            max_speed_error_mmps: 5_000,
+        }
+    }
+
+    fn entry_input(procedure: u8, start_heading_true_cdeg: u16, turn: u8) -> HoldEntryPhaseInput {
+        HoldEntryPhaseInput {
+            key: key(),
+            crossing_state_ns: ENTRY_NS,
+            available_at_ns: ENTRY_NS + 500_000_000,
+            start_lat_e7: 410_000_000,
+            start_lon_e7: -870_000_000,
+            start_heading_true_cdeg,
+            fix_lat_e7: 410_000_000,
+            fix_lon_e7: -870_000_000,
+            inbound_true_course_cdeg: 0,
+            turn,
+            procedure,
+            groundspeed_mmps: 100_000,
+            leg_duration_ms: 60_000,
+            turn_rate_cdeg_s: 300,
+            max_scan_gap_ns: MAX_GAP_NS,
+            max_speed_error_mmps: 5_000,
+        }
+    }
+
+    fn velocity_for_heading(heading_cdeg: u16) -> (i32, i32) {
+        let heading = f64::from(heading_cdeg) / 100.0 * (core::f64::consts::PI / 180.0);
+        let (east, north) = oa_math::sin_cos(heading);
+        (
+            (100_000.0 * east).round() as i32,
+            (100_000.0 * north).round() as i32,
+        )
+    }
+
+    // REQ: OA-ENC-023
+    #[test]
+    fn hold_phase_keeps_entry_anchor_across_successive_scan_advances() {
+        let (mut state, entry) = hold_phase_start(input()).expect("accepted direct-entry anchor");
+        assert_eq!(entry.key, key());
+        assert_eq!(entry.at_ns, ENTRY_NS);
+        assert_eq!(entry.phase, HoldPhase::OutboundTurn);
+        assert_eq!(entry.lat_e7, 410_000_000);
+        assert_eq!(entry.lon_e7, -870_000_000);
+
+        let first_scan = hold_phase_advance(&mut state, ENTRY_NS + 20_000_000_000)
+            .expect("first scan advances the outbound turn");
+        assert_eq!(first_scan.phase, HoldPhase::OutboundTurn);
+        assert_eq!(first_scan.heading_true_cdeg, 33_000);
+
+        let second_scan = hold_phase_advance(&mut state, ENTRY_NS + 61_000_000_000)
+            .expect("second scan advances onto the outbound leg");
+        assert_eq!(second_scan.phase, HoldPhase::OutboundLeg);
+        assert_eq!(second_scan.heading_true_cdeg, 9_000);
+        assert_eq!(state.entry_state_ns, ENTRY_NS);
+        assert_eq!(state.last_advance_ns, ENTRY_NS + 61_000_000_000);
+
+        let third_scan = hold_phase_advance(&mut state, ENTRY_NS + 121_000_000_000)
+            .expect("third scan advances into the inbound turn");
+        assert_eq!(third_scan.phase, HoldPhase::InboundTurn);
+        assert_eq!(third_scan.cycle, 0);
+        assert_eq!(state.entry_state_ns, ENTRY_NS);
+    }
+
+    // REQ: OA-ENC-023
+    #[test]
+    fn hold_phase_rejects_nonmonotonic_and_over_gap_scans_without_advancing() {
+        let (mut state, _) = hold_phase_start(input()).expect("accepted direct-entry anchor");
+        hold_phase_advance(&mut state, ENTRY_NS + 10_000_000_000).expect("first scan");
+        let prior = state;
+        assert_eq!(
+            hold_phase_advance(&mut state, ENTRY_NS + 9_000_000_000),
+            Err(HoldPhaseRefusal::NonMonotonicTime)
+        );
+        assert_eq!(state, prior);
+        assert_eq!(
+            hold_phase_advance(&mut state, ENTRY_NS + 70_000_000_001),
+            Err(HoldPhaseRefusal::ScanGapExceeded)
+        );
+        assert_eq!(state, prior);
+    }
+
+    // REQ: OA-ENC-023
+    #[test]
+    fn hold_phase_reconciles_each_scan_before_advancing_persistent_state() {
+        let (mut state, _) = hold_phase_start(input()).expect("accepted direct-entry anchor");
+        for at_ns in [ENTRY_NS + 20_000_000_000, ENTRY_NS + 61_000_000_000] {
+            let expected = hold_phase_snapshot(&state, at_ns).expect("expected phase");
+            let (east_mmps, north_mmps) = velocity_for_heading(expected.heading_true_cdeg);
+            let actual = hold_phase_reconcile_and_advance(
+                &mut state,
+                HoldTrackReconciliationInput {
+                    key: expected.key,
+                    at_ns,
+                    lat_e7: expected.lat_e7,
+                    lon_e7: expected.lon_e7,
+                    east_mmps,
+                    north_mmps,
+                    max_position_error_mm: 20_000,
+                    max_heading_error_cdeg: 100,
+                },
+            )
+            .expect("current track is within the declared model bounds");
+            assert_eq!(actual, expected);
+            assert_eq!(state.entry_state_ns, ENTRY_NS);
+        }
+
+        let prior = state;
+        let at_ns = ENTRY_NS + 62_000_000_000;
+        let expected = hold_phase_snapshot(&state, at_ns).expect("expected phase");
+        let (east_mmps, north_mmps) = velocity_for_heading(expected.heading_true_cdeg);
+        let mut wrong_key = expected.key;
+        wrong_key.plan_id = *b"OTHERPLAN001";
+        assert_eq!(
+            hold_phase_reconcile_and_advance(
+                &mut state,
+                HoldTrackReconciliationInput {
+                    key: wrong_key,
+                    at_ns,
+                    lat_e7: expected.lat_e7,
+                    lon_e7: expected.lon_e7,
+                    east_mmps,
+                    north_mmps,
+                    max_position_error_mm: 20_000,
+                    max_heading_error_cdeg: 100,
+                },
+            ),
+            Err(HoldPhaseRefusal::FlightKeyMismatch)
+        );
+        assert_eq!(state, prior);
+        assert_eq!(
+            hold_phase_reconcile_and_advance(
+                &mut state,
+                HoldTrackReconciliationInput {
+                    key: expected.key,
+                    at_ns,
+                    lat_e7: expected.lat_e7.saturating_add(10_000),
+                    lon_e7: expected.lon_e7,
+                    east_mmps,
+                    north_mmps,
+                    max_position_error_mm: 20_000,
+                    max_heading_error_cdeg: 100,
+                },
+            ),
+            Err(HoldPhaseRefusal::TrackMismatch)
+        );
+        assert_eq!(state, prior);
+        assert_eq!(
+            hold_phase_reconcile_and_advance(
+                &mut state,
+                HoldTrackReconciliationInput {
+                    key: expected.key,
+                    at_ns,
+                    lat_e7: expected.lat_e7,
+                    lon_e7: expected.lon_e7,
+                    east_mmps: east_mmps.saturating_mul(2),
+                    north_mmps: north_mmps.saturating_mul(2),
+                    max_position_error_mm: 20_000,
+                    max_heading_error_cdeg: 100,
+                },
+            ),
+            Err(HoldPhaseRefusal::TrackMismatch)
+        );
+        assert_eq!(state, prior);
+    }
+
+    // REQ: OA-ENC-023
+    #[test]
+    fn hold_phase_cancel_is_full_key_bound_and_prevents_future_advancement() {
+        let (mut state, _) = hold_phase_start(input()).expect("accepted direct-entry anchor");
+        let mut wrong_key = key();
+        wrong_key.plan_id = *b"OTHERPLAN001";
+        assert_eq!(
+            hold_phase_cancel(&mut state, wrong_key),
+            Err(HoldPhaseRefusal::Inactive)
+        );
+        assert_eq!(state.active, 1);
+        hold_phase_cancel(&mut state, key()).expect("cancel exact flight");
+        assert_eq!(state.active, 0);
+        assert_eq!(
+            hold_phase_advance(&mut state, ENTRY_NS + 1_000_000_000),
+            Err(HoldPhaseRefusal::Inactive)
+        );
+        assert_eq!(
+            hold_phase_cancel(&mut state, key()),
+            Err(HoldPhaseRefusal::Inactive)
+        );
+    }
+
+    // REQ: OA-ENC-023
+    #[test]
+    fn hold_phase_rejects_invalid_and_nonfinite_geometry_inputs() {
+        let mut bad_speed = input();
+        bad_speed.groundspeed_mmps = 0;
+        assert_eq!(
+            hold_phase_start(bad_speed),
+            Err(HoldPhaseRefusal::InvalidInput)
+        );
+
+        let mut bad_speed_tolerance = input();
+        bad_speed_tolerance.max_speed_error_mmps = 0;
+        assert_eq!(
+            hold_phase_start(bad_speed_tolerance),
+            Err(HoldPhaseRefusal::InvalidInput)
+        );
+
+        let (mut forged_state, _) = hold_phase_start(input()).expect("valid hold phase");
+        forged_state.max_speed_error_mmps = 0;
+        let prior = forged_state;
+        assert_eq!(
+            hold_phase_predict(&forged_state, ENTRY_NS + 1),
+            Err(HoldPhaseRefusal::InvalidInput)
+        );
+        assert_eq!(
+            hold_phase_advance(&mut forged_state, ENTRY_NS + 1),
+            Err(HoldPhaseRefusal::InvalidInput)
+        );
+        assert_eq!(forged_state, prior);
+
+        let mut bad_gap = input();
+        bad_gap.max_scan_gap_ns = HOLD_MAX_SCAN_GAP_NS + 1;
+        assert_eq!(
+            hold_phase_start(bad_gap),
+            Err(HoldPhaseRefusal::InvalidInput)
+        );
+
+        // Integer inputs cannot carry NaN/Inf; a valid coordinate at the pole makes the local
+        // longitude scale singular and must fail as InvalidGeometry rather than emit bad output.
+        let mut singular = input();
+        singular.fix_lat_e7 = 900_000_000;
+        assert_eq!(
+            hold_phase_start(singular),
+            Err(HoldPhaseRefusal::InvalidGeometry)
+        );
+    }
+
+    // REQ: OA-ENC-023
+    #[test]
+    fn parallel_and_teardrop_share_receipt_gated_phase_forecast() {
+        for (procedure, heading, turn) in [
+            (2, 12_000, 2),
+            (3, 3_500, 2),
+            (2, 24_000, 1),
+            (3, 32_500, 1),
+        ] {
+            let started = hold_phase_start_entry(entry_input(procedure, heading, turn));
+            assert!(
+                started.is_ok(),
+                "procedure={procedure} heading={heading} turn={turn}: {started:?}"
+            );
+            let Ok((mut state, available)) = started else {
+                return;
+            };
+            assert_eq!(available.at_ns, ENTRY_NS + 500_000_000);
+            assert_eq!(available.phase, HoldPhase::EntryTurn);
+            assert!(available.at_ns < state.entry_join_ns);
+            assert_eq!(
+                hold_phase_predict(&state, ENTRY_NS),
+                Err(HoldPhaseRefusal::NonMonotonicTime)
+            );
+            let first_heading = available.heading_true_cdeg;
+            let (east_mmps, north_mmps) = velocity_for_heading(first_heading);
+            let first = hold_phase_reconcile_and_advance(
+                &mut state,
+                HoldTrackReconciliationInput {
+                    key: available.key,
+                    at_ns: available.at_ns,
+                    lat_e7: available.lat_e7,
+                    lon_e7: available.lon_e7,
+                    east_mmps,
+                    north_mmps,
+                    max_position_error_mm: 20_000,
+                    max_heading_error_cdeg: 100,
+                },
+            );
+            assert!(first.is_ok(), "model-matched report should advance");
+            let second_at = available.at_ns + 1_000_000_000;
+            let second_expected = hold_phase_predict(&state, second_at).expect("next scan phase");
+            let (east_mmps, north_mmps) = velocity_for_heading(second_expected.heading_true_cdeg);
+            let second = hold_phase_reconcile_and_advance(
+                &mut state,
+                HoldTrackReconciliationInput {
+                    key: second_expected.key,
+                    at_ns: second_at,
+                    lat_e7: second_expected.lat_e7,
+                    lon_e7: second_expected.lon_e7,
+                    east_mmps,
+                    north_mmps,
+                    max_position_error_mm: 20_000,
+                    max_heading_error_cdeg: 100,
+                },
+            )
+            .expect("second successive scan reconciles against retained phase");
+            assert_eq!(second, second_expected);
+            assert_eq!(state.entry_state_ns, ENTRY_NS);
+            let prior = state;
+            assert_eq!(
+                hold_phase_advance(&mut state, second_at + MAX_GAP_NS + 1),
+                Err(HoldPhaseRefusal::ScanGapExceeded)
+            );
+            assert_eq!(state, prior);
+            let intermediate = hold_phase_predict(&state, state.entry_join_ns - 1)
+                .expect("entry intercept is forecast before join");
+            assert!(matches!(
+                intermediate.phase,
+                HoldPhase::EntryTurn
+                    | HoldPhase::EntryLeg
+                    | HoldPhase::EntryInterceptTurn
+                    | HoldPhase::EntryInterceptLeg
+                    | HoldPhase::EntryJoinTurn
+            ));
+            let joined = hold_phase_predict(&state, state.entry_join_ns)
+                .expect("geometric course-line intercept joins the shared racetrack");
+            assert!(matches!(
+                joined.phase,
+                HoldPhase::OutboundTurn
+                    | HoldPhase::OutboundLeg
+                    | HoldPhase::InboundTurn
+                    | HoldPhase::InboundLeg
+            ));
+        }
+    }
 }
 
 /// Produce the 30-second profile grid plus every filed route vertex reached within 20 minutes.

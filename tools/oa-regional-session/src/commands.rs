@@ -8,6 +8,7 @@ use crate::input::{
 use crate::runtime::FlightEvidence;
 use crate::surveillance::ObservedTrack;
 use oa_display::interaction::{self as ui, FlightIdentity, Intent, InteractionResult, TargetView};
+use std::path::Path;
 
 pub struct MsawServiceAuditContext<'a> {
     pub audit_log: &'a std::path::Path,
@@ -38,6 +39,31 @@ pub struct Dispatch {
     pub refusal: String,
     /// A queue invariant failure means the runtime cannot safely publish or continue this frame.
     pub terminal_failure: bool,
+}
+
+/// Audit configuration for the typed OpenATCA hold command caller. The registry digest and
+/// checkpoint must come from an independent trusted configuration source; this is not a login or
+/// ERAM command grammar.
+#[derive(Clone, Copy, Debug)]
+pub struct HoldCommandAuthority<'a> {
+    pub principal_id: u64,
+    pub registry_path: &'a Path,
+    pub expected_registry_sha256: [u8; 32],
+    pub audit_path: &'a Path,
+    pub expected_checkpoint: oa_audit_core::Checkpoint,
+    /// Receipt-clock time for this command, in the same nanosecond domain as regional scans.
+    pub command_receipt_ns: i64,
+}
+
+/// Dispatch one typed project hold assign/amend/cancel operation through the regional runtime's
+/// pinned-role and durable-intent gate. Exact deployed ERAM syntax and UI behavior remain outside
+/// this API.
+pub fn dispatch_hold_command(
+    runtime: &mut crate::runtime::RegionalRuntime,
+    update: crate::holding::HoldUpdate,
+    authority: HoldCommandAuthority<'_>,
+) -> Result<crate::runtime::HoldCommandResult, String> {
+    crate::runtime::regional_dispatch_hold_command(runtime, update, authority)
 }
 
 #[derive(Debug)]

@@ -38,6 +38,7 @@ pub enum ProbeRefusal {
     InvalidPosition = 4,
     UnknownAltitude = 5,
     ProjectionOutOfBounds = 6,
+    MissingTrack = 7,
 }
 
 /// Shared-predictor samples in structure-of-arrays form. Capacity is the union of 41 uniform
