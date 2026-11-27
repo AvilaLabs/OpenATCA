@@ -535,6 +535,55 @@ print("fake runner stdout")
             self.assertEqual(second_result, 0, stderr.getvalue())
             self.assertNotEqual(first_target, second_target)
 
+    # Kills the shared-root substitution in _run_one_proof using two real nightly registry rows.
+    def test_real_nightly_proof_commands_keep_disjoint_targets_and_registered_limits(self):
+        proof_ids = (
+            "late-append-output-projection",
+            "large-move-decision-rejected-current-filter-snapshot",
+        )
+        registered, errors = load_registry(REGISTRY_PATH)
+        self.assertEqual(errors, [])
+        by_id = {proof["id"]: proof for proof in registered["proofs"]}
+        self.assertTrue(set(proof_ids).issubset(by_id))
+        proofs = [copy.deepcopy(by_id[proof_id]) for proof_id in proof_ids]
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, registry_path, out, target_root, _ = self.fake_workspace(root, proof_count=1)
+            registry_path.write_text(json.dumps(registry_with(*proofs), indent=2) + "\n")
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with mock.patch.dict(os.environ, {"FAKE_RUN_RECORD_MODE": "pass"}), \
+                    redirect_stdout(stdout), redirect_stderr(stderr):
+                result = run_suite(repo, out, target_root, registry_path, proof_ids=list(proof_ids))
+
+            suite = json.loads((out / "suite.json").read_text())
+            self.assertEqual(result, 0, stderr.getvalue())
+            self.assertEqual(suite["status"], "PASS")
+            self.assertEqual(suite["selected_count"], len(proofs))
+            commands = {check["id"]: check["command"] for check in suite["checks"]}
+            self.assertEqual(set(commands), set(proof_ids))
+            targets = {
+                proof_id: Path(command[command.index("--target-dir") + 1])
+                for proof_id, command in commands.items()
+            }
+            self.assertNotEqual(targets[proof_ids[0]], targets[proof_ids[1]])
+            self.assertTrue(all(path.is_relative_to(target_root.resolve() / "proofs") for path in targets.values()))
+
+            for proof in proofs:
+                command = commands[proof["id"]]
+                self.assertEqual(int(command[command.index("--memory-mib") + 1]), proof["memory_mib"])
+                self.assertEqual(
+                    int(command[command.index("--harness-timeout") + 1]),
+                    proof["harness_timeout_seconds"],
+                )
+                self.assertEqual(int(command[command.index("--timeout") + 1]), proof["external_timeout_seconds"])
+                unwind = [
+                    command[index + 1]
+                    for index, value in enumerate(command[:-1])
+                    if value == "--loop-unwind-preset"
+                ]
+                self.assertEqual(unwind, proof.get("loop_unwind_overrides", []))
+
     # REQ: OA-GEN-006
     def test_success_runs_every_proof_and_default_failure_continues(self):
         with tempfile.TemporaryDirectory() as temp:
