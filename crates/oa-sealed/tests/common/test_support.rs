@@ -6,3 +6,10 @@ pub fn scratch(name: &str) -> PathBuf {
     std::fs::create_dir_all(&directory).unwrap();
     directory
 }
+
+pub fn list_without_window(list: &str) -> String {
+    list.lines()
+        .filter(|line| !line.starts_with("window"))
+        .map(|line| format!("{line}\n"))
+        .collect()
+}
