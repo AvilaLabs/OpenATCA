@@ -46,7 +46,7 @@ PINNED_CARGO_TOOLCHAIN = "1.89.0"
 _LATE_LOOP_ID_TEMPLATE = "_RNvNtC{disambiguator}_13oa_track_core7tracker11update_late."
 _DISAMBIGUATOR_RE = r"s[0-9A-Za-z]+"
 # Source line of every loop of update_late, by loop index; discovery must find exactly these.
-_LATE_FUNCTION_LOOPS = [1592, 1611, 1649, 1679]
+_LATE_FUNCTION_LOOPS = [1661, 1680, 1718, 1748]
 # Closed CBMC loop-bound presets. Loop labels are tied to the pinned Kani/CBMC
 # build and the source location below; never accept arbitrary CBMC arguments.
 LOOP_UNWIND_PRESETS = {
@@ -79,7 +79,7 @@ LOOP_UNWIND_PRESETS = {
         },
         "default_harness_source": "crates/oa-track-core/src/tracker/proofs/rollback_paths.rs",
         "source": "crates/oa-track-core/src/tracker.rs",
-        "line": 1679,
+        "line": 1748,
         "function": "update_late",
         "source_line": "while k < n_seq {",
     },
@@ -88,10 +88,10 @@ _late_base_preset = LOOP_UNWIND_PRESETS["late-replay-two-events"]
 LOOP_UNWIND_PRESETS["late-replay-two-events-all-loops"] = {
     **_late_base_preset,
     "loops": [
-        {"loop_id": _LATE_LOOP_ID_TEMPLATE + "0", "bound": 3, "line": 1592, "guard_line": 1592, "source_line": "for k in 0..len {", "log_mode": "completed_before_bound", "iterations": [1, 2]},
-        {"loop_id": _LATE_LOOP_ID_TEMPLATE + "1", "bound": 2, "line": 1611, "guard_line": 1611, "source_line": "for k in (e + 1)..len {"},
-        {"loop_id": _LATE_LOOP_ID_TEMPLATE + "2", "bound": 2, "line": 1649, "source_line": "for k in 0..=e {"},
-        {"loop_id": _LATE_LOOP_ID_TEMPLATE + "3", "bound": 3, "line": 1679, "source_line": "while k < n_seq {"},
+        {"loop_id": _LATE_LOOP_ID_TEMPLATE + "0", "bound": 3, "line": 1661, "guard_line": 1661, "source_line": "for k in 0..len {", "log_mode": "completed_before_bound", "iterations": [1, 2]},
+        {"loop_id": _LATE_LOOP_ID_TEMPLATE + "1", "bound": 2, "line": 1680, "guard_line": 1680, "source_line": "for k in (e + 1)..len {"},
+        {"loop_id": _LATE_LOOP_ID_TEMPLATE + "2", "bound": 2, "line": 1718, "source_line": "for k in 0..=e {"},
+        {"loop_id": _LATE_LOOP_ID_TEMPLATE + "3", "bound": 3, "line": 1748, "source_line": "while k < n_seq {"},
     ],
     "fixture_source": "crates/oa-track-core/src/tracker/proofs.rs",
     "fixture_snippets": [
