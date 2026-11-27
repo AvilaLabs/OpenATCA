@@ -103,6 +103,7 @@ today is in [docs/STATUS.md](docs/STATUS.md).
 | [docs/INTERFACES.md](docs/INTERFACES.md) | How OpenATCA talks to systems it does not control |
 | [docs/NODE_NETWORK.md](docs/NODE_NETWORK.md) | How facilities compute the national picture, check each other and survive alone |
 | [docs/CONFIGURATION_MANAGEMENT_PLAN.md](docs/CONFIGURATION_MANAGEMENT_PLAN.md) | Configuration items, change control, baselines and release records |
+| [docs/safety/PROGRAM_SAFETY_PLAN.md](docs/safety/PROGRAM_SAFETY_PLAN.md) | Hazards, safety analyses, verification and safety decisions |
 | [docs/UNKNOWNS.md](docs/UNKNOWNS.md) | Open questions, each with why it matters and the next step |
 | [DATA.md](DATA.md) | Every input dataset with its source and SHA-256 |
 
