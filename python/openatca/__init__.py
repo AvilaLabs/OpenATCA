@@ -8,6 +8,7 @@ ABI names and layout are not stable or published.
 from __future__ import annotations
 
 import ctypes
+import array
 import os
 import threading
 from dataclasses import dataclass
@@ -30,6 +31,9 @@ _MAX_ZIP_INPUT_BYTES: Final[int] = 1024 * 1024 * 1024
 _MAX_ZIP_ENTRIES: Final[int] = 10_000
 _MAX_ZIP_ENTRY_BYTES: Final[int] = 256 * 1024 * 1024
 _MAX_ZIP_NAME_POOL_BYTES: Final[int] = _MAX_ZIP_ENTRIES * 4096
+_MAX_GRIB2_INPUT_BYTES: Final[int] = 256 * 1024 * 1024
+_MAX_GRIB2_FIELDS: Final[int] = 16
+_MAX_GRIB2_VALUES: Final[int] = 64 * 1024 * 1024
 
 
 class _ErrorInfo(ctypes.Structure):
@@ -38,6 +42,39 @@ class _ErrorInfo(ctypes.Structure):
         ("location_kind", ctypes.c_uint32),
         ("location", ctypes.c_uint64),
     ]
+
+
+class _Grib2Time(ctypes.Structure):
+    _fields_ = [("year", ctypes.c_uint16), ("month", ctypes.c_uint8),
+                ("day", ctypes.c_uint8), ("hour", ctypes.c_uint8),
+                ("minute", ctypes.c_uint8), ("second", ctypes.c_uint8),
+                ("reserved", ctypes.c_uint8)]
+
+
+class _Grib2Field(ctypes.Structure):
+    _fields_ = [("discipline", ctypes.c_uint8), ("category", ctypes.c_uint8),
+        ("number", ctypes.c_uint8), ("named_parameter", ctypes.c_uint8),
+        ("grid_template", ctypes.c_uint16), ("product_template", ctypes.c_uint16),
+        ("packing_template", ctypes.c_uint16), ("level_kind", ctypes.c_uint8),
+        ("forecast_time_unit", ctypes.c_uint8), ("reference_time", _Grib2Time),
+        ("forecast_time", ctypes.c_uint32), ("level_value", ctypes.c_float),
+        ("interval_present", ctypes.c_uint8), ("interval_ranges", ctypes.c_uint8),
+        ("interval_statistic", ctypes.c_uint8), ("reserved0", ctypes.c_uint8),
+        ("interval_end", _Grib2Time), ("nx", ctypes.c_uint32), ("ny", ctypes.c_uint32),
+        ("grid_flags", ctypes.c_uint8), ("scan_mode", ctypes.c_uint8),
+        ("latitude_row_direction", ctypes.c_int8), ("global_longitude", ctypes.c_uint8),
+        ("first_latitude_deg", ctypes.c_double), ("first_longitude_deg", ctypes.c_double),
+        ("i_increment_deg", ctypes.c_double), ("j_increment_deg", ctypes.c_double),
+        ("lambert_lad_deg", ctypes.c_double), ("lambert_lov_deg", ctypes.c_double),
+        ("lambert_dx_m", ctypes.c_double), ("lambert_dy_m", ctypes.c_double),
+        ("lambert_latin1_deg", ctypes.c_double), ("lambert_latin2_deg", ctypes.c_double),
+        ("earth_radius_m", ctypes.c_double), ("value_offset", ctypes.c_uint64),
+        ("value_count", ctypes.c_uint64), ("missing_count", ctypes.c_uint64)]
+
+
+assert ctypes.sizeof(_Grib2Time) == 8 and ctypes.alignment(_Grib2Time) == 2
+assert ctypes.sizeof(_Grib2Field) == 168 and ctypes.alignment(_Grib2Field) == 8
+assert _Grib2Field.reference_time.offset == 12 and _Grib2Field.value_offset.offset == 144
 
 
 class _AsterixPosition(ctypes.Structure):
@@ -129,6 +166,9 @@ _STATUS_NAMES: Final[dict[int, str]] = {
     38: "ZIP_INFLATE_OR_SIZE",
     39: "ZIP_CRC",
     40: "ZIP_BAD_ENTRY_INDEX",
+    48: "GRIB2_FORMAT",
+    49: "GRIB2_UNSUPPORTED",
+    50: "GRIB2_LIMIT",
 }
 
 
@@ -291,6 +331,42 @@ class AsterixError(OpenAtcaError):
         self.subitem = subitem
         self.offset = offset
         super().__init__(status, message=f"ASTERIX error kind {kind}")
+
+
+@dataclass(frozen=True, slots=True)
+class Grib2Field:
+    discipline: int
+    category: int
+    number: int
+    named_parameter: int
+    grid_template: int
+    product_template: int
+    packing_template: int
+    level_kind: int
+    forecast_time_unit: int
+    reference_time: tuple[int, int, int, int, int, int]
+    forecast_time: int
+    level_value: float
+    interval_present: bool
+    interval_ranges: int
+    interval_statistic: int
+    interval_end: tuple[int, int, int, int, int, int]
+    nx: int
+    ny: int
+    grid_flags: int
+    scan_mode: int
+    latitude_row_direction: int
+    global_longitude: bool
+    grid_parameters: tuple[float, ...]
+    value_offset: int
+    value_count: int
+    missing_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class Grib2Message:
+    fields: tuple[Grib2Field, ...]
+    values: array.array
 
 
 @dataclass(frozen=True, slots=True)
@@ -974,6 +1050,71 @@ class TextBindings:
             for field in fields), bytes(pool))
 
 
+class Grib2Bindings:
+    """Decode one complete message from the existing bounded GRIB2 profile."""
+
+    def __init__(self, library: ctypes.CDLL) -> None:
+        self._library = library
+        byte_p = ctypes.POINTER(ctypes.c_uint8)
+        u64_p = ctypes.POINTER(ctypes.c_uint64)
+        error_p = ctypes.POINTER(_ErrorInfo)
+        library.oa_grib2_inspect_message.argtypes = [byte_p, ctypes.c_uint64, u64_p, u64_p, error_p]
+        library.oa_grib2_inspect_message.restype = ctypes.c_uint32
+        library.oa_grib2_decode_message.argtypes = [byte_p, ctypes.c_uint64,
+            ctypes.POINTER(_Grib2Field), ctypes.c_uint64, ctypes.POINTER(ctypes.c_float),
+            ctypes.c_uint64, u64_p, u64_p, error_p]
+        library.oa_grib2_decode_message.restype = ctypes.c_uint32
+
+    @staticmethod
+    def _time(value: _Grib2Time) -> tuple[int, int, int, int, int, int]:
+        return (int(value.year), int(value.month), int(value.day), int(value.hour),
+                int(value.minute), int(value.second))
+
+    def inspect_message(self, data: bytes) -> tuple[int, int]:
+        if not isinstance(data, bytes):
+            raise TypeError("data must be bytes")
+        if len(data) > _MAX_GRIB2_INPUT_BYTES:
+            raise ValueError("data exceeds the native GRIB2 message limit")
+        source = (ctypes.c_uint8 * len(data)).from_buffer_copy(data) if data else None
+        fields, values, error = ctypes.c_uint64(), ctypes.c_uint64(), _ErrorInfo()
+        status = int(self._library.oa_grib2_inspect_message(source, len(data),
+            ctypes.byref(fields), ctypes.byref(values), ctypes.byref(error)))
+        _raise_if_error(self._library, status, error)
+        if fields.value > _MAX_GRIB2_FIELDS or values.value > _MAX_GRIB2_VALUES:
+            raise RuntimeError("native GRIB2 inspector exceeded its declared bounds")
+        return int(fields.value), int(values.value)
+
+    def decode_message(self, data: bytes) -> Grib2Message:
+        field_count, value_count = self.inspect_message(data)
+        source = (ctypes.c_uint8 * len(data)).from_buffer_copy(data) if data else None
+        fields = (_Grib2Field * field_count)() if field_count else None
+        values = array.array("f", [0.0]) * value_count
+        if values.itemsize != ctypes.sizeof(ctypes.c_float):
+            raise RuntimeError("platform f32 array does not match the native ABI")
+        value_storage = (ctypes.c_float * value_count).from_buffer(values) if value_count else None
+        value_pointer = ctypes.cast(value_storage, ctypes.POINTER(ctypes.c_float)) if value_storage else None
+        required_fields, required_values, error = ctypes.c_uint64(), ctypes.c_uint64(), _ErrorInfo()
+        status = int(self._library.oa_grib2_decode_message(source, len(data), fields, field_count,
+            value_pointer, value_count, ctypes.byref(required_fields), ctypes.byref(required_values),
+            ctypes.byref(error)))
+        _raise_if_error(self._library, status, error)
+        if required_fields.value != field_count or required_values.value != value_count:
+            raise RuntimeError("native GRIB2 sizes changed between inspection and decode")
+        projected = tuple(Grib2Field(int(f.discipline), int(f.category), int(f.number),
+            int(f.named_parameter), int(f.grid_template), int(f.product_template),
+            int(f.packing_template), int(f.level_kind), int(f.forecast_time_unit),
+            self._time(f.reference_time), int(f.forecast_time), float(f.level_value),
+            bool(f.interval_present), int(f.interval_ranges), int(f.interval_statistic),
+            self._time(f.interval_end), int(f.nx), int(f.ny), int(f.grid_flags),
+            int(f.scan_mode), int(f.latitude_row_direction), bool(f.global_longitude),
+            (float(f.first_latitude_deg), float(f.first_longitude_deg),
+             float(f.i_increment_deg), float(f.j_increment_deg), float(f.lambert_lad_deg),
+             float(f.lambert_lov_deg), float(f.lambert_dx_m), float(f.lambert_dy_m),
+             float(f.lambert_latin1_deg), float(f.lambert_latin2_deg), float(f.earth_radius_m)),
+            int(f.value_offset), int(f.value_count), int(f.missing_count)) for f in fields or ())
+        return Grib2Message(projected, values)
+
+
 class Geodesy:
     """Calls the provisional stateless WGS-84 symbols in an explicitly loaded library."""
 
@@ -992,6 +1133,7 @@ class Geodesy:
         self.compression = Compression(library)
         self.archives = Archives(library)
         self.asterix = AsterixBindings(library)
+        self.grib2 = Grib2Bindings(library)
 
     def _bind(self) -> None:
         lib = self._library
@@ -1368,6 +1510,9 @@ __all__ = [
     "JsonResult",
     "Polygon",
     "Geodesy",
+    "Grib2Bindings",
+    "Grib2Field",
+    "Grib2Message",
     "InverseResult",
     "OpenAtcaError",
     "RhumbInverseResult",

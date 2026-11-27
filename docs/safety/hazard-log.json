@@ -8493,6 +8493,12 @@
       "register_clause": "The C and Python L0 source runners cover every exported L0 operation family against the shared committed vectors, including polygon handle lifetime operations and bounded one-shot hashing. Source runner presence does not establish that a native build or run succeeded; the coordinator records those gates."
     },
     {
+      "id": "OA-FFI-005",
+      "function": "offline_encounter_and_migration_evaluation",
+      "rationale": "The experimental binding exposes a bounded decoder over caller-provided weather bytes but is not connected to an accepted runtime consumer. Its synthetic vectors are source-level evidence only and do not qualify weather freshness, coverage, pressure-altitude correction, or operational use.",
+      "register_clause": "The GRIB2 Preview C and Python bindings delegate to the existing oa-grib2 decoder, accept one complete message under its existing edition/template, byte, field, point, and work limits, preserve typed source metadata and bitmap missing values, and use caller-owned fixed-layout outputs with capacity-query/fill behavior. Shared Rust/C/ctypes synthetic vectors cover valid bitmap decode, truncation, unsupported packing, and capacity atomicity. The binding does not establish GRIB2 freshness, weather coverage, or operational consumer behavior; HZ-WEATHER-001 remains a consumer hazard."
+    },
+    {
       "id": "OA-REP-001",
       "function": "offline_encounter_and_migration_evaluation",
       "rationale": "This evaluates saved or synthetic evidence and has no direct runtime control effect.",

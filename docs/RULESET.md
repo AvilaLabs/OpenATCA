@@ -38,15 +38,15 @@ the rule unless an exception is recorded at the site as a comment naming the rul
   inventory is exactly `src/lib.rs` and `src/linux.rs`.
   The binding package is also classified `shell`, depends only on the exact reviewed workspace
   crates `oa-geo`, `oa-ieee`, `oa-math`, `oa-sha256`, `oa-csv`, `oa-json`, `oa-xml`,
-  `oa-zip`, `oa-deflate`, `oa-tar` and `oa-asterix`. Each binding delegates to its existing
+  `oa-zip`, `oa-deflate`, `oa-tar`, `oa-asterix` and `oa-grib2`. Each binding delegates to its existing
   bounded implementation through a justified F1a edge. The package sets
   `[lints.rust] unsafe_code = "deny"` plus explicit denials for the four workspace runtime Clippy
   lints. Its crate root uses `#![deny(unsafe_code)]`; `src/text.rs` is the safe bounded-parser
-  adapter; `src/formats/asterix.rs` and `src/formats/zip.rs` are safe format projections.
+  adapter; `src/formats/asterix.rs`, `src/formats/zip.rs` and `src/formats/grib2.rs` are safe format projections.
   These adapters and `src/formats/mod.rs` use `#![forbid(unsafe_code)]`; exactly `src/ffi.rs`
   has the module-local `#![allow(unsafe_code)]`. The Rust `src/` inventory is exactly
   `src/lib.rs`, `src/ffi.rs`, `src/text.rs`, `src/formats/mod.rs`,
-  `src/formats/asterix.rs` and `src/formats/zip.rs`. The allowlist is enforced by `oa-trace`,
+  `src/formats/asterix.rs`, `src/formats/zip.rs` and `src/formats/grib2.rs`. The allowlist is enforced by `oa-trace`,
   which rejects additional files, unsafe operations, raw-pointer adaptation, `extern` functions
   and symbol exports in the safe format adapters. Their fixed `#[repr(C)]` value records are
   permitted. Raw pointers, `extern "C"`, symbol

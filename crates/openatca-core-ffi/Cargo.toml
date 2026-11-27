@@ -42,3 +42,5 @@ oa-deflate = { path = "../oa-deflate" }
 oa-tar = { path = "../oa-tar" }
 # F1a: fixed C/ctypes projection delegates bounded decode to the existing ASTERIX core.
 oa-asterix = { path = "../oa-asterix" }
+# F1a: the GRIB2 binding projects the existing bounded Preview decoder; it adds no decoder.
+oa-grib2 = { path = "../oa-grib2" }

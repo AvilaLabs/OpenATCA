@@ -532,7 +532,7 @@ impl Ws {
         ws.put(BUDGET, "");
         ws.put(
             "crates/openatca-core-ffi/Cargo.toml",
-            "[package]\nname = \"openatca-core-ffi\"\n\n[package.metadata.openatca]\nclass = \"shell\"\n\n[dependencies]\noa-geo = { path = \"../oa-geo\" }\noa-ieee = { path = \"../oa-ieee\" }\noa-math = { path = \"../oa-math\" }\noa-sha256 = { path = \"../oa-sha256\" }\noa-csv = { path = \"../oa-csv\" }\noa-json = { path = \"../oa-json\" }\noa-xml = { path = \"../oa-xml\" }\noa-zip = { path = \"../oa-zip\" }\noa-deflate = { path = \"../oa-deflate\" }\noa-tar = { path = \"../oa-tar\" }\noa-asterix = { path = \"../oa-asterix\" }\n\n[lints.rust]\nunsafe_code = \"deny\"\n\n[lints.clippy]\nunwrap_used = \"deny\"\nexpect_used = \"deny\"\npanic = \"deny\"\nindexing_slicing = \"deny\"\n",
+            "[package]\nname = \"openatca-core-ffi\"\n\n[package.metadata.openatca]\nclass = \"shell\"\n\n[dependencies]\noa-geo = { path = \"../oa-geo\" }\noa-ieee = { path = \"../oa-ieee\" }\noa-math = { path = \"../oa-math\" }\noa-sha256 = { path = \"../oa-sha256\" }\noa-csv = { path = \"../oa-csv\" }\noa-json = { path = \"../oa-json\" }\noa-xml = { path = \"../oa-xml\" }\noa-zip = { path = \"../oa-zip\" }\noa-deflate = { path = \"../oa-deflate\" }\noa-tar = { path = \"../oa-tar\" }\noa-asterix = { path = \"../oa-asterix\" }\noa-grib2 = { path = \"../oa-grib2\" }\n\n[lints.rust]\nunsafe_code = \"deny\"\n\n[lints.clippy]\nunwrap_used = \"deny\"\nexpect_used = \"deny\"\npanic = \"deny\"\nindexing_slicing = \"deny\"\n",
         );
         ws.put(
             "crates/openatca-core-ffi/src/lib.rs",
@@ -545,7 +545,7 @@ impl Ws {
         );
         ws.put(
             "crates/openatca-core-ffi/src/formats/mod.rs",
-            "#![forbid(unsafe_code)]\npub(crate) mod asterix;\npub(crate) mod zip;\n",
+            "#![forbid(unsafe_code)]\npub(crate) mod asterix;\npub(crate) mod grib2;\npub(crate) mod zip;\n",
         );
         ws.put(
             "crates/openatca-core-ffi/src/formats/asterix.rs",
@@ -553,6 +553,10 @@ impl Ws {
         );
         ws.put(
             "crates/openatca-core-ffi/src/formats/zip.rs",
+            "#![forbid(unsafe_code)]\n",
+        );
+        ws.put(
+            "crates/openatca-core-ffi/src/formats/grib2.rs",
             "#![forbid(unsafe_code)]\n",
         );
         for (path, source) in extra_src {
@@ -692,6 +696,8 @@ fn ffi_fixture_source() -> String {
         "oa_tar_parse",
         "oa_zip_list",
         "oa_zip_extract_entry",
+        "oa_grib2_inspect_message",
+        "oa_grib2_decode_message",
     ];
     let mut source = String::from("#![allow(unsafe_code)]\n");
     for name in EXPORTS {
@@ -2244,7 +2250,7 @@ fn ffi_format_adapter_inventory_rejects_extra_files_and_unsafe_helpers() {
     assert!(
         has(
             &ws.failures(),
-            "safe format inventory is exactly `asterix.rs`, `mod.rs`, and `zip.rs`"
+            "safe format inventory is exactly `asterix.rs`, `grib2.rs`, `mod.rs`, and `zip.rs`"
         ),
         "{:#?}",
         ws.failures()

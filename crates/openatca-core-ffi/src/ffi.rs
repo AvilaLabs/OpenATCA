@@ -2,6 +2,7 @@
 #![allow(unsafe_code)] // RULESET A0: the sole unsafe module of openatca-core-ffi.
 
 use crate::formats::asterix::{self, OaAsterixCounts, OaAsterixError, OaAsterixRecord};
+use crate::formats::grib2::{self as grib2, AdapterError as Grib2AdapterError, OaGrib2Field};
 use crate::formats::zip::{self, OaZipEntry, ZipAdapterError};
 use crate::text;
 use oa_asterix::{AsterixError, ErrorKind as AsterixErrorKind, NO_ITEM, NO_OFFSET, NO_RECORD};
@@ -48,6 +49,9 @@ pub const OA_STATUS_ZIP_LIMIT: u32 = 37;
 pub const OA_STATUS_ZIP_INFLATE_OR_SIZE: u32 = 38;
 pub const OA_STATUS_ZIP_CRC: u32 = 39;
 pub const OA_STATUS_ZIP_BAD_ENTRY_INDEX: u32 = 40;
+pub const OA_STATUS_GRIB2_FORMAT: u32 = 48;
+pub const OA_STATUS_GRIB2_UNSUPPORTED: u32 = 49;
+pub const OA_STATUS_GRIB2_LIMIT: u32 = 50;
 
 /// Hard ceiling for one raw-DEFLATE input slice accepted by the provisional C ABI.
 pub const MAX_DEFLATE_INPUT_BYTES: u64 = 64 * 1024 * 1024;
@@ -136,6 +140,34 @@ fn map_zip_adapter_error(error: ZipAdapterError) -> Failure {
     match error {
         ZipAdapterError::Parse(error) => map_zip_error(error),
         ZipAdapterError::Allocation => Failure::general(OA_STATUS_ALLOCATION_FAILED),
+    }
+}
+
+fn map_grib2_error(error: oa_grib2::Grib2Error) -> Failure {
+    use oa_grib2::Grib2Error as E;
+    let status = match error {
+        E::UnsupportedEdition(_)
+        | E::UnsupportedGridTemplate(_)
+        | E::UnsupportedScanMode(_)
+        | E::UnsupportedEarthShape(_)
+        | E::UnsupportedProductTemplate(_)
+        | E::UnsupportedPacking(_) => OA_STATUS_GRIB2_UNSUPPORTED,
+        E::GridPoints(_) | E::WorkBudget { .. } | E::TooManyFields | E::ScratchBudget { .. } => {
+            OA_STATUS_GRIB2_LIMIT
+        }
+        E::BadMessageLength(length) if length > grib2::MAX_INPUT_BYTES => {
+            OA_STATUS_LENGTH_TOO_LARGE
+        }
+        _ => OA_STATUS_GRIB2_FORMAT,
+    };
+    Failure::general(status)
+}
+
+fn map_grib2_adapter_error(error: Grib2AdapterError) -> Failure {
+    match error {
+        Grib2AdapterError::Decode(error) => map_grib2_error(error),
+        Grib2AdapterError::Capacity => Failure::general(OA_STATUS_BUFFER_TOO_SMALL),
+        Grib2AdapterError::Inconsistent => Failure::general(OA_STATUS_INTERNAL_PANIC),
     }
 }
 
@@ -2183,6 +2215,163 @@ fn coordinate_argument(error: &GeoError, base: u64) -> u64 {
     }
 }
 
+/// Reports bounded field and value capacities for exactly one complete GRIB2 message.
+///
+/// Inspection validates message framing, sections, supported grids/products and existing
+/// point/work limits. It does not decode packing data, so an unsupported packing may still be
+/// refused by `oa_grib2_decode_message` after this capacity query succeeds.
+///
+/// # Safety
+/// `input` must be readable for `input_length` bytes unless length is zero. The two required
+/// count pointers and `error` must be valid, aligned, writable and pairwise non-overlapping.
+#[no_mangle]
+pub unsafe extern "C" fn oa_grib2_inspect_message(
+    input: *const u8,
+    input_length: u64,
+    required_fields: *mut u64,
+    required_values: *mut u64,
+    error: *mut OaErrorInfo,
+) -> u32 {
+    let mut fields = 0u64;
+    let mut values = 0u64;
+    let (status, result) = dispatch(error, || {
+        if required_fields.is_null() {
+            return Err(Failure::argument(OA_STATUS_INVALID_ARGUMENT, 2));
+        }
+        if required_values.is_null() {
+            return Err(Failure::argument(OA_STATUS_INVALID_ARGUMENT, 3));
+        }
+        if input_length > grib2::MAX_INPUT_BYTES {
+            return Err(Failure::argument(OA_STATUS_LENGTH_TOO_LARGE, 1));
+        }
+        let length = usize::try_from(input_length)
+            .map_err(|_| Failure::argument(OA_STATUS_LENGTH_TOO_LARGE, 1))?;
+        if length != 0 && input.is_null() {
+            return Err(Failure::argument(OA_STATUS_INVALID_ARGUMENT, 0));
+        }
+        let bytes = if length == 0 {
+            &[]
+        } else {
+            // SAFETY: the C caller guarantees a readable, non-overlapping region of this
+            // checked length; arbitrary C addresses cannot be validated by this ABI.
+            unsafe { core::slice::from_raw_parts(input, length) }
+        };
+        let plan = grib2::inspect(bytes).map_err(map_grib2_adapter_error)?;
+        fields = u64::try_from(plan.field_count())
+            .map_err(|_| Failure::general(OA_STATUS_LENGTH_TOO_LARGE))?;
+        values = u64::try_from(plan.value_count())
+            .map_err(|_| Failure::general(OA_STATUS_LENGTH_TOO_LARGE))?;
+        Ok(())
+    });
+    if result.is_some() {
+        // SAFETY: validated non-null metadata pointers; the caller guarantees aligned, writable,
+        // mutually disjoint output regions and separation from the input bytes.
+        unsafe {
+            required_fields.write(fields);
+            required_values.write(values);
+        }
+    }
+    status
+}
+
+/// Decodes one complete GRIB2 message to caller-owned field descriptors and a flat `f32` array.
+/// Capacity shortfall reports both required sizes and leaves both data arrays untouched. Other
+/// failures leave sizes and data arrays untouched. Bitmap-missing points are IEEE NaN.
+///
+/// # Safety
+/// `input` must be readable for `input_length` bytes unless length is zero. Nonzero output
+/// capacities require valid aligned writable buffers. The required-count pointers and `error`
+/// must be valid, aligned, writable and pairwise disjoint from each other, input and output. All
+/// input and output regions must be pairwise non-overlapping; the ABI cannot validate C addresses.
+#[no_mangle]
+pub unsafe extern "C" fn oa_grib2_decode_message(
+    input: *const u8,
+    input_length: u64,
+    fields_out: *mut OaGrib2Field,
+    fields_capacity: u64,
+    values_out: *mut f32,
+    values_capacity: u64,
+    required_fields: *mut u64,
+    required_values: *mut u64,
+    error: *mut OaErrorInfo,
+) -> u32 {
+    let mut fields_required = 0u64;
+    let mut values_required = 0u64;
+    let (status, result) = dispatch(error, || {
+        if required_fields.is_null() {
+            return Err(Failure::argument(OA_STATUS_INVALID_ARGUMENT, 6));
+        }
+        if required_values.is_null() {
+            return Err(Failure::argument(OA_STATUS_INVALID_ARGUMENT, 7));
+        }
+        if input_length > grib2::MAX_INPUT_BYTES {
+            return Err(Failure::argument(OA_STATUS_LENGTH_TOO_LARGE, 1));
+        }
+        if fields_capacity > grib2::MAX_FIELDS as u64 {
+            return Err(Failure::argument(OA_STATUS_BAD_PARAMETER, 3));
+        }
+        if values_capacity > grib2::MAX_VALUES {
+            return Err(Failure::argument(OA_STATUS_BAD_PARAMETER, 5));
+        }
+        let length = usize::try_from(input_length)
+            .map_err(|_| Failure::argument(OA_STATUS_LENGTH_TOO_LARGE, 1))?;
+        if length != 0 && input.is_null() {
+            return Err(Failure::argument(OA_STATUS_INVALID_ARGUMENT, 0));
+        }
+        let bytes = if length == 0 {
+            &[]
+        } else {
+            // SAFETY: the C caller guarantees a readable, non-overlapping region of this
+            // checked length; arbitrary C addresses cannot be validated by this ABI.
+            unsafe { core::slice::from_raw_parts(input, length) }
+        };
+        let plan = grib2::inspect(bytes).map_err(map_grib2_adapter_error)?;
+        fields_required = u64::try_from(plan.field_count())
+            .map_err(|_| Failure::general(OA_STATUS_LENGTH_TOO_LARGE))?;
+        values_required = u64::try_from(plan.value_count())
+            .map_err(|_| Failure::general(OA_STATUS_LENGTH_TOO_LARGE))?;
+        if fields_capacity < fields_required || values_capacity < values_required {
+            return Err(Failure::general(OA_STATUS_BUFFER_TOO_SMALL));
+        }
+        if fields_required != 0 && fields_out.is_null() {
+            return Err(Failure::argument(OA_STATUS_INVALID_ARGUMENT, 2));
+        }
+        if values_required != 0 && values_out.is_null() {
+            return Err(Failure::argument(OA_STATUS_INVALID_ARGUMENT, 4));
+        }
+        let field_count = usize::try_from(fields_required)
+            .map_err(|_| Failure::general(OA_STATUS_LENGTH_TOO_LARGE))?;
+        let value_count = usize::try_from(values_required)
+            .map_err(|_| Failure::general(OA_STATUS_LENGTH_TOO_LARGE))?;
+        let fields_slice = if field_count == 0 {
+            &mut [][..]
+        } else {
+            // SAFETY: capacity was checked against the inspected field count; the caller
+            // guarantees an aligned writable, non-overlapping output region of that extent.
+            unsafe { core::slice::from_raw_parts_mut(fields_out, field_count) }
+        };
+        let values_slice = if value_count == 0 {
+            &mut [][..]
+        } else {
+            // SAFETY: capacity was checked against the inspected point count; the caller
+            // guarantees an aligned writable, non-overlapping output region of that extent.
+            unsafe { core::slice::from_raw_parts_mut(values_out, value_count) }
+        };
+        grib2::decode_into(bytes, &plan, fields_slice, values_slice)
+            .map_err(map_grib2_adapter_error)?;
+        Ok(())
+    });
+    if result.is_some() || status == OA_STATUS_BUFFER_TOO_SMALL {
+        // SAFETY: required-count pointers were checked non-null; the caller guarantees they are
+        // aligned, writable, disjoint from all input/output regions and from one another.
+        unsafe {
+            required_fields.write(fields_required);
+            required_values.write(values_required);
+        }
+    }
+    status
+}
+
 fn message(code: u32) -> &'static [u8] {
     match code {
         OA_STATUS_OK => b"success\0",
@@ -2219,6 +2408,9 @@ fn message(code: u32) -> &'static [u8] {
         OA_STATUS_ZIP_INFLATE_OR_SIZE => b"ZIP member decompression or size validation failed\0",
         OA_STATUS_ZIP_CRC => b"ZIP member CRC-32 validation failed\0",
         OA_STATUS_ZIP_BAD_ENTRY_INDEX => b"ZIP member index is outside the archive\0",
+        OA_STATUS_GRIB2_FORMAT => b"GRIB2 message structure or values are invalid\0",
+        OA_STATUS_GRIB2_UNSUPPORTED => b"GRIB2 edition, template or packing is unsupported\0",
+        OA_STATUS_GRIB2_LIMIT => b"GRIB2 message exceeds an existing decoder limit\0",
         _ => b"unknown status\0",
     }
 }
