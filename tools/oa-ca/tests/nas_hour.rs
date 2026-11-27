@@ -8,8 +8,8 @@
     clippy::panic
 )]
 
-#[path = "../../test-support/sealed_inputs.rs"]
-mod sealed_inputs;
+#[path = "../../test-support/sealed_data_root.rs"]
+mod sealed_data_root;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -162,7 +162,8 @@ fn the_track_mode_measures_from_the_start_time_and_reports_its_capacity_counters
 // REQ: OA-CA-032
 #[test]
 fn a_sealed_path_and_a_missing_start_are_refused() {
-    let sealed = sealed_inputs::sealed_inputs(env!("CARGO_MANIFEST_DIR")).raw_sample;
+    let sealed = sealed_data_root::data_root(env!("CARGO_MANIFEST_DIR"))
+        .join("raw/adsblol/2026.11.20/a.oaf");
     // seal-allow: runs the example, which checks every path in the guard before opening it.
     let o = run_example_with_path("census", &sealed);
     assert_command_refused(&o, 1, "sealed");
