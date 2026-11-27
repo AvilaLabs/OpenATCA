@@ -1225,8 +1225,13 @@ class ShardBalanceTests(unittest.TestCase):
         registry, errors = load_registry(REGISTRY_PATH)
         self.assertEqual(errors, [])
         chosen = select_proofs(registry["proofs"], None)
-        loads = [sum(p["ci_seconds"] for p in s) for s in balance_shards(chosen, 4)]
-        self.assertLessEqual(max(loads) - min(loads), max(p["ci_seconds"] for p in chosen))
+        shards = balance_shards(chosen, 4)
+        schedule_weight = lambda proof: (
+            proof["external_timeout_seconds"] if proof["ci_seconds_source"] == "none"
+            else proof["ci_seconds"]
+        )
+        loads = [sum(schedule_weight(p) for p in shard) for shard in shards]
+        self.assertLessEqual(max(loads) - min(loads), max(schedule_weight(p) for p in chosen))
 
     def test_the_workflow_runs_four_shards(self):
         text = (REPO / ".github" / "workflows" / "rust-proofs.yml").read_text()

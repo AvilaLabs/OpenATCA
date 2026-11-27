@@ -5,7 +5,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from tools import proof_source_inventory as inventory
+import proof_source_inventory as inventory
 
 
 class ProofSourceInventoryTests(unittest.TestCase):
