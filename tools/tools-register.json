@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "entries": [
+    {
+      "path": "tools/test_kani_validation.py",
+      "rule": "a",
+      "use": {
+        "kind": "ci",
+        "file": ".github/workflows/rust-proofs.yml",
+        "needle": "python3 tools/test_kani_validation.py"
+      }
+    },
+    {
+      "path": "tools/test_rust_proof_resources.py",
+      "rule": "a",
+      "use": {
+        "kind": "ci",
+        "file": ".github/workflows/rust-proofs.yml",
+        "needle": "python3 tools/test_rust_proof_resources.py"
+      }
+    },
+    {
+      "path": "tools/test_rust_proof_suite.py",
+      "rule": "a",
+      "use": {
+        "kind": "ci",
+        "file": ".github/workflows/rust-proofs.yml",
+        "needle": "python3 tools/test_rust_proof_suite.py"
+      }
+    }
+  ]
+}
