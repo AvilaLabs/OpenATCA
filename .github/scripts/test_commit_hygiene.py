@@ -159,7 +159,6 @@ def make_event_graph(repo: Path) -> EventGraph:
 def checker_env(event: str, ref: str, head: str, **range_values: str) -> dict[str, str]:
     return {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-        "COMMIT_EMAIL_LOG_MASK": FIXTURE_EMAIL,
         "EXPECTED_COMMIT_EMAIL": FIXTURE_EMAIL,
         "GITHUB_EVENT_NAME": event,
         "GITHUB_REF": ref,
@@ -178,6 +177,18 @@ def run_checker(repo: Path, env: dict[str, str], merge_output: bool = False):
         env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT if merge_output else subprocess.PIPE,
+        text=True,
+    )
+
+
+def run_mask_preflight(repo: Path, env: dict[str, str]):
+    checker = Path(__file__).with_name("check_commit_hygiene.py").resolve()
+    return subprocess.run(
+        [sys.executable, str(checker), "--mask-preflight"],
+        cwd=repo,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
     )
 
@@ -233,7 +244,6 @@ def run_proof_case(case: ProofCase) -> ProofReceipt:
             head = make_commit(repo, bad_tree, case.fixture, safe_head)
             test_env = {
                 "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-                "COMMIT_EMAIL_LOG_MASK": FIXTURE_EMAIL,
                 "EXPECTED_COMMIT_EMAIL": FIXTURE_EMAIL,
                 "GITHUB_EVENT_NAME": "push",
                 "GITHUB_REF": "refs/heads/main",
@@ -350,55 +360,78 @@ class CommitHygieneTests(unittest.TestCase):
         head = "a" * 40
         with patch.dict(os.environ, {
             "GITHUB_EVENT_NAME": "push", "GITHUB_SHA": head,
-            "COMMIT_EMAIL_LOG_MASK": "fixture@example.invalid",
         }, clear=True):
             with self.assertRaises(module.Refusal) as caught:
                 module.main()
         self.assertEqual(caught.exception.rule, "missing-or-invalid-email-variable")
         self.assertEqual(caught.exception.sha, head[:12])
 
-    def test_missing_or_mismatched_redaction_carrier_fails_before_git(self):
-        with patch.dict(os.environ, {"EXPECTED_COMMIT_EMAIL": "fixture@example.invalid"}, clear=True):
-            with self.assertRaises(module.Refusal) as caught:
-                module.main(mask_preflight=True)
-        self.assertEqual(caught.exception.rule, "email-log-mask-missing")
-        with patch.dict(os.environ, {
-            "COMMIT_EMAIL_LOG_MASK": "fixture@example.invalid",
-            "COMMIT_EMAIL_REDACTION_READY": "true",
-        }, clear=True):
-            self.assertEqual(module.main(mask_preflight=True), 0)
-        with patch.dict(os.environ, {
-            "COMMIT_EMAIL_LOG_MASK": "fixture@example.invalid",
-            "COMMIT_EMAIL_REDACTION_READY": "false",
-        }, clear=True):
-            with self.assertRaises(module.Refusal) as caught:
-                module.main(mask_preflight=True)
-        self.assertEqual(caught.exception.rule, "email-log-mask-mismatch")
-        with patch.dict(os.environ, {
-            "EXPECTED_COMMIT_EMAIL": "fixture@example.invalid",
-            "COMMIT_EMAIL_LOG_MASK": "different@example.invalid",
-        }, clear=True):
-            with self.assertRaises(module.Refusal) as caught:
-                module.main()
-        self.assertEqual(caught.exception.rule, "email-log-mask-mismatch")
+    def test_preflight_masks_actual_head_author_and_committer_emails(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary)
+            subprocess.run(["git", "init", "--quiet"], cwd=repo, check=True)
+            tree = make_tree(repo, {"fixture.txt": b"synthetic"})
+            head = make_commit(
+                repo,
+                tree,
+                CommitFixture(
+                    "synthetic mask preflight",
+                    author_email="author@example.invalid",
+                    committer_email="committer@example.invalid",
+                ),
+            )
+            env = {
+                "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                "GITHUB_ACTIONS": "true",
+                "GITHUB_EVENT_NAME": "push",
+                "GITHUB_SHA": head,
+            }
+            result = run_mask_preflight(repo, env)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(
+            result.stdout,
+            "::add-mask::author@example.invalid\n::add-mask::committer@example.invalid\n",
+        )
 
-    def test_workflow_uses_secret_carrier_and_vars_only_for_validation(self):
+    def test_preflight_refuses_missing_head_or_invalid_git_email(self):
+        with patch.dict(os.environ, {"GITHUB_EVENT_NAME": "push"}, clear=True), patch.object(
+            module, "git"
+        ) as git_call:
+            with self.assertRaises(module.Refusal) as caught:
+                module.main(mask_preflight=True)
+        self.assertEqual(caught.exception.rule, "invalid-range")
+        git_call.assert_not_called()
+        with patch.dict(os.environ, {
+            "GITHUB_ACTIONS": "true",
+            "GITHUB_EVENT_NAME": "push",
+            "GITHUB_SHA": "a" * 40,
+        }, clear=True), patch.object(
+            module,
+            "git",
+            return_value=b"bad\nvalue\0good@example.invalid\0OPENATCA_MASK_END\n",
+        ), patch(
+            "sys.stdout", new_callable=io.StringIO
+        ) as output:
+            with self.assertRaises(module.Refusal) as caught:
+                module.main(mask_preflight=True)
+        self.assertEqual(caught.exception.rule, "head-email-invalid")
+        self.assertEqual(output.getvalue(), "")
+
+    def test_workflow_masks_checkout_identity_before_vars_only_validation(self):
         workflow = (Path(__file__).parents[1] / "workflows" / "ci.yml").read_text()
-        self.assertIn("COMMIT_EMAIL_LOG_MASK: ${{ secrets.COMMIT_EMAIL_LOG_MASK }}", workflow)
-        self.assertIn(
-            "COMMIT_EMAIL_REDACTION_READY: ${{ vars.COMMIT_EMAIL == secrets.COMMIT_EMAIL_LOG_MASK }}",
-            workflow,
-        )
+        self.assertNotIn("COMMIT_EMAIL_LOG_MASK", workflow)
+        self.assertNotIn("COMMIT_EMAIL_REDACTION_READY", workflow)
+        self.assertNotIn("secrets.COMMIT_EMAIL", workflow)
         self.assertIn("EXPECTED_COMMIT_EMAIL: ${{ vars.COMMIT_EMAIL }}", workflow)
-        self.assertIn(
-            "if: env.COMMIT_EMAIL_LOG_MASK != '' && env.COMMIT_EMAIL_REDACTION_READY == 'true'",
-            workflow,
-        )
-        guard_start = workflow.index("- name: Require commit-email log redaction carrier")
+        self.assertIn("if: steps.email-mask.outputs.ready == 'true'", workflow)
+        guard_start = workflow.index("- name: Mask commit identity before validation")
         checker_start = workflow.index("- name: Check commit metadata and tracked path hygiene")
         guard_step = workflow[guard_start:checker_start]
         self.assertNotIn("EXPECTED_COMMIT_EMAIL", guard_step)
         self.assertIn("--mask-preflight", guard_step)
+        self.assertIn("id: email-mask", guard_step)
+        self.assertIn("${{ github.event.pull_request.head.sha || github.sha }}", workflow)
         self.assertLess(guard_start, checker_start)
 
     def test_failure_output_is_only_valid_short_sha_and_rule(self):
@@ -555,7 +588,6 @@ class CommitHygieneTests(unittest.TestCase):
             env = checker_env("push", "refs/heads/main", graph.main_head,
                               before=graph.main_base)
             invalid = "bad\n::warning::synthetic@example.invalid"
-            env["COMMIT_EMAIL_LOG_MASK"] = invalid
             env["EXPECTED_COMMIT_EMAIL"] = invalid
             env["GITHUB_ACTIONS"] = "true"
             result = run_checker(repo, env, merge_output=True)
@@ -564,7 +596,7 @@ class CommitHygieneTests(unittest.TestCase):
             self.assertNotIn("::add-mask::", result.stdout)
             self.assertNotIn(invalid, result.stdout)
 
-    def test_cli_fails_closed_for_missing_wrong_and_root_email_configuration(self):
+    def test_cli_fails_closed_for_missing_invalid_and_root_email_configuration(self):
         with tempfile.TemporaryDirectory() as temporary:
             repo = Path(temporary)
             graph = make_event_graph(repo)
@@ -574,10 +606,10 @@ class CommitHygieneTests(unittest.TestCase):
             base_env["GITHUB_ACTIONS"] = "true"
             cases = (
                 ({key: value for key, value in base_env.items()
-                  if key != "COMMIT_EMAIL_LOG_MASK"}, "email-log-mask-missing"),
-                ({**base_env, "COMMIT_EMAIL_LOG_MASK": "wrong@example.invalid"},
-                 "email-log-mask-mismatch"),
-                ({**base_env, "COMMIT_EMAIL_LOG_MASK": "/", "EXPECTED_COMMIT_EMAIL": "/"},
+                  if key != "EXPECTED_COMMIT_EMAIL"}, "missing-or-invalid-email-variable"),
+                ({**base_env, "EXPECTED_COMMIT_EMAIL": "wrong"},
+                 "missing-or-invalid-email-variable"),
+                ({**base_env, "EXPECTED_COMMIT_EMAIL": "/"},
                  "missing-or-invalid-email-variable"),
             )
             for env, rule in cases:

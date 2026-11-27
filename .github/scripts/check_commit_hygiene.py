@@ -110,6 +110,24 @@ def mask_email_before_use(value: str) -> None:
         print(f"::add-mask::{value}", flush=True)
 
 
+def mask_head_commit_emails() -> None:
+    head = event_head_sha()
+    if head is None:
+        raise Refusal("invalid-range")
+    raw = git("show", "-s", "--format=%ae%x00%ce%x00OPENATCA_MASK_END", head)
+    suffix = b"\0OPENATCA_MASK_END\n"
+    if not raw.endswith(suffix):
+        raise Refusal("metadata-unreadable", head)
+    emails = raw[:-len(suffix)].split(b"\0")
+    if len(emails) != 2:
+        raise Refusal("metadata-unreadable", head)
+    decoded = [email.decode("utf-8", "replace") for email in emails]
+    if not all(valid_email(email) for email in decoded):
+        raise Refusal("head-email-invalid", head)
+    for email in decoded:
+        mask_email_before_use(email)
+
+
 def normalized_message(message: str) -> str:
     compatible = unicodedata.normalize("NFKC", message)
     # Nonspacing/enclosing marks include zero-width joiners and variation selectors that
@@ -163,18 +181,12 @@ def check_tracked_paths(commits: list[str], cwd=None) -> None:
 
 
 def main(mask_preflight: bool = False) -> int:
-    mask = os.environ.get("COMMIT_EMAIL_LOG_MASK", "")
-    if not mask:
-        raise Refusal("email-log-mask-missing")
     if mask_preflight:
-        if os.environ.get("COMMIT_EMAIL_REDACTION_READY") != "true":
-            raise Refusal("email-log-mask-mismatch")
+        mask_head_commit_emails()
         return 0
     expected = os.environ.get("EXPECTED_COMMIT_EMAIL", "")
     if not valid_email(expected):
         raise Refusal("missing-or-invalid-email-variable")
-    if mask != expected:
-        raise Refusal("email-log-mask-mismatch")
     mask_email_before_use(expected)
     event = os.environ.get("GITHUB_EVENT_NAME", "")
     ref = os.environ.get("GITHUB_REF", "")

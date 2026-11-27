@@ -10,21 +10,23 @@ jobs:
   commit-hygiene:
     if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/train/') || startsWith(github.ref, 'refs/heads/wip/') || startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-24.04
-    env:
-      COMMIT_EMAIL_LOG_MASK: ${{ secrets.COMMIT_EMAIL_LOG_MASK }}
-      COMMIT_EMAIL_REDACTION_READY: ${{ vars.COMMIT_EMAIL == secrets.COMMIT_EMAIL_LOG_MASK }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Require commit-email log redaction carrier
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Mask commit identity before validation
+        id: email-mask
         env:
           GITHUB_EVENT_NAME: ${{ github.event_name }}
           GITHUB_SHA: ${{ github.sha }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: python3 .github/scripts/check_commit_hygiene.py --mask-preflight
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/check_commit_hygiene.py --mask-preflight
+          echo "ready=true" >> "$GITHUB_OUTPUT"
       - name: Check commit metadata and tracked path hygiene
-        if: env.COMMIT_EMAIL_LOG_MASK != '' && env.COMMIT_EMAIL_REDACTION_READY == 'true'
+        if: steps.email-mask.outputs.ready == 'true'
         env:
           EXPECTED_COMMIT_EMAIL: ${{ vars.COMMIT_EMAIL }}
           GITHUB_EVENT_NAME: ${{ github.event_name }}
@@ -60,12 +62,67 @@ jobs:
           name: quality-refusal-${{ matrix.escape }}
           path: ${{ runner.temp }}/quality-proof-${{ matrix.escape }}.txt
           if-no-files-found: error
+  safety-mutations:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Configure isolated synthetic data root
+        run: python3 .github/scripts/configure_test_data_root.py
+      - name: Test synthetic data root setup
+        run: python3 .github/scripts/test_configure_test_data_root.py
+      - name: Install product Rust toolchain
+        run: rustup toolchain install 1.89.0 --profile minimal && rustup default 1.89.0
+      - name: Install pinned mutation runner
+        run: cargo +1.89.0 install --locked cargo-mutants --version 27.1.0
+      - name: Verify mutation runner
+        run: cargo mutants --version | grep -Fx 'cargo-mutants 27.1.0'
+      - name: Mutation checker tests
+        run: python3 tools/test_check_safety_mutations.py
+      - name: Synthetic mutation runner fixture
+        run: python3 tools/run_safety_mutants_fixture.py
+      - name: Select changed range
+        id: changed-range
+        env:
+          EVENT: ${{ github.event_name }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          HEAD_SHA: ${{ github.sha }}
+          PUSH_REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT" == pull_request ]]; then
+            base="$PR_BASE"
+            head="$PR_HEAD"
+          elif [[ "$EVENT" == push ]]; then
+            head="$HEAD_SHA"
+            if [[ "$PUSH_REF" != refs/heads/main || "$PUSH_BEFORE" =~ ^0+$ ]]; then
+              base="$(git merge-base "$head" origin/main)"
+            else
+              base="$PUSH_BEFORE"
+            fi
+          else
+            echo 'unsupported workflow event' >&2
+            exit 1
+          fi
+          [[ "$base" =~ ^[0-9a-f]{40}$ && "$head" =~ ^[0-9a-f]{40}$ ]]
+          printf 'base=%s\nhead=%s\n' "$base" "$head" >> "$GITHUB_OUTPUT"
+      - name: Check changed safety-source mutants
+        env:
+          MUTATION_BASE: ${{ steps.changed-range.outputs.base }}
+          MUTATION_HEAD: ${{ steps.changed-range.outputs.head }}
+        run: python3 tools/check_safety_mutations.py --base "$MUTATION_BASE" --head "$MUTATION_HEAD"
   check:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Configure isolated synthetic data root
+        run: python3 .github/scripts/configure_test_data_root.py
       - name: Toolchain
         run: rustup toolchain install 1.89.0 --profile minimal --component clippy,rustfmt && rustup default 1.89.0
       - name: Cache Rust dependencies and build outputs
@@ -106,6 +163,62 @@ jobs:
         run: python3 tools/test_allocator_validation.py
       - name: Proof control provisioning tests
         run: python3 tools/test_prepare_rust_proof_controls.py
+      - name: Select immutable quality baseline revision
+        id: quality-range
+        env:
+          EVENT: ${{ github.event_name }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          HEAD_SHA: ${{ github.sha }}
+          PUSH_REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT" == pull_request ]]; then
+            base="$PR_BASE"
+            head="$PR_HEAD"
+          elif [[ "$EVENT" == push ]]; then
+            head="$HEAD_SHA"
+            if [[ "$PUSH_REF" != refs/heads/main || "$PUSH_BEFORE" =~ ^0+$ ]]; then
+              base="$(git merge-base "$head" origin/main)"
+            else
+              base="$PUSH_BEFORE"
+            fi
+          else
+            echo 'unsupported workflow event' >&2
+            exit 1
+          fi
+          [[ "$base" =~ ^[0-9a-f]{40}$ && "$head" =~ ^[0-9a-f]{40}$ ]]
+          printf 'base=%s\nhead=%s\n' "$base" "$head" >> "$GITHUB_OUTPUT"
+      - name: Check safety flag consumers
+        run: |
+          python3 .github/scripts/test_safety_flag_consumers.py
+          python3 .github/scripts/check_safety_flag_consumers.py
+      - name: Test quality size ratchet
+        run: PYTHONPATH=. python3 tools/test_quality_size_ratchet.py
+      - name: Prepare prior-revision quality baseline
+        env:
+          BASE_REVISION: ${{ steps.quality-range.outputs.base }}
+        run: |
+          set -euo pipefail
+          mkdir -p target
+          baseline_path='tools/quality-size-baseline.json'
+          if git cat-file -e "$BASE_REVISION:$baseline_path" 2>/dev/null; then
+            git show "$BASE_REVISION:$baseline_path" > target/quality-prior-baseline.json
+          else
+            worktree="$RUNNER_TEMP/quality-baseline-worktree"
+            test ! -e "$worktree"
+            git worktree add --detach "$worktree" "$BASE_REVISION"
+            mkdir -p "$worktree/target"
+            python3 "$GITHUB_WORKSPACE/tools/quality_size_ratchet.py" \
+              --root "$worktree" \
+              --baseline "$worktree/target/quality-prior-baseline.json" \
+              --write-baseline
+            cp "$worktree/target/quality-prior-baseline.json" target/quality-prior-baseline.json
+            git worktree remove --force "$worktree"
+          fi
+      - name: Check quality size against prior revision
+        run: python3 tools/quality_size_ratchet.py --root "$GITHUB_WORKSPACE" --baseline target/quality-prior-baseline.json --check
       - name: Allocation harness
         run: python3 tools/check_allocations.py --target-dir "$RUNNER_TEMP/oa-allocator-target" --out "$RUNNER_TEMP/oa-allocator-evidence"
       - name: Attach allocation qualification diagnostics
@@ -244,6 +357,8 @@ jobs:
           python3 tools/test_f1a_dependency_graph.py
           python3 tools/check_f1a_dependency_graph.py
           cargo +1.89.0 run --locked -p oa-trace -- --root "$GITHUB_WORKSPACE" | tee "$RUNNER_TEMP/oa-trace-vdd.txt"
+          OPENATCA_OA_TRACE_BIN="$GITHUB_WORKSPACE/target/debug/oa-trace" \
+            python3 tools/test_check_done_claim.py
           python3 -m unittest discover -s tools/oa-encounter/tests -p 'test_*.py'
           python3 tools/test_generate_oscal_control_map.py
           python3 tools/generate_oscal_control_map.py --check
@@ -297,6 +412,8 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+      - name: Configure isolated synthetic data root
+        run: python3 .github/scripts/configure_test_data_root.py
       - name: Toolchain
         run: rustup toolchain install 1.89.0 --profile minimal && rustup default 1.89.0
       - name: Cache Rust dependencies and build outputs
@@ -422,6 +539,8 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
+      - name: Configure isolated synthetic data root
+        run: python3 .github/scripts/configure_test_data_root.py
       - name: Toolchain
         run: rustup toolchain install 1.89.0 --profile minimal && rustup default 1.89.0
       - name: Cache Rust dependencies and build outputs
