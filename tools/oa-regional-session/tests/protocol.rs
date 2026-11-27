@@ -55,7 +55,7 @@ fn v2_preserves_native_adsb_source_quality_without_upgrading_it_to_reliability()
     assert_eq!(evidence.squawk, u16::MAX);
     assert_eq!(evidence.callsign, [0; 8]);
     assert!(matches!(
-        parse_event_line(&row.replace("\t8\t9\t4", "\t8\t12\t4")),
+        parse_event_line(&row.replace("\t8\t9\t4", "\t8\t16\t4")),
         Err(InputError::InvalidInteger)
     ));
     assert!(matches!(
