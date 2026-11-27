@@ -1,3 +1,3 @@
-# Exact cargo-mutants mutant identity<TAB>substantive reason
+# Exact package::cargo-mutants mutant name<TAB>substantive reason
 # Entries must correspond to a MissedMutant in this exact run. Stale identities
 # fail validation. Blank, placeholder, or generic reasons are rejected.
