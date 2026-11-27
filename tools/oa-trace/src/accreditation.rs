@@ -67,6 +67,7 @@ pub fn check(root: &Path) -> Vec<String> {
                 || !function
                     .bytes()
                     .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+                || !is_test_source_path(file)
                 || Path::new(file)
                     .components()
                     .any(|part| !matches!(part, Component::Normal(_)))
@@ -548,33 +549,69 @@ fn as_number(value: Option<&JsonValue>) -> Option<&str> {
 
 fn contains_test(source: &str, function: &str) -> bool {
     let sanitized = strip_comments_and_literals(source);
-    let lines: Vec<&str> = sanitized.lines().collect();
-    for (index, line) in lines.iter().enumerate() {
+    let mut attributes = Vec::<String>::new();
+    let mut depth = 0usize;
+    let mut disabled_module_depths = Vec::<usize>::new();
+    for line in sanitized.lines() {
         let declaration = line.trim_start();
-        let Some(rest) = declaration.strip_prefix("fn ") else {
+        if declaration.starts_with("#[") {
+            attributes.push(declaration.trim().to_owned());
             continue;
-        };
-        let name = rest
-            .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
-            .next()
-            .unwrap_or("");
-        if name == function {
-            let mut previous = index;
-            while let Some(prior_index) = previous.checked_sub(1) {
-                previous = prior_index;
-                let prior = lines.get(prior_index).map(|line| line.trim()).unwrap_or("");
-                if prior == "#[test]" {
-                    return true;
-                }
-                if prior.is_empty() || (prior.starts_with("#[") && prior.ends_with(']')) {
-                    continue;
-                }
-                return false;
-            }
-            return false;
         }
+        if declaration.is_empty() {
+            continue;
+        }
+        let has_test_attribute = attributes.iter().any(|attribute| attribute == "#[test]");
+        let disabled_here = attributes
+            .iter()
+            .any(|attribute| cfg_is_statically_empty(attribute));
+        let disabled_parent = disabled_module_depths.iter().any(|base| depth > *base);
+        if let Some(rest) = declaration.strip_prefix("fn ") {
+            let name = rest
+                .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+                .next()
+                .unwrap_or("");
+            if name == function {
+                return has_test_attribute && !disabled_here && !disabled_parent;
+            }
+        }
+        let module_is_disabled = module_opens_scope(declaration) && disabled_here;
+        attributes.clear();
+        let open = line.bytes().filter(|byte| *byte == b'{').count();
+        let close = line.bytes().filter(|byte| *byte == b'}').count();
+        if module_is_disabled && open > close {
+            disabled_module_depths.push(depth);
+        }
+        depth = depth.saturating_add(open).saturating_sub(close);
+        disabled_module_depths.retain(|base| depth > *base);
     }
     false
+}
+
+fn cfg_is_statically_empty(attribute: &str) -> bool {
+    let compact: String = attribute
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect();
+    compact == "#[cfg(any())]"
+}
+
+fn module_opens_scope(line: &str) -> bool {
+    let Some((head, _)) = line.split_once('{') else {
+        return false;
+    };
+    let head = head.trim();
+    head.starts_with("mod ")
+        || head.starts_with("pub mod ")
+        || head.starts_with("pub(crate) mod ")
+        || head.starts_with("pub(super) mod ")
+}
+
+fn is_test_source_path(file: &str) -> bool {
+    Path::new(file).extension().is_some_and(|extension| extension == "rs")
+        && Path::new(file).components().any(|component| {
+            matches!(component, Component::Normal(value) if value == "tests" || value == "src" || value == "examples")
+        })
 }
 
 /// Validates one named Rust test citation using the same comment/literal-aware parser as the
@@ -588,6 +625,7 @@ pub fn verify_test_reference(root: &Path, reference: &str) -> Result<(), String>
         || !function
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        || !is_test_source_path(file)
         || Path::new(file)
             .components()
             .any(|part| !matches!(part, Component::Normal(_)))
@@ -885,10 +923,19 @@ mod tests {
         )
         .unwrap();
         assert!(super::verify_test_reference(&root, "tests/example.rs::real_test").is_ok());
+        fs::write(
+            &path,
+            "#[cfg(any())]\nmod disabled {\n    #[test]\n    fn disabled_test() {}\n}\n#[test]\nfn real_test() {}\n",
+        )
+        .unwrap();
+        assert!(super::verify_test_reference(&root, "tests/example.rs::disabled_test").is_err());
         assert!(super::verify_test_reference(&root, "tests/example.rs::comment_fake").is_err());
         assert!(super::verify_test_reference(&root, "tests/example.rs::raw_fake").is_err());
         assert!(super::verify_test_reference(&root, "tests/example.rs::helper").is_err());
         assert!(super::verify_test_reference(&root, "../outside.rs::escape").is_err());
+        let non_rust = root.join("tests/reference.txt");
+        fs::write(&non_rust, "#[test]\nfn text_fake() {}\n").unwrap();
+        assert!(super::verify_test_reference(&root, "tests/reference.txt::text_fake").is_err());
         let _ = fs::remove_dir_all(root);
     }
 
@@ -911,6 +958,18 @@ mod tests {
         assert!(!contains_test(
             "/*\n#[test]\nfn fake() {}\n*/\nfn actual() {}",
             "fake"
+        ));
+        assert!(!contains_test(
+            "#[cfg(any())]\n#[test]\nfn disabled() {}",
+            "disabled"
+        ));
+        assert!(!contains_test(
+            "#[cfg(any())]\nmod disabled {\n#[test]\nfn nested() {}\n}\n",
+            "nested"
+        ));
+        assert!(contains_test(
+            "mod enabled {\n#[test]\nfn nested() {}\n}\n",
+            "nested"
         ));
     }
 
