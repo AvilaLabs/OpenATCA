@@ -3,8 +3,8 @@
 use oa_flight::{ALT_NIL, HO_ACCEPTED, HO_NONE, R_NO_HANDOFF, R_STALE, ST_ACTIVE};
 use oa_regional_session::flight::{
     flight_apply_batch, flight_apply_event, flight_driver_capacity, flight_driver_new,
-    flight_driver_new_bounded, flight_driver_report, flight_view_for_gufi,
-    flight_views_for_address, AdapterRefusal, FlightDriverConfig, FlightDriverError,
+    flight_driver_new_bounded, flight_driver_report, flight_view_as_of, flight_view_for_gufi,
+    flight_views_for_address, AdapterRefusal, FieldAsOf, FlightDriverConfig, FlightDriverError,
     FlightViewStatus, SharedFlightView, MAX_DRIVER_FLIGHTS, MAX_OFFLINE_DRIVER_FLIGHTS,
 };
 use oa_regional_session::{
@@ -470,6 +470,43 @@ fn address_join_keeps_ambiguity_full_gufi_and_cutoff_refusal_visible() {
     assert_eq!(
         flight_view_for_gufi(&mut table, first, *b"ZMP1", 21),
         Err(FlightViewStatus::UnknownCentre)
+    );
+}
+
+// REQ: OA-REG-002
+#[test]
+fn per_flight_as_of_ages_do_not_follow_an_unrelated_live_flight_update() {
+    let target = 0x1000_0000_0000_0000_0000_0000_0000_0001;
+    let unrelated = 0x2000_0000_0000_0000_0000_0000_0000_0002;
+    let mut table = driver(4, 8, 8);
+    for event in active_plan(target, ADDRESS, 100, 1) {
+        apply(&mut table, event);
+    }
+    for event in active_plan(unrelated, ADDRESS + 1, 9_000, 10) {
+        apply(&mut table, event);
+    }
+
+    let view = flight_view_for_gufi(&mut table, target, CENTRE, 10_000)
+        .expect("target plan remains available at the later consumer cutoff");
+    let as_of = flight_view_as_of(&view, 10_000).expect("all stamps are at or before cutoff");
+    assert_eq!(
+        as_of.plan,
+        FieldAsOf::AsOf {
+            source_age_ms: 9_900,
+            availability_age_ms: 9_900,
+        }
+    );
+    assert_eq!(
+        as_of.assigned,
+        FieldAsOf::Unknown,
+        "a field with no accepted update has no inferred freshness"
+    );
+    assert_eq!(
+        as_of.address,
+        FieldAsOf::AsOf {
+            source_age_ms: 9_899,
+            availability_age_ms: 9_899,
+        }
     );
 }
 

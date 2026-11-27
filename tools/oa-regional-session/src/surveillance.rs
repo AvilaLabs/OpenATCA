@@ -4,9 +4,9 @@
 use crate::input::{EventKind, NormalizedEvent, SourceKind};
 use oa_airspace::core::model::Model;
 use oa_ca::{
-    alert_log_clear, alert_log_new, ca_cycle, ca_new, ca_open, event_log_clear, event_log_new,
-    Area, CaConfig, CaTrack, Volume, AIRBORNE, F_COAST, F_IDENTITY_UNCONFIRMED, F_UNCERTAIN,
-    MAX_VOLUMES,
+    alert_log_clear, alert_log_new, ca_cycle_with_inhibits, ca_new, ca_open, event_log_clear,
+    event_log_new, Area, CaConfig, CaTrack, Volume, AIRBORNE, F_COAST, F_IDENTITY_UNCONFIRMED,
+    F_UNCERTAIN, MAX_VOLUMES,
 };
 use oa_display::core::ownership::OwnershipStatus;
 use oa_display::core::raster::frame_digest;
@@ -183,6 +183,9 @@ pub struct SurveillanceFrame {
     pub ca_open: Vec<oa_ca::Alert>,
     pub ca_closed: Vec<oa_ca::Alert>,
     pub ca_altitude_lost: Vec<oa_ca::AltLost>,
+    /// Per-alert acknowledgement/audit rows retained from the inhibition subsystem.
+    pub ca_suppressed: Vec<oa_safety::inhibit::Suppressed>,
+    pub ca_suppressed_overflow: u64,
     pub msaw: Option<crate::msaw_bridge::RegionalMsawFrame>,
     pub msaw_markers: Option<oa_display::core::alert_markers::MarkerStats>,
     pub msaw_altitude_source_unknown: u32,
@@ -192,11 +195,38 @@ pub struct SurveillanceFrame {
     pub tracker_stats: TrackerStats,
     pub track_transport_seen_ns: Option<i64>,
     pub track_measurement_seen_ns: Option<i64>,
+    /// Source health shared by the display and regional automation mode selector.
+    pub feeds: Vec<FeedStatus>,
+    /// Product-specific status. A retained empty/None value is never a healthy no-alert result
+    /// when the corresponding product was withheld by the selected/effective mode.
+    pub track_product: ProductAvailability,
+    pub ca_product: ProductAvailability,
+    pub msaw_product: ProductAvailability,
+    /// True when the selected/effective regional mode intentionally withheld surveillance products.
+    pub surveillance_withheld: bool,
+    pub withheld_tracks: u32,
+    pub withheld_alerts: u32,
+    pub withheld_ca_records: u32,
+    pub withheld_msaw_records: u32,
     pub measurement_rejections: u64,
     pub duplicate_rows_replaced: u32,
     pub displayed: u32,
     pub off_map: u32,
     pub warnings: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProductUnavailableReason {
+    OperatorSelectedFlightDataOnly,
+    SurveillanceFeedUnavailable,
+    FusionUnavailable,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProductAvailability {
+    Available,
+    NotConfigured,
+    Withheld(ProductUnavailableReason),
 }
 // A7.2: cold owned frame evidence, retained at most MAX_FRAMES times.
 
@@ -664,6 +694,18 @@ pub fn surveillance_finish(
     s: &mut Surveillance,
     ownership: Option<&OwnershipStatus>,
 ) -> Result<SurveillanceFrame, String> {
+    surveillance_finish_with_visibility(s, ownership, true, None)
+}
+
+pub(crate) fn surveillance_finish_with_visibility(
+    s: &mut Surveillance,
+    ownership: Option<&OwnershipStatus>,
+    include_surveillance: bool,
+    unavailable_reason: Option<ProductUnavailableReason>,
+) -> Result<SurveillanceFrame, String> {
+    if !include_surveillance && unavailable_reason.is_none() {
+        return Err("withheld surveillance products require a named reason".into());
+    }
     if s.failed {
         return Err("surveillance failed; reconstruct from the admitted input prefix".into());
     }
@@ -840,60 +882,72 @@ pub fn surveillance_finish(
         )?),
         None => None,
     };
-    let ca = ca_cycle(
+    let ca = ca_cycle_with_inhibits(
         &mut s.ca,
         time_ns,
         &ca_rows,
         &mut s.alerts,
         &mut s.events,
         &mut s.states,
+        &mut s.inhibits,
     );
     let (ca_closed, ca_altitude_lost) = capture_ca_logs(s);
+    let ca_suppressed = oa_safety::inhibit::suppressed_log(&s.inhibits).to_vec();
+    let ca_suppressed_overflow = oa_safety::inhibit::suppressed_overflow(&s.inhibits);
+    oa_safety::inhibit::suppressed_clear(&mut s.inhibits);
+    let withheld_tracks = if include_surveillance {
+        0
+    } else {
+        u32::try_from(tracks.len()).map_err(|_| "withheld track count overflow")?
+    };
+    let withheld_ca_records = if include_surveillance {
+        0
+    } else {
+        let rows = ca_open(&s.ca)
+            .len()
+            .checked_add(ca_closed.len())
+            .and_then(|count| count.checked_add(ca_altitude_lost.len()))
+            .and_then(|count| count.checked_add(ca_suppressed.len()))
+            .ok_or("withheld CA record count overflow")?;
+        u32::try_from(rows).map_err(|_| "withheld CA record count overflow")?
+    };
+    let withheld_msaw_records = if include_surveillance {
+        0
+    } else {
+        let rows = msaw.as_ref().map_or(Ok(0), |frame| {
+            frame
+                .open
+                .len()
+                .checked_add(frame.closed.len())
+                .and_then(|count| count.checked_add(frame.skipped.len()))
+                .ok_or("withheld MSAW record count overflow")
+        })?;
+        u32::try_from(rows).map_err(|_| "withheld MSAW record count overflow")?
+    };
+    let withheld_alerts = withheld_ca_records
+        .checked_add(withheld_msaw_records)
+        .ok_or("withheld alert count overflow")?;
+    let msaw_configured = msaw.is_some();
+    let feeds = feed_statuses(s, time_ns)?;
     let (msaw_markers, digest, displayed, off_map, warnings) = if !s.profile.render_scope {
-        let digest = offline_projection_digest(time_ns, &tracks, ca_open(&s.ca))?;
+        let digest = if include_surveillance {
+            offline_projection_digest(time_ns, &tracks, ca_open(&s.ca))?
+        } else {
+            offline_projection_digest(time_ns, &[], &[])?
+        };
         (None, digest, 0, 0, Vec::new())
     } else {
         let mut store = RowStore::default();
-        let stats = store_add(
-            &mut store,
-            &row_columns(&snapshot, &mut ColumnBuf::default()),
-            time_ns,
-        )
-        .map_err(err)?;
-        if stats.kept != stats.rows_in || store_finish(&mut store) != 0 {
-            return Err("scope input snapshot lost rows".into());
-        }
-        let mut feeds = Vec::with_capacity(5);
-        for (i, &name) in FEED_NAMES.iter().enumerate() {
-            let seen = if i == 0 {
-                s.track_measurement_seen_ns
-            } else {
-                required(&s.seen, i)?
-            };
-            let down = if i == 0 {
-                s.track_down
-            } else {
-                required(&s.down, i)?
-            };
-            let state = match seen {
-                None => FeedState::NoMessageSeen,
-                Some(at) => {
-                    let age = time_ns.checked_sub(at).ok_or("feed age overflow")?;
-                    if age < 0 {
-                        return Err("feed age is negative".into());
-                    }
-                    let age_ms = u32::try_from(age / 1_000_000)
-                        .map_err(|_| "feed age exceeds research envelope")?;
-                    if down || age >= 5 * SECOND_NS {
-                        FeedState::Lost { age_ms }
-                    } else if age >= 2 * SECOND_NS {
-                        FeedState::Slow { age_ms }
-                    } else {
-                        FeedState::Live
-                    }
-                }
-            };
-            feeds.push(FeedStatus { name, state });
+        if include_surveillance {
+            let stats = store_add(
+                &mut store,
+                &row_columns(&snapshot, &mut ColumnBuf::default()),
+                time_ns,
+            )
+            .map_err(err)?;
+            if stats.kept != stats.rows_in || store_finish(&mut store) != 0 {
+                return Err("scope input snapshot lost rows".into());
+            }
         }
         let newest_track = tracker_newest_update_ns(&s.tracker);
         let info = replay_build_with_overlays(
@@ -960,38 +1014,42 @@ pub fn surveillance_finish(
             15,
         )
         .map_err(err)?;
-        let msaw_markers = if let Some(frame) = msaw.as_ref() {
-            use oa_display::core::alert_markers::{
-                append_alert_markers, AlertMarker, MarkerState, NO_POSITION_E7,
-            };
-            if frame.open.len() > s.profile.max_tracks {
-                return Err("MSAW alert marker capacity exceeded".into());
-            }
-            let mut markers = Vec::with_capacity(s.profile.max_tracks);
-            for alert in &frame.open {
-                let position = tracks.iter().find(|track| track.address == alert.addr);
-                let state = if frame.stats.is_none() || alert.end_reason != oa_msaw::END_CLEAR {
-                    MarkerState::ProtectionLost
-                } else {
-                    match alert.peak {
-                        oa_msaw::Grade::Caution => MarkerState::Caution,
-                        oa_msaw::Grade::Warning => MarkerState::Warning,
-                    }
+        let msaw_markers = if include_surveillance {
+            if let Some(frame) = msaw.as_ref() {
+                use oa_display::core::alert_markers::{
+                    append_alert_markers, AlertMarker, MarkerState, NO_POSITION_E7,
                 };
-                markers.push(AlertMarker {
-                    address: alert.addr,
-                    lat_e7: position.map_or(NO_POSITION_E7, |track| track.lat_e7),
-                    lon_e7: position.map_or(NO_POSITION_E7, |track| track.lon_e7),
-                    state,
-                    position_known: u8::from(position.is_some()),
-                    reserved: [0; 2],
-                });
+                if frame.open.len() > s.profile.max_tracks {
+                    return Err("MSAW alert marker capacity exceeded".into());
+                }
+                let mut markers = Vec::with_capacity(s.profile.max_tracks);
+                for alert in &frame.open {
+                    let position = tracks.iter().find(|track| track.address == alert.addr);
+                    let state = if frame.stats.is_none() || alert.end_reason != oa_msaw::END_CLEAR {
+                        MarkerState::ProtectionLost
+                    } else {
+                        match alert.peak {
+                            oa_msaw::Grade::Caution => MarkerState::Caution,
+                            oa_msaw::Grade::Warning => MarkerState::Warning,
+                        }
+                    };
+                    markers.push(AlertMarker {
+                        address: alert.addr,
+                        lat_e7: position.map_or(NO_POSITION_E7, |track| track.lat_e7),
+                        lon_e7: position.map_or(NO_POSITION_E7, |track| track.lon_e7),
+                        state,
+                        position_known: u8::from(position.is_some()),
+                        reserved: [0; 2],
+                    });
+                }
+                markers.sort_by_key(|marker| marker.address);
+                Some(
+                    append_alert_markers(&mut s.scope.list, &s.scope.view.proj, &markers)
+                        .map_err(err)?,
+                )
+            } else {
+                None
             }
-            markers.sort_by_key(|marker| marker.address);
-            Some(
-                append_alert_markers(&mut s.scope.list, &s.scope.view.proj, &markers)
-                    .map_err(err)?,
-            )
         } else {
             None
         };
@@ -1033,6 +1091,10 @@ pub fn surveillance_finish(
     let track_transport_seen_ns = s.seen.first().copied().flatten();
     s.completed = true;
     s.failed = false;
+    if !include_surveillance {
+        tracks.clear();
+        flags.clear();
+    }
     Ok(SurveillanceFrame {
         time_ns,
         raster_rendered: s.profile.render_scope,
@@ -1042,6 +1104,8 @@ pub fn surveillance_finish(
         ca_open: ca_open(&s.ca).to_vec(),
         ca_closed,
         ca_altitude_lost,
+        ca_suppressed,
+        ca_suppressed_overflow,
         msaw,
         msaw_markers,
         msaw_altitude_source_unknown,
@@ -1051,12 +1115,83 @@ pub fn surveillance_finish(
         tracker_stats: *tracker_stats(&s.tracker),
         track_transport_seen_ns,
         track_measurement_seen_ns: s.track_measurement_seen_ns,
+        feeds,
+        track_product: product_availability(include_surveillance, true, unavailable_reason)?,
+        ca_product: product_availability(include_surveillance, true, unavailable_reason)?,
+        msaw_product: product_availability(
+            include_surveillance,
+            msaw_configured,
+            unavailable_reason,
+        )?,
+        surveillance_withheld: !include_surveillance,
+        withheld_tracks,
+        withheld_alerts,
+        withheld_ca_records,
+        withheld_msaw_records,
         measurement_rejections: s.measurement_rejections,
         duplicate_rows_replaced,
         displayed,
         off_map,
         warnings,
     })
+}
+
+fn product_availability(
+    include_surveillance: bool,
+    configured: bool,
+    reason: Option<ProductUnavailableReason>,
+) -> Result<ProductAvailability, String> {
+    if include_surveillance && configured {
+        return Ok(ProductAvailability::Available);
+    }
+    if include_surveillance {
+        return Ok(ProductAvailability::NotConfigured);
+    }
+    reason
+        .map(ProductAvailability::Withheld)
+        .ok_or_else(|| "withheld surveillance products require a named reason".into())
+}
+
+pub(crate) fn feed_statuses(s: &Surveillance, time_ns: i64) -> Result<Vec<FeedStatus>, String> {
+    let mut feeds = Vec::with_capacity(FEED_NAMES.len());
+    for (i, &name) in FEED_NAMES.iter().enumerate() {
+        let seen = if i == 0 {
+            s.track_measurement_seen_ns.or_else(|| {
+                if s.track_down {
+                    s.seen.first().copied().flatten()
+                } else {
+                    None
+                }
+            })
+        } else {
+            required(&s.seen, i)?
+        };
+        let down = if i == 0 {
+            s.track_down
+        } else {
+            required(&s.down, i)?
+        };
+        let state = match seen {
+            None => FeedState::NoMessageSeen,
+            Some(at) => {
+                let age = time_ns.checked_sub(at).ok_or("feed age overflow")?;
+                if age < 0 {
+                    return Err("feed age is negative".into());
+                }
+                let age_ms = u32::try_from(age / 1_000_000)
+                    .map_err(|_| "feed age exceeds research envelope")?;
+                if down || age >= 5 * SECOND_NS {
+                    FeedState::Lost { age_ms }
+                } else if age >= 2 * SECOND_NS {
+                    FeedState::Slow { age_ms }
+                } else {
+                    FeedState::Live
+                }
+            }
+        };
+        feeds.push(FeedStatus { name, state });
+    }
+    Ok(feeds)
 }
 
 /// Pixels are borrowed only while the completed immutable frame is being published by the shell.
@@ -1089,8 +1224,8 @@ pub fn surveillance_present_controls(
     if s.failed || !s.completed || s.frames == 0 {
         return Err("control overlay requires a completed frame".into());
     }
-    if console.len() > 128 || !console.bytes().all(|byte| (32..=126).contains(&byte)) {
-        return Err("console text must be at most 128 printable ASCII bytes".into());
+    if console.len() > 192 || !console.bytes().all(|byte| (32..=126).contains(&byte)) {
+        return Err("console and mode status must be at most 192 printable ASCII bytes".into());
     }
     if s.presentation_updates >= s.profile.max_presentation_updates {
         return Err("regional presentation update budget exhausted".into());
@@ -1139,7 +1274,7 @@ pub fn surveillance_present_controls(
     .map_err(err)?;
     for (index, line) in console.as_bytes().chunks(64).enumerate() {
         let text = std::str::from_utf8(line).map_err(|_| "console encoding")?;
-        let y = 132 + i32::try_from(index).map_err(|_| "console row")? * 12;
+        let y = 120 + i32::try_from(index).map_err(|_| "console row")? * 12;
         oa_display::list::push_text(
             &mut s.scope.list,
             (8 * 16, y * 16),
@@ -1162,6 +1297,7 @@ mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used, clippy::indexing_slicing)]
     use super::*;
     use oa_airspace::core::model::{self, Model};
+    use oa_ca::ca_cycle;
 
     fn test_model() -> Model {
         let mut model = Model {
@@ -1398,5 +1534,136 @@ mod tests {
         assert_eq!(capture_ca_logs(&mut s), (vec![], vec![]));
         assert_eq!(s.alerts.capacity, MAX_PAIRS);
         assert_eq!(s.events.capacity, MAX_TRACKS);
+    }
+
+    #[test]
+    fn withheld_ca_product_retains_suppressed_open_or_closed_alert_state() {
+        let mut s = new_surveillance();
+        surveillance_begin(&mut s, SECOND_NS).expect("begin suppressed alert frame");
+        let mut policy = oa_safety::inhibit::inhibit_config_none();
+        policy.max_alert_suppression_ns = Some(5 * SECOND_NS);
+        oa_safety::inhibit::pair_suppress_create(
+            &mut s.inhibits,
+            &policy,
+            &oa_safety::inhibit::PairSuppressRequest {
+                addr_a: 0x123456,
+                addr_b: 0x123457,
+                alert_start_ns: SECOND_NS,
+                start_ns: SECOND_NS,
+                end_ns: 4 * SECOND_NS,
+                text: oa_safety::inhibit::AlertControlText {
+                    reason: "SECTOR COORDINATION",
+                    author: "SUP A",
+                },
+            },
+            SECOND_NS,
+        )
+        .expect("explicit pair suppression is admitted");
+        let track = |addr| CaTrack {
+            lat_deg: 41.0,
+            lon_deg: -87.0,
+            addr,
+            vel_east_mps: 0.0,
+            vel_north_mps: 0.0,
+            r95_m: 0.0,
+            alt_ft: 10_000.0,
+            vrate_fpm: 0.0,
+            flags: 0,
+            ground: AIRBORNE,
+        };
+        let rows = [track(0x123456), track(0x123457)];
+        let cycle = ca_cycle_with_inhibits(
+            &mut s.ca,
+            SECOND_NS,
+            &rows,
+            &mut s.alerts,
+            &mut s.events,
+            &mut s.states,
+            &mut s.inhibits,
+        );
+        assert_eq!(cycle.stats.suppressed, 1);
+        assert!(ca_open(&s.ca)
+            .first()
+            .is_some_and(|alert| alert.flags & oa_ca::AF_SUPPRESSED != 0));
+
+        let frame = surveillance_finish_with_visibility(
+            &mut s,
+            None,
+            false,
+            Some(ProductUnavailableReason::OperatorSelectedFlightDataOnly),
+        )
+        .expect("withheld product carries explicit status");
+        assert_eq!(
+            frame.ca_product,
+            ProductAvailability::Withheld(ProductUnavailableReason::OperatorSelectedFlightDataOnly)
+        );
+        assert!(frame.withheld_ca_records > 0);
+        assert!(frame
+            .ca_open
+            .iter()
+            .chain(&frame.ca_closed)
+            .any(|alert| alert.flags & oa_ca::AF_SUPPRESSED != 0));
+        assert!(frame
+            .ca_suppressed
+            .iter()
+            .any(|audit| audit.alert_start_ns == SECOND_NS));
+    }
+
+    #[test]
+    fn withheld_ca_frame_exports_closed_and_altitude_lost_alert_details() {
+        let mut s = new_surveillance();
+        let track = |addr, alt_ft| CaTrack {
+            lat_deg: 41.0,
+            lon_deg: -87.0,
+            addr,
+            vel_east_mps: 0.0,
+            vel_north_mps: 0.0,
+            r95_m: 0.0,
+            alt_ft,
+            vrate_fpm: 0.0,
+            flags: 0,
+            ground: AIRBORNE,
+        };
+        let initial = [track(0x123456, 10_000.0), track(0x123457, 10_000.0)];
+        ca_cycle(
+            &mut s.ca,
+            SECOND_NS,
+            &initial,
+            &mut s.alerts,
+            &mut s.events,
+            &mut s.states,
+        );
+        let altitude_loss = [track(0x123456, f32::NAN), track(0x123457, 10_000.0)];
+        let loss = ca_cycle(
+            &mut s.ca,
+            2 * SECOND_NS,
+            &altitude_loss,
+            &mut s.alerts,
+            &mut s.events,
+            &mut s.states,
+        );
+        assert_eq!(loss.stats.alt_lost, 1);
+
+        surveillance_begin(&mut s, 5 * SECOND_NS).expect("begin outage frame");
+        let frame = surveillance_finish_with_visibility(
+            &mut s,
+            None,
+            false,
+            Some(ProductUnavailableReason::SurveillanceFeedUnavailable),
+        )
+        .expect("outage frame retains closed and altitude-loss details");
+        assert_eq!(
+            frame.ca_product,
+            ProductAvailability::Withheld(ProductUnavailableReason::SurveillanceFeedUnavailable)
+        );
+        assert!(frame
+            .ca_closed
+            .iter()
+            .any(|alert| alert.start_ns == SECOND_NS));
+        assert!(frame
+            .ca_altitude_lost
+            .iter()
+            .any(|event| event.addr == 0x123456 && event.t_ns == 2 * SECOND_NS));
+        assert!(frame.withheld_ca_records >= 2);
     }
 }

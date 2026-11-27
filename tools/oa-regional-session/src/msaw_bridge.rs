@@ -618,6 +618,64 @@ mod tests {
         assert!(crate::runtime::regional_pixels(&runtime).is_ok());
     }
 
+    #[test]
+    fn msaw_alert_state_survives_mode_withholding_and_recovers_with_fresh_track_data() {
+        let mut runtime = regional(regional_msaw_synthetic(32).unwrap());
+        crate::runtime::regional_step(&mut runtime, &receipt(1, Some(1500))).unwrap();
+        let active = crate::runtime::regional_step(&mut runtime, &receipt(2, Some(1490))).unwrap();
+        let active_msaw = active.surveillance.msaw.as_ref().unwrap();
+        assert_eq!(
+            active.surveillance.msaw_product,
+            crate::surveillance::ProductAvailability::Available
+        );
+        assert!(!active_msaw.open.is_empty());
+        let alert_start = active_msaw.open[0].start_ns;
+
+        let outage = crate::runtime::regional_step(
+            &mut runtime,
+            &crate::ReceiptBatch {
+                receipt_ns: 3_000_000_000,
+                source_clock_regressions: 0,
+                events: vec![crate::NormalizedEvent {
+                    receipt_ns: 3_000_000_000,
+                    source_ns: 3_000_000_000,
+                    sequence: 3,
+                    source: crate::SourceKind::Surveillance,
+                    identity: crate::Identity {
+                        flight_gufi: 0,
+                        aircraft_address: 0,
+                    },
+                    centre: *b"ZAU1",
+                    kind: crate::EventKind::FeedState {
+                        available: false,
+                        reason: 0,
+                    },
+                }],
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            outage.surveillance.msaw_product,
+            crate::surveillance::ProductAvailability::Withheld(
+                crate::surveillance::ProductUnavailableReason::SurveillanceFeedUnavailable
+            )
+        );
+        assert!(outage.surveillance.withheld_msaw_records > 0);
+        let retained_msaw = outage.surveillance.msaw.as_ref().unwrap();
+        assert!(retained_msaw
+            .open
+            .iter()
+            .chain(&retained_msaw.closed)
+            .any(|alert| alert.start_ns == alert_start));
+
+        let recovered =
+            crate::runtime::regional_step(&mut runtime, &receipt(4, Some(1490))).unwrap();
+        assert_eq!(
+            recovered.surveillance.msaw_product,
+            crate::surveillance::ProductAvailability::Available
+        );
+    }
+
     // REQ: OA-REG-012
     #[test]
     fn malformed_terrain_isolates_msaw_while_tracker_ca_and_scope_continue() {

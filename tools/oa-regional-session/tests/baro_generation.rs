@@ -83,21 +83,27 @@ fn clock_stepback_new_track_does_not_inherit_previous_baro_epoch() {
 
     // Six ascending late reports span the 10s out-of-order window. The sixth makes tracker_update
     // step its clock back to 191s, retire the old track whose latest state was 210s, and start a
-    // fresh generation for this address from its 191s barometric report. The final 192s row
-    // confirms that new track. Keeping all seven in one receipt avoids regional_advance moving
-    // the tracker clock between the back-clock reports.
+    // fresh generation for this address from its 191s barometric report. The 192s row confirms
+    // that new track. A final altitude-absent report at 222s keeps the aggregate surveillance
+    // feed live at the 223s issue cutoff without refreshing the 191s barometric evidence. Keeping
+    // the reports in one receipt avoids advancing the tracker clock between the back-clock reports.
     let frame = regional_step(
         &mut runtime,
         &batch(
             223,
-            &[181, 183, 185, 187, 189, 191, 192],
-            &[None, None, None, None, None, Some(1_500), None],
+            &[181, 183, 185, 187, 189, 191, 192, 222],
+            &[None, None, None, None, None, Some(1_500), None, None],
         ),
     )
     .unwrap();
 
     assert!(frame.surveillance.tracker_stats.time_steps_back > 0);
-    assert_eq!(frame.surveillance.tracks.len(), 1);
+    assert_eq!(
+        frame.surveillance.tracks.len(),
+        1,
+        "tracker stats at issue cutoff: {:?}",
+        frame.surveillance.tracker_stats
+    );
     assert_eq!(frame.surveillance.tracks[0].address, ADDRESS);
     let msaw = frame.surveillance.msaw.as_ref().expect("MSAW evidence");
     let stats = msaw.stats.expect("MSAW cycle stats");

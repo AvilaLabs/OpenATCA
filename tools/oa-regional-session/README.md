@@ -156,6 +156,22 @@ mm/s, and optional vertical rate ft/min. `FLIGHT` carries authoritative upstream
 identity, clearance and ownership updates. Its bootstrap `OWNER` operation is trusted normalized
 source state, not controller authority. `FEED` carries `UP`/`DOWN` and a reason code.
 
+OA-RS v1 exposes one logical surveillance category and carries no sensor or source-instance ID.
+For regional mode selection, `FEED` on `SURVEILLANCE` and surveillance measurements describe one
+caller-provided aggregate TRACK stream. `DOWN` therefore withholds the aggregate surveillance,
+CA, and configured MSAW products while retaining flight plans, handoff state, and alert history
+with explicit per-product unavailable status. A caller must not mix independent sensor streams
+and infer individual-sensor health from this format. Per-sensor fallback and Fusion are unsupported;
+Fusion selection is refused. Feed states for FLIGHT, ROUTE, WEATHER, and ADAPTATION remain
+category-specific and do not declare the TRACK aggregate healthy or unhealthy. No legacy FSL/EFSL
+flag mapping is claimed by these OpenATCA functional modes.
+
+The functional basis is [FAA JO 7110.65BB §13-1-16](https://www.faa.gov/documentLibrary/media/Order/7110.65BB_Bsc_w_Chg_1_dtd_8-7-25.pdf)
+for using electronic flight data to support situational awareness during surveillance or flight-data
+outages, and [FAA JO 7210.3EE §3-6-7](https://www.faa.gov/documentLibrary/media/Order/7210.3EE_Bsc_w_Chg_1_and_2_dtd_1-22-26_Final.pdf)
+for Fusion degradation and facility contingency procedures. These references do not define this
+runner's mode contract or an OA-RS sensor-identity field.
+
 `FILED_ROUTE` carries a 12-byte plan ID, a legacy meter label (not used to guess an active leg),
 and the converter's explicit identity-qualified grammar, for example
 `FIX:FIXA:K1:1:- DCT:FIXB:K1:1:-`. General ICAO route parsing remains open. Legacy `ROUTE`

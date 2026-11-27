@@ -435,7 +435,8 @@ fn integrated_runtime_recomputes_retained_prefix_across_process_death() {
     assert_eq!(
         (expected[3].handoff_state, expected[3].owner.as_str()),
         (2, "SECTOR1"),
-        "acceptance does not transfer ownership"
+        "acceptance does not transfer ownership: {:?}",
+        expected[3]
     );
     assert_eq!(
         (expected[4].handoff_state, expected[4].owner.as_str()),

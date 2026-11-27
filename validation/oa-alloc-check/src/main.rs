@@ -651,6 +651,9 @@ fn first_output(out: &TrackOutput) -> Option<OutRow> {
     Some(OutRow {
         t_ns: *out.t_ns.first()?,
         addr: *out.addr.first()?,
+        ident: *out.ident.first()?,
+        ident_ns: *out.ident_ns.first()?,
+        ident_conflict: *out.ident_conflict.first()?,
         lat_e7: *out.lat_e7.first()?,
         lon_e7: *out.lon_e7.first()?,
         vel_east_mps: *out.vel_east_mps.first()?,

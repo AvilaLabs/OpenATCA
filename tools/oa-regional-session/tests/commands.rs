@@ -78,6 +78,15 @@ fn ready(with_owner: bool) -> (RegionalRuntime, RegionalFrame) {
     )
     .expect("confirmed frame");
     assert_eq!(frame.surveillance.tracks.len(), 1);
+    assert!(
+        frame
+            .flights
+            .first()
+            .is_some_and(|flight| flight.view.is_some()),
+        "command fixture lacks a current full-key flight view: report={:?}, flights={:?}",
+        frame.flight_report,
+        frame.flights
+    );
     (engine, frame)
 }
 
@@ -118,12 +127,16 @@ fn step(
     event: oa_regional_session::NormalizedEvent,
 ) -> RegionalFrame {
     let receipt_ns = event.receipt_ns;
+    let position_sequence = u64::try_from(receipt_ns / SECOND)
+        .expect("positive fixture receipt")
+        .checked_add(2)
+        .expect("bounded fixture sequence");
     regional_step(
         engine,
         &ReceiptBatch {
             receipt_ns,
             source_clock_regressions: 0,
-            events: vec![event],
+            events: vec![position(receipt_ns, position_sequence), event],
         },
     )
     .expect("command frame")
@@ -242,6 +255,17 @@ fn wrong_actor_old_view_old_command_and_reused_address_are_refused_visibly() {
     assert_eq!(old_view.controller_outcome, CommandOutcome::Stale);
 
     let fresh = old_view;
+    // Restore a live surveillance view before testing the old command payload so the expected
+    // refusal is the stale frame sequence, not the runtime's feed-loss fallback.
+    regional_step(
+        &mut engine,
+        &ReceiptBatch {
+            receipt_ns: 9 * SECOND,
+            source_clock_regressions: 0,
+            events: vec![position(9 * SECOND, 11)],
+        },
+    )
+    .expect("current report before stale-command check");
     let old_command = command_at(
         &fresh,
         10 * SECOND,
@@ -261,6 +285,15 @@ fn wrong_actor_old_view_old_command_and_reused_address_are_refused_visibly() {
     )
     .expect("stale command refusal");
     assert_eq!(stale.controller_outcome, CommandOutcome::Stale);
+    assert!(
+        !stale.flights.is_empty(),
+        "current surveillance should supply a flight row: automation={:?}, tracks={}, feeds={:?}, tracker={:?}, quarantine={:?}",
+        stale.automation,
+        stale.surveillance.tracks.len(),
+        stale.surveillance.feeds,
+        stale.surveillance.tracker_stats,
+        stale.quarantine.records
+    );
     assert_eq!(stale.flights[0].view.unwrap().assigned.a_ft, 12000);
 
     let (mut reused_engine, old) = ready(true);

@@ -17,6 +17,9 @@ use crate::input::{EventKind, FlightOperation, HandoffOperation, NormalizedEvent
 pub const MAX_DRIVER_FLIGHTS: usize = 32;
 /// Maximum opt-in offline table capacity; the default driver remains capped at 32.
 pub const MAX_OFFLINE_DRIVER_FLIGHTS: usize = 8192;
+/// `oa-flight` key-index cells at the maximum offline capacity: `next_power_of_two(2 * entries)`.
+pub const MAX_OFFLINE_DRIVER_KEY_INDEX_CELLS: usize =
+    (MAX_OFFLINE_DRIVER_FLIGHTS * 2).next_power_of_two();
 /// Maximum entries in either externally visible flight log.
 pub const MAX_DRIVER_LOG_ENTRIES: usize = 1024;
 
@@ -369,6 +372,63 @@ pub struct SharedFlightView {
 // Budget: snapshots copied per admitted receipt frame are bounded by the selected driver's
 // capacity (32 for ordinary sessions; larger only for explicit offline profiles).
 const _: () = assert!(core::mem::size_of::<SharedFlightView>() == 336);
+
+/// Consumer-side time interpretation for one retained field. `Unknown` means the field has no
+/// accepted update stamp. `AsOf` reports elapsed time from the field's own source and availability
+/// stamps; it deliberately makes no freshness or expiry claim.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FieldAsOf {
+    Unknown,
+    AsOf {
+        source_age_ms: i64,
+        availability_age_ms: i64,
+    },
+}
+
+/// Per-field as-of interpretation of one immutable flight snapshot. Aggregate FLIGHT-feed
+/// health does not refresh these values; each age comes from that field's retained stamp.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SharedFlightAsOf {
+    pub plan: FieldAsOf,
+    pub assigned: FieldAsOf,
+    pub interim: FieldAsOf,
+    pub identity: FieldAsOf,
+    pub address: FieldAsOf,
+    pub owner: FieldAsOf,
+    pub handoff: FieldAsOf,
+}
+
+/// Interprets a frozen view at a consumer cutoff. Fields with no accepted update remain Unknown;
+/// known fields report their own source-time and availability-time age. A known field may be old
+/// while remaining valid until its documented amend/clear/transfer event, so this function does
+/// not label it fresh or stale and does not impose an expiry interval.
+pub fn flight_view_as_of(
+    view: &SharedFlightView,
+    cutoff_ms: i64,
+) -> Result<SharedFlightAsOf, FlightViewStatus> {
+    if cutoff_ms < 0 || !stamps_within_cutoff(view, cutoff_ms) {
+        return Err(FlightViewStatus::FutureSnapshot);
+    }
+    let field = |stamp: Stamp| {
+        if stamp.avail_ms == 0 {
+            FieldAsOf::Unknown
+        } else {
+            FieldAsOf::AsOf {
+                source_age_ms: cutoff_ms.saturating_sub(stamp.ts_ms),
+                availability_age_ms: cutoff_ms.saturating_sub(stamp.avail_ms),
+            }
+        }
+    };
+    Ok(SharedFlightAsOf {
+        plan: field(view.plan_stamp),
+        assigned: field(view.assigned_stamp),
+        interim: field(view.interim_stamp),
+        identity: field(view.identity_stamp),
+        address: field(view.address_stamp),
+        owner: field(view.owner_stamp),
+        handoff: field(view.handoff_stamp),
+    })
+}
 
 /// Why a view query did not produce a complete, unambiguous set of frozen rows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1016,6 +1076,42 @@ pub fn flight_view_for_gufi(
         return Err(FlightViewStatus::FutureSnapshot);
     }
     Ok(view)
+}
+
+/// Looks up one explicitly known full flight key without requiring an observed surveillance
+/// address. This keeps flight-plan and handoff awareness available during sensor outages.
+pub fn flight_view_for_key(
+    driver: &mut FlightDriver,
+    key: oa_flight::FlightKey,
+    centre: [u8; 4],
+    cutoff_ms: i64,
+) -> Result<SharedFlightView, FlightViewStatus> {
+    let Some(flight) = flight_get(&driver.table, &key) else {
+        driver.stats.unknown_flight_queries = driver.stats.unknown_flight_queries.saturating_add(1);
+        return Err(FlightViewStatus::UnknownFlight);
+    };
+    let Some(view) = view_for_flight(&flight, centre) else {
+        driver.stats.unknown_centre_queries = driver.stats.unknown_centre_queries.saturating_add(1);
+        return Err(FlightViewStatus::UnknownCentre);
+    };
+    if !stamps_within_cutoff(&view, cutoff_ms) {
+        driver.stats.future_snapshot_refusals =
+            driver.stats.future_snapshot_refusals.saturating_add(1);
+        return Err(FlightViewStatus::FutureSnapshot);
+    }
+    Ok(view)
+}
+
+/// Whether the authoritative table still owns this exact full key, without affecting query
+/// counters. Used to reclaim retired keys from the bounded offline view ledger.
+pub fn flight_driver_has_key(driver: &FlightDriver, key: oa_flight::FlightKey) -> bool {
+    flight_get(&driver.table, &key).is_some()
+}
+
+/// Maximum index probes one exact-key lookup can perform in this driver's allocated key index.
+/// `oa-flight::index_find` checks at most `cells.len()` cells before it returns.
+pub fn flight_driver_key_index_cells(driver: &FlightDriver) -> usize {
+    oa_flight::flight_key_index_cells(&driver.table)
 }
 
 fn view_for_flight(flight: &Flight, centre: [u8; 4]) -> Option<SharedFlightView> {

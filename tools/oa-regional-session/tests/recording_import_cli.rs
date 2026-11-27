@@ -75,7 +75,9 @@ fn synthetic_oaf_import_runs_through_tracking_and_stage_contract() {
     // Two valid airborne reports one second apart exercise actual tracker confirmation. Ground
     // and missing-altitude rows retain their distinct exclusions; a final malformed row is
     // quarantined by exact source ordinal without discarding its healthy siblings.
-    let base_ms = oa_fixm::parse_iso_ms(b"2030-01-02T03:04:03.000Z").unwrap();
+    // Keep the newest accepted track report one second before the 03:04:06 issue cutoff, so this
+    // test exercises current surveillance rather than the product-withheld Slow-feed mode.
+    let base_ms = oa_fixm::parse_iso_ms(b"2030-01-02T03:04:04.000Z").unwrap();
     let base_ns = base_ms.checked_mul(1_000_000).unwrap();
     let mut reports = oa_adsb::Reports::default();
     for row in [
@@ -83,17 +85,17 @@ fn synthetic_oaf_import_runs_through_tracking_and_stage_contract() {
         // 450 kt east advances about 0.00279 degrees of longitude here in one second.
         adsb_row(base_ns + 1_000_000_000, 41.900_000_0, -88.297_210_0),
         {
-            let mut row = adsb_row(base_ns + 1_500_000_000, 41.900_200_0, -88.298_000_0);
+            let mut row = adsb_row(base_ns + 1_250_000_000, 41.900_200_0, -88.298_000_0);
             row.flags |= oa_adsb::F_GROUND;
             row.baro_alt_ft = oa_adsb::NONE_I32;
             row
         },
         {
-            let mut row = adsb_row(base_ns + 2_000_000_000, 41.900_300_0, -88.297_000_0);
+            let mut row = adsb_row(base_ns + 1_500_000_000, 41.900_300_0, -88.297_000_0);
             row.baro_alt_ft = oa_adsb::NONE_I32;
             row
         },
-        adsb_row(base_ns + 3_000_000_000, 41.900_400_0, -88.296_000_0),
+        adsb_row(base_ns + 2_000_000_000, 41.900_400_0, -88.296_000_0),
     ] {
         oa_adsb::reports_push(&mut reports, &row);
     }
