@@ -223,19 +223,29 @@ def proof_selection_report(
 
 def changed_files(repo: Path, base: str) -> list[str] | None:
     """Files changed since `base`, or None when the comparison cannot be made. Renames are
-    reported as a delete and an add, so both the old and the new path count as changed."""
+    reported as a delete and an add, so both the old and the new path count as changed. NUL
+    framing preserves Git paths containing whitespace, quotes, newlines or non-ASCII bytes."""
     if base.startswith("-") or not re.fullmatch(r"[0-9a-fA-F]{7,64}|[A-Za-z0-9_./-]+", base):
         return None
     if set(base) == {"0"}:
         return None
     try:
         out = subprocess.run(
-            ["git", "diff", "--name-only", "--no-renames", base, "HEAD", "--"], cwd=repo,
-            check=True, capture_output=True, text=True, timeout=60,
+            ["git", "diff", "--name-only", "-z", "--no-renames", base, "HEAD", "--"], cwd=repo,
+            check=True, capture_output=True, timeout=60,
         ).stdout
     except (OSError, subprocess.SubprocessError):
         return None
-    return [line for line in out.splitlines() if line]
+    if not out:
+        return []
+    if not out.endswith(b"\0"):
+        return None
+    try:
+        return [path.decode("utf-8", "strict") for path in out[:-1].split(b"\0")]
+    except UnicodeDecodeError:
+        # An unrepresentable path makes the affected set unknowable. The caller treats None as
+        # all packages, so this cannot turn a changed package into an empty selection.
+        return None
 
 
 def balance_shards(proofs: list[dict[str, Any]], count: int) -> list[list[dict[str, Any]]]:

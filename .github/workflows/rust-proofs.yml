@@ -42,25 +42,21 @@ jobs:
         run: python3 tools/test_rust_proof_resources.py
       - name: Test Kani runner and result bindings
         run: python3 tools/test_kani_validation.py
+      - name: Guard against proof cap increases
+        run: |
+          base="$(git merge-base origin/main HEAD)"
+          python3 tools/check_proof_caps.py --repo "$GITHUB_WORKSPACE" --base "$base"
       - name: Pick the proofs this run covers
         id: pick
         env:
-          EVENT: ${{ github.event_name }}
-          PUSH_BEFORE: ${{ github.event.before }}
-          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_REF: ${{ github.ref }}
+          GITHUB_SHA: ${{ github.sha }}
+          GITHUB_EVENT_BEFORE: ${{ github.event.before }}
+          GITHUB_PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
-          # Pushes compare with the previous commit on main; PRs compare with their base.
-          case "$EVENT" in
-            push)
-              base="$PUSH_BEFORE"
-              if [ "$base" = "0000000000000000000000000000000000000000" ]; then
-                base="$(git merge-base "$GITHUB_SHA" origin/main)"
-              fi
-              echo "changed_from=$base" >> "$GITHUB_OUTPUT"
-              ;;
-            pull_request) echo "changed_from=$PR_BASE" >> "$GITHUB_OUTPUT" ;;
-            *) echo "changed_from=" >> "$GITHUB_OUTPUT" ;;
-          esac
+          base="$(python3 tools/select_rust_proof_base.py --repo "$GITHUB_WORKSPACE")"
+          echo "changed_from=$base" >> "$GITHUB_OUTPUT"
       - name: Run registered proof suite sequentially
         env:
           CHANGED_FROM: ${{ steps.pick.outputs.changed_from }}

@@ -782,6 +782,94 @@ class SelectionHardeningTests(unittest.TestCase):
         (tools_dir / "kani_validation.py").write_text("# fixture runner is not reached\n")
         return repo, base
 
+    def selector_workspace(self, root):
+        files = dict(self.BASE)
+        files["crates/b/Cargo.toml"] = manifest("oa-track-core", 'oa-math = { path = "../a" }\n')
+        files["crates/b/src/lib.rs"] = "pub fn stable() {}\n"
+        files["tools/kani_validation.py"] = SuiteEndToEndTests.fake_runner_source()
+        files["tools/rust_proof_suite.py"] = "# fixture source snapshot\n"
+        tracker = proof_entry()
+        tracker.update(id="tracker-core-invariant", package="oa-track-core")
+        other = proof_entry()
+        other.update(id="unrelated-ca-invariant", package="oa-ca")
+        files["tools/rust_proofs.json"] = json.dumps(registry_with(tracker, other)) + "\n"
+        repo = make_workspace(root, files)
+        main_base = git(repo, "rev-parse", "HEAD")
+        git(repo, "update-ref", "refs/remotes/origin/main", main_base)
+        return repo, main_base
+
+    def run_actual_suite_cli(self, repo, base, output, invoked):
+        command = [
+            "python3", str(Path(__file__).with_name("rust_proof_suite.py")),
+            "--repo", str(repo), "--out", str(output), "--target-dir", str(output.parent / "target"),
+            "--registry", str(repo / "tools/rust_proofs.json"), "--changed-from", base,
+        ]
+        env = os.environ.copy()
+        env["FAKE_RUN_RECORD_MODE"] = "pass"
+        env["FAKE_INVOKED"] = str(invoked)
+        return subprocess.run(command, env=env, capture_output=True, text=True, timeout=60)
+
+    def test_train_push_uses_cumulative_main_base_and_reaches_tracker_after_docs_push(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, main_base = self.selector_workspace(root)
+            source = repo / "crates/b/src/modél.rs"
+            source.write_text("pub fn changed_tracker_source() {}\n", encoding="utf-8")
+            git(repo, "add", "crates/b/src/modél.rs")
+            git(repo, "commit", "-q", "-m", "change tracker source")
+            tracker_commit = git(repo, "rev-parse", "HEAD")
+            (repo / "docs").mkdir()
+            (repo / "docs/readme.md").write_text("documentation-only follow-up\n")
+            git(repo, "add", "docs/readme.md")
+            git(repo, "commit", "-q", "-m", "follow up with docs")
+            tip = git(repo, "rev-parse", "HEAD")
+            git(repo, "branch", "train/selector-fixture", tip)
+
+            env = os.environ.copy()
+            env.update({
+                "GITHUB_EVENT_NAME": "push",
+                "GITHUB_REF": "refs/heads/train/selector-fixture",
+                "GITHUB_SHA": tip,
+                "GITHUB_EVENT_BEFORE": tracker_commit,
+                "GITHUB_PR_BASE_SHA": "",
+            })
+            selected_base = subprocess.run(
+                ["python3", str(Path(__file__).with_name("select_rust_proof_base.py")),
+                 "--repo", str(repo)],
+                env=env, capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(selected_base.returncode, 0, selected_base.stderr)
+            self.assertEqual(selected_base.stdout.strip(), main_base)
+
+            invoked = root / "proof-invocations.txt"
+            output = root / "evidence"
+            actual = self.run_actual_suite_cli(repo, selected_base.stdout.strip(), output, invoked)
+            self.assertEqual(actual.returncode, 0, actual.stderr)
+            suite = json.loads((output / "suite.json").read_text(encoding="utf-8"))
+            self.assertEqual(suite["selection"]["base"], main_base)
+            self.assertIn("crates/b/src/modél.rs", suite["selection"]["changed_files"])
+            self.assertEqual([row["id"] for row in suite["checks"]], ["tracker-core-invariant"])
+            self.assertEqual(invoked.read_text(encoding="utf-8").splitlines(),
+                             ["types::proofs::bounded_example"])
+
+    def test_unrepresentable_git_path_runs_all_proofs_instead_of_skipping(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, base = self.selector_workspace(root)
+            raw_path = os.fsencode(repo) + b"/crates/b/src/" + bytes([0xFF]) + b".rs"
+            descriptor = os.open(raw_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            os.close(descriptor)
+            git(repo, "add", "--all")
+            git(repo, "commit", "-q", "-m", "add unrepresentable Rust path")
+
+            invoked = root / "proof-invocations.txt"
+            output = root / "evidence"
+            actual = self.run_actual_suite_cli(repo, base, output, invoked)
+            self.assertEqual(actual.returncode, 2)
+            self.assertIn("cannot bind proof target namespaces", actual.stderr)
+            self.assertFalse((output / "suite.json").exists())
+            self.assertFalse(invoked.exists())
+
     def test_a_rename_counts_as_a_change_to_the_old_and_the_new_path(self):
         with tempfile.TemporaryDirectory() as temp:
             repo = make_workspace(temp, self.BASE)
