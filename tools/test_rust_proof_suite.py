@@ -11,6 +11,7 @@ import re
 import subprocess
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from dataclasses import dataclass
 from unittest import mock
 
 from rust_proof_suite import (
@@ -24,6 +25,23 @@ from kani_validation import LOOP_UNWIND_PRESETS
 
 REPO = Path(__file__).resolve().parents[1]
 REGISTRY_PATH = REPO / "tools" / "rust_proofs.json"
+
+
+@dataclass(frozen=True)
+class SuiteRun:
+    mode: str = "pass"
+    invoked: Path | None = None
+    proof_ids: tuple[str, ...] | None = None
+    changed_from: str | None = None
+    shard: tuple[int, int] | None = None
+
+
+@dataclass(frozen=True)
+class CapturedRun:
+    result: int
+    suite: dict | None
+    stdout: str
+    stderr: str
 
 
 def proof_entry():
@@ -402,12 +420,26 @@ print("fake runner stdout")
         subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
         return repo, registry_path, root / "evidence", root / "target", mode
 
+    def run_captured(self, repo, out, target, registry, options=SuiteRun()):
+        env = {"FAKE_RUN_RECORD_MODE": options.mode}
+        if options.invoked is not None:
+            env["FAKE_INVOKED"] = str(options.invoked)
+        stdout, stderr = io.StringIO(), io.StringIO()
+        selection = {"proof_ids": list(options.proof_ids)} if options.proof_ids is not None else {}
+        if options.changed_from is not None:
+            selection["changed_from"] = options.changed_from
+        if options.shard is not None:
+            selection["shard"] = options.shard
+        with mock.patch.dict(os.environ, env), redirect_stdout(stdout), redirect_stderr(stderr):
+            result = run_suite(repo, out, target, registry, **selection)
+        suite_path = out / "suite.json"
+        suite = json.loads(suite_path.read_text()) if suite_path.is_file() else None
+        return CapturedRun(result, suite, stdout.getvalue(), stderr.getvalue())
+
     def invoke(self, root, mode="pass", proof_count=2):
         repo, registry, out, target, mode = self.fake_workspace(root, mode, proof_count)
-        stdout, stderr = io.StringIO(), io.StringIO()
-        with mock.patch.dict(os.environ, {"FAKE_RUN_RECORD_MODE": mode}), redirect_stdout(stdout), redirect_stderr(stderr):
-            result = run_suite(repo, out, target, registry)
-        return result, out, registry, stdout.getvalue(), stderr.getvalue()
+        captured = self.run_captured(repo, out, target, registry, SuiteRun(mode=mode))
+        return captured.result, out, registry, captured.stdout, captured.stderr
 
     def test_two_fake_harness_runs_pass_and_pipeline_sources_are_archived(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -458,12 +490,10 @@ print("fake runner stdout")
             root = Path(temp)
             repo, registry, out, target, _ = self.fake_workspace(root, mode="fail", proof_count=3)
             invoked = root / "invoked.txt"
-            stdout, stderr = io.StringIO(), io.StringIO()
-            with mock.patch.dict(os.environ, {
-                "FAKE_RUN_RECORD_MODE": "fail", "FAKE_INVOKED": str(invoked),
-            }), redirect_stdout(stdout), redirect_stderr(stderr):
-                result = run_suite(repo, out, target, registry)
-            suite = json.loads((out / "suite.json").read_text())
+            captured = self.run_captured(
+                repo, out, target, registry, SuiteRun(mode="fail", invoked=invoked),
+            )
+            result, suite = captured.result, captured.suite
             statuses = [check["status"] for check in suite["checks"]]
             self.assertEqual(result, 1)
             self.assertEqual(suite["status"], "FAIL")
@@ -474,7 +504,7 @@ print("fake runner stdout")
                 "types::proofs::example_1_bounded",
                 "types::proofs::example_2_bounded",
             ])
-            self.assertIn("loop binding did not match source evidence", stdout.getvalue())
+            self.assertIn("loop binding did not match source evidence", captured.stdout)
 
     # Kills the old stop-after-first-failure mutation: a following proof must execute and report PASS.
     def test_failure_then_pass_executes_and_reports_both_proofs(self):
@@ -482,12 +512,10 @@ print("fake runner stdout")
             root = Path(temp)
             repo, registry, out, target, _ = self.fake_workspace(root, mode="first-fail", proof_count=2)
             invoked = root / "invoked.txt"
-            stdout, stderr = io.StringIO(), io.StringIO()
-            with mock.patch.dict(os.environ, {
-                "FAKE_RUN_RECORD_MODE": "first-fail", "FAKE_INVOKED": str(invoked),
-            }), redirect_stdout(stdout), redirect_stderr(stderr):
-                result = run_suite(repo, out, target, registry)
-            suite = json.loads((out / "suite.json").read_text())
+            captured = self.run_captured(
+                repo, out, target, registry, SuiteRun(mode="first-fail", invoked=invoked),
+            )
+            result, suite = captured.result, captured.suite
             self.assertEqual(result, 1)
             self.assertEqual([entry["status"] for entry in suite["checks"]], ["FAIL", "PASS"])
             self.assertEqual(len(invoked.read_text().splitlines()), 2)
@@ -524,15 +552,13 @@ print("fake runner stdout")
             manifest = repo / "Cargo.toml"
             manifest.write_text(manifest.read_text(encoding="utf-8") + "\n# source revision\n")
             second_out = root / "evidence-next"
-            stdout, stderr = io.StringIO(), io.StringIO()
-            with redirect_stdout(stdout), redirect_stderr(stderr):
-                second_result = run_suite(repo, second_out, target_root, registry)
-            second_suite = json.loads((second_out / "suite.json").read_text())
+            second = self.run_captured(repo, second_out, target_root, registry)
+            second_result, second_suite = second.result, second.suite
             second_command = second_suite["checks"][0]["command"]
             second_target = second_command[second_command.index("--target-dir") + 1]
 
             self.assertEqual(first_result, 0, stderr.getvalue())
-            self.assertEqual(second_result, 0, stderr.getvalue())
+            self.assertEqual(second_result, 0, second.stderr)
             self.assertNotEqual(first_target, second_target)
 
     # Kills the shared-root substitution in _run_one_proof using two real nightly registry rows.
@@ -551,13 +577,11 @@ print("fake runner stdout")
             root = Path(temp)
             repo, registry_path, out, target_root, _ = self.fake_workspace(root, proof_count=1)
             registry_path.write_text(json.dumps(registry_with(*proofs), indent=2) + "\n")
-            stdout, stderr = io.StringIO(), io.StringIO()
-            with mock.patch.dict(os.environ, {"FAKE_RUN_RECORD_MODE": "pass"}), \
-                    redirect_stdout(stdout), redirect_stderr(stderr):
-                result = run_suite(repo, out, target_root, registry_path, proof_ids=list(proof_ids))
-
-            suite = json.loads((out / "suite.json").read_text())
-            self.assertEqual(result, 0, stderr.getvalue())
+            captured = self.run_captured(
+                repo, out, target_root, registry_path, SuiteRun(proof_ids=proof_ids),
+            )
+            suite = captured.suite
+            self.assertEqual(captured.result, 0, captured.stderr)
             self.assertEqual(suite["status"], "PASS")
             self.assertEqual(suite["selected_count"], len(proofs))
             commands = {check["id"]: check["command"] for check in suite["checks"]}
@@ -590,13 +614,9 @@ print("fake runner stdout")
             root = Path(temp)
             repo, registry, out, target, _ = self.fake_workspace(root, proof_count=3)
             invoked = root / "invoked.txt"
-            stdout, stderr = io.StringIO(), io.StringIO()
-            with mock.patch.dict(os.environ, {
-                "FAKE_RUN_RECORD_MODE": "pass", "FAKE_INVOKED": str(invoked),
-            }), redirect_stdout(stdout), redirect_stderr(stderr):
-                result = run_suite(repo, out, target, registry)
-            suite = json.loads((out / "suite.json").read_text())
-            self.assertEqual(result, 0, stderr.getvalue())
+            captured = self.run_captured(repo, out, target, registry, SuiteRun(invoked=invoked))
+            suite = captured.suite
+            self.assertEqual(captured.result, 0, captured.stderr)
             self.assertEqual(suite["status"], "PASS")
             self.assertEqual([x["status"] for x in suite["checks"]], ["PASS"] * 3)
             self.assertEqual(len(invoked.read_text().splitlines()), 3)
@@ -604,13 +624,11 @@ print("fake runner stdout")
             root = Path(temp)
             repo, registry, out, target, _ = self.fake_workspace(root, mode="fail", proof_count=2)
             invoked = root / "invoked.txt"
-            stdout, stderr = io.StringIO(), io.StringIO()
-            with mock.patch.dict(os.environ, {
-                "FAKE_RUN_RECORD_MODE": "fail", "FAKE_INVOKED": str(invoked),
-            }), redirect_stdout(stdout), redirect_stderr(stderr):
-                result = run_suite(repo, out, target, registry)
-            suite = json.loads((out / "suite.json").read_text())
-            self.assertEqual(result, 1)
+            captured = self.run_captured(
+                repo, out, target, registry, SuiteRun(mode="fail", invoked=invoked),
+            )
+            suite = captured.suite
+            self.assertEqual(captured.result, 1)
             self.assertEqual(suite["status"], "FAIL")
             self.assertEqual([x["status"] for x in suite["checks"]], ["FAIL"] * 2)
             self.assertEqual(len(invoked.read_text().splitlines()), 2)
@@ -620,13 +638,12 @@ print("fake runner stdout")
             root = Path(temp)
             repo, registry, out, target, _ = self.fake_workspace(root, proof_count=3)
             invoked = root / "invoked.txt"
-            stdout, stderr = io.StringIO(), io.StringIO()
-            with mock.patch.dict(os.environ, {
-                "FAKE_RUN_RECORD_MODE": "pass", "FAKE_INVOKED": str(invoked),
-            }), redirect_stdout(stdout), redirect_stderr(stderr):
-                result = run_suite(repo, out, target, registry, proof_ids=["sample-proof", "second-proof-2"])
-            self.assertEqual(result, 0, stderr.getvalue())
-            suite = json.loads((out / "suite.json").read_text())
+            captured = self.run_captured(
+                repo, out, target, registry,
+                SuiteRun(invoked=invoked, proof_ids=("sample-proof", "second-proof-2")),
+            )
+            self.assertEqual(captured.result, 0, captured.stderr)
+            suite = captured.suite
             self.assertEqual([entry["id"] for entry in suite["checks"]], ["sample-proof", "second-proof-2"])
             self.assertEqual(suite["selection"]["requested_proof_ids"], ["sample-proof", "second-proof-2"])
             self.assertEqual(suite["selection"]["excluded_proofs"][0]["status"], "EXCLUDED")
@@ -638,13 +655,15 @@ print("fake runner stdout")
         for proof_ids, changed_from in ((["not-registered"], None), (["sample-proof"], "HEAD")):
             with self.subTest(proof_ids=proof_ids, changed_from=changed_from), tempfile.TemporaryDirectory() as temp:
                 repo, registry, out, target, _ = self.fake_workspace(Path(temp), proof_count=1)
-                stdout, stderr = io.StringIO(), io.StringIO()
-                with redirect_stdout(stdout), redirect_stderr(stderr):
-                    result = run_suite(
-                        repo, out, target, registry, changed_from=changed_from, proof_ids=proof_ids,
-                    )
-                self.assertEqual(result, 2)
-                self.assertIn("cannot select proofs" if changed_from is None else "cannot be combined", stderr.getvalue())
+                captured = self.run_captured(
+                    repo, out, target, registry,
+                    SuiteRun(proof_ids=tuple(proof_ids), changed_from=changed_from),
+                )
+                self.assertEqual(captured.result, 2)
+                self.assertIn(
+                    "cannot select proofs" if changed_from is None else "cannot be combined",
+                    captured.stderr,
+                )
 
     def test_legacy_fail_fast_cli_flag_is_accepted_with_deprecation_warning(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -665,11 +684,9 @@ print("fake runner stdout")
         for index in range(2):
             with tempfile.TemporaryDirectory() as temp:
                 repo, registry, out, target, _ = self.fake_workspace(Path(temp), proof_count=5)
-                stdout, stderr = io.StringIO(), io.StringIO()
-                with redirect_stdout(stdout), redirect_stderr(stderr):
-                    result = run_suite(repo, out, target, registry, shard=(index, 2))
-                self.assertEqual(result, 0, stderr.getvalue())
-                suite = json.loads((out / "suite.json").read_text())
+                captured = self.run_captured(repo, out, target, registry, SuiteRun(shard=(index, 2)))
+                self.assertEqual(captured.result, 0, captured.stderr)
+                suite = captured.suite
                 self.assertEqual(suite["shard"], f"{index}/2")
                 seen.append([x["proof"] if "proof" in x else x["id"] for x in suite["checks"]])
         self.assertEqual([len(x) for x in seen], [3, 2])
@@ -684,11 +701,9 @@ print("fake runner stdout")
             proof["harness"] = sorted(LOOP_UNWIND_PRESETS["late-replay-two-events"]["harnesses"])[0]
             proof["loop_unwind_overrides"] = ["late-replay-two-events"]
             registry.write_text(json.dumps(registry_with(proof), indent=2) + "\n")
-            stdout, stderr = io.StringIO(), io.StringIO()
-            with redirect_stdout(stdout), redirect_stderr(stderr):
-                result = run_suite(repo, out, target, registry)
-            self.assertEqual(result, 0, stderr.getvalue())
-            suite = json.loads((out / "suite.json").read_text())
+            captured = self.run_captured(repo, out, target, registry)
+            self.assertEqual(captured.result, 0, captured.stderr)
+            suite = captured.suite
             outcome = suite["checks"][0]
             self.assertIn("--loop-unwind-preset", outcome["command"])
             self.assertIn("late-replay-two-events", outcome["command"])
@@ -834,6 +849,16 @@ class SelectionHardeningTests(unittest.TestCase):
         "crates/a/src/lib.rs": "",
     }
 
+    def deleted_package_workspace(self, temp, files, message):
+        repo = make_workspace(temp, files)
+        base = git(repo, "rev-parse", "HEAD")
+        git(repo, "rm", "-r", "crates/a")
+        git(repo, "commit", "-q", "-m", message)
+        tools_dir = repo / "tools"
+        tools_dir.mkdir()
+        (tools_dir / "kani_validation.py").write_text("# fixture runner is not reached\n")
+        return repo, base
+
     def test_a_rename_counts_as_a_change_to_the_old_and_the_new_path(self):
         with tempfile.TemporaryDirectory() as temp:
             repo = make_workspace(temp, self.BASE)
@@ -908,13 +933,7 @@ class SelectionHardeningTests(unittest.TestCase):
     def test_deleted_path_dependency_refuses_instead_of_successfully_skipping_affected_proofs(self):
         # Kills current-HEAD-only ownership mapping: deletion of a helper must not become SKIPPED/0.
         with tempfile.TemporaryDirectory() as temp:
-            repo = make_workspace(temp, self.BASE)
-            base = git(repo, "rev-parse", "HEAD")
-            git(repo, "rm", "-r", "crates/a")
-            git(repo, "commit", "-q", "-m", "remove helper package")
-            tools_dir = repo / "tools"
-            tools_dir.mkdir()
-            (tools_dir / "kani_validation.py").write_text("# fixture runner is not reached\n")
+            repo, base = self.deleted_package_workspace(temp, self.BASE, "remove helper package")
             proof = proof_entry()
             proof["package"] = "oa-track"
             registry = Path(temp) / "registry.json"
@@ -935,13 +954,7 @@ class SelectionHardeningTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             files = dict(self.BASE)
             files["crates/b/Cargo.toml"] = manifest("oa-track")
-            repo = make_workspace(temp, files)
-            base = git(repo, "rev-parse", "HEAD")
-            git(repo, "rm", "-r", "crates/a")
-            git(repo, "commit", "-q", "-m", "remove unused helper")
-            tools_dir = repo / "tools"
-            tools_dir.mkdir()
-            (tools_dir / "kani_validation.py").write_text("# fixture runner is not reached\n")
+            repo, base = self.deleted_package_workspace(temp, files, "remove unused helper")
             proof = proof_entry()
             proof["package"] = "oa-track"
             registry = Path(temp) / "registry.json"
