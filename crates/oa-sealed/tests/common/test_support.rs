@@ -7,6 +7,7 @@ pub fn scratch(name: &str) -> PathBuf {
     directory
 }
 
+#[allow(dead_code)] // The integration-test binary uses only the scratch fixture.
 pub fn list_without_window(list: &str) -> String {
     list.lines()
         .filter(|line| !line.starts_with("window"))
