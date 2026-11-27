@@ -20,6 +20,7 @@ _MAX_POLYGON_VERTICES: Final[int] = 100_001
 _MAX_TEXT_OUTPUT_BYTES: Final[int] = 256 * 1024 * 1024
 _MAX_DEFLATE_INPUT_BYTES: Final[int] = 64 * 1024 * 1024
 _MAX_DEFLATE_OUTPUT_BYTES: Final[int] = 256 * 1024 * 1024
+_MAX_DEFLATE_ENCODE_OUTPUT_BYTES: Final[int] = 128 * 1024 * 1024
 
 
 class _ErrorInfo(ctypes.Structure):
@@ -48,6 +49,7 @@ _STATUS_NAMES: Final[dict[int, str]] = {
     14: "DEFLATE_TRUNCATED",
     15: "DEFLATE_OUTPUT_LIMIT",
     16: "DEFLATE_RATIO_LIMIT",
+    17: "DEFLATE_ENCODE_OUTPUT_LIMIT",
 }
 
 
@@ -121,6 +123,13 @@ class SeparationResult:
 class RawInflateResult:
     output: bytes
     consumed: int
+
+
+@dataclass(frozen=True, slots=True)
+class RawDeflateResult:
+    output: bytes
+    consumed: int
+    actual_level: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -730,6 +739,10 @@ class Geodesy:
         lib.oa_deflate_raw_inflate.argtypes = [byte_p, ctypes.c_uint64, ctypes.c_uint64,
             byte_p, ctypes.c_uint64, u64_p, u64_p, error_p]
         lib.oa_deflate_raw_inflate.restype = ctypes.c_uint32
+        lib.oa_deflate_raw_compress.argtypes = [byte_p, ctypes.c_uint64, ctypes.c_uint32,
+            ctypes.c_uint64, byte_p, ctypes.c_uint64, u64_p, u64_p,
+            ctypes.POINTER(ctypes.c_uint32), error_p]
+        lib.oa_deflate_raw_compress.restype = ctypes.c_uint32
         lib.oa_geo_wgs84_inverse.argtypes = [
             ctypes.c_double, ctypes.c_double, ctypes.c_double, ctypes.c_double,
             double_p, double_p, double_p, error_p,
@@ -860,6 +873,38 @@ class Compression:
     def __init__(self, library: ctypes.CDLL) -> None:
         self._library = library
 
+    def raw_deflate(self, data: bytes, *, level: int = 6,
+                    max_output: int = _MAX_DEFLATE_ENCODE_OUTPUT_BYTES) -> RawDeflateResult:
+        """Compress bytes as one raw-DEFLATE stream; levels clamp to the native 1..=9 policy."""
+        if not isinstance(data, bytes):
+            raise TypeError("data must be bytes")
+        if len(data) > _MAX_DEFLATE_INPUT_BYTES:
+            raise ValueError("data exceeds the native input limit")
+        if isinstance(level, bool) or not isinstance(level, int):
+            raise TypeError("level must be an integer")
+        if level < 0 or level >= (1 << 32):
+            raise ValueError("level must fit unsigned 32-bit range")
+        if isinstance(max_output, bool) or not isinstance(max_output, int):
+            raise TypeError("max_output must be an integer")
+        if max_output < 0 or max_output > _MAX_DEFLATE_ENCODE_OUTPUT_BYTES:
+            raise ValueError("max_output is outside the native encoded-output limit")
+        input_buffer = (ctypes.c_uint8 * len(data)).from_buffer_copy(data) if data else None
+        output_length, consumed = ctypes.c_uint64(), ctypes.c_uint64()
+        actual_level, error = ctypes.c_uint32(), _ErrorInfo()
+        status = int(self._library.oa_deflate_raw_compress(
+            input_buffer, len(data), level, max_output, None, 0,
+            ctypes.byref(output_length), ctypes.byref(consumed),
+            ctypes.byref(actual_level), ctypes.byref(error)))
+        _raise_if_error(self._library, status, error)
+        output_buffer = (ctypes.c_uint8 * output_length.value)() if output_length.value else None
+        status = int(self._library.oa_deflate_raw_compress(
+            input_buffer, len(data), level, max_output, output_buffer, output_length.value,
+            ctypes.byref(output_length), ctypes.byref(consumed),
+            ctypes.byref(actual_level), ctypes.byref(error)))
+        _raise_if_error(self._library, status, error)
+        return RawDeflateResult(bytes(output_buffer) if output_buffer is not None else b"",
+                                consumed.value, actual_level.value)
+
     def raw_inflate(self, data: bytes, *, max_output: int = _MAX_DEFLATE_OUTPUT_BYTES) -> RawInflateResult:
         if not isinstance(data, bytes):
             raise TypeError("data must be bytes")
@@ -906,6 +951,7 @@ __all__ = [
     "OpenAtcaError",
     "RhumbInverseResult",
     "RawInflateResult",
+    "RawDeflateResult",
     "ScalarMath",
     "SeparationResult",
     "TextBindings",

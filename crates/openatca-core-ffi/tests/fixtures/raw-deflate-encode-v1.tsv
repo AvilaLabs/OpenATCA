@@ -1,0 +1,8 @@
+# case	input_hex	requested_level	max_output	expected_status	output_capacity	expected_consumed	expected_level	plain_hex
+empty		6	64	0	64	0	6	
+abc_fast	616263	1	64	0	64	3	1	616263
+repeat_default	616263616263616263616263616263616263616263616263	6	128	0	128	24	6	616263616263616263616263616263616263616263616263
+clamp_below	616263	0	64	0	64	3	1	616263
+clamp_above	616263	4294967295	64	0	64	3	9	616263
+output_limit	616263	6	1	17	64	-1	0	616263
+capacity_query	616263	6	64	6	0	3	6	616263

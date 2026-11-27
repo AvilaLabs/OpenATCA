@@ -36,3 +36,5 @@ oa-json = { path = "../oa-json" }
 oa-xml = { path = "../oa-xml" }
 # F1a: expose the existing bounded raw-DEFLATE decoder without implementing a second inflater.
 oa-zip = { path = "../oa-zip" }
+# F1a: one-shot C wrapper delegates raw-DEFLATE encoding to the existing streaming compressor.
+oa-deflate = { path = "../oa-deflate" }
