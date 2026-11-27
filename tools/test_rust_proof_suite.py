@@ -15,8 +15,9 @@ from unittest import mock
 
 from rust_proof_suite import (
     NIGHTLY_OVER_SECONDS, SelectionError, affected_packages, balance_shards, changed_files,
-    load_registry, package_graph, registry_packages_missing, run_suite, select_proofs,
-    validate_registry,
+    has_unowned_package_root_changes, load_registry, main, package_directories_at,
+    package_graph, proof_target_path, registry_packages_missing, run_suite, select_proofs,
+    select_proof_ids, unmapped_package_paths, validate_registry,
 )
 from kani_validation import LOOP_UNWIND_PRESETS
 
@@ -354,6 +355,12 @@ loop_presets = [item for flag, item in zip(args, args[1:]) if flag == "--loop-un
 mode = os.environ.get("FAKE_RUN_RECORD_MODE", "pass")
 invocation_log = os.environ.get("FAKE_INVOKED")
 if invocation_log:
+    try:
+        prior_invocations = pathlib.Path(invocation_log).read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        prior_invocations = []
+    if mode == "first-fail":
+        mode = "fail" if not prior_invocations else "pass"
     with open(invocation_log, "a", encoding="utf-8") as stream:
         stream.write(harness + "\\n")
 record = {
@@ -376,7 +383,6 @@ print("fake runner stdout")
     def fake_workspace(self, root, mode="pass", proof_count=2):
         repo = root / "repo"
         repo.mkdir()
-        (repo / ".git").mkdir()
         (repo / "Cargo.toml").write_text("[workspace]\nmembers = []\n")
         tools_dir = repo / "tools"
         tools_dir.mkdir()
@@ -392,13 +398,15 @@ print("fake runner stdout")
             proofs.append(proof)
         registry_path = tools_dir / "rust_proofs.json"
         registry_path.write_text(json.dumps(registry_with(*proofs), indent=2) + "\n")
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
         return repo, registry_path, root / "evidence", root / "target", mode
 
-    def invoke(self, root, mode="pass", proof_count=2, fail_fast=False):
+    def invoke(self, root, mode="pass", proof_count=2):
         repo, registry, out, target, mode = self.fake_workspace(root, mode, proof_count)
         stdout, stderr = io.StringIO(), io.StringIO()
         with mock.patch.dict(os.environ, {"FAKE_RUN_RECORD_MODE": mode}), redirect_stdout(stdout), redirect_stderr(stderr):
-            result = run_suite(repo, out, target, registry, fail_fast=fail_fast)
+            result = run_suite(repo, out, target, registry)
         return result, out, registry, stdout.getvalue(), stderr.getvalue()
 
     def test_two_fake_harness_runs_pass_and_pipeline_sources_are_archived(self):
@@ -419,6 +427,12 @@ print("fake runner stdout")
                 suite["pipeline_source_hashes"]["tools/rust_proofs.json"],
                 hashlib.sha256(registry.read_bytes()).hexdigest(),
             )
+            targets = [
+                check["command"][check["command"].index("--target-dir") + 1]
+                for check in suite["checks"]
+            ]
+            self.assertEqual(len(set(targets)), len(targets))
+            self.assertTrue(all(Path(path).is_relative_to(out.parent / "target" / "proofs") for path in targets))
             self.assertTrue(all(suite["pipeline_source_unchanged"].values()))
             from rust_proof_suite import __file__ as suite_script
             suite_copy = out / "pipeline-source/tools/rust_proof_suite.py"
@@ -439,7 +453,7 @@ print("fake runner stdout")
                 self.assertEqual(suite["checks"][0]["status"], "FAIL")
 
     # REQ: OA-GEN-006
-    def test_fail_fast_reports_failure_and_marks_remaining_proofs_not_run(self):
+    def test_failure_does_not_suppress_later_proof_execution(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             repo, registry, out, target, _ = self.fake_workspace(root, mode="fail", proof_count=3)
@@ -448,24 +462,81 @@ print("fake runner stdout")
             with mock.patch.dict(os.environ, {
                 "FAKE_RUN_RECORD_MODE": "fail", "FAKE_INVOKED": str(invoked),
             }), redirect_stdout(stdout), redirect_stderr(stderr):
-                result = run_suite(repo, out, target, registry, fail_fast=True)
+                result = run_suite(repo, out, target, registry)
             suite = json.loads((out / "suite.json").read_text())
             statuses = [check["status"] for check in suite["checks"]]
             self.assertEqual(result, 1)
             self.assertEqual(suite["status"], "FAIL")
             self.assertEqual(suite["selected_count"], 3)
-            self.assertEqual(statuses, ["FAIL", "NOT_RUN", "NOT_RUN"])
-            self.assertEqual(invoked.read_text().splitlines(), [proof_entry()["harness"]])
-            for outcome in suite["checks"][1:]:
-                self.assertIsNone(outcome["exit_code"])
-                self.assertIsNone(outcome["timed_out"])
-                self.assertIsNone(outcome["elapsed_seconds"])
-                self.assertIsNone(outcome["run_dir"])
-                self.assertIn("fail-fast", outcome["reason"])
+            self.assertEqual(statuses, ["FAIL"] * 3)
+            self.assertEqual(invoked.read_text().splitlines(), [
+                proof_entry()["harness"],
+                "types::proofs::example_1_bounded",
+                "types::proofs::example_2_bounded",
+            ])
             self.assertIn("loop binding did not match source evidence", stdout.getvalue())
 
+    # Kills the old stop-after-first-failure mutation: a following proof must execute and report PASS.
+    def test_failure_then_pass_executes_and_reports_both_proofs(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, registry, out, target, _ = self.fake_workspace(root, mode="first-fail", proof_count=2)
+            invoked = root / "invoked.txt"
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with mock.patch.dict(os.environ, {
+                "FAKE_RUN_RECORD_MODE": "first-fail", "FAKE_INVOKED": str(invoked),
+            }), redirect_stdout(stdout), redirect_stderr(stderr):
+                result = run_suite(repo, out, target, registry)
+            suite = json.loads((out / "suite.json").read_text())
+            self.assertEqual(result, 1)
+            self.assertEqual([entry["status"] for entry in suite["checks"]], ["FAIL", "PASS"])
+            self.assertEqual(len(invoked.read_text().splitlines()), 2)
+
+    # Kills shared-target reuse across IDs and across source/config revisions of one ID.
+    def test_proof_target_namespace_is_bound_to_id_source_and_effective_config(self):
+        target_root = Path("proof-target-namespace-fixture")
+        proof = proof_entry()
+        source_one = hashlib.sha256(b"source snapshot one").hexdigest()
+        source_two = hashlib.sha256(b"source snapshot two").hexdigest()
+        base_path = proof_target_path(target_root, proof, source_one)
+
+        other_proof = copy.deepcopy(proof)
+        other_proof["id"] = "different-proof"
+        config_changed = copy.deepcopy(proof)
+        config_changed["cfgs"] = ["kani_full_capacity"]
+
+        self.assertNotEqual(base_path, proof_target_path(target_root, other_proof, source_one))
+        self.assertNotEqual(base_path, proof_target_path(target_root, proof, source_two))
+        self.assertNotEqual(base_path, proof_target_path(target_root, config_changed, source_one))
+
+    # Kills suite-level target reuse when the same proof ID is rerun after a source edit.
+    def test_source_change_uses_a_distinct_target_cache_context(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, registry, first_out, target_root, _ = self.fake_workspace(root, proof_count=1)
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                first_result = run_suite(repo, first_out, target_root, registry)
+            first_suite = json.loads((first_out / "suite.json").read_text())
+            first_command = first_suite["checks"][0]["command"]
+            first_target = first_command[first_command.index("--target-dir") + 1]
+
+            manifest = repo / "Cargo.toml"
+            manifest.write_text(manifest.read_text(encoding="utf-8") + "\n# source revision\n")
+            second_out = root / "evidence-next"
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                second_result = run_suite(repo, second_out, target_root, registry)
+            second_suite = json.loads((second_out / "suite.json").read_text())
+            second_command = second_suite["checks"][0]["command"]
+            second_target = second_command[second_command.index("--target-dir") + 1]
+
+            self.assertEqual(first_result, 0, stderr.getvalue())
+            self.assertEqual(second_result, 0, stderr.getvalue())
+            self.assertNotEqual(first_target, second_target)
+
     # REQ: OA-GEN-006
-    def test_fail_fast_success_runs_every_proof_and_default_failure_continues(self):
+    def test_success_runs_every_proof_and_default_failure_continues(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             repo, registry, out, target, _ = self.fake_workspace(root, proof_count=3)
@@ -474,7 +545,7 @@ print("fake runner stdout")
             with mock.patch.dict(os.environ, {
                 "FAKE_RUN_RECORD_MODE": "pass", "FAKE_INVOKED": str(invoked),
             }), redirect_stdout(stdout), redirect_stderr(stderr):
-                result = run_suite(repo, out, target, registry, fail_fast=True)
+                result = run_suite(repo, out, target, registry)
             suite = json.loads((out / "suite.json").read_text())
             self.assertEqual(result, 0, stderr.getvalue())
             self.assertEqual(suite["status"], "PASS")
@@ -494,6 +565,51 @@ print("fake runner stdout")
             self.assertEqual(suite["status"], "FAIL")
             self.assertEqual([x["status"] for x in suite["checks"]], ["FAIL"] * 2)
             self.assertEqual(len(invoked.read_text().splitlines()), 2)
+
+    def test_manual_exact_id_run_executes_only_requested_proof(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, registry, out, target, _ = self.fake_workspace(root, proof_count=3)
+            invoked = root / "invoked.txt"
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with mock.patch.dict(os.environ, {
+                "FAKE_RUN_RECORD_MODE": "pass", "FAKE_INVOKED": str(invoked),
+            }), redirect_stdout(stdout), redirect_stderr(stderr):
+                result = run_suite(repo, out, target, registry, proof_ids=["sample-proof", "second-proof-2"])
+            self.assertEqual(result, 0, stderr.getvalue())
+            suite = json.loads((out / "suite.json").read_text())
+            self.assertEqual([entry["id"] for entry in suite["checks"]], ["sample-proof", "second-proof-2"])
+            self.assertEqual(suite["selection"]["requested_proof_ids"], ["sample-proof", "second-proof-2"])
+            self.assertEqual(suite["selection"]["excluded_proofs"][0]["status"], "EXCLUDED")
+            self.assertEqual(invoked.read_text().splitlines(), [
+                proof_entry()["harness"], "types::proofs::example_2_bounded",
+            ])
+
+    def test_manual_exact_id_rejects_unknown_and_changed_selection_combination(self):
+        for proof_ids, changed_from in ((["not-registered"], None), (["sample-proof"], "HEAD")):
+            with self.subTest(proof_ids=proof_ids, changed_from=changed_from), tempfile.TemporaryDirectory() as temp:
+                repo, registry, out, target, _ = self.fake_workspace(Path(temp), proof_count=1)
+                stdout, stderr = io.StringIO(), io.StringIO()
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    result = run_suite(
+                        repo, out, target, registry, changed_from=changed_from, proof_ids=proof_ids,
+                    )
+                self.assertEqual(result, 2)
+                self.assertIn("cannot select proofs" if changed_from is None else "cannot be combined", stderr.getvalue())
+
+    def test_legacy_fail_fast_cli_flag_is_accepted_with_deprecation_warning(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo = Path(temp)
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with mock.patch("rust_proof_suite.run_suite", return_value=1) as run_suite_mock:
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    result = main([
+                        "--repo", str(repo), "--out", str(repo / "out"),
+                        "--target-dir", str(repo / "target"), "--fail-fast",
+                    ])
+            self.assertEqual(result, 1)
+            self.assertIn("deprecated and ignored", stderr.getvalue())
+            self.assertNotIn("fail_fast", run_suite_mock.call_args.kwargs)
 
     def test_shards_split_the_enabled_proofs_between_jobs_without_overlap(self):
         seen = []
@@ -551,45 +667,60 @@ def sample_proofs():
     return proofs
 
 
-def selected_ids(changed, push=True):
+def selected_ids(changed):
     affected = affected_packages(sample_graph(), changed)
-    return {p["id"] for p in select_proofs(sample_proofs(), affected, push)}
+    return {p["id"] for p in select_proofs(sample_proofs(), affected)}
 
 
 class PushSelectionTests(unittest.TestCase):
-    def test_a_change_in_one_package_selects_only_its_proofs(self):
-        self.assertEqual(selected_ids(["crates/d/src/lib.rs"]), {"d-push"})
-        self.assertEqual(selected_ids(["crates/c/tests/t.rs", "crates/c/Cargo.toml"]), {"c-push"})
+    # Kills the old push-tier-only filter: package changes must include registered nightly proofs.
+    def test_a_change_in_one_package_selects_all_its_enabled_tiers(self):
+        self.assertEqual(selected_ids(["crates/d/src/lib.rs"]), {"d-push", "d-nightly"})
+        self.assertEqual(selected_ids(["crates/c/tests/t.rs", "crates/c/Cargo.toml"]), {"c-push", "c-nightly"})
 
     def test_a_change_in_a_dependency_selects_its_dependents(self):
-        self.assertEqual(selected_ids(["crates/a/src/lib.rs"]), {"a-push", "b-push", "c-push"})
-        self.assertEqual(selected_ids(["crates/b/src/x.rs"]), {"b-push", "c-push"})
+        self.assertEqual(selected_ids(["crates/a/src/lib.rs"]), {
+            "a-push", "a-nightly", "b-push", "b-nightly", "c-push", "c-nightly",
+        })
+        self.assertEqual(selected_ids(["crates/b/src/x.rs"]), {"b-push", "b-nightly", "c-push", "c-nightly"})
 
     def test_a_change_outside_every_package_selects_nothing(self):
         self.assertEqual(selected_ids(["docs/VERIFICATION.md", "REQUIREMENTS.md"]), set())
 
-    def test_a_change_to_the_registry_runner_or_workflow_selects_everything_in_the_push_tier(self):
+    def test_a_change_to_the_registry_runner_or_workflow_selects_every_enabled_proof(self):
         for path in (
             "tools/rust_proofs.json", "tools/rust_proof_suite.py", "tools/kani_validation.py",
             ".github/workflows/rust-proofs.yml", "Cargo.toml", "Cargo.lock",
         ):
             self.assertEqual(
-                selected_ids([path]), {"a-push", "b-push", "c-push", "d-push"}, path,
+                selected_ids([path]), {f"{package}-{tier}" for package in "abcd" for tier in ("push", "nightly")}, path,
             )
 
-    def test_the_nightly_tier_never_runs_on_a_push_and_always_in_the_full_run(self):
+    def test_changed_package_runs_include_nightly_and_full_runs_include_every_tier(self):
         every = [p for p in sample_proofs()]
         for changed in (["crates/a/src/lib.rs"], ["tools/rust_proofs.json"]):
-            self.assertFalse(any(i.endswith("nightly") for i in selected_ids(changed)))
-        full = {p["id"] for p in select_proofs(every, None, False)}
+            self.assertTrue(any(i.endswith("nightly") for i in selected_ids(changed)))
+        full = {p["id"] for p in select_proofs(every, None)}
         self.assertEqual(full, {p["id"] for p in every})
 
     def test_a_disabled_proof_is_never_selected(self):
         proofs = sample_proofs()
         for proof in proofs:
             proof["enabled"] = False
-        self.assertEqual(select_proofs(proofs, None, True), [])
-        self.assertEqual(select_proofs(proofs, None, False), [])
+        self.assertEqual(select_proofs(proofs, None), [])
+
+    def test_exact_proof_id_selection_rejects_unknown_duplicate_and_disabled_ids(self):
+        proofs = sample_proofs()
+        self.assertEqual(
+            [p["id"] for p in select_proof_ids(proofs, ["c-nightly", "a-push"])],
+            ["a-push", "c-nightly"],
+        )
+        for request in (["unknown"], ["a-push", "a-push"]):
+            with self.assertRaises(SelectionError):
+                select_proof_ids(proofs, request)
+        proofs[0]["enabled"] = False
+        with self.assertRaises(SelectionError):
+            select_proof_ids(proofs, [proofs[0]["id"]])
 
     def test_the_real_workspace_graph_ties_the_tracker_to_its_dependencies(self):
         graph = package_graph(REPO)
@@ -603,11 +734,11 @@ class PushSelectionTests(unittest.TestCase):
         registry, _ = load_registry(REGISTRY_PATH)
         proofs = registry["proofs"]
         math_change = {p["package"] for p in select_proofs(
-            proofs, affected_packages(graph, ["crates/oa-math/src/trig.rs"]), True)}
+            proofs, affected_packages(graph, ["crates/oa-math/src/trig.rs"]))}
         self.assertIn("oa-math", math_change)
         self.assertIn("oa-track-core", math_change)
         tracker_change = {p["package"] for p in select_proofs(
-            proofs, affected_packages(graph, ["crates/oa-track-core/src/tracker.rs"]), True)}
+            proofs, affected_packages(graph, ["crates/oa-track-core/src/tracker.rs"]))}
         self.assertIn("oa-track-core", tracker_change)
         self.assertNotIn("oa-track", tracker_change)
         self.assertNotIn("oa-asterix", tracker_change)
@@ -725,7 +856,110 @@ class SelectionHardeningTests(unittest.TestCase):
             self.assertEqual(result, 2)
             self.assertIn("oa-runway", stderr.getvalue())
 
-    def test_a_change_to_the_proof_inputs_selects_everything_in_the_push_tier(self):
+    def test_deleted_path_dependency_refuses_instead_of_successfully_skipping_affected_proofs(self):
+        # Kills current-HEAD-only ownership mapping: deletion of a helper must not become SKIPPED/0.
+        with tempfile.TemporaryDirectory() as temp:
+            repo = make_workspace(temp, self.BASE)
+            base = git(repo, "rev-parse", "HEAD")
+            git(repo, "rm", "-r", "crates/a")
+            git(repo, "commit", "-q", "-m", "remove helper package")
+            tools_dir = repo / "tools"
+            tools_dir.mkdir()
+            (tools_dir / "kani_validation.py").write_text("# fixture runner is not reached\n")
+            proof = proof_entry()
+            proof["package"] = "oa-track"
+            registry = Path(temp) / "registry.json"
+            registry.write_text(json.dumps(registry_with(proof)) + "\n")
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                result = run_suite(
+                    repo, Path(temp) / "out", Path(temp) / "target", registry,
+                    changed_from=base,
+                )
+            self.assertEqual(result, 2)
+            self.assertIn("unresolved workspace path dependencies: oa-math", stderr.getvalue())
+            self.assertEqual(stdout.getvalue(), "")
+            self.assertFalse((Path(temp) / "out").exists())
+
+    def test_unmapped_deleted_package_source_refuses_instead_of_successfully_skipping(self):
+        # Kills the old empty-affected-set success when a deleted package path has no HEAD owner.
+        with tempfile.TemporaryDirectory() as temp:
+            files = dict(self.BASE)
+            files["crates/b/Cargo.toml"] = manifest("oa-track")
+            repo = make_workspace(temp, files)
+            base = git(repo, "rev-parse", "HEAD")
+            git(repo, "rm", "-r", "crates/a")
+            git(repo, "commit", "-q", "-m", "remove unused helper")
+            tools_dir = repo / "tools"
+            tools_dir.mkdir()
+            (tools_dir / "kani_validation.py").write_text("# fixture runner is not reached\n")
+            proof = proof_entry()
+            proof["package"] = "oa-track"
+            registry = Path(temp) / "registry.json"
+            registry.write_text(json.dumps(registry_with(proof)) + "\n")
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                result = run_suite(
+                    repo, Path(temp) / "out", Path(temp) / "target", registry,
+                    changed_from=base,
+                )
+            self.assertEqual(result, 2)
+            self.assertIn("changed package paths are absent from HEAD: crates/a/", stderr.getvalue())
+            self.assertEqual(stdout.getvalue(), "")
+
+    def test_loose_shared_rust_helper_selects_all_proofs_instead_of_skipping(self):
+        with tempfile.TemporaryDirectory() as temp:
+            files = dict(self.BASE)
+            files["tools/kani_validation.py"] = "# runner fixture\n"
+            repo = make_workspace(temp, files)
+            base = git(repo, "rev-parse", "HEAD")
+            helper = repo / "tools/test-support/sealed_inputs.rs"
+            helper.parent.mkdir(parents=True)
+            helper.write_text("// shared Rust test helper\n")
+            git(repo, "add", "tools/test-support/sealed_inputs.rs")
+            git(repo, "commit", "-q", "-m", "add shared test helper")
+            changed = changed_files(repo, base)
+            graph = package_graph(repo)
+            base_dirs = package_directories_at(repo, base)
+            self.assertEqual(changed, ["tools/test-support/sealed_inputs.rs"])
+            self.assertTrue(has_unowned_package_root_changes(graph, changed, base_dirs))
+            proof = proof_entry()
+            proof["package"] = "oa-track"
+            other_proof = proof_entry()
+            other_proof.update(id="other-package-proof", package="oa-ca")
+            registry = Path(temp) / "registry.json"
+            registry.write_text(json.dumps(registry_with(proof, other_proof)) + "\n")
+            self.assertEqual(len(load_registry(registry)[0]["proofs"]), 2)
+            runner = mock.patch(
+                "rust_proof_suite._run_one_proof",
+                return_value={"status": "PASS", "diagnostics": []},
+            )
+            stdout = io.StringIO()
+            with runner as execute, redirect_stdout(stdout):
+                result = run_suite(
+                    repo, Path(temp) / "out", Path(temp) / "target", registry,
+                    changed_from=base,
+                )
+            self.assertEqual(result, 0)
+            report = json.loads(stdout.getvalue().splitlines()[-1])
+            self.assertEqual(execute.call_count, 2, stdout.getvalue())
+            self.assertEqual(report["selected"], 2)
+            self.assertEqual(report["suite_status"], "PASS")
+
+    def test_deleted_cargo_package_is_still_recognized_from_base_manifest(self):
+        with tempfile.TemporaryDirectory() as temp:
+            files = dict(self.BASE)
+            files["crates/b/Cargo.toml"] = manifest("oa-track")
+            repo = make_workspace(temp, files)
+            base = git(repo, "rev-parse", "HEAD")
+            git(repo, "rm", "-r", "crates/a")
+            git(repo, "commit", "-q", "-m", "remove package")
+            graph = package_graph(repo)
+            base_dirs = package_directories_at(repo, base)
+            changed = changed_files(repo, base)
+            self.assertEqual(unmapped_package_paths(graph, changed, base_dirs), ["crates/a/"])
+
+    def test_a_change_to_the_proof_inputs_selects_everything(self):
         graph = {"a": {"dir": "crates/a/", "deps": set()}}
         for path in (
             "fuzz/Cargo.toml", "fuzz/fuzz_targets/x.rs", "validation/rust-proof-status.json",
@@ -759,10 +993,10 @@ class SelectionHardeningTests(unittest.TestCase):
             self.assertEqual(result, 0, stderr.getvalue())
             report = json.loads(stdout.getvalue().splitlines()[-1])
             self.assertEqual(report["suite_status"], "SKIPPED")
-            self.assertEqual(report["base"], base)
-            self.assertEqual(report["changed_files"], ["docs/readme.md"])
-            self.assertEqual(report["affected_packages"], [])
-
+            self.assertEqual(report["selection"]["base"], base)
+            self.assertEqual(report["selection"]["changed_files"], ["docs/readme.md"])
+            self.assertEqual(report["selection"]["affected_packages"], [])
+            self.assertTrue(report["selection"]["excluded_proofs"])
 
 class ShardBalanceTests(unittest.TestCase):
     def proofs(self, seconds):
@@ -794,13 +1028,16 @@ class ShardBalanceTests(unittest.TestCase):
     def test_the_real_registry_full_run_is_balanced_over_four_shards(self):
         registry, errors = load_registry(REGISTRY_PATH)
         self.assertEqual(errors, [])
-        chosen = select_proofs(registry["proofs"], None, False)
+        chosen = select_proofs(registry["proofs"], None)
         loads = [sum(p["ci_seconds"] for p in s) for s in balance_shards(chosen, 4)]
         self.assertLessEqual(max(loads) - min(loads), max(p["ci_seconds"] for p in chosen))
 
     def test_the_workflow_runs_four_shards(self):
         text = (REPO / ".github" / "workflows" / "rust-proofs.yml").read_text()
         self.assertIn('shard: ["0/4", "1/4", "2/4", "3/4"]', text)
+        self.assertIn("proof_ids:", text)
+        self.assertIn("--proof-ids", text)
+        self.assertNotIn("python3 tools/rust_proof_suite.py\n          --fail-fast", text)
 
 
 if __name__ == "__main__":
