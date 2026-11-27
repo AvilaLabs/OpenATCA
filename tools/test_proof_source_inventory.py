@@ -42,6 +42,11 @@ class ProofSourceInventoryTests(unittest.TestCase):
     def _proof(self):
         return {"package": "sample", "harness": "proofs::source_case"}
 
+    def _check_fixture_registry(self, exclusions_path=None):
+        return inventory.check_paths(
+            self.root, self.root / "tools/rust_proofs.json", exclusions_path
+        )
+
     def _assert_inventory(self, result, status, detail_key=None, expected=None):
         self.assertEqual(result["status"], status)
         if detail_key is not None:
@@ -53,7 +58,7 @@ class ProofSourceInventoryTests(unittest.TestCase):
         self.assertEqual(identities, expected)
 
     def test_unregistered_source_harness_fails_source_inward(self):
-        result = inventory.check_paths(self.root, self.root / "tools/rust_proofs.json")
+        result = self._check_fixture_registry()
         self._assert_inventory(result, "FAIL", "unaccounted_source_harnesses", [{
             "package": "sample", "harness": "proofs::source_case",
             "path": "crates/sample/src/proofs.rs", "line": 1,
@@ -61,24 +66,22 @@ class ProofSourceInventoryTests(unittest.TestCase):
 
     def test_registered_identity_and_named_exclusion_account_for_source(self):
         self._registry([self._proof()])
-        result = inventory.check_paths(self.root, self.root / "tools/rust_proofs.json")
+        result = self._check_fixture_registry()
         self._assert_inventory(result, "PASS")
         exclusions = self._write("tools/exclusions.json", json.dumps({"exclusions": [
             {**self._proof(), "reason": "not selected for the bounded registry"},
         ]}))
         with self.assertRaisesRegex(inventory.InventoryError, "both registered and excluded"):
-            inventory.check_paths(self.root, self.root / "tools/rust_proofs.json", exclusions)
+            self._check_fixture_registry(exclusions)
 
     def test_exclusion_requires_exact_identity_and_nonempty_reason(self):
         exclusions = self._write("tools/exclusions.json", json.dumps({"exclusions": [self._proof()]}))
         with self.assertRaisesRegex(inventory.InventoryError, "requires a named reason"):
-            inventory.check_paths(self.root, self.root / "tools/rust_proofs.json", exclusions)
+            self._check_fixture_registry(exclusions)
         exclusions.write_text(json.dumps({"exclusions": [
             {**self._proof(), "reason": "source harness is intentionally not registered"},
         ]}), encoding="utf-8")
-        self._assert_inventory(inventory.check_paths(
-            self.root, self.root / "tools/rust_proofs.json", exclusions
-        ), "PASS")
+        self._assert_inventory(self._check_fixture_registry(exclusions), "PASS")
 
     def test_path_attribute_maps_harness_to_declaring_module(self):
         self._write("crates/sample/src/lib.rs", "mod wire;\n")
@@ -119,7 +122,7 @@ class ProofSourceInventoryTests(unittest.TestCase):
 
     def test_stale_registry_identity_fails_closed(self):
         self._registry([{"package": "sample", "harness": "proofs::renamed_case"}])
-        result = inventory.check_paths(self.root, self.root / "tools/rust_proofs.json")
+        result = self._check_fixture_registry()
         self._assert_inventory(result, "FAIL", "stale_registry_or_exclusion_identities", [{
             "package": "sample", "harness": "proofs::renamed_case",
         }])
