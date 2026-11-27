@@ -24,6 +24,12 @@ pub struct Requirement {
     /// 1-based line in the register.
     pub line: usize,
     pub withdrawn: bool,
+    /// A proposal is recorded in the register but is not an active requirement.
+    pub proposed: bool,
+    /// Draft clause identifying the source of a proposed requirement.
+    pub proposal_source: Option<String>,
+    /// Hazard IDs linked by the proposal metadata (validated by hazard_trace).
+    pub proposal_hazards: Vec<String>,
 }
 
 /// A test or proof harness that names a requirement.
@@ -57,6 +63,10 @@ pub struct Report {
     pub untested: Vec<String>,
     /// Withdrawn requirements (sorted).
     pub withdrawn: Vec<String>,
+    /// Proposed requirements (sorted); never included in active coverage or untested counts.
+    pub proposed: Vec<String>,
+    /// Informational test/proof tags naming proposals; these do not verify them.
+    pub proposed_tested: BTreeMap<String, Vec<TestRef>>,
     /// Unknown ID -> tests naming it.
     pub unknown: BTreeMap<String, Vec<TestRef>>,
     /// Warnings: tests naming a withdrawn requirement.
@@ -106,15 +116,39 @@ pub fn parse_requirements(text: &str) -> Vec<Requirement> {
                         id: id.to_string(),
                         line: i + 1,
                         withdrawn: tail.contains("WITHDRAWN"),
+                        proposed: false,
+                        proposal_source: None,
+                        proposal_hazards: Vec::new(),
                     });
                     continue;
                 }
             }
         }
         // Continuation line of the previous item (indented, non-empty).
-        if line.starts_with(' ') && line.contains("WITHDRAWN") {
-            if let Some(last) = out.last_mut() {
-                last.withdrawn = true;
+        if line.starts_with(' ') {
+            if line.contains("WITHDRAWN") {
+                if let Some(last) = out.last_mut() {
+                    last.withdrawn = true;
+                }
+            }
+            if let Some(metadata) = line.trim().strip_prefix("PROPOSED |") {
+                if let Some(last) = out.last_mut() {
+                    last.proposed = true;
+                    for part in metadata.split('|').map(str::trim) {
+                        if let Some(value) = part.strip_prefix("source=") {
+                            if !value.trim().is_empty() {
+                                last.proposal_source = Some(value.trim().to_string());
+                            }
+                        } else if let Some(value) = part.strip_prefix("hazards=") {
+                            last.proposal_hazards = value
+                                .split(',')
+                                .map(str::trim)
+                                .filter(|id| !id.is_empty())
+                                .map(str::to_string)
+                                .collect();
+                        }
+                    }
+                }
             }
         }
     }
@@ -318,11 +352,12 @@ pub fn analyze(root: &Path) -> Report {
             Vec::new()
         }
     };
-    let mut defs: BTreeMap<String, (Vec<usize>, bool)> = BTreeMap::new();
+    let mut defs: BTreeMap<String, (Vec<usize>, bool, bool)> = BTreeMap::new();
     for r in &reqs {
         let e = defs.entry(r.id.clone()).or_default();
         e.0.push(r.line);
         e.1 |= r.withdrawn;
+        e.2 |= r.proposed;
     }
     for (id, (lines, _)) in &defs {
         if lines.len() > 1 {
@@ -363,7 +398,8 @@ pub fn analyze(root: &Path) -> Report {
                 };
                 let bucket = match defs.get(id) {
                     None => &mut rep.unknown,
-                    Some((_, true)) => &mut rep.withdrawn_tested,
+                    Some((_, true, _)) => &mut rep.withdrawn_tested,
+                    Some((_, false, true)) => &mut rep.proposed_tested,
                     Some(_) => &mut rep.covered,
                 };
                 let v = bucket.entry(id.clone()).or_default();
@@ -378,13 +414,16 @@ pub fn analyze(root: &Path) -> Report {
         .values_mut()
         .chain(rep.unknown.values_mut())
         .chain(rep.withdrawn_tested.values_mut())
+        .chain(rep.proposed_tested.values_mut())
     {
         v.sort();
     }
     rep.malformed.sort();
-    for (id, (_, withdrawn)) in &defs {
+    for (id, (_, withdrawn, proposed)) in &defs {
         if *withdrawn {
             rep.withdrawn.push(id.clone());
+        } else if *proposed {
+            rep.proposed.push(id.clone());
         } else if !rep.covered.contains_key(id) {
             rep.untested.push(id.clone());
         }
@@ -416,6 +455,17 @@ pub fn render_text(rep: &Report) -> String {
     ));
     for id in &rep.untested {
         o.push_str(&format!("  {id}\n"));
+    }
+    o.push_str(&format!(
+        "\nProposed requirements ({}; not active or verified):\n",
+        rep.proposed.len()
+    ));
+    for id in &rep.proposed {
+        o.push_str(&format!("  {id}\n"));
+        if let Some(tests) = rep.proposed_tested.get(id) {
+            o.push_str("    informational tags only; proposal remains unverified\n");
+            fmt_tests(&mut o, tests);
+        }
     }
     o.push_str(&format!(
         "\nTags naming unknown IDs ({}):\n",
@@ -465,11 +515,25 @@ pub fn render_markdown(rep: &Report) -> String {
         .keys()
         .chain(rep.untested.iter())
         .chain(rep.withdrawn.iter())
+        .chain(rep.proposed.iter())
         .collect();
     ids.sort();
     ids.dedup();
     for id in ids {
-        if let Some(tests) = rep.covered.get(id) {
+        if rep.proposed.contains(id) {
+            let cell = rep
+                .proposed_tested
+                .get(id)
+                .map(|tests| {
+                    tests
+                        .iter()
+                        .map(|t| format!("informational `{}` ({}:{})", t.name, t.file, t.line))
+                        .collect::<Vec<_>>()
+                        .join("<br>")
+                })
+                .unwrap_or_default();
+            o.push_str(&format!("| {id} | proposed (unverified) | {cell} |\n"));
+        } else if let Some(tests) = rep.covered.get(id) {
             let cell = tests
                 .iter()
                 .map(|t| {
@@ -579,6 +643,49 @@ mod tests {
         assert!(r.ok());
         assert!(r.withdrawn_tested.contains_key("OA-424-003"));
         assert!(render_text(&r).contains("Warnings"));
+    }
+
+    // REQ: OA-TRC-001
+    #[test]
+    fn proposed_requirements_are_separate_and_never_verified_by_tags() {
+        let t = Tmp::new();
+        t.write(
+            "REQUIREMENTS.md",
+            "- **OA-AAA-001** active\n- **OA-AAA-002** proposal\n  PROPOSED | source=SSHA §4.1 | hazards=HZ-SYN-1\n",
+        );
+        t.write("a.rs", &tag("OA-AAA-001, OA-AAA-002", "#[test]"));
+
+        let r = analyze(&t.0);
+        assert!(r.ok());
+        assert_eq!(r.covered["OA-AAA-001"].len(), 1);
+        assert!(!r.covered.contains_key("OA-AAA-002"));
+        assert!(r.untested.is_empty());
+        assert_eq!(r.proposed, vec!["OA-AAA-002"]);
+        assert_eq!(r.proposed_tested["OA-AAA-002"].len(), 1);
+        let text = render_text(&r);
+        assert!(text.contains("Proposed requirements (1; not active or verified)"));
+        assert!(text.contains("informational tags only; proposal remains unverified"));
+        assert!(
+            render_markdown(&r).contains("| OA-AAA-002 | proposed (unverified) | informational")
+        );
+    }
+
+    // REQ: OA-TRC-001
+    #[test]
+    fn proposed_requirement_without_test_is_allowed_but_unverified() {
+        let t = Tmp::new();
+        t.write(
+            "REQUIREMENTS.md",
+            "- **OA-AAA-001** active\n- **OA-AAA-002** proposal\n  PROPOSED | source=SHA §3.1 | hazards=HZ-SYN-1\n",
+        );
+        t.write("a.rs", &tag("OA-AAA-001", "#[test]"));
+
+        let r = analyze(&t.0);
+        assert!(r.ok());
+        assert!(r.untested.is_empty());
+        assert_eq!(r.proposed, vec!["OA-AAA-002"]);
+        assert!(!r.proposed_tested.contains_key("OA-AAA-002"));
+        assert!(render_markdown(&r).contains("| OA-AAA-002 | proposed (unverified) |  |"));
     }
 
     // REQ: OA-TRC-001
