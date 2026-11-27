@@ -28,6 +28,15 @@ const MAX_FLEET_ARGUMENTS: usize = FLEET_OPTION_COUNT * 2;
 // hex bytes; five numeric values need at most 20 decimal bytes each; each of the nine fixed
 // option names is shorter than 32 bytes. This admits every supported path/value shape.
 const MAX_FLEET_OPTION_BYTES: usize = 3 * MAX_ARGUMENT_BYTES + 64 + 5 * 20 + 9 * 32;
+const FATAL_INVENTORY_FLAGS: u32 = FLAG_LOADED_ADAPTATION_MISMATCH
+    | FLAG_DISK_ADAPTATION_MISMATCH
+    | FLAG_RELEASE_MANIFEST_MISMATCH
+    | FLAG_MISSING_PROCESSOR
+    | FLAG_MISSING_SEQUENCE;
+
+fn has_fatal_inventory_flag(flags: u32) -> bool {
+    flags & FATAL_INVENTORY_FLAGS != 0
+}
 const MAX_EXPECTED_BYTES: usize = 32_768;
 const MAX_REPORT_FILES: usize = 512;
 const MAX_REPORT_BYTES: usize = 2_048;
@@ -532,13 +541,7 @@ pub fn run(args: &[String], out: &mut dyn Write) -> Result<(), FleetError> {
     )
     .map_err(|error| failed("write aggregate output", error))?;
 
-    let adaptation_or_missing = assessment.flags
-        & (FLAG_LOADED_ADAPTATION_MISMATCH
-            | FLAG_DISK_ADAPTATION_MISMATCH
-            | FLAG_RELEASE_MANIFEST_MISMATCH
-            | FLAG_MISSING_PROCESSOR
-            | FLAG_MISSING_SEQUENCE)
-        != 0
+    let adaptation_or_missing = has_fatal_inventory_flag(assessment.flags)
         || local_by_id
             .iter()
             .any(|(_, status)| *status != LocalInventoryStatus::Match)
@@ -848,6 +851,18 @@ mod tests {
         assert!(result.is_err());
         assert!(output.contains("processor\t2\tlocal=missing_report"));
         assert!(output.contains("missing_processors=1"));
+        for fatal_flag in [
+            FLAG_LOADED_ADAPTATION_MISMATCH,
+            FLAG_DISK_ADAPTATION_MISMATCH,
+            FLAG_RELEASE_MANIFEST_MISMATCH,
+            FLAG_MISSING_PROCESSOR,
+            FLAG_MISSING_SEQUENCE,
+        ] {
+            assert!(
+                has_fatal_inventory_flag(fatal_flag),
+                "CLI fatal-flag classifier omitted 0x{fatal_flag:08x}"
+            );
+        }
         let _ = fs::remove_dir_all(case.root);
     }
 

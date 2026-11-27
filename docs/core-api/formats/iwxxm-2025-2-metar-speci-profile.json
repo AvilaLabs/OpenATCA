@@ -1,0 +1,344 @@
+{
+  "format_id": "openatca-iwxxm-2025-2-metar-speci-taf-profile-v1",
+  "profile_version": 1,
+  "standard": {
+    "name": "WMO IWXXM",
+    "edition": "2025-2",
+    "package": "METAR-SPECI 3.2.0",
+    "upstream_repository": "https://github.com/wmo-im/iwxxm",
+    "upstream_commit": "2c4db03d20f22bca74e55024ff6dc357adfff473",
+    "schema_files": [
+      {
+        "path": "../../../crates/oa-iwxxm/testdata/schema-2025-2/metarSpeci.xsd",
+        "sha256": "61f4d97b764f8791967b6e0da6739a69123cf0d9a7c57920cb3a27ba195c53ae"
+      },
+      {
+        "path": "../../../crates/oa-iwxxm/testdata/schema-2025-2/common.xsd",
+        "sha256": "21e63487c5787938650fa274383c03bafaee0ef0176dfb7bdccf1f493b56c8da"
+      }
+    ],
+    "schema_closure": "partial; imported ISO 19139 GMD declarations are not all included",
+    "official_examples_index": "../../../crates/oa-iwxxm/testdata/official-wmo-v2025-2/SOURCES.md"
+  },
+  "namespaces": {
+    "iwxxm": "http://icao.int/iwxxm/2025-2",
+    "aixm": "http://www.aixm.aero/schema/5.1.1",
+    "gml": "http://www.opengis.net/gml/3.2",
+    "xsi": "http://www.w3.org/2001/XMLSchema-instance",
+    "xlink": "http://www.w3.org/1999/xlink",
+    "collect": "http://def.wmo.int/collect/2014"
+  },
+  "xml_profile": {
+    "encoding": "UTF-8",
+    "root_expanded_names": [
+      "{http://icao.int/iwxxm/2025-2}METAR",
+      "{http://icao.int/iwxxm/2025-2}SPECI",
+      "{http://icao.int/iwxxm/2025-2}TAF"
+    ],
+    "one_report_per_document": true,
+    "required_root_attribute": "{http://www.opengis.net/gml/3.2}id",
+    "text_policy": "significant text in element-only profile containers is refused",
+    "document_order": {
+      "METAR_or_SPECI": [
+        "issueTime",
+        "aerodrome",
+        "observationTime",
+        "observation?",
+        "trendForecast{0,2}"
+      ],
+      "TAF": [
+        "issueTime",
+        "aerodrome",
+        "validPeriod",
+        "baseForecast",
+        "changeForecast{0,5}"
+      ]
+    },
+    "collection_root": {
+      "expanded_name": "{http://def.wmo.int/collect/2014}MeteorologicalBulletin",
+      "result": "refuse UnsupportedRoot; context collect.MeteorologicalBulletin"
+    }
+  },
+  "attributes": {
+    "METAR_SPECI": {
+      "required": [
+        "reportStatus",
+        "permissibleUsage"
+      ],
+      "allowed": {
+        "reportStatus": [
+          "NORMAL",
+          "AMENDMENT",
+          "CORRECTION"
+        ],
+        "permissibleUsage": [
+          "OPERATIONAL",
+          "NON-OPERATIONAL"
+        ],
+        "automatedStation": {
+          "optional": true,
+          "boolean_lexemes": [
+            "true",
+            "false",
+            "1",
+            "0"
+          ]
+        }
+      },
+      "refused": [
+        "translationFailedTAC",
+        "unknown or extension attributes"
+      ]
+    },
+    "TAF": {
+      "required": [
+        "reportStatus",
+        "permissibleUsage"
+      ],
+      "allowed": {
+        "reportStatus": [
+          "NORMAL",
+          "AMENDMENT",
+          "CORRECTION"
+        ],
+        "permissibleUsage": [
+          "OPERATIONAL",
+          "NON-OPERATIONAL"
+        ],
+        "isCancelReport": {
+          "false_lexemes": [
+            "false",
+            "0"
+          ],
+          "true_result": "refuse cancellation report"
+        }
+      },
+      "refused": [
+        "unknown or extension attributes"
+      ]
+    }
+  },
+  "root_child_rules": {
+    "METAR_or_SPECI": {
+      "required_ordered": [
+        "issueTime",
+        "aerodrome",
+        "observationTime"
+      ],
+      "optional_after_required": [
+        "observation"
+      ],
+      "trailing_repeated": {
+        "name": "trendForecast",
+        "minimum": 0,
+        "maximum": 2
+      }
+    },
+    "TAF": {
+      "required_ordered": [
+        "issueTime",
+        "aerodrome",
+        "validPeriod",
+        "baseForecast"
+      ],
+      "trailing_repeated": {
+        "name": "changeForecast",
+        "minimum": 0,
+        "maximum": 5
+      },
+      "cancelled_report": "refused"
+    },
+    "unexpected_or_non_iwxxm_child": "refuse whole report and count unsupported construct"
+  },
+  "normalized_projection": {
+    "report": [
+      "kind",
+      "status",
+      "permissible_usage",
+      "station",
+      "issue_time_ms",
+      "observation_time_ms",
+      "automated_station",
+      "observation",
+      "trends",
+      "taf"
+    ],
+    "time": {
+      "unit": "Unix milliseconds UTC",
+      "accepted_lexical_shape": "positive four-digit Gregorian year with UTC Z; no fractional rounding",
+      "reject": [
+        "year 0000",
+        "UTC offsets",
+        "24:00",
+        "leap second",
+        "sub-millisecond precision"
+      ]
+    },
+    "measure": {
+      "representation": "mantissa * 10^-scale",
+      "fields": [
+        "mantissa:i64",
+        "scale:u8",
+        "unit"
+      ],
+      "units": [
+        "Celsius",
+        "hectopascal",
+        "meter",
+        "foot",
+        "meter_per_second",
+        "knot",
+        "degree"
+      ],
+      "relational_operators": [
+        "Above",
+        "Below"
+      ],
+      "no_unit_conversion_or_rounding": true
+    },
+    "nil_and_absence": "Measured, nil with optional exact nilReason URI, absent optional property, and missing observation remain distinct; xsi:nil is refused",
+    "weather_and_code_lists": "Weather/cloud code values and unknown nilReason URIs are retained as exact URI strings, not mapped to guessed enums",
+    "metar_speci_fields": [
+      "CAVOK",
+      "surface wind",
+      "prevailing and minimum visibility",
+      "runway visual range",
+      "present and recent weather",
+      "cloud",
+      "wind shear",
+      "trend groups"
+    ],
+    "taf_fields": [
+      "valid period",
+      "base group",
+      "BECOMING",
+      "TEMPORARY_FLUCTUATIONS",
+      "FROM",
+      "PROBABILITY_30",
+      "PROBABILITY_40",
+      "visibility",
+      "wind",
+      "weather",
+      "cloud"
+    ],
+    "taf_from_interval_semantics": "FROM uses the schema interval meaning for FM; it is not reinterpreted as a point event"
+  },
+  "limits": {
+    "document_bytes": 262144,
+    "elements": 4096,
+    "attributes": 8192,
+    "attributes_per_element": 64,
+    "text_nodes": 4096,
+    "namespace_bindings": 64,
+    "depth": 64,
+    "name_bytes": 256,
+    "decode_work_units": 100000,
+    "scalar_or_uri_bytes": 512,
+    "runway_visual_ranges": 4,
+    "recent_weather": 3,
+    "trend_groups": 2,
+    "taf_change_groups": 5,
+    "cloud_layers": 4,
+    "present_weather": 3
+  },
+  "physical_checks": {
+    "temperature_celsius_min": -273.15,
+    "qnh_hpa_min_exclusive": 0,
+    "wind_speed_and_gust_min_inclusive": 0,
+    "direction_degrees_range_inclusive": [
+      0,
+      360
+    ]
+  },
+  "unsupported_behavior": {
+    "unknown_present_construct": "reject the complete report; do not silently drop it",
+    "schema_validation": false,
+    "schematron_validation": false,
+    "full_edition_decoder": false,
+    "tac_translation": false,
+    "encoder": "finite profile only; structural checks are not complete transitive XSD validation"
+  },
+  "implementation_and_tests": {
+    "implementation": "../../../crates/oa-iwxxm/src/decode.rs",
+    "public_model": "../../../crates/oa-iwxxm/src/model.rs",
+    "official_examples": [
+      {
+        "file": "../../../crates/oa-iwxxm/testdata/official-wmo-v2025-2/metar-A3-1.xml",
+        "result": "METAR decoded"
+      },
+      {
+        "file": "../../../crates/oa-iwxxm/testdata/official-wmo-v2025-2/speci-A3-2.xml",
+        "result": "SPECI decoded"
+      },
+      {
+        "file": "../../../crates/oa-iwxxm/testdata/official-wmo-v2025-2/taf-A5-1.xml",
+        "result": "TAF decoded"
+      },
+      {
+        "file": "../../../crates/oa-iwxxm/testdata/official-wmo-v2025-2/taf-A5-2.xml",
+        "result": "cancellation refusal"
+      },
+      {
+        "file": "../../../crates/oa-iwxxm/testdata/official-wmo-v2025-2/metar-NIL-collect.xml",
+        "result": "collection-root refusal"
+      },
+      {
+        "file": "../../../crates/oa-iwxxm/testdata/official-wmo-v2025-2/taf-NIL-collect.xml",
+        "result": "collection-root refusal"
+      },
+      {
+        "file": "../../../crates/oa-iwxxm/testdata/official-wmo-v2025-2/metar-translation-failed.xml",
+        "result": "translationFailedTAC refusal"
+      },
+      {
+        "file": "../../../crates/oa-iwxxm/testdata/official-wmo-v2025-2/taf-translation-failed.xml",
+        "result": "translationFailedTAC refusal"
+      }
+    ],
+    "production_synthetic_test_refs": [
+      {
+        "path": "../../../crates/oa-iwxxm/src/tests.rs",
+        "test": "retains_recent_weather_and_all_runways_wind_shear",
+        "covers": [
+          "recent weather",
+          "wind shear"
+        ]
+      },
+      {
+        "path": "../../../crates/oa-iwxxm/src/tests.rs",
+        "test": "supports_knot_wind_operators_variable_flag_and_nil_group",
+        "covers": [
+          "nil property and quantity forms"
+        ]
+      },
+      {
+        "path": "../../../crates/oa-iwxxm/src/tests.rs",
+        "test": "official_wmo_metar_speci_and_taf_values_are_retained",
+        "covers": [
+          "PROBABILITY_30",
+          "PROBABILITY_40_TEMPORARY_FLUCTUATIONS"
+        ]
+      },
+      {
+        "path": "../../../crates/oa-iwxxm/src/tests.rs",
+        "test": "preserves_absent_observation_and_refuses_unknown_report_status",
+        "covers": [
+          "absent versus nil observation",
+          "unsupported report status"
+        ]
+      },
+      {
+        "path": "../../../crates/oa-iwxxm/src/tests.rs",
+        "test": "refuses_hazard_fields_instead_of_silently_dropping_them",
+        "covers": [
+          "unsupported construct refusal"
+        ]
+      }
+    ],
+    "reference_reader_synthetic_test": {
+      "path": "./test_format_specs.py",
+      "test": "test_iwxxm_synthetic_root_envelope_and_refusal",
+      "scope": "synthetic XML root/namespace/required-attribute envelope inspection only; it is not a production decoder conformance test"
+    }
+  }
+}

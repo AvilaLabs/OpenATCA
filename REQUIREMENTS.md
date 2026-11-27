@@ -431,6 +431,19 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
   verifies the exact preset body, component set, manifest pin and facility. Digests establish byte integrity,
   not issuer authentication or operational approval.
 
+### Synthetic performance verification and certification evidence (oa-certification)
+
+- **OA-CERT-001** The synthetic PVER target catalog is a separate, versioned, bounded adaptation-data component issued in a G2 v4 package. The canonical manifest binds its exact length and SHA-256 digest; normal PVER and certification verify that package and refuse a missing or damaged catalog without falling back to an embedded copy. `FULL` covers all six catalog targets; `ABBREVIATED` covers exactly its declared three-target subset. The catalog records target IDs, positions, velocities and tolerances and is bound into the evidence record with the verified G2 adaptation snapshot digest and issued adaptation version. These targets and runs are synthetic development evidence, not recorded, live or authority-provided data.
+- **OA-CERT-002** PVER feeds the fixed catalog targets through the production `oa-track` tracker and compares emitted output positions and east/north velocities with each target's expected values at the emitted timestamp. Residuals and tolerances are each rounded to the nearest micrometre (or micrometre per second) and the same integer values drive both threshold decisions and recorded evidence. Every required target must emit a comparable row within its catalog tolerances. Tracker refusals, velocity gates, capacity refusals, unrepresentable rows, output overflow, missing rows or tolerance failures fail PVER; a partial or lossy run cannot pass.
+- **OA-CERT-003** A separately supplied, bounded, versioned expected processor roster carries each expected software artifact SHA-256 and expected adaptation snapshot SHA-256; its exact input bytes are hashed and retained in the certification event. Observations are read from a distinct bounded input and use `oa-build-info` for local artifact hashing and successful `oa-adapt` G2 package verification against a separate manifest pin. Missing, refused and invalid values carry an explicit state and no digest; they are never replaced by a zero digest. These local observations are not authenticated processor identity, loaded-image attestation or deployment proof.
+- **OA-CERT-004** A decision is `certified` only when the actual full or abbreviated PVER passed and the complete expected processor inventory has present, matching software and adaptation digests. An omitted responding processor is recorded with explicit missing evidence and forces `not_certified`. `certified_with_exceptions` has the same prerequisites and requires nonempty exception text. Any failed PVER, missing/refused/invalid evidence or processor digest mismatch produces `not_certified`, regardless of exception text. Principal IDs and UTC timestamps are caller-supplied claims; this workflow does not authenticate, qualify or authorize a technician and does not claim operational certification.
+- **OA-CERT-005** The certification evidence event is appended to the verified hash-chain audit log before success is returned. It records the caller principal and UTC timestamp claims, service, PVER mode/result, catalog and G2 binding digests, the expected roster and separately observed processor ID list (including multiplicity), each processor's expected and observed digests with evidence states, recomputed missing/duplicate/unexpected findings, outcome and exception text. Append revalidation derives those findings from the preserved roster, observed IDs and evidence; a disagreement or failed append prevents a success result.
+- **OA-CERT-006** The text certification report is generated only from certification events read through audit-chain verification against the caller's expected checkpoint. The report retains the recorded outcome, principal/time claim, service, PVER scope, catalog/G2 identities, processor digests and exception text; it does not upgrade claims to authenticated or operational certification.
+- **OA-CERT-007** Artifact digest requests accept only byte caps in `1..=512 MiB`; the cap is checked before guarded file access, and hashing is refused if the opened regular-file descriptor changes identity, length, or timestamps during the bounded read. This is a local byte observation, not loaded-image attestation.
+- **OA-CERT-008** Certification input counts, expected roster rows, observation rows, registry rows, and file sizes are preflighted against fixed limits before processor paths are examined. The separately supplied expected roster, never the observed rows, defines the processor denominator. Missing, duplicate, or unexpected observations remain explicit and prevent a certified result. The versioned local principal registry must contain one unique `configure` claim for the supplied principal; the exact registry digest and role claim are recorded. The registry is caller-provided policy data, not authentication, identity proof, or an external authorization service.
+- **OA-CERT-009** Every PVER record binds the fixed tracker configuration, runner build claim, locally observed runner artifact digest, and each target's output time, residual, tolerance, and pass/failure state. These bindings identify the reported local run; they do not prove remote deployment or runtime identity.
+- **OA-CERT-010** The `certify` command reports a committed outcome only after the append-only audit shell returns its receipt following file and directory sync. All three outcomes are audited; a failed append emits no committed result. The principal, timestamp, registry, and processor inputs remain caller-supplied claims.
+
 ### Route conversion (oa-airspace)
 
 - **OA-RTE-001** A route fix is resolved by its complete stable identity, and a direct connector exists only when an explicit direct step is supplied; otherwise a fix remains an isolated anchor.
@@ -8128,3 +8141,60 @@ The L13 role registry is not yet landed; roles below are plain caller-supplied c
   are not compliance findings, an ATO, or FAA authorization.
 - **OA-E1-003** The deterministic generator produces Markdown and CSV counts by control family and
   evidence status. CI checks the generated files and rejects incomplete or duplicate inventories.
+
+## Privileged action audit log (E3, I10)
+
+- **OA-AUDIT-001** Each audit record binds a positive principal ID, one declared registry role,
+  action code, bounded ASCII target, positive caller-supplied nanosecond timestamp, bounded opaque
+  details, sequence number and previous digest. Version 1 uses fixed-width fields, little-endian
+  integers, zero-padded target/details, and the domain `OA-AUDIT-CHAIN-V1\0`; the record digest is
+  SHA-256 over that full canonical encoding with the digest field zeroed. The first sequence is 1
+  with an all-zero previous digest; each following sequence increments by one and binds the prior
+  digest. No alternate encoding is accepted.
+- **OA-AUDIT-002** The registry allows `monitor` to verify records, `operate` to release quarantine
+  items and submit vulnerability intake, and `configure` to issue adaptations, certify, flip or
+  roll back migration output, and disposition vulnerability findings. `operate` and `configure`
+  may perform runway assignment and alert-acknowledgement actions. Higher roles may perform
+  lower-level actions; a lower role is refused before
+  the action commit. Principal IDs, role claims and timestamps are caller inputs; this registry
+  provides no login, credential check, authenticated origin or authority validation.
+- **OA-AUDIT-003** The shell log uses fixed-size records and an OS-held nonblocking exclusive
+  lock on the opened log descriptor. Lock contention fails closed; closing the descriptor releases
+  the lock, so no stale sidecar lock needs recovery. The shell verifies the supplied count and tail
+  before appending, writes only at EOF, syncs the record and containing directory before returning
+  a plain receipt value, and fails closed on I/O, lock or sync errors. A privileged mutation must
+  consume the matching receipt value before commit; audit failure cannot invoke or commit that
+  mutation. The value is not unforgeable or authenticated; principal and role claims remain caller
+  inputs.
+- **OA-AUDIT-004** Verification checks records in sequence and reports the first malformed,
+  reordered, altered, deleted or truncated record. Every verify/read/append operation requires the
+  caller's trusted expected record count and tail digest and refuses a shorter or longer log than
+  that checkpoint. `oa-audit-verify` reports the first broken sequence and requires the checkpoint
+  on every invocation. The log is capped at 65,536 records. This detects changes relative to the
+  supplied checkpoint; a hash chain alone does not prevent full history rewriting together with
+  replacement of that checkpoint, and it does not authenticate who wrote a record.
+- **OA-AUDIT-005** Adaptation issue, certification, quarantine release, migration flip and
+  migration rollback append a bounded record before committing their action. If a later action
+  fails, its already-written intent remains visible for reconciliation; no failed action is
+  reported as committed solely because an audit record exists.
+- **OA-AUDIT-006** Every audit-log read, append destination, and parent directory synchronization
+  path is checked by the production `oa-sealed` guard before filesystem access; read and append
+  descriptors are verified after opening, and no append bytes are written until the destination
+  descriptor is verified. On Linux, append opens the destination through the retained verified
+  parent descriptor using `/proc/self/fd`, verifies and locks that same descriptor, and syncs that
+  same parent descriptor; its leaf open refuses symlinks with `O_NOFOLLOW`. Append refuses on
+  platforms without this directory anchoring. A sealed-path refusal or descriptor-verification
+  error fails the audit operation before the associated committed action.
+- **OA-AUDIT-007** The core principal registry accepts the existing bounded
+  `OACERT-LOCAL-PRINCIPALS-V1` two-column grammar and `OACERT-LOCAL-PRINCIPALS-V2` rows with an
+  explicit enabled/disabled status. Both require unique positive canonical decimal IDs and one
+  `monitor`, `operate`, or `configure` role. The fixed table admits at most 128 rows and the parser
+  admits at most 64 KiB; malformed framing, duplicate IDs, unknown roles, invalid status, excess
+  rows, and unknown or disabled principals are explicit refusals. Action authorization first
+  resolves the principal, then applies the existing three-role action matrix. This is local role
+  configuration only; it does not authenticate a login, credential, principal origin, or authority.
+- **OA-AUDIT-008** The shell registry loader opens a regular file through the production sealed
+  path guard, reads from the verified descriptor under the 64 KiB byte cap, rejects size changes,
+  hashes the exact bytes, and compares them with an independently supplied expected SHA-256 pin
+  before parsing. The registry bytes do not supply their own trusted pin. Path, descriptor, pin,
+  framing, and parse refusals return no registry.

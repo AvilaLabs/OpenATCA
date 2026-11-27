@@ -1201,6 +1201,29 @@ mod tests {
         assert!(errors.iter().any(|error| {
             error.contains("safety assessment OA-AAA-001 is not an active requirement")
         }));
+
+        // Exercise the separate declared-ID check without relying on the assessment-active
+        // diagnostic: the safety list names an inactive ID, while its assessment row names the
+        // current active ID and the unresolved disposition covers that active register entry.
+        fs::write(
+            root.0.join("REQUIREMENTS.md"),
+            "- **OA-BBB-001** unrelated active requirement\n",
+        )
+        .unwrap();
+        let declared_id_inactive = fixture()
+            .replace(
+                "\"safety_requirement_assessments\":[{\"id\":\"OA-AAA-001\"",
+                "\"safety_requirement_assessments\":[{\"id\":\"OA-BBB-001\"",
+            )
+            .replace(
+                "\"unresolved_requirement_assessments\":[]",
+                "\"unresolved_requirement_assessments\":[{\"id\":\"OA-BBB-001\",\"function\":\"synthetic\",\"rationale\":\"active but outside the declared safety ID list\"}]",
+            );
+        root.write_log(&declared_id_inactive);
+        let errors = check(&root.0);
+        assert!(errors
+            .iter()
+            .any(|error| error == "safety requirement OA-AAA-001 is not an active register ID"));
     }
 
     // REQ: OA-MIG-602

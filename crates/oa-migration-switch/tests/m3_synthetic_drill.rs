@@ -6,6 +6,7 @@
 #[path = "../examples/m3_synthetic_drill.rs"]
 mod drill;
 
+use oa_audit_core::{AuditReceipt, Event};
 use oa_migration_switch::{
     ingest, new_selector, observe_delivery, prepare_candidate, rollback, select_candidate,
     selected, trace, EvidenceKind, Output, Refusal, Side, Snapshot, SwapUnitKey, UnitPolicy,
@@ -24,6 +25,55 @@ const MAX_HARNESS_NOISE: usize = 4096;
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
 const TARGET_DECISION_TO_ACK: Duration = Duration::from_secs(1);
+
+fn test_audit_receipt(
+    selector: &oa_migration_switch::Selector,
+    event: Event,
+) -> Result<AuditReceipt, Refusal> {
+    let expected = oa_migration_switch::audit_checkpoint(selector);
+    let sequence = expected
+        .count
+        .checked_add(1)
+        .ok_or(Refusal::AuditRequired)?;
+    Ok(oa_audit_core::receipt_claim(
+        sequence,
+        [0; 32],
+        expected.tail,
+        event,
+    ))
+}
+
+fn audited_select_candidate(
+    selector: &mut oa_migration_switch::Selector,
+    readiness: &oa_migration_switch::CandidateReadiness,
+    authorization: &oa_migration_switch::WindowAuthorization,
+    intent: &oa_migration_switch::PromotionIntent,
+    now_ns: i64,
+    max_age_ns: i64,
+) -> Result<(), Refusal> {
+    let event = oa_migration_switch::candidate_audit_event(selector, intent, now_ns)?;
+    let receipt = test_audit_receipt(selector, event)?;
+    select_candidate(
+        selector,
+        readiness,
+        authorization,
+        intent,
+        now_ns,
+        max_age_ns,
+        receipt,
+    )
+}
+
+fn audited_rollback(
+    selector: &mut oa_migration_switch::Selector,
+    cause: oa_migration_switch::RollbackReceipt,
+    now_ns: i64,
+    max_age_ns: i64,
+) -> Result<(), Refusal> {
+    let event = oa_migration_switch::rollback_audit_event(selector, cause, now_ns)?;
+    let receipt = test_audit_receipt(selector, event)?;
+    rollback(selector, cause, now_ns, max_age_ns, receipt)
+}
 
 #[derive(Clone, Debug)]
 struct Payload {
@@ -116,7 +166,7 @@ fn read_bounded_line(reader: &mut impl Read) -> io::Result<Option<Vec<u8>>> {
                 return Err(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
                     "partial frame",
-                ))
+                ));
             }
             _ => {
                 let value = byte.first().copied().ok_or_else(|| {
@@ -609,7 +659,7 @@ fn local_process_failover_delivers_selected_payload_and_preserves_consumer_seque
     let intent_1 = drill::promotion_intent(&selector, &ready_1, &grant, 1, intent_1_at)
         .expect("first fresh M2 intent");
     let decision_1_started = Instant::now();
-    select_candidate(
+    audited_select_candidate(
         &mut selector,
         &ready_1,
         &grant,
@@ -646,7 +696,7 @@ fn local_process_failover_delivers_selected_payload_and_preserves_consumer_seque
 
     let rollback_decision_started = Instant::now();
     let rollback_1_at = wall_event_ns(wall_origin, epoch_ns).expect("first rollback time");
-    rollback(
+    audited_rollback(
         &mut selector,
         drill::rollback_receipt(unit, policy, 2, 1, 1, rollback_1_at, rollback_1_at),
         rollback_1_at,
@@ -704,7 +754,7 @@ fn local_process_failover_delivers_selected_payload_and_preserves_consumer_seque
     let intent_2 = drill::promotion_intent(&selector, &ready_2, &grant, 3, intent_2_at)
         .expect("fresh M2 intent under reused M1 grant");
     let fallback_started = Instant::now();
-    select_candidate(
+    audited_select_candidate(
         &mut selector,
         &ready_2,
         &grant,
@@ -725,7 +775,7 @@ fn local_process_failover_delivers_selected_payload_and_preserves_consumer_seque
         "closed producer wrapper accepted a request after process loss"
     );
     let rollback_2_at = wall_event_ns(wall_origin, epoch_ns).expect("fallback rollback time");
-    rollback(
+    audited_rollback(
         &mut selector,
         drill::rollback_receipt(unit, policy, 4, 2, 2, rollback_2_at, rollback_2_at),
         rollback_2_at,
@@ -845,5 +895,13 @@ fn local_process_failover_delivers_selected_payload_and_preserves_consumer_seque
     assert!(
         record_count < u16::try_from(oa_migration_switch::MAX_TRACE).expect("bounded trace size")
     );
-    println!("M3_INTERNAL_SYNTHETIC_TEST_REPORT\tversion=1\tselected_output_opportunities=4\tproducer_frames_for_primary_delivery=3\tproducer_failures=1\tproducer_requests_refused_locally_after_loss=1\tconsumer_offered=3\tconsumer_acked=3\tconsumer_lost=0\tconsumer_sequences=1,2,3\tnegative_gap_refusals=1\tnegative_duplicate_refusals=1\tfirst_decision_to_ack_ns={}\trollback_decision_to_ack_ns={}\tfallback_decision_to_ack_ns={}\ttarget_ms={}\tresponse_timeout_ms={}\tcleanup_timeout_ms={}\tprotocol=internal_synthetic_only\trecorded=0\tqualification=INCOMPLETE", decision_1_to_ack.as_nanos(), rollback_decision_to_ack.as_nanos(), fallback_decision_to_ack.as_nanos(), TARGET_DECISION_TO_ACK.as_millis(), RESPONSE_TIMEOUT.as_millis(), CLEANUP_TIMEOUT.as_millis());
+    println!(
+        "M3_INTERNAL_SYNTHETIC_TEST_REPORT\tversion=1\tselected_output_opportunities=4\tproducer_frames_for_primary_delivery=3\tproducer_failures=1\tproducer_requests_refused_locally_after_loss=1\tconsumer_offered=3\tconsumer_acked=3\tconsumer_lost=0\tconsumer_sequences=1,2,3\tnegative_gap_refusals=1\tnegative_duplicate_refusals=1\tfirst_decision_to_ack_ns={}\trollback_decision_to_ack_ns={}\tfallback_decision_to_ack_ns={}\ttarget_ms={}\tresponse_timeout_ms={}\tcleanup_timeout_ms={}\tprotocol=internal_synthetic_only\trecorded=0\tqualification=INCOMPLETE",
+        decision_1_to_ack.as_nanos(),
+        rollback_decision_to_ack.as_nanos(),
+        fallback_decision_to_ack.as_nanos(),
+        TARGET_DECISION_TO_ACK.as_millis(),
+        RESPONSE_TIMEOUT.as_millis(),
+        CLEANUP_TIMEOUT.as_millis()
+    );
 }

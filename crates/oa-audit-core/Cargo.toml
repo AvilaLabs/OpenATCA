@@ -1,0 +1,16 @@
+[package]
+name = "oa-audit-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+description = "Pure audit action and receipt value contract"
+
+[lints]
+workspace = true
+
+[dependencies]
+
+[package.metadata.openatca]
+class = "core"

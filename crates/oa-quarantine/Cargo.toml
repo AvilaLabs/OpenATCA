@@ -9,5 +9,10 @@ authors.workspace = true
 [lints]
 workspace = true
 
+[dependencies]
+# F1 / steer41: OA-QUAR-004 gates the pure queue release on a plain audit receipt value;
+# append and filesystem verification remain in the shell audit package.
+oa-audit-core = { path = "../oa-audit-core" }
+
 [package.metadata.openatca]
 class = "core"

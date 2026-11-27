@@ -7,6 +7,8 @@ name = "oa-adapt"
 version = "0.0.1"
 dependencies = [
  "oa-airspace",
+ "oa-audit-core",
+ "oa-audit-log",
  "oa-ca",
  "oa-nasr",
  "oa-sealed",
@@ -62,6 +64,19 @@ name = "oa-asterix"
 version = "0.0.1"
 
 [[package]]
+name = "oa-audit-core"
+version = "0.0.1"
+
+[[package]]
+name = "oa-audit-log"
+version = "0.0.1"
+dependencies = [
+ "oa-audit-core",
+ "oa-sealed",
+ "oa-sha256",
+]
+
+[[package]]
 name = "oa-awc"
 version = "0.0.1"
 dependencies = [
@@ -95,6 +110,10 @@ dependencies = [
 [[package]]
 name = "oa-build-info"
 version = "0.0.1"
+dependencies = [
+ "oa-sealed",
+ "oa-sha256",
+]
 
 [[package]]
 name = "oa-ca"
@@ -122,6 +141,19 @@ dependencies = [
  "oa-sha256",
  "oa-track",
  "oa-track-tools",
+]
+
+[[package]]
+name = "oa-certification"
+version = "0.0.1"
+dependencies = [
+ "oa-adapt",
+ "oa-audit-core",
+ "oa-audit-log",
+ "oa-build-info",
+ "oa-sealed",
+ "oa-sha256",
+ "oa-track",
 ]
 
 [[package]]
@@ -376,6 +408,7 @@ version = "0.0.1"
 name = "oa-migration-switch"
 version = "0.0.1"
 dependencies = [
+ "oa-audit-core",
  "oa-migration",
 ]
 
@@ -468,6 +501,9 @@ dependencies = [
 [[package]]
 name = "oa-quarantine"
 version = "0.0.1"
+dependencies = [
+ "oa-audit-core",
+]
 
 [[package]]
 name = "oa-regional-session"
@@ -475,6 +511,8 @@ version = "0.0.1"
 dependencies = [
  "oa-adsb",
  "oa-airspace",
+ "oa-audit-core",
+ "oa-audit-log",
  "oa-ca",
  "oa-display",
  "oa-display-present",
@@ -701,6 +739,9 @@ version = "0.0.1"
 [[package]]
 name = "oa-trace"
 version = "0.0.1"
+dependencies = [
+ "oa-sealed",
+]
 
 [[package]]
 name = "oa-track"
