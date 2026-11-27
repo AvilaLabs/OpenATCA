@@ -13,6 +13,7 @@ import os
 import stat
 import subprocess
 import sys
+import tempfile
 import tokenize
 from collections import Counter, defaultdict
 from dataclasses import dataclass
@@ -872,6 +873,30 @@ def compare(current: dict[str, object], baseline: dict[str, object]) -> dict[str
     }
 
 
+def _write_baseline(target: Path, payload: bytes) -> None:
+    if len(payload) > MAX_BASELINE_BYTES:
+        raise RatchetError("generated baseline byte limit exceeded")
+    try:
+        before = target.lstat()
+    except FileNotFoundError:
+        before = None
+    if before is not None and not stat.S_ISREG(before.st_mode):
+        raise RatchetError("baseline output must not be a symlink or non-regular file")
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=target.parent, prefix=".quality-baseline-", delete=False) as stream:
+            temporary = Path(stream.name)
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        # Atomic replacement replaces a destination link itself; it never follows its target.
+        os.replace(temporary, target)
+        temporary = None
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path.cwd())
@@ -895,7 +920,7 @@ def main(argv: list[str] | None = None) -> int:
             payload = (json.dumps(baseline, indent=2, sort_keys=True) + "\n").encode("utf-8")
             if len(payload) > MAX_BASELINE_BYTES:
                 raise RatchetError("generated baseline byte limit exceeded")
-            target.write_bytes(payload)
+            _write_baseline(target, payload)
             print(json.dumps({"status": "BASELINE_WRITTEN", "path": str(args.baseline),
                               "summary": baseline["summary"]}, sort_keys=True))
             return 0

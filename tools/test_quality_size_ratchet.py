@@ -210,6 +210,25 @@ class QualitySizeRatchetTests(unittest.TestCase):
             with self.assertRaises(ratchet.RatchetError):
                 ratchet._read_baseline(path)
 
+    def test_baseline_writer_refuses_final_symlink_without_touching_target(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            outside = root / "outside.json"
+            outside.write_bytes(b"original")
+            link = root / "baseline.json"
+            link.symlink_to(outside)
+            with self.assertRaises(ratchet.RatchetError):
+                ratchet._write_baseline(link, b"replacement")
+            self.assertEqual(outside.read_bytes(), b"original")
+
+    def test_baseline_writer_atomically_replaces_regular_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "baseline.json"
+            target.write_bytes(b"original")
+            ratchet._write_baseline(target, b"replacement")
+            self.assertEqual(target.read_bytes(), b"replacement")
+            self.assertEqual(list(Path(directory).iterdir()), [target])
+
     def test_baseline_binding_and_revision_fail_closed(self):
         summary = ratchet.analyze_sources([("sample.rs", "fn small() {}\n")])
         baseline = self.baseline_for(summary)
