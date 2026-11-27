@@ -14,7 +14,7 @@ fn event(action: Action, role: Role) -> Event {
     }
 }
 
-// REQ: OA-AUDIT-001, OA-AUDIT-002
+// REQ: OA-AUDIT-001, OA-AUDIT-002, OA-AUDIT-005
 #[test]
 fn bounded_event_registry_and_exact_receipt_binding() {
     let flip = event(Action::MigrationFlip, Role::Configure);
@@ -32,7 +32,7 @@ fn bounded_event_registry_and_exact_receipt_binding() {
     ));
 }
 
-// REQ: OA-AUDIT-002
+// REQ: OA-AUDIT-002, OA-AUDIT-010
 #[test]
 fn registry_action_matrix_keeps_added_actions_at_the_declared_levels() {
     for action in [
@@ -40,6 +40,7 @@ fn registry_action_matrix_keeps_added_actions_at_the_declared_levels() {
         Action::VulnerabilityIntake,
         Action::RunwayAssignment,
         Action::AlertAcknowledge,
+        Action::HoldCommand,
     ] {
         assert_eq!(
             authorize(Role::Monitor, action),

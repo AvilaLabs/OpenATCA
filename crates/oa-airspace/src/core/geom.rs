@@ -836,6 +836,12 @@ fn segment_samples_within(
     Ok(out)
 }
 
+/// Densify one CIFP boundary description on WGS 84 for a caller that needs the model's native
+/// geodetic datum. The exact segment codes remain the source of the path geometry.
+pub fn segment_samples_wgs84(segs: &[SegIn]) -> Result<Vec<LatLon>, GeoError> {
+    segment_samples(&wgs84(), segs)
+}
+
 /// The largest amount, metres, by which an arc's coded radius differs from the distance between
 /// its centre and either of its two stored end points; 0 when the boundary has no arc with both
 /// ends. The sampler uses the coded radius (what the model stores), so a gap here is a volume

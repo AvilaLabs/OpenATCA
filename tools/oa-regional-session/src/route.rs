@@ -14,6 +14,7 @@ use oa_airspace::shell::route_parse::parse_route_steps;
 use oa_legacy_traj::core::trajectory::{
     self as t, AltitudeConstraintKind as A, SpeedConstraintKind as S,
 };
+use std::borrow::Cow;
 
 /// C6/C7: one session retains at most 256 route/cursor revisions across all flights, matching
 /// the shared selector's bound. Exhaustion stops the run before conversion or storage.
@@ -36,6 +37,32 @@ const MAX_CURSOR_COMPARISONS: usize = MAX_ROUTE_REVISIONS * (MAX_ROUTE_REVISIONS
 const PATH_DF: u8 = 7;
 const PATH_IF: u8 = 15;
 const PATH_TF: u8 = 18;
+pub(crate) const HOLD_PROFILE_POINTS: usize = 240;
+pub(crate) const EMPTY_HOLD_ROUTE_POINT: t::RoutePoint = t::RoutePoint {
+    lat_e7: 0,
+    lon_e7: 0,
+    min_altitude_ft: t::NO_ALTITUDE_FT,
+    max_altitude_ft: t::NO_ALTITUDE_FT,
+    min_speed_mmps: t::NO_SPEED_MMPS,
+    max_speed_mmps: t::NO_SPEED_MMPS,
+    fix: t::FixIdentity {
+        ident: t::RouteIdentifier {
+            len: 8,
+            bytes: *b"HOLD0001\0\0\0\0",
+        },
+        region: *b"K1\0\0",
+        scope: t::RouteIdentifier {
+            len: 0,
+            bytes: [0; 12],
+        },
+        class: 1,
+    },
+    altitude_constraint_kind: t::AltitudeConstraintKind::None,
+    speed_constraint_kind: t::SpeedConstraintKind::None,
+    geometry: t::PathGeometry::GreatCircleLeg,
+    speed_reference: t::SpeedReference::GroundSpeed,
+    reserved: [0; 1],
+};
 
 // A3/C6: cold immutable offline revisions, capped above. Complete converter output retains
 // airway/procedure/MEA/turn provenance even where the baseline predictor cannot use it.
@@ -1320,7 +1347,7 @@ pub fn clearance_evidence(view: &SharedFlightView) -> t::Clearance {
 }
 
 // A7.2: cold one-receipt adapter value, used only to call both pure issue-time modes on identical inputs.
-struct PreparedRouteIssue {
+struct PreparedRouteIssue<'a> {
     key: t::FlightKey,
     route: t::RouteProvenance,
     cutoff_ms: i64,
@@ -1330,10 +1357,55 @@ struct PreparedRouteIssue {
     track: t::CurrentTrack,
     clearance: t::Clearance,
     eta_target: t::EtaTarget,
-    points: Vec<t::RoutePoint>,
+    points: Cow<'a, [t::RoutePoint]>,
 }
 
-fn prepared_input(prepared: &PreparedRouteIssue) -> t::TrajectoryIssueInput<'_> {
+/// One scan-matched active view and its observed track for shell conflict queries.
+pub struct ActiveRouteInput<'a> {
+    pub view: &'a SharedFlightView,
+    pub observed: &'a ObservedTrack,
+}
+
+/// A full-key, scan-bound direct-hold profile prepared once by the regional runtime.
+#[derive(Clone, Copy)]
+pub struct HoldRouteProfile<'a> {
+    pub state: &'a t::HoldPhaseState,
+    pub config: crate::holding::HoldPredictionIntent,
+    pub revision: u64,
+    pub points: &'a [t::RoutePoint; HOLD_PROFILE_POINTS],
+}
+
+pub struct PairRouteProbeInput<'a> {
+    pub first: ActiveRouteInput<'a>,
+    pub first_hold: Option<HoldRouteProfile<'a>>,
+    pub second: ActiveRouteInput<'a>,
+    pub second_hold: Option<HoldRouteProfile<'a>>,
+    pub cutoff_ns: i64,
+    pub frame_sequence: u64,
+}
+
+/// Caller-supplied active SUA geometry and altitude band for one shared route query.
+pub struct SuaRouteProbeInput<'a> {
+    pub active: ActiveRouteInput<'a>,
+    pub cutoff_ns: i64,
+    pub frame_sequence: u64,
+    pub area: &'a oa_airspace::core::geom::Area,
+    pub floor_ft: i32,
+    pub ceiling_ft: i32,
+}
+
+/// Explicit operator-supplied route amendment and scan-matched counterpart for a detached trial.
+pub struct TrialRouteProbeInput<'a> {
+    pub candidate_event: &'a NormalizedEvent,
+    pub candidate_view: &'a SharedFlightView,
+    pub candidate_track: &'a ObservedTrack,
+    pub counterpart_view: &'a SharedFlightView,
+    pub counterpart_track: &'a ObservedTrack,
+    pub cutoff_ns: i64,
+    pub frame_sequence: u64,
+}
+
+fn prepared_input<'a>(prepared: &'a PreparedRouteIssue<'_>) -> t::TrajectoryIssueInput<'a> {
     t::TrajectoryIssueInput {
         key: prepared.key,
         route: prepared.route,
@@ -1344,8 +1416,243 @@ fn prepared_input(prepared: &PreparedRouteIssue) -> t::TrajectoryIssueInput<'_> 
         track: prepared.track,
         clearance: prepared.clearance,
         eta_target: prepared.eta_target,
-        points: &prepared.points,
+        points: prepared.points.as_ref(),
     }
+}
+
+/// Prepare a bounded synthetic direct-hold path for the same issue-time sampler used by
+/// filed-route pair and SUA probes. Its evidence digest describes the accepted hold parameters,
+/// not the filed route; unsupported hold procedures never reach this adapter.
+fn prepare_hold_phase_issue<'a>(
+    view: &SharedFlightView,
+    observed: &ObservedTrack,
+    cutoff_ns: i64,
+    frame_sequence: u64,
+    profile: HoldRouteProfile<'a>,
+) -> Result<PreparedRouteIssue<'a>, String> {
+    let state = profile.state;
+    let config = profile.config;
+    let key = flight_key(view);
+    let cutoff_ms = ms(cutoff_ns)?;
+    if state.key != key
+        || state.last_advance_ns != observed.state_ns
+        || (state.entry_model == 0 && state.entry_state_ns != config.entry_state_ns)
+        || (state.entry_model == 1
+            && (config.entry_state_ns != 0 || state.entry_available_ns > state.last_advance_ns))
+        || state.inbound_true_course_cdeg != config.inbound_true_course_cdeg
+        || state.leg_duration_ms != config.leg_duration_ms
+        || state.turn_rate_cdeg_s != config.turn_rate_cdeg_s
+        || state.max_scan_gap_ns != config.max_scan_gap_ns
+        || state.max_speed_error_mmps != config.max_speed_error_mmps
+    {
+        return Err("hold phase has not reconciled this exact scan/full key".into());
+    }
+    if observed.newest_source_ns > observed.state_ns
+        || observed.state_ns > cutoff_ns
+        || observed.newest_source_ns > cutoff_ns
+    {
+        return Err("hold observed track is future-stamped".into());
+    }
+    let east = f64::from(observed.east_mmps);
+    let north = f64::from(observed.north_mmps);
+    let speed = oa_ieee::round(oa_math::hypot(east, north));
+    if !speed.is_finite() || speed < 1.0 || speed >= f64::from(u32::MAX) {
+        return Err("hold observed groundspeed unrepresentable".into());
+    }
+    if (speed - f64::from(state.groundspeed_mmps)).abs() > f64::from(state.max_speed_error_mmps) {
+        return Err("hold observed groundspeed exceeds its explicit model tolerance".into());
+    }
+    let mut payload = [0_u8; 164];
+    payload[..12].copy_from_slice(b"HOLDPHASE001");
+    payload[12..48].copy_from_slice(&key_bytes(key));
+    payload[48..56].copy_from_slice(&state.entry_state_ns.to_le_bytes());
+    payload[56..60].copy_from_slice(&state.fix_lat_e7.to_le_bytes());
+    payload[60..64].copy_from_slice(&state.fix_lon_e7.to_le_bytes());
+    payload[64..66].copy_from_slice(&state.inbound_true_course_cdeg.to_le_bytes());
+    payload[66] = state.turn;
+    payload[67..71].copy_from_slice(&state.groundspeed_mmps.to_le_bytes());
+    payload[71..75].copy_from_slice(&state.leg_duration_ms.to_le_bytes());
+    payload[75..77].copy_from_slice(&state.turn_rate_cdeg_s.to_le_bytes());
+    payload[77..85].copy_from_slice(&state.max_scan_gap_ns.to_le_bytes());
+    payload[85..89].copy_from_slice(&config.max_speed_error_mmps.to_le_bytes());
+    payload[89..93].copy_from_slice(&config.max_position_error_mm.to_le_bytes());
+    payload[93..95].copy_from_slice(&config.max_heading_error_cdeg.to_le_bytes());
+    payload[95] = 1;
+    payload[96] = state.entry_model;
+    payload[97] = state.entry_procedure;
+    payload[98] = state.entry_turn_direction;
+    payload[99..101].copy_from_slice(&state.entry_start_heading_true_cdeg.to_le_bytes());
+    payload[101..105].copy_from_slice(&state.entry_start_lat_e7.to_le_bytes());
+    payload[105..109].copy_from_slice(&state.entry_start_lon_e7.to_le_bytes());
+    payload[109..117].copy_from_slice(&state.entry_available_ns.to_le_bytes());
+    payload[117..125].copy_from_slice(&state.entry_first_turn_ns.to_le_bytes());
+    payload[125..133].copy_from_slice(&state.entry_straight_leg_ns.to_le_bytes());
+    payload[133..141].copy_from_slice(&state.entry_intercept_turn_ns.to_le_bytes());
+    payload[141..149].copy_from_slice(&state.entry_join_ns.to_le_bytes());
+    payload[149..157].copy_from_slice(&state.entry_regular_phase_offset_ns.to_le_bytes());
+    payload[157] = match config.course_basis {
+        crate::holding::HoldEntryCourseBasis::SyntheticNoWindCourse => 1,
+        crate::holding::HoldEntryCourseBasis::WindOrHeadingUnknown => 2,
+    };
+    payload[158..162].copy_from_slice(&config.entry_capture_radius_mm.to_le_bytes());
+    let route = t::RouteProvenance {
+        key,
+        source_ms: ms(state.entry_state_ns)?,
+        available_ms: cutoff_ms,
+        message_id: profile.revision,
+        payload_sha256: oa_sha256::sha256(&payload),
+        reserved: [0; 4],
+    };
+    let owner = t::OwnerProvenance {
+        source_ms: view.owner_stamp.ts_ms,
+        available_ms: view.owner_stamp.avail_ms,
+        message_id: view.owner_stamp.msg,
+        owner_unit: view.owner_unit,
+        owner_state: if view.owner_unit == [0; 8] {
+            t::OwnerState::Unknown
+        } else {
+            t::OwnerState::Known
+        },
+        reserved: [0; 7],
+    };
+    let target = profile
+        .points
+        .first()
+        .ok_or("hold sample set is empty")?
+        .fix;
+    let cursor = t::ActiveRouteCursor {
+        source_ms: route.source_ms,
+        available_ms: cutoff_ms,
+        message_id: profile.revision,
+        route_payload_sha256: route.payload_sha256,
+        key,
+        next_fix: target,
+        reserved: [0; 5],
+    };
+    Ok(PreparedRouteIssue {
+        key,
+        route,
+        cutoff_ms,
+        max_track_age_ms: 5_000,
+        owner,
+        route_cursor: Some(cursor),
+        track: t::CurrentTrack {
+            state_ms: ms(observed.state_ns)?,
+            newest_source_ms: ms(observed.newest_source_ns)?,
+            available_ms: cutoff_ms,
+            message_id: frame_sequence,
+            aircraft_address: observed.address,
+            lat_e7: observed.lat_e7,
+            lon_e7: observed.lon_e7,
+            altitude_ft: observed.altitude_ft,
+            vertical_rate_fpm: observed.vertical_rate_fpm,
+            groundspeed_mmps: state.groundspeed_mmps,
+        },
+        clearance: clearance_evidence(view),
+        eta_target: t::EtaTarget {
+            present: true,
+            fix: target,
+        },
+        points: Cow::Borrowed(profile.points.as_slice()),
+    })
+}
+
+/// Build the bounded hold route profile once per accepted phase and scan. All probes borrow the
+/// same immutable 240-point slice, avoiding route reconstruction for each pair/SUA candidate.
+pub(crate) fn fill_hold_phase_profile(
+    view: &SharedFlightView,
+    observed: &ObservedTrack,
+    cutoff_ns: i64,
+    state: &t::HoldPhaseState,
+    config: crate::holding::HoldPredictionIntent,
+    points: &mut [t::RoutePoint; HOLD_PROFILE_POINTS],
+) -> Result<(), String> {
+    // The 240 points span 22 minutes. The two-minute tail keeps the route sampler's
+    // straight great-circle legs covered through its complete 20-minute probe horizon.
+    const HOLD_SAMPLE_STEP_NS: i64 = 5_500_000_000;
+    if state.key != flight_key(view)
+        || state.last_advance_ns != observed.state_ns
+        || (state.entry_model == 0 && state.entry_state_ns != config.entry_state_ns)
+        || (state.entry_model == 1
+            && (config.entry_state_ns != 0 || state.entry_available_ns > state.last_advance_ns))
+        || state.inbound_true_course_cdeg != config.inbound_true_course_cdeg
+        || state.leg_duration_ms != config.leg_duration_ms
+        || state.turn_rate_cdeg_s != config.turn_rate_cdeg_s
+        || state.max_scan_gap_ns != config.max_scan_gap_ns
+        || state.max_speed_error_mmps != config.max_speed_error_mmps
+        || observed.newest_source_ns > observed.state_ns
+        || observed.state_ns > cutoff_ns
+        || observed.newest_source_ns > cutoff_ns
+    {
+        return Err("hold profile identity/scan is not reconciled".into());
+    }
+    let measured = oa_ieee::round(oa_math::hypot(
+        f64::from(observed.east_mmps),
+        f64::from(observed.north_mmps),
+    ));
+    if !measured.is_finite()
+        || !(1.0..f64::from(u32::MAX)).contains(&measured)
+        || (measured - f64::from(state.groundspeed_mmps)).abs()
+            > f64::from(state.max_speed_error_mmps)
+    {
+        return Err("hold profile groundspeed is outside declared model".into());
+    }
+    for (index, sample) in (1..=HOLD_PROFILE_POINTS as i64).enumerate() {
+        let at_ns = cutoff_ns
+            .checked_add(sample * HOLD_SAMPLE_STEP_NS)
+            .ok_or("hold forecast timestamp overflow")?;
+        let snapshot = t::hold_phase_predict(state, at_ns)
+            .map_err(|reason| format!("hold phase forecast unavailable: {reason:?}"))?;
+        let point = points
+            .get_mut(index)
+            .ok_or("hold profile output capacity invariant failed")?;
+        let ident = hold_profile_fix(index).ok_or("hold profile fix identity capacity failed")?;
+        *point = t::RoutePoint {
+            lat_e7: snapshot.lat_e7,
+            lon_e7: snapshot.lon_e7,
+            min_altitude_ft: t::NO_ALTITUDE_FT,
+            max_altitude_ft: t::NO_ALTITUDE_FT,
+            min_speed_mmps: t::NO_SPEED_MMPS,
+            max_speed_mmps: t::NO_SPEED_MMPS,
+            fix: t::FixIdentity {
+                ident: t::RouteIdentifier {
+                    len: 8,
+                    bytes: ident,
+                },
+                region: view.centre,
+                scope: t::RouteIdentifier {
+                    len: 0,
+                    bytes: [0; 12],
+                },
+                class: 1,
+            },
+            altitude_constraint_kind: t::AltitudeConstraintKind::None,
+            speed_constraint_kind: t::SpeedConstraintKind::None,
+            geometry: t::PathGeometry::GreatCircleLeg,
+            speed_reference: t::SpeedReference::GroundSpeed,
+            reserved: [0; 1],
+        };
+    }
+    Ok(())
+}
+
+fn hold_profile_fix(point_index: usize) -> Option<[u8; 12]> {
+    let mut ident = *b"HLD00000\0\0\0\0";
+    let mut value = point_index;
+    for position in (3..8).rev() {
+        *ident.get_mut(position)? = b'0' + (value % 10) as u8;
+        value /= 10;
+    }
+    Some(ident)
+}
+
+fn key_bytes(key: t::FlightKey) -> [u8; 36] {
+    let mut bytes = [0; 36];
+    bytes[..16].copy_from_slice(&key.gufi);
+    bytes[16..20].copy_from_slice(&key.aircraft_address.to_le_bytes());
+    bytes[20..24].copy_from_slice(&key.centre);
+    bytes[24..].copy_from_slice(&key.plan_id);
+    bytes
 }
 
 /// Converts one receipt into the exact issue-time values shared by horizontal and optional
@@ -1356,7 +1663,7 @@ fn prepare_route_issue(
     observed: &ObservedTrack,
     cutoff_ns: i64,
     frame_sequence: u64,
-) -> Result<PreparedRouteIssue, String> {
+) -> Result<PreparedRouteIssue<'static>, String> {
     let cutoff_ms = ms(cutoff_ns)?;
     if !flight_view_in_cutoff(view, cutoff_ms) {
         return Err("flight view has invalid or future-stamped state at cutoff".into());
@@ -1546,7 +1853,7 @@ fn prepare_route_issue(
             present: true,
             fix: target,
         },
-        points,
+        points: Cow::Owned(points),
     })
 }
 
@@ -1577,6 +1884,233 @@ pub fn route_issue_with_performance(
         t::issue_trajectory(&input),
         t::issue_vertical_profile(&input, performance),
     ))
+}
+
+/// Evaluate two scan-matched active plans with the shared route predictor. This is a query over
+/// the current admitted route/flight snapshots; it does not commit or revise either plan.
+pub fn route_pair_probe(
+    store: &RouteStore,
+    first: ActiveRouteInput<'_>,
+    second: ActiveRouteInput<'_>,
+    cutoff_ns: i64,
+    frame_sequence: u64,
+    scratch: &mut crate::conflict_probe::ConflictProbeScratch,
+) -> Result<oa_ca::probe::ProbeResult, String> {
+    let first = prepare_route_issue(store, first.view, first.observed, cutoff_ns, frame_sequence)?;
+    let second = prepare_route_issue(
+        store,
+        second.view,
+        second.observed,
+        cutoff_ns,
+        frame_sequence,
+    )?;
+    Ok(crate::conflict_probe::probe_active_pair(
+        &prepared_input(&first),
+        &prepared_input(&second),
+        scratch,
+    ))
+}
+
+/// Pair probe using an already scan-reconciled direct hold for either participant. A missing
+/// phase leaves that flight on its admitted filed route; callers must pass a phase only for the
+/// exact full key and scan that it reconciled.
+pub fn route_pair_probe_with_holds(
+    store: &RouteStore,
+    input: PairRouteProbeInput<'_>,
+    scratch: &mut crate::conflict_probe::ConflictProbeScratch,
+) -> Result<oa_ca::probe::ProbeResult, String> {
+    let first = match input.first_hold {
+        Some(profile) => prepare_hold_phase_issue(
+            input.first.view,
+            input.first.observed,
+            input.cutoff_ns,
+            input.frame_sequence,
+            profile,
+        )?,
+        None => prepare_route_issue(
+            store,
+            input.first.view,
+            input.first.observed,
+            input.cutoff_ns,
+            input.frame_sequence,
+        )?,
+    };
+    let second = match input.second_hold {
+        Some(profile) => prepare_hold_phase_issue(
+            input.second.view,
+            input.second.observed,
+            input.cutoff_ns,
+            input.frame_sequence,
+            profile,
+        )?,
+        None => prepare_route_issue(
+            store,
+            input.second.view,
+            input.second.observed,
+            input.cutoff_ns,
+            input.frame_sequence,
+        )?,
+    };
+    Ok(crate::conflict_probe::probe_active_pair(
+        &prepared_input(&first),
+        &prepared_input(&second),
+        scratch,
+    ))
+}
+
+/// Screen one active plan against a startup-owned continuous SUA geometry using the shared
+/// route predictor. The caller's admitted model supplies the geometry and MSL band.
+pub fn route_sua_probe(
+    store: &RouteStore,
+    input: SuaRouteProbeInput<'_>,
+    scratch: &mut crate::conflict_probe::ConflictProbeScratch,
+) -> Result<oa_airspace::core::conflict_probe::SuaProbeResult, String> {
+    let prepared = prepare_route_issue(
+        store,
+        input.active.view,
+        input.active.observed,
+        input.cutoff_ns,
+        input.frame_sequence,
+    )?;
+    let trajectory =
+        crate::conflict_probe::sample_active_trajectory(&prepared_input(&prepared), scratch)
+            .ok_or("shared route profile unavailable for SUA screening")?;
+    Ok(crate::conflict_probe::probe_sua(
+        trajectory,
+        input.area,
+        true,
+        i64::MIN,
+        i64::MAX,
+        input.floor_ft,
+        input.ceiling_ft,
+    ))
+}
+
+/// Screen a current direct-hold trajectory against a SUA using the same shared sampler used by
+/// filed routes. The phase must already have reconciled the supplied observed scan.
+pub fn route_hold_sua_probe(
+    input: SuaRouteProbeInput<'_>,
+    profile: HoldRouteProfile<'_>,
+    scratch: &mut crate::conflict_probe::ConflictProbeScratch,
+) -> Result<oa_airspace::core::conflict_probe::SuaProbeResult, String> {
+    let prepared = prepare_hold_phase_issue(
+        input.active.view,
+        input.active.observed,
+        input.cutoff_ns,
+        input.frame_sequence,
+        profile,
+    )?;
+    let trajectory =
+        crate::conflict_probe::sample_active_trajectory(&prepared_input(&prepared), scratch)
+            .ok_or("shared hold profile unavailable for SUA screening")?;
+    Ok(crate::conflict_probe::probe_sua(
+        trajectory,
+        input.area,
+        true,
+        i64::MIN,
+        i64::MAX,
+        input.floor_ft,
+        input.ceiling_ft,
+    ))
+}
+
+/// Evaluate an explicitly supplied filed-route candidate against another active plan. The
+/// candidate is converted in a temporary route store; no admitted route or flight state changes.
+pub fn route_trial_pair_probe(
+    active_store: &RouteStore,
+    model: &Model,
+    input: TrialRouteProbeInput<'_>,
+    scratch: &mut crate::conflict_probe::ConflictProbeScratch,
+) -> Result<oa_ca::probe::ProbeResult, String> {
+    route_trial_pair_probe_with_holds(active_store, model, input, None, None, scratch)
+}
+
+/// Trial a filed candidate while retaining modeled direct-hold paths for the active baseline
+/// and counterpart. The detached candidate remains an explicit filed-route replacement.
+pub fn route_trial_pair_probe_with_holds(
+    active_store: &RouteStore,
+    model: &Model,
+    input: TrialRouteProbeInput<'_>,
+    active_hold: Option<HoldRouteProfile<'_>>,
+    counterpart_hold: Option<HoldRouteProfile<'_>>,
+    scratch: &mut crate::conflict_probe::ConflictProbeScratch,
+) -> Result<oa_ca::probe::ProbeResult, String> {
+    if input.candidate_event.source != SourceKind::Route
+        || !matches!(input.candidate_event.kind, EventKind::FiledRoute { .. })
+        || input.candidate_view.gufi != input.candidate_event.identity.flight_gufi
+        || input.candidate_view.address != input.candidate_event.identity.aircraft_address
+        || input.candidate_view.centre != input.candidate_event.centre
+        || input.candidate_view.gufi == input.counterpart_view.gufi
+    {
+        return Err(
+            "trial request does not identify a distinct active route and counterpart".into(),
+        );
+    }
+    let mut candidate_store = route_store_new(active_store.snapshot_sha256);
+    let stage = route_stage_event(&candidate_store, model, input.candidate_event)?;
+    if !matches!(&stage, RouteStage::Revision(_)) {
+        return Err("trial route did not produce an accepted detached revision".into());
+    }
+    route_commit_stage(&mut candidate_store, stage);
+    let active = match active_hold {
+        Some(profile) => prepare_hold_phase_issue(
+            input.candidate_view,
+            input.candidate_track,
+            input.cutoff_ns,
+            input.frame_sequence,
+            profile,
+        )?,
+        None => prepare_route_issue(
+            active_store,
+            input.candidate_view,
+            input.candidate_track,
+            input.cutoff_ns,
+            input.frame_sequence,
+        )?,
+    };
+    let active_cursor = active
+        .route_cursor
+        .ok_or("trial candidate requires an explicit active route cursor")?;
+    let candidate_text_hash = candidate_store
+        .revisions
+        .first()
+        .map(|revision| revision.text_sha256)
+        .ok_or("detached trial revision is missing")?;
+    // Carry forward only the already-admitted active next-fix cursor. The candidate must still
+    // contain that exact unique fix; prepare_route_issue validates it against candidate geometry.
+    candidate_store.cursors.push(active_cursor);
+    candidate_store.cursor_text_hashes.push(candidate_text_hash);
+    let counterpart = match counterpart_hold {
+        Some(profile) => prepare_hold_phase_issue(
+            input.counterpart_view,
+            input.counterpart_track,
+            input.cutoff_ns,
+            input.frame_sequence,
+            profile,
+        )?,
+        None => prepare_route_issue(
+            active_store,
+            input.counterpart_view,
+            input.counterpart_track,
+            input.cutoff_ns,
+            input.frame_sequence,
+        )?,
+    };
+    let trial = prepare_route_issue(
+        &candidate_store,
+        input.candidate_view,
+        input.candidate_track,
+        input.cutoff_ns,
+        input.frame_sequence,
+    )?;
+    crate::conflict_probe::probe_trial_plan(
+        &prepared_input(&active),
+        &prepared_input(&counterpart),
+        0,
+        &prepared_input(&trial),
+        scratch,
+    )
+    .ok_or_else(|| "trial candidate changes non-route active planning inputs".into())
 }
 
 /// Converts a receipt nanosecond timestamp through the shared exact-millisecond gate.

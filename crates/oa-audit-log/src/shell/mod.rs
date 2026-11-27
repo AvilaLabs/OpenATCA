@@ -442,7 +442,7 @@ mod tests {
         let _ = std::fs::remove_file(file);
     }
 
-    // REQ: OA-AUDIT-001, OA-AUDIT-003, OA-AUDIT-004
+    // REQ: OA-AUDIT-001, OA-AUDIT-003, OA-AUDIT-004, OA-AUDIT-010
     #[test]
     fn append_verifies_trusted_tail_and_detects_deletion_reorder_and_tamper() {
         let file = path("chain");
@@ -454,28 +454,35 @@ mod tests {
         )
         .unwrap();
         let second = append(&file, first, event(Action::QuarantineRelease)).unwrap();
-        assert_eq!(verify(&file, second).unwrap(), second);
+        let third = append(&file, second, event(Action::HoldCommand)).unwrap();
+        assert_eq!(verify(&file, third).unwrap(), third);
+        let mut decoded_hold_command = false;
+        read_records(&file, third, &mut |record| {
+            decoded_hold_command |= record.event.action == Action::HoldCommand;
+        })
+        .unwrap();
+        assert!(decoded_hold_command);
         let data = std::fs::read(&file).unwrap();
-        assert_eq!(data.len(), RECORD_BYTES * 2);
+        assert_eq!(data.len(), RECORD_BYTES * 3);
 
-        std::fs::write(&file, data.get(..RECORD_BYTES).unwrap()).unwrap();
+        std::fs::write(&file, data.get(..(RECORD_BYTES * 2)).unwrap()).unwrap();
         assert!(matches!(
-            verify(&file, second),
-            Err(LogError::Truncated { sequence: 2 })
+            verify(&file, third),
+            Err(LogError::Truncated { sequence: 3 })
         ));
 
         let mut reordered = Vec::with_capacity(data.len());
         reordered.extend_from_slice(data.get(RECORD_BYTES..).unwrap());
         reordered.extend_from_slice(data.get(..RECORD_BYTES).unwrap());
         std::fs::write(&file, reordered).unwrap();
-        assert!(verify(&file, second).is_err());
+        assert!(verify(&file, third).is_err());
 
         let mut tampered = data;
         if let Some(byte) = tampered.get_mut(40) {
             *byte ^= 1;
         }
         std::fs::write(&file, tampered).unwrap();
-        assert!(verify(&file, second).is_err());
+        assert!(verify(&file, third).is_err());
         let _ = std::fs::remove_file(file);
     }
 

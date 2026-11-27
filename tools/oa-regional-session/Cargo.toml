@@ -32,6 +32,8 @@ oa-scope-replay = { path = "../../crates/oa-scope-replay" }
 oa-airspace = { path = "../../crates/oa-airspace" }
 # Exactly specified rounding before checked fixed-point conversions.
 oa-ieee = { path = "../../crates/oa-ieee" }
+# Deterministic fixed-profile hold heading and speed reconciliation at the runtime boundary.
+oa-math = { path = "../../crates/oa-math" }
 # Bind inputs, adaptation, source, executable and output evidence to exact bytes.
 oa-sha256 = { path = "../../crates/oa-sha256" }
 # F1a: the existing shell adaptation verifier supplies the exact issued model at startup and

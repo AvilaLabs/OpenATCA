@@ -5,6 +5,7 @@
 
 pub mod alert_markers;
 pub mod font;
+pub mod hold_view;
 pub mod interaction;
 pub mod list;
 pub mod metering;

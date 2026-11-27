@@ -42,6 +42,8 @@ pub enum Action {
     VulnerabilityDisposition = 8,
     RunwayAssignment = 9,
     AlertAcknowledge = 10,
+    /// Typed OpenATCA hold assign/amend/cancel command; operation and revision bind in details.
+    HoldCommand = 11,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -134,7 +136,8 @@ pub const fn authorize(role: Role, action: Action) -> Result<(), AuditError> {
         Action::QuarantineRelease
         | Action::VulnerabilityIntake
         | Action::RunwayAssignment
-        | Action::AlertAcknowledge => matches!(role, Role::Operate | Role::Configure),
+        | Action::AlertAcknowledge
+        | Action::HoldCommand => matches!(role, Role::Operate | Role::Configure),
     };
     if allowed {
         Ok(())
