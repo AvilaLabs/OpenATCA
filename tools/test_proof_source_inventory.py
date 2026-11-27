@@ -2,6 +2,7 @@
 
 import json
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 
@@ -12,6 +13,7 @@ class ProofSourceInventoryTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
+        subprocess.run(["git", "init", "--quiet"], cwd=self.root, check=True)
         self._write("Cargo.toml", '[workspace]\nmembers = ["crates/oa-track-core", "tools/oa-trace", "crates/sample"]\n')
         self._package("crates/oa-track-core", "oa-track-core")
         self._package("tools/oa-trace", "oa-trace")
@@ -23,10 +25,12 @@ class ProofSourceInventoryTests(unittest.TestCase):
     def tearDown(self):
         self.temporary.cleanup()
 
-    def _write(self, relative, content):
+    def _write(self, relative, content, *, track=True):
         path = self.root / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
+        if track:
+            subprocess.run(["git", "add", "--", relative], cwd=self.root, check=True)
         return path
 
     def _package(self, relative, name):
@@ -127,6 +131,29 @@ class ProofSourceInventoryTests(unittest.TestCase):
         self._write("crates/sample/tests/external.rs", "#[kani::proof]\nfn outside_lib() {}\n")
         with self.assertRaisesRegex(inventory.InventoryError, "outside package src"):
             inventory.discover_source_proofs(self.root)
+
+    def test_tracked_proof_outside_supported_package_sources_fails_closed(self):
+        self._write("validation/inventory_probe.rs", "#[kani::proof]\nfn unowned_case() {}\n")
+        with self.assertRaisesRegex(inventory.InventoryError, "outside a supported package src"):
+            inventory.discover_source_proofs(self.root)
+
+    def test_ignored_untracked_target_rust_is_not_selected_as_source(self):
+        self._write(".gitignore", "/target/\n")
+        cache_path = "target/generated/probe.rs"
+        self._write(cache_path, "#[kani::proof]\nfn cache_case() {}\n", track=False)
+        ignored = subprocess.run(
+            ["git", "check-ignore", "--quiet", "--", cache_path], cwd=self.root,
+            check=False,
+        )
+        self.assertEqual(ignored.returncode, 0)
+        tracked = subprocess.run(
+            ["git", "ls-files", "--error-unmatch", "--", cache_path], cwd=self.root,
+            check=False, capture_output=True,
+        )
+        self.assertNotEqual(tracked.returncode, 0)
+        result = inventory.discover_source_proofs(self.root)
+        self.assertEqual([(item.package, item.harness) for item in result],
+                         [("sample", "proofs::source_case")])
 
     def test_workspace_source_inventory_is_fully_accounted(self):
         workspace = Path(__file__).resolve().parents[1]

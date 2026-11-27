@@ -7,6 +7,7 @@ import ast
 from dataclasses import asdict, dataclass
 import json
 from pathlib import Path
+import subprocess
 import tomllib
 from typing import Any
 
@@ -37,13 +38,15 @@ class SourceProof:
 
 
 def _read_bounded(path: Path, limit: int) -> str:
-    info = path.stat(follow_symlinks=False)
-    if not path.is_file() or path.is_symlink() or info.st_size > limit:
-        raise InventoryError(f"source input is not a bounded regular file: {path}")
-    with path.open("rb") as stream:
-        raw = stream.read(limit + 1)
-    if len(raw) > limit:
-        raise InventoryError(f"source input exceeds its byte limit: {path}")
+    try:
+        raw = ratchet._read_bounded_regular_file(
+            path, limit,
+            f"source input is not a bounded regular file: {path}",
+            f"source input exceeds its byte limit: {path}",
+            f"source input changed while reading: {path}",
+        )
+    except (OSError, ratchet.RatchetError) as error:
+        raise InventoryError(str(error)) from error
     try:
         return raw.decode("utf-8")
     except UnicodeDecodeError as error:
@@ -57,6 +60,72 @@ def _package_name(package_root: Path) -> str:
     if not isinstance(name, str) or not name:
         raise InventoryError(f"package manifest has no package name: {package_root}")
     return name
+
+
+def _find_package_root(source: Path) -> Path | None:
+    for parent in source.parents:
+        manifest_path = parent / "Cargo.toml"
+        if not manifest_path.is_file():
+            continue
+        try:
+            manifest = tomllib.loads(_read_bounded(manifest_path, MAX_SOURCE_BYTES))
+        except tomllib.TOMLDecodeError as error:
+            raise InventoryError(f"package manifest is invalid: {manifest_path}") from error
+        if isinstance(manifest.get("package"), dict):
+            return parent
+    return None
+
+
+def _tracked_rust_paths(root: Path) -> list[Path]:
+    try:
+        top_output = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"], cwd=root,
+            check=True, capture_output=True,
+        ).stdout
+        try:
+            top = top_output.rstrip(b"\n").decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise InventoryError("Git workspace path is not UTF-8") from error
+        if Path(top).resolve() != root.resolve():
+            raise InventoryError("inventory root must be the Git workspace root")
+        result = subprocess.run(
+            ["git", "ls-files", "--full-name", "-z", "--", "*.rs"],
+            cwd=root, check=True, capture_output=True,
+        )
+    except InventoryError:
+        raise
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise InventoryError("cannot enumerate Git-tracked Rust sources") from error
+    paths = []
+    for raw in result.stdout.split(b"\0"):
+        if not raw:
+            continue
+        try:
+            relative = raw.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise InventoryError("tracked Rust source path is not UTF-8") from error
+        path = Path(relative)
+        if path.is_absolute() or ".." in path.parts or "\0" in relative:
+            raise InventoryError("tracked Rust source path is not a safe workspace-relative path")
+        candidate = root / path
+        try:
+            resolved = candidate.resolve(strict=True)
+            resolved.relative_to(root)
+        except (OSError, ValueError) as error:
+            raise InventoryError("tracked Rust source path escapes or is missing from the workspace") from error
+        if resolved != candidate:
+            raise InventoryError("tracked Rust source path traverses a symlink")
+        paths.append(candidate)
+    if len(paths) > MAX_SOURCE_FILES:
+        raise InventoryError("source file limit exceeded")
+    return sorted(paths)
+
+
+def _has_proof_attribute(tokens: list[ratchet.Token]) -> bool:
+    return any(
+        tuple(token.value for token in tokens[index:index + len(PROOF_ATTRIBUTE)]) == PROOF_ATTRIBUTE
+        for index in range(len(tokens) - len(PROOF_ATTRIBUTE) + 1)
+    )
 
 
 def _file_module_prefix(source: Path, package_root: Path) -> tuple[str, ...]:
@@ -162,30 +231,35 @@ def _proof_function(tokens: list[ratchet.Token], attribute_start: int) -> tuple[
 
 
 def discover_source_proofs(root: Path) -> list[SourceProof]:
-    roots = [root / "crates", root / "tools"]
-    sources = sorted(path for base in roots if base.is_dir()
-                     for path in base.glob("*/**/*.rs"))
-    if len(sources) > MAX_SOURCE_FILES:
-        raise InventoryError("source file limit exceeded")
+    root = root.resolve()
+    sources = _tracked_rust_paths(root)
     package_roots = {}
     overrides: dict[Path, tuple[str, ...]] = {}
     records = []
     for source in sources:
-        package_root = next((parent for parent in source.parents if (parent / "Cargo.toml").is_file()), None)
+        package_root = _find_package_root(source)
+        text = _read_bounded(source, MAX_SOURCE_BYTES)
+        tokens = ratchet._rust_tokens(text)
         if package_root is None:
-            raise InventoryError(f"Rust source has no package manifest: {source}")
+            if _has_proof_attribute(tokens):
+                raise InventoryError(f"Kani proof outside a supported package src: {source}")
+            continue
+        try:
+            package_parts = package_root.relative_to(root).parts
+        except ValueError as error:
+            raise InventoryError(f"Rust package is outside the workspace: {package_root}") from error
+        if len(package_parts) < 2 or package_parts[0] not in ("crates", "tools"):
+            if _has_proof_attribute(tokens):
+                raise InventoryError(f"Kani proof outside a supported package src: {source}")
+            continue
         package = package_roots.get(package_root)
         if package is None:
             package = _package_name(package_root)
             package_roots[package_root] = package
-        text = _read_bounded(source, MAX_SOURCE_BYTES)
-        tokens = ratchet._rust_tokens(text)
         try:
             source.relative_to(package_root / "src")
         except ValueError:
-            if any(tuple(token.value for token in tokens[index:index + len(PROOF_ATTRIBUTE)])
-                   == PROOF_ATTRIBUTE
-                   for index in range(len(tokens) - len(PROOF_ATTRIBUTE) + 1)):
+            if _has_proof_attribute(tokens):
                 raise InventoryError(
                     f"Kani proof outside package src needs an explicit target mapping: {source}"
                 )
