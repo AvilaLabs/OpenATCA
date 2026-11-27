@@ -32,8 +32,8 @@ MAX_CODE_TOKENS = 4_000_000
 # Every qualifying window consumes at least one body token, so the 4M token cap bounds this
 # two-pass scan without a smaller source-content-dependent rejection threshold.
 MAX_DUPLICATE_WINDOWS = MAX_CODE_TOKENS
-# Every counted block needs at least two qualifying source windows.
-MAX_DUPLICATE_BLOCK_GROUPS = MAX_DUPLICATE_WINDOWS // 2
+# Detailed fingerprints and locations use bounded storage; excess groups fail closed.
+MAX_DUPLICATE_BLOCK_GROUPS = 100_000
 PACKED_LOCATION_PART_MAX = (1 << 32) - 1
 MAX_DUPLICATE_COMPARISONS = 25_000_000
 MAX_LEX_TOKENS_PER_FILE = 1_000_000
@@ -47,6 +47,16 @@ WORKSPACE_MARKERS = (
 
 class RatchetError(Exception):
     pass
+
+
+@dataclass
+class WorkBudget:
+    remaining: int
+
+    def reserve(self, amount: int) -> None:
+        if amount < 0 or amount > self.remaining:
+            raise RatchetError("duplicate comparison work limit exceeded")
+        self.remaining -= amount
 
 
 @dataclass(frozen=True)
@@ -544,7 +554,7 @@ def _expand_duplicate_windows(
 ) -> dict[str, dict[str, object]]:
     blocks: dict[str, dict[str, object]] = {}
     covered: dict[tuple[int, int], list[tuple[int, int, int, int]]] = defaultdict(list)
-    comparison_work = 0
+    work = WorkBudget(MAX_DUPLICATE_COMPARISONS)
     for locations in window_index.values():
         # Resolve hash collisions and count each source window once even when an enclosing
         # function body also contains the same nested-function tokens.
@@ -566,18 +576,21 @@ def _expand_duplicate_windows(
                 continue
             base_function, base_start = group[0]
             for other_function, other_start in group[1:]:
+                work.reserve(1)
                 left_start = base_start
                 right_start = other_start
                 pair = (base_function, other_function)
                 if base_function > other_function:
                     pair = (other_function, base_function)
                     left_start, right_start = other_start, base_start
-                already_covered = any(
-                    start_a <= left_start < end_a
-                    and start_b <= right_start < end_b
-                    and left_start - start_a == right_start - start_b
-                    for start_a, end_a, start_b, end_b in covered[pair]
-                )
+                intervals = covered[pair]
+                work.reserve(len(intervals))
+                already_covered = False
+                for start_a, end_a, start_b, end_b in intervals:
+                    if (start_a <= left_start < end_a and start_b <= right_start < end_b
+                            and left_start - start_a == right_start - start_b):
+                        already_covered = True
+                        break
                 if already_covered:
                     continue
                 source_left, source_right = pair
@@ -589,9 +602,7 @@ def _expand_duplicate_windows(
                 left = source_start_left
                 right = source_start_right
                 while left > 0 and right > 0:
-                    comparison_work += 1
-                    if comparison_work > MAX_DUPLICATE_COMPARISONS:
-                        raise RatchetError("duplicate comparison work limit exceeded")
+                    work.reserve(1)
                     if left_ids[left - 1] != right_ids[right - 1]:
                         break
                     left -= 1
@@ -599,9 +610,7 @@ def _expand_duplicate_windows(
                 end_left = source_start_left + WINDOW_TOKENS
                 end_right = source_start_right + WINDOW_TOKENS
                 while end_left < len(left_ids) and end_right < len(right_ids):
-                    comparison_work += 1
-                    if comparison_work > MAX_DUPLICATE_COMPARISONS:
-                        raise RatchetError("duplicate comparison work limit exceeded")
+                    work.reserve(1)
                     if left_ids[end_left] != right_ids[end_right]:
                         break
                     end_left += 1

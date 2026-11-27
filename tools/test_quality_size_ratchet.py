@@ -126,6 +126,39 @@ class QualitySizeRatchetTests(unittest.TestCase):
             duplicate_counts, _ = ratchet._duplicate_inventory(functions)
         self.assertEqual(duplicate_counts, {})
 
+    def test_disjoint_blocks_charge_interval_probes_to_work_budget(self):
+        left_parts = []
+        right_parts = []
+        for block_index in range(16):
+            calls = [f"call{block_index}_{suffix}();" for suffix in "abcdef"]
+            left_parts.extend(calls + [f"left_gap_{block_index};"])
+            right_parts.extend(calls + [f"right_gap_{block_index};"])
+        source = (
+            "fn left() {\n" + "\n".join(left_parts) + "\n}\n"
+            "fn right() {\n" + "\n".join(right_parts) + "\n}\n"
+        )
+        original_reserve = ratchet.WorkBudget.reserve
+
+        def omit_interval_probe_charge(budget, amount):
+            return original_reserve(budget, 1 if amount > 1 else amount)
+
+        # This simulates the specific removed-interval-charge mutant; it stays below the bound.
+        with patch.object(ratchet, "MAX_DUPLICATE_COMPARISONS", 200):
+            with patch.object(ratchet.WorkBudget, "reserve", omit_interval_probe_charge):
+                ratchet.analyze_sources([("disjoint.rs", source)])
+            with self.assertRaisesRegex(ratchet.RatchetError, "comparison work limit"):
+                ratchet.analyze_sources([("disjoint.rs", source)])
+
+    def test_duplicate_group_storage_limit_refuses_instead_of_dropping_groups(self):
+        body = repeated_block("bounded")
+        source = (
+            "fn first(source: Source) {\n" + body + "\n}\n"
+            "fn second(source: Source) {\n" + body + "\n}\n"
+        )
+        with patch.object(ratchet, "MAX_DUPLICATE_BLOCK_GROUPS", 0):
+            with self.assertRaisesRegex(ratchet.RatchetError, "block group limit"):
+                ratchet.analyze_sources([("bounded.rs", source)])
+
     def test_all_three_ratchets_reject_metric_rises(self):
         base = ratchet.analyze_sources([("base.rs", "fn small() {}\n")])
         baseline = self.baseline_for(base)
@@ -156,8 +189,12 @@ class QualitySizeRatchetTests(unittest.TestCase):
             (root / "crates/oa-track/Cargo.toml").write_text("[package]\nname='other'\n", encoding="utf-8")
             (root / "tools").mkdir()
             (root / "tools/quality_size_ratchet.py").write_text("# not OpenATCA\n", encoding="utf-8")
+            (root / "tools/oa-trace").mkdir()
+            (root / "tools/oa-trace/Cargo.toml").write_text("[package]\nname='other-trace'\n", encoding="utf-8")
+            (root / "tools/rust_proofs.json").write_text("{}\n", encoding="utf-8")
             subprocess.run(["git", "add", "Cargo.toml", "docs/RULESET.md", "crates/oa-track/Cargo.toml",
-                            "tools/quality_size_ratchet.py"],
+                            "tools/quality_size_ratchet.py", "tools/oa-trace/Cargo.toml",
+                            "tools/rust_proofs.json"],
                            cwd=root, check=True)
             with self.assertRaises(ratchet.RatchetError):
                 ratchet._validate_workspace(root)
