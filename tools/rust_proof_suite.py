@@ -6,10 +6,12 @@ import argparse
 import datetime as dt
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
 import signal
+import shutil
 import subprocess
 import sys
 import time
@@ -42,6 +44,9 @@ TIERS = ("push", "nightly")
 # A proof recorded over this many seconds is nightly, one at or under it is push.
 NIGHTLY_OVER_SECONDS = 120
 CI_SECONDS_SOURCES = ("ci", "local", "none")
+GNU_TIME_COMMAND = "time"
+MAX_RESOURCE_OUTPUT_BYTES = 4096
+RESOURCE_FORMAT = "OPENATCA_PROOF_RESOURCE_V1 %M %e"
 _PACKAGE_ROOTS = ("crates", "tools")
 _DEPENDENCY_TABLES = ("dependencies", "build-dependencies", "dev-dependencies")
 
@@ -474,6 +479,86 @@ def _failure_diagnostics(
     return list(dict.fromkeys(diagnostics))[:4]
 
 
+def _resource_tool_identity() -> dict[str, Any]:
+    """Identify the bounded Linux measurement tool used around one proof runner."""
+    try:
+        located = shutil.which(GNU_TIME_COMMAND)
+        if located is None:
+            raise OSError("GNU time executable is not available on PATH")
+        tool = Path(located).resolve(strict=True)
+        info = tool.stat()
+        if not tool.is_file() or info.st_size <= 0 or info.st_size > 4 * 1024 * 1024:
+            raise OSError("GNU time executable is not a bounded regular file")
+        version = subprocess.run(
+            [str(tool), "--version"], capture_output=True, text=True, timeout=5, check=False,
+        )
+        first_line = version.stdout.splitlines()[0] if version.stdout.splitlines() else ""
+        if version.returncode != 0 or "GNU Time" not in first_line:
+            raise OSError("measurement executable is not GNU time")
+        return {
+            "status": "available",
+            "configured_command": GNU_TIME_COMMAND,
+            "resolved_path": str(tool),
+            "version": first_line[:160],
+            "binary_sha256": hashlib.sha256(tool.read_bytes()).hexdigest(),
+        }
+    except (OSError, subprocess.SubprocessError, IndexError) as error:
+        return {
+            "status": "unavailable",
+            "configured_command": GNU_TIME_COMMAND,
+            "reason": str(error)[:240],
+        }
+
+
+def _read_resource_output(path: Path) -> tuple[dict[str, Any] | None, str | None, str | None]:
+    """Read exactly one GNU-time record: direct child max RSS and wall elapsed time."""
+    try:
+        if path.is_symlink() or not path.is_file() or path.stat().st_size > MAX_RESOURCE_OUTPUT_BYTES:
+            return None, None, "resource output is missing, unsafe, or oversized"
+        raw = path.read_bytes()
+    except OSError as error:
+        return None, None, f"resource output could not be read: {error}"
+    try:
+        text = raw.decode("ascii")
+    except UnicodeDecodeError:
+        return None, hashlib.sha256(raw).hexdigest(), "resource output is not ASCII"
+    match = re.fullmatch(r"OPENATCA_PROOF_RESOURCE_V1 ([0-9]+) ([0-9]+(?:\.[0-9]+)?)\n?", text)
+    if match is None:
+        return None, hashlib.sha256(raw).hexdigest(), "resource output does not match the exact GNU-time record"
+    maximum_rss_kib = int(match.group(1))
+    elapsed_seconds = float(match.group(2))
+    if maximum_rss_kib <= 0 or not math.isfinite(elapsed_seconds) or elapsed_seconds < 0:
+        return None, hashlib.sha256(raw).hexdigest(), "resource values are outside their valid ranges"
+    return {
+        "maximum_rss_kib": maximum_rss_kib,
+        "elapsed_seconds": elapsed_seconds,
+        "measurement_scope": (
+            "GNU time %M maximum RSS reported for the timed validation runner and its waited "
+            "descendants; Linux reports the largest individual waited child, not a simultaneous "
+            "process-tree sum. This is not virtual memory or the configured RLIMIT_AS bound."
+        ),
+    }, hashlib.sha256(raw).hexdigest(), None
+
+
+def _write_resource_record(
+    proof_dir: Path, tool: dict[str, Any], raw_path: Path,
+) -> tuple[dict[str, Any], str]:
+    measurement, raw_sha256, error = _read_resource_output(raw_path)
+    status = "available" if tool.get("status") == "available" and measurement is not None else "unavailable"
+    record = {
+        "resource_record_version": 1,
+        "status": status,
+        "tool": tool,
+        "measurement": measurement,
+        "raw_output_sha256": raw_sha256,
+        "error": error if error is not None else (None if status == "available" else "measurement tool unavailable"),
+    }
+    path = proof_dir / "resource.json"
+    encoded = json.dumps(record, sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\n"
+    path.write_bytes(encoded)
+    return record, hashlib.sha256(encoded).hexdigest()
+
+
 def _run_one_proof(
     proof: dict[str, Any], repo: Path, out: Path, target_root: Path, runner: Path,
     source_sha256: str,
@@ -501,13 +586,21 @@ def _run_one_proof(
         cmd.extend(["--cfg", cfg])
     started = time.monotonic()
     stdout_path, stderr_path = proof_dir / "stdout.log", proof_dir / "stderr.log"
+    raw_resource_path = proof_dir / "gnu-time.txt"
+    resource_tool = _resource_tool_identity()
+    measured_cmd = cmd
+    if resource_tool.get("status") == "available":
+        measured_cmd = [
+            resource_tool["resolved_path"], "-q", "-f", RESOURCE_FORMAT,
+            "-o", str(raw_resource_path), "--", *cmd,
+        ]
     timed_out = False
     try:
         with stdout_path.open("w", encoding="utf-8") as stdout, stderr_path.open(
             "w", encoding="utf-8"
         ) as stderr:
             process = subprocess.Popen(
-                cmd, cwd=repo, env=os.environ.copy(), stdout=stdout, stderr=stderr,
+                measured_cmd, cwd=repo, env=os.environ.copy(), stdout=stdout, stderr=stderr,
                 start_new_session=True,
             )
             try:
@@ -526,6 +619,7 @@ def _run_one_proof(
             run_record = json.loads(run_record_path.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             pass
+    resource_record, resource_sha256 = _write_resource_record(proof_dir, resource_tool, raw_resource_path)
     ok = (
         rc == 0 and not timed_out and isinstance(run_record, dict)
         and run_record.get("status") == "PASS"
@@ -534,8 +628,11 @@ def _run_one_proof(
         and run_record.get("required_covers") == {proof["harness"]: proof["required_covers"]}
         and run_record.get("loop_unwind_presets", {}).get(proof["harness"], [])
         == proof.get("loop_unwind_overrides", [])
+        and resource_record.get("status") == "available"
     )
     diagnostics = [] if ok else _failure_diagnostics(run_record, rc, timed_out, run_record_path)
+    if resource_record.get("status") != "available":
+        diagnostics.append("per-proof peak/time measurement unavailable; proof cannot receive PASS")
     return {
         "id": proof["id"],
         "target_context_sha256": proof_target_context_sha256(proof, source_sha256),
@@ -550,6 +647,10 @@ def _run_one_proof(
         "elapsed_seconds": time.monotonic() - started,
         "command": cmd,
         "command_sha256": _canonical_sha256(cmd),
+        "measurement_command": measured_cmd,
+        "resource_file": f"proofs/{proof['id']}/resource.json",
+        "resource_file_sha256": resource_sha256,
+        "resource_measurement": resource_record,
         "run_record_sha256": hashlib.sha256(run_record_path.read_bytes()).hexdigest()
         if run_record_path.is_file() else None,
         "run_dir": str(run_dir),
