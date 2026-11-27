@@ -391,15 +391,14 @@ fn typed_runway_assignment_uses_normal_selection_queue_advance_and_pinned_audit(
     use oa_regional_session::cli::ModelSource;
 
     let root = temp_path("typed-runway");
-    fs::create_dir(&root).expect("create synthetic typed-runway root");
+    fs::create_dir(&root).unwrap();
     let input = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/synthetic-session.tsv");
     let script = root.join("actions.txt");
     let output = root.join("output");
-    fs::write(&script, b"NEXT\nNEXT\nSELECT ABC101\nACTOR 1\nNEXT\nQUIT\n")
-        .expect("write ordinary host script");
+    fs::write(&script, b"NEXT\nNEXT\nSELECT ABC101\nACTOR 1\nNEXT\nQUIT\n").unwrap();
     let registry = root.join("principals.tsv");
     let registry_bytes = b"OACERT-LOCAL-PRINCIPALS-V1\n51\toperate\n";
-    fs::write(&registry, registry_bytes).expect("write synthetic principal registry");
+    fs::write(&registry, registry_bytes).unwrap();
     let audit_log = root.join("actions.audit");
     let wrong_pin = run_script_session_with_typed_operator_inputs(
         &input,
@@ -447,7 +446,7 @@ fn typed_runway_assignment_uses_normal_selection_queue_advance_and_pinned_audit(
         result.is_ok(),
         "typed queue path completes with an explicit refusal: {result:?}"
     );
-    let journal = fs::read_to_string(output.join("operator.tsv")).expect("operator journal");
+    let journal = fs::read_to_string(output.join("operator.tsv")).unwrap();
     assert!(
         journal.contains("RUNWAY_COMMAND\t")
             && journal
