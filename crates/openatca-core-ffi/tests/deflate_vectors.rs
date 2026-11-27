@@ -1,3 +1,6 @@
+// This integration test exercises the unsafe C pointer contract directly.
+#![allow(unsafe_code)]
+
 use openatca_core_ffi::{oa_deflate_raw_inflate, OaErrorInfo};
 
 #[test]
@@ -69,62 +72,62 @@ fn raw_deflate_matches_shared_synthetic_vectors() {
             status,
             expected_status,
             "{}",
-            fields.get(0).copied().unwrap_or_default()
+            fields.first().copied().unwrap_or_default()
         );
         if status == 0 {
             assert_eq!(
                 output_length as usize,
                 expected.len(),
                 "{}",
-                fields.get(0).copied().unwrap_or_default()
+                fields.first().copied().unwrap_or_default()
             );
             assert_eq!(
                 consumed as i64,
                 expected_consumed,
                 "{}",
-                fields.get(0).copied().unwrap_or_default()
+                fields.first().copied().unwrap_or_default()
             );
             assert_eq!(
                 output.get(..expected.len()).unwrap_or_default(),
                 expected.as_slice(),
                 "{}",
-                fields.get(0).copied().unwrap_or_default()
+                fields.first().copied().unwrap_or_default()
             );
         } else if status == 6 {
             assert_eq!(
                 output_length as usize,
                 expected.len(),
                 "{}",
-                fields.get(0).copied().unwrap_or_default()
+                fields.first().copied().unwrap_or_default()
             );
             assert_eq!(
                 consumed as i64,
                 expected_consumed,
                 "{}",
-                fields.get(0).copied().unwrap_or_default()
+                fields.first().copied().unwrap_or_default()
             );
             assert!(
                 output.iter().all(|byte| *byte == 0xa5),
                 "{}",
-                fields.get(0).copied().unwrap_or_default()
+                fields.first().copied().unwrap_or_default()
             );
         } else {
             assert_eq!(
                 output_length,
                 777,
                 "{}",
-                fields.get(0).copied().unwrap_or_default()
+                fields.first().copied().unwrap_or_default()
             );
             assert_eq!(
                 consumed,
                 777,
                 "{}",
-                fields.get(0).copied().unwrap_or_default()
+                fields.first().copied().unwrap_or_default()
             );
             assert!(
                 output.iter().all(|byte| *byte == 0xa5),
                 "{}",
-                fields.get(0).copied().unwrap_or_default()
+                fields.first().copied().unwrap_or_default()
             );
         }
     }
