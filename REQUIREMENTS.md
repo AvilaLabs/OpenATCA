@@ -8152,8 +8152,10 @@ The L13 role registry is not yet landed; roles below are plain caller-supplied c
   with an all-zero previous digest; each following sequence increments by one and binds the prior
   digest. No alternate encoding is accepted.
 - **OA-AUDIT-002** The registry allows `monitor` to verify records, `operate` to release quarantine
-  items, and `configure` to issue adaptations, certify, flip migration output, or roll back
-  migration output. Higher roles may perform lower-level actions; a lower role is refused before
+  items and submit vulnerability intake, and `configure` to issue adaptations, certify, flip or
+  roll back migration output, and disposition vulnerability findings. `operate` and `configure`
+  may perform runway assignment and alert-acknowledgement actions. Higher roles may perform
+  lower-level actions; a lower role is refused before
   the action commit. Principal IDs, role claims and timestamps are caller inputs; this registry
   provides no login, credential check, authenticated origin or authority validation.
 - **OA-AUDIT-003** The shell log uses fixed-size records and an OS-held nonblocking exclusive
@@ -8183,3 +8185,16 @@ The L13 role registry is not yet landed; roles below are plain caller-supplied c
   same parent descriptor; its leaf open refuses symlinks with `O_NOFOLLOW`. Append refuses on
   platforms without this directory anchoring. A sealed-path refusal or descriptor-verification
   error fails the audit operation before the associated committed action.
+- **OA-AUDIT-007** The core principal registry accepts the existing bounded
+  `OACERT-LOCAL-PRINCIPALS-V1` two-column grammar and `OACERT-LOCAL-PRINCIPALS-V2` rows with an
+  explicit enabled/disabled status. Both require unique positive canonical decimal IDs and one
+  `monitor`, `operate`, or `configure` role. The fixed table admits at most 128 rows and the parser
+  admits at most 64 KiB; malformed framing, duplicate IDs, unknown roles, invalid status, excess
+  rows, and unknown or disabled principals are explicit refusals. Action authorization first
+  resolves the principal, then applies the existing three-role action matrix. This is local role
+  configuration only; it does not authenticate a login, credential, principal origin, or authority.
+- **OA-AUDIT-008** The shell registry loader opens a regular file through the production sealed
+  path guard, reads from the verified descriptor under the 64 KiB byte cap, rejects size changes,
+  hashes the exact bytes, and compares them with an independently supplied expected SHA-256 pin
+  before parsing. The registry bytes do not supply their own trusted pin. Path, descriptor, pin,
+  framing, and parse refusals return no registry.

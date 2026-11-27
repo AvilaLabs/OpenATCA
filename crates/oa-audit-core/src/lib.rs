@@ -14,6 +14,13 @@ pub type Digest = [u8; 32];
 pub const DETAILS_CAPACITY: usize = 20_480;
 pub const TARGET_CAPACITY: usize = 96;
 
+pub mod principal;
+
+pub use principal::{
+    authorize_principal, parse_principal_registry, PrincipalAuthorizationError, PrincipalRecord,
+    PrincipalRegistry, RegistryError, MAX_PRINCIPAL_REGISTRY_BYTES, MAX_PRINCIPAL_REGISTRY_ROWS,
+};
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Role {
@@ -31,6 +38,10 @@ pub enum Action {
     AdaptationIssue = 4,
     Certification = 5,
     QuarantineRelease = 6,
+    VulnerabilityIntake = 7,
+    VulnerabilityDisposition = 8,
+    RunwayAssignment = 9,
+    AlertAcknowledge = 10,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -118,8 +129,12 @@ pub const fn authorize(role: Role, action: Action) -> Result<(), AuditError> {
         Action::MigrationFlip
         | Action::MigrationRollback
         | Action::AdaptationIssue
-        | Action::Certification => matches!(role, Role::Configure),
-        Action::QuarantineRelease => matches!(role, Role::Operate | Role::Configure),
+        | Action::Certification
+        | Action::VulnerabilityDisposition => matches!(role, Role::Configure),
+        Action::QuarantineRelease
+        | Action::VulnerabilityIntake
+        | Action::RunwayAssignment
+        | Action::AlertAcknowledge => matches!(role, Role::Operate | Role::Configure),
     };
     if allowed {
         Ok(())

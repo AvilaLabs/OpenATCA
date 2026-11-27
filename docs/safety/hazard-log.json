@@ -108,6 +108,8 @@
     "OA-AUDIT-004",
     "OA-AUDIT-005",
     "OA-AUDIT-006",
+    "OA-AUDIT-007",
+    "OA-AUDIT-008",
     "OA-AWC-001",
     "OA-AWC-002",
     "OA-AWC-003",
@@ -10198,7 +10200,9 @@
         "OA-AUDIT-003",
         "OA-AUDIT-004",
         "OA-AUDIT-005",
-        "OA-AUDIT-006"
+        "OA-AUDIT-006",
+        "OA-AUDIT-007",
+        "OA-AUDIT-008"
       ],
       "source_refs": [
         {
@@ -10311,6 +10315,26 @@
           "requirement_id": "OA-AUDIT-006",
           "file": "crates/oa-audit-log/src/shell/mod.rs",
           "test_name": "append_refuses_leaf_symlinks_without_touching_the_target"
+        },
+        {
+          "requirement_id": "OA-AUDIT-007",
+          "file": "crates/oa-audit-core/src/principal.rs",
+          "test_name": "local_registry_rejects_noncanonical_ids_roles_statuses_and_row_order"
+        },
+        {
+          "requirement_id": "OA-AUDIT-007",
+          "file": "crates/oa-audit-core/src/principal.rs",
+          "test_name": "local_registry_row_and_byte_limits_refuse_without_truncation"
+        },
+        {
+          "requirement_id": "OA-AUDIT-008",
+          "file": "crates/oa-audit-log/src/shell/mod.rs",
+          "test_name": "principal_registry_loader_checks_external_pin_and_parses_exact_opened_bytes"
+        },
+        {
+          "requirement_id": "OA-AUDIT-008",
+          "file": "crates/oa-audit-log/src/shell/mod.rs",
+          "test_name": "principal_registry_loader_refuses_oversize_and_sealed_paths"
         },
         {
           "requirement_id": "OA-AUDIT-003",
@@ -23335,6 +23359,18 @@
       "function": "migration_selector_and_rollback",
       "hazard_id": "HZ-CUTOVER-001",
       "rationale": "Engineering safety candidate: a log read or append directed through an unverified path could invalidate the audit gate used for a migration change. Synthetic path-refusal, descriptor, rename, and symlink tests exercise fail-closed shell behavior; no protected recording is read and no authenticated-origin claim is made."
+    },
+    {
+      "id": "OA-AUDIT-007",
+      "function": "migration_selector_and_rollback",
+      "hazard_id": "HZ-CUTOVER-001",
+      "rationale": "Engineering safety candidate: accepting a noncanonical or ambiguous local role table could assign a migration action to the wrong configured principal role. Bounded parser tests cover strict IDs, roles, status, ordering, row and byte limits; principal IDs remain claims and are not authenticated credentials."
+    },
+    {
+      "id": "OA-AUDIT-008",
+      "function": "migration_selector_and_rollback",
+      "hazard_id": "HZ-CUTOVER-001",
+      "rationale": "Engineering safety candidate: loading an unpinned, changed, oversized or protected role table could undermine the role gate before a migration action. Tests cover external digest pinning, opened-descriptor length stability, bounded parsing and sealed-path refusal; the pin's trusted origin and principal authentication remain external."
     },
     {
       "id": "OA-CERT-001",

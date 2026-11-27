@@ -10,6 +10,8 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
+# F1a: repository evidence readers reuse the guarded, nonblocking regular-file opener.
+oa-sealed = { path = "../../crates/oa-sealed" }
 
 [package.metadata.openatca]
 class = "shell"
