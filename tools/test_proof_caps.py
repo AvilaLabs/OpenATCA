@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import copy
+from contextlib import contextmanager
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 from unittest import mock
 
 from check_proof_caps import (
-    CAP_FIELDS, CapCheckError, _read_worktree_registry, _registry, check, compare_registries,
+    CAP_FIELDS, CapCheckError, _git, _read_worktree_registry, _registry, check,
+    compare_registries,
 )
 
 RESOURCE_FIELDS = ("memory_mib", "harness_timeout_seconds", "external_timeout_seconds")
@@ -27,6 +30,14 @@ def proof(proof_id: str = "sample-proof", harness: str = "track::proofs::sample"
 
 
 class ProofCapComparisonTests(unittest.TestCase):
+    @contextmanager
+    def candidate_registry_workspace(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            tools = repo / "tools"
+            tools.mkdir()
+            yield repo, tools / "rust_proofs.json"
+
     def test_guard_covers_all_three_resource_limits(self):
         self.assertEqual(set(CAP_FIELDS), set(RESOURCE_FIELDS))
 
@@ -85,13 +96,23 @@ class ProofCapComparisonTests(unittest.TestCase):
             "id": new["id"], "package": new["package"], "harness": new["harness"]
         }])
 
+    # Kills an unbounded Git subprocess or conversion of timeout/launch failure into empty data.
+    def test_git_read_has_timeout_and_refuses_process_failures(self):
+        for failure in (
+            OSError("git unavailable"),
+            subprocess.TimeoutExpired("git", timeout=30),
+            subprocess.CalledProcessError(1, "git"),
+        ):
+            with self.subTest(failure=type(failure).__name__):
+                with mock.patch("check_proof_caps.subprocess.check_output", side_effect=failure) as call:
+                    with self.assertRaises(CapCheckError):
+                        _git(Path("."), "rev-parse", "HEAD")
+                    self.assertLessEqual(call.call_args.kwargs["timeout"], 30)
+
     def test_candidate_registry_read_refuses_missing_malformed_and_root_configuration(self):
-        with tempfile.TemporaryDirectory() as directory:
-            repo = Path(directory)
-            (repo / "tools").mkdir()
+        with self.candidate_registry_workspace() as (repo, registry):
             with self.assertRaises(CapCheckError):
                 _read_worktree_registry(repo)
-            registry = repo / "tools" / "rust_proofs.json"
             registry.write_bytes(b"not-json")
             with self.assertRaises(CapCheckError):
                 _registry(_read_worktree_registry(repo), "candidate")
@@ -100,11 +121,8 @@ class ProofCapComparisonTests(unittest.TestCase):
             check(Path("/"), "0" * 40)
 
     def test_candidate_registry_read_refuses_symlink_and_nonregular_file(self):
-        with tempfile.TemporaryDirectory() as directory:
-            repo = Path(directory)
-            tools = repo / "tools"
-            tools.mkdir()
-            registry = tools / "rust_proofs.json"
+        with self.candidate_registry_workspace() as (repo, registry):
+            tools = registry.parent
             target = tools / "target.json"
             target.write_bytes(b"{}")
             registry.symlink_to(target)
@@ -117,11 +135,7 @@ class ProofCapComparisonTests(unittest.TestCase):
                 _read_worktree_registry(repo)
 
     def test_candidate_registry_read_refuses_file_changed_during_read(self):
-        with tempfile.TemporaryDirectory() as directory:
-            repo = Path(directory)
-            tools = repo / "tools"
-            tools.mkdir()
-            registry = tools / "rust_proofs.json"
+        with self.candidate_registry_workspace() as (repo, registry):
             registry.write_bytes(b"old")
             original_open = Path.open
 

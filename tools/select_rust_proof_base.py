@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-import argparse
 import os
 from pathlib import Path
 import re
 import subprocess
 import sys
+
+from rust_proof_suite import repo_argument_parser
 
 
 ZERO_SHA = "0" * 40
@@ -55,8 +56,7 @@ def comparison_base(
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--repo", type=Path, required=True)
+    parser = repo_argument_parser(__doc__)
     args = parser.parse_args(argv)
     try:
         repo = args.repo.resolve(strict=True)

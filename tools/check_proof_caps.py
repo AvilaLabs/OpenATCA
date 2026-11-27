@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import argparse
 import json
 from pathlib import Path
 import subprocess
@@ -11,7 +10,7 @@ import sys
 from typing import Any
 
 from quality_size_ratchet import RatchetError, _read_bounded_regular_file
-from rust_proof_suite import validate_registry
+from rust_proof_suite import repo_argument_parser, validate_registry
 
 
 REGISTRY_RELATIVE = Path("tools/rust_proofs.json")
@@ -24,15 +23,12 @@ class CapCheckError(ValueError):
 
 
 def _git(repo: Path, *args: str) -> bytes:
-    result = subprocess.run(
-        ["git", "-C", str(repo), *args],
-        check=False,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    if result.returncode:
-        raise CapCheckError("git could not read the requested revision")
-    return result.stdout
+    try:
+        return subprocess.check_output(
+            ["git", "-C", str(repo), *args], stderr=subprocess.DEVNULL, timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise CapCheckError("git could not read the requested revision") from exc
 
 
 def _read_git_registry(repo: Path, revision: str) -> bytes:
@@ -140,8 +136,7 @@ def check(repo: Path, base_revision: str) -> dict[str, Any]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--repo", type=Path, required=True)
+    parser = repo_argument_parser(__doc__)
     parser.add_argument("--base", required=True, help="immutable main merge-base commit")
     args = parser.parse_args(argv)
     try:

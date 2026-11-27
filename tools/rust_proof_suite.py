@@ -55,6 +55,13 @@ class SelectionError(ValueError):
     """The change cannot be mapped to packages; the run must not guess."""
 
 
+def repo_argument_parser(description: str) -> argparse.ArgumentParser:
+    """Create a command parser with the common required repository-root option."""
+    parser = argparse.ArgumentParser(description=description)
+    parser.add_argument("--repo", type=Path, required=True)
+    return parser
+
+
 def _path_dependencies(data: dict[str, Any]) -> set[str]:
     """Path dependencies of one manifest in every table, target-specific ones and dev ones
     included: counting more dependencies only ever runs more proofs."""
@@ -793,8 +800,7 @@ def run_suite(
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--repo", type=Path, required=True)
+    parser = repo_argument_parser(__doc__)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--target-dir", type=Path, required=True)
     parser.add_argument("--registry", type=Path)
