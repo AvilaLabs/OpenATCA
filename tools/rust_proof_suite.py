@@ -97,17 +97,55 @@ def unresolved_path_dependencies(graph: dict[str, dict[str, Any]]) -> list[str]:
     return sorted({dep for info in graph.values() for dep in info["deps"] if dep not in graph})
 
 
-def unmapped_package_paths(graph: dict[str, dict[str, Any]], changed: list[str]) -> list[str]:
-    """Changed source paths under a package root must map to a package present at HEAD."""
+def package_directories_at(repo: Path, revision: str) -> set[str]:
+    """Cargo package directories recorded by a revision, including packages deleted at HEAD."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo), "ls-tree", "-r", "-z", "--name-only", revision,
+             "--", *_PACKAGE_ROOTS],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise SelectionError("cannot inspect Cargo package manifests at the comparison base") from exc
+    if result.returncode != 0 or len(result.stdout) > 32 * 1024 * 1024:
+        raise SelectionError("cannot inspect Cargo package manifests at the comparison base")
+    try:
+        return {
+            (path.rpartition(b"/")[0] + b"/").decode("utf-8", "strict")
+            for path in result.stdout.split(b"\0")
+            if path.endswith(b"/Cargo.toml")
+        }
+    except UnicodeDecodeError as exc:
+        raise SelectionError("Cargo package path at comparison base is not UTF-8") from exc
+
+
+def unmapped_package_paths(
+    graph: dict[str, dict[str, Any]], changed: list[str], base_directories: set[str],
+) -> list[str]:
+    """Deleted package directories from the base must not silently disappear from selection."""
     directories = {info["dir"] for info in graph.values()}
     unmapped = set()
     for path in changed:
         parts = path.split("/")
         if len(parts) >= 3 and parts[0] in _PACKAGE_ROOTS:
             directory = f"{parts[0]}/{parts[1]}/"
-            if directory not in directories:
+            if directory not in directories and directory in base_directories:
                 unmapped.add(directory)
     return sorted(unmapped)
+
+
+def has_unowned_package_root_changes(
+    graph: dict[str, dict[str, Any]], changed: list[str], base_directories: set[str],
+) -> bool:
+    """Unknown loose source/support under crates/ or tools/ selects every proof conservatively."""
+    directories = {info["dir"] for info in graph.values()}
+    for path in changed:
+        parts = path.split("/")
+        if len(parts) >= 3 and parts[0] in _PACKAGE_ROOTS:
+            directory = f"{parts[0]}/{parts[1]}/"
+            if directory not in directories and directory not in base_directories:
+                return True
+    return False
 
 
 def affected_packages(graph: dict[str, dict[str, Any]], changed: list[str]) -> set[str] | None:
@@ -566,11 +604,14 @@ def run_suite(
         if unresolved:
             print(f"cannot select proofs: unresolved workspace path dependencies: {', '.join(unresolved)}", file=sys.stderr)
             return 2
-        unmapped = unmapped_package_paths(graph, changed or [])
+        base_directories = package_directories_at(repo, changed_from)
+        unmapped = unmapped_package_paths(graph, changed or [], base_directories)
         if unmapped:
             print(f"cannot select proofs: changed package paths are absent from HEAD: {', '.join(unmapped)}", file=sys.stderr)
             return 2
-        affected = None if changed is None else affected_packages(graph, changed)
+        affected = None if changed is None or has_unowned_package_root_changes(
+            graph, changed, base_directories,
+        ) else affected_packages(graph, changed)
     try:
         chosen = select_proof_ids(select_proofs(registry["proofs"], affected), proof_ids)
     except SelectionError as exc:

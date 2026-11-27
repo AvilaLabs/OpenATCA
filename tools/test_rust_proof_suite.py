@@ -15,9 +15,9 @@ from unittest import mock
 
 from rust_proof_suite import (
     NIGHTLY_OVER_SECONDS, SelectionError, affected_packages, balance_shards, changed_files,
-    load_registry, main, package_graph, registry_packages_missing, run_suite, select_proofs,
-    select_proof_ids,
-    validate_registry,
+    has_unowned_package_root_changes, load_registry, main, package_directories_at,
+    package_graph, registry_packages_missing, run_suite, select_proofs, select_proof_ids,
+    unmapped_package_paths, validate_registry,
 )
 from kani_validation import LOOP_UNWIND_PRESETS
 
@@ -856,6 +856,58 @@ class SelectionHardeningTests(unittest.TestCase):
             self.assertEqual(result, 2)
             self.assertIn("changed package paths are absent from HEAD: crates/a/", stderr.getvalue())
             self.assertEqual(stdout.getvalue(), "")
+
+    def test_loose_shared_rust_helper_selects_all_proofs_instead_of_skipping(self):
+        with tempfile.TemporaryDirectory() as temp:
+            files = dict(self.BASE)
+            files["tools/kani_validation.py"] = "# runner fixture\n"
+            repo = make_workspace(temp, files)
+            base = git(repo, "rev-parse", "HEAD")
+            helper = repo / "tools/test-support/sealed_inputs.rs"
+            helper.parent.mkdir(parents=True)
+            helper.write_text("// shared Rust test helper\n")
+            git(repo, "add", "tools/test-support/sealed_inputs.rs")
+            git(repo, "commit", "-q", "-m", "add shared test helper")
+            changed = changed_files(repo, base)
+            graph = package_graph(repo)
+            base_dirs = package_directories_at(repo, base)
+            self.assertEqual(changed, ["tools/test-support/sealed_inputs.rs"])
+            self.assertTrue(has_unowned_package_root_changes(graph, changed, base_dirs))
+            proof = proof_entry()
+            proof["package"] = "oa-track"
+            other_proof = proof_entry()
+            other_proof.update(id="other-package-proof", package="oa-ca")
+            registry = Path(temp) / "registry.json"
+            registry.write_text(json.dumps(registry_with(proof, other_proof)) + "\n")
+            self.assertEqual(len(load_registry(registry)[0]["proofs"]), 2)
+            runner = mock.patch(
+                "rust_proof_suite._run_one_proof",
+                return_value={"status": "PASS", "diagnostics": []},
+            )
+            stdout = io.StringIO()
+            with runner as execute, redirect_stdout(stdout):
+                result = run_suite(
+                    repo, Path(temp) / "out", Path(temp) / "target", registry,
+                    changed_from=base,
+                )
+            self.assertEqual(result, 0)
+            report = json.loads(stdout.getvalue().splitlines()[-1])
+            self.assertEqual(execute.call_count, 2, stdout.getvalue())
+            self.assertEqual(report["selected"], 2)
+            self.assertEqual(report["suite_status"], "PASS")
+
+    def test_deleted_cargo_package_is_still_recognized_from_base_manifest(self):
+        with tempfile.TemporaryDirectory() as temp:
+            files = dict(self.BASE)
+            files["crates/b/Cargo.toml"] = manifest("oa-track")
+            repo = make_workspace(temp, files)
+            base = git(repo, "rev-parse", "HEAD")
+            git(repo, "rm", "-r", "crates/a")
+            git(repo, "commit", "-q", "-m", "remove package")
+            graph = package_graph(repo)
+            base_dirs = package_directories_at(repo, base)
+            changed = changed_files(repo, base)
+            self.assertEqual(unmapped_package_paths(graph, changed, base_dirs), ["crates/a/"])
 
     def test_a_change_to_the_proof_inputs_selects_everything(self):
         graph = {"a": {"dir": "crates/a/", "deps": set()}}
