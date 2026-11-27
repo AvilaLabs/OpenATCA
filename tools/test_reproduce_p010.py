@@ -5,6 +5,8 @@ import contextlib
 import importlib.util
 import io
 import json
+import os
+import subprocess
 import tempfile
 import unittest
 import sys
@@ -17,14 +19,34 @@ if SPEC is None or SPEC.loader is None:
     raise RuntimeError("cannot load P-010 wrapper source")
 p010 = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(p010)
+ROOT_SENTINEL_FIXTURE = b"openatca-data-root-v1\n"
 
 
 class P010SyntheticGateTests(unittest.TestCase):
+    def test_module_import_does_not_require_rustup(self) -> None:
+        with tempfile.TemporaryDirectory() as empty_path:
+            source = (
+                "import importlib.util, pathlib, sys; "
+                "p=pathlib.Path(sys.argv[1]); "
+                "s=importlib.util.spec_from_file_location('p010_import_probe', p); "
+                "m=importlib.util.module_from_spec(s); s.loader.exec_module(m)"
+            )
+            result = subprocess.run(
+                [sys.executable, "-c", source, str(SCRIPT)],
+                env={"PATH": empty_path, "PYTHONDONTWRITEBYTECODE": "1"},
+                capture_output=True, text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual((result.stdout, result.stderr), ("", ""))
+
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
+        (self.root / ".openatca-data-root").write_bytes(ROOT_SENTINEL_FIXTURE)
+        self.old_guard = p010._guard
         self.old_open = p010._open_guarded
         self.old_read_guarded = p010._read_guarded
+        p010._guard = lambda: p010.sealed_guard.Guard(root=self.root)
         p010._open_guarded = lambda path: Path(path).open("rb")
         def read_guarded(path, cap):
             data = Path(path).read_bytes()
@@ -34,6 +56,7 @@ class P010SyntheticGateTests(unittest.TestCase):
         p010._read_guarded = read_guarded
 
     def tearDown(self) -> None:
+        p010._guard = self.old_guard
         p010._open_guarded = self.old_open
         p010._read_guarded = self.old_read_guarded
         self.tmp.cleanup()

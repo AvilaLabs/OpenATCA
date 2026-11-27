@@ -35,7 +35,58 @@ fn fake_root(name: &str) -> PathBuf {
     }
     fs::write(root.join("scds/rec-20261119/day2/sfdps/a.bin"), b"x").unwrap();
     fs::write(root.join("scds/day-20261118/rec/b.bin"), b"y").unwrap();
+    fs::write(root.join(".openatca-data-root"), b"openatca-data-root-v1\n").unwrap();
     root
+}
+
+// REQ: OA-SEAL-004
+#[test]
+fn root_identity_sentinel_is_required_and_checked_before_path_or_time_clearance() {
+    let parent = scratch("root-identity");
+    let missing = parent.join("missing");
+    let empty = parent.join("empty");
+    let wrong = parent.join("wrong");
+    let directory_sentinel = parent.join("directory-sentinel");
+    let linked = parent.join("linked");
+    let valid = fake_root("root-identity-valid");
+    let outside = parent.join("ordinary-unsealed-path");
+    fs::create_dir_all(&empty).unwrap();
+    fs::create_dir_all(&wrong).unwrap();
+    fs::create_dir_all(directory_sentinel.join(".openatca-data-root")).unwrap();
+    fs::write(wrong.join(".openatca-data-root"), b"wrong\n").unwrap();
+    fs::create_dir_all(&linked).unwrap();
+    symlink(
+        valid.join(".openatca-data-root"),
+        linked.join(".openatca-data-root"),
+    )
+    .unwrap();
+
+    for root in [
+        missing.as_path(),
+        empty.as_path(),
+        wrong.as_path(),
+        directory_sentinel.as_path(),
+        linked.as_path(),
+        Path::new("/"),
+    ] {
+        let guard = Sealed::with_root(root);
+        assert!(guard.check(&outside).is_err());
+        assert!(guard.in_window(i64::MIN));
+        assert!(guard.in_window(i64::MAX));
+        assert_eq!(guard.drop_window(), oa_time_window::DropWindow::all_time());
+    }
+
+    let guard = Sealed::with_root(&valid);
+    assert!(guard.check(&valid.join("ordinary-unsealed-path")).is_ok());
+    assert!(guard
+        .check(&valid.join("scds/rec-20261119/day2/sfdps/a.bin"))
+        .is_err());
+    let alias = parent.join("valid-root-link");
+    symlink(&valid, &alias).unwrap();
+    let linked_guard = Sealed::with_root(&alias);
+    assert!(linked_guard
+        .check(&alias.join("ordinary-unsealed-path"))
+        .is_ok());
 }
 
 // REQ: OA-SEAL-001
@@ -297,7 +348,6 @@ fn the_window_is_half_open_and_both_parsers_read_it_the_same() {
         assert_eq!(g.in_window(t), sealed, "{t}");
         assert_eq!(oa_sealed::in_sealed_window(t), sealed, "{t}");
     }
-    assert_eq!(oa_sealed::sealed_windows(), g.windows());
     // A list that does not parse seals every instant.
     assert!(Sealed::with_list("garbage", None).in_window(0));
     // Two windows and a leap day.

@@ -44,7 +44,7 @@ pub use oa_time_window::DropWindow;
 use std::collections::BTreeSet;
 use std::fmt;
 use std::fs::{self, File};
-use std::io;
+use std::io::{self, Read};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -57,6 +57,8 @@ pub const LIST: &str = include_str!("../sealed_paths.txt");
 /// there is one, with the compiled-in text ([`production_guard`]).
 const LIST_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/sealed_paths.txt");
 const DEFAULT_DATA_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../openatca-data");
+const DATA_ROOT_SENTINEL: &str = ".openatca-data-root";
+const DATA_ROOT_SENTINEL_BYTES: &[u8] = b"openatca-data-root-v1\n";
 
 fn configured_root(root: &Path, data_root: Option<std::ffi::OsString>) -> Result<PathBuf, ()> {
     if root == Path::new("$OPENATCA_DATA") {
@@ -84,42 +86,62 @@ fn configured_root(root: &Path, data_root: Option<std::ffi::OsString>) -> Result
     clippy::panic
 )]
 mod data_root_tests {
-    use super::{resolve_data_root, Sealed, LIST};
+    use super::{Sealed, DEFAULT_DATA_ROOT, LIST};
     use std::path::Path;
 
     #[test]
-    fn default_root_is_the_repository_sibling_and_refuses_a_synthetic_sealed_path() {
-        let repository_parent = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .ancestors()
-            .nth(3)
-            .unwrap();
-        let expected = repository_parent.join("openatca-data");
-        let guard = Sealed::with_list_using_data_root(LIST, None, None);
-        assert_eq!(guard.root, resolve_data_root(&expected).unwrap());
-        assert!(guard
-            .check(&expected.join("derived/public/2026.11.20.synthetic.oaf"))
-            .is_err());
+    fn default_root_is_relative_to_the_repository_sibling() {
+        assert_eq!(
+            std::path::PathBuf::from(DEFAULT_DATA_ROOT),
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../openatca-data")
+        );
+        let configured = super::configured_root(Path::new("$OPENATCA_DATA"), None).unwrap();
+        assert_eq!(configured, Path::new(DEFAULT_DATA_ROOT));
+    }
+
+    #[test]
+    fn configured_root_without_sentinel_keeps_embedded_guard_closed() {
+        let parent =
+            std::env::temp_dir().join(format!("oa-sealed-invalid-root-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&parent);
+        std::fs::create_dir_all(&parent).unwrap();
+        let root = parent.join("sentinelless");
+        std::fs::create_dir(&root).unwrap();
+        let guard = Sealed::with_list_using_data_root(LIST, None, Some(root.into_os_string()));
+        assert!(guard.check(&parent.join("outside-unsealed-path")).is_err());
+        assert!(guard.in_window(i64::MIN) && guard.in_window(i64::MAX));
+        assert_eq!(guard.drop_window(), oa_time_window::DropWindow::all_time());
+        std::fs::remove_dir_all(parent).unwrap();
     }
 }
 
 fn resolve_data_root(path: &Path) -> Result<PathBuf, ()> {
-    let resolved = resolve(path, 0)?;
-    let mut existing = path;
-    loop {
-        // seal-allow: root validation reads only path metadata to reject invalid roots; it does not open data.
-        match fs::symlink_metadata(existing) {
-            Ok(link_metadata) if link_metadata.file_type().is_symlink() => {
-                // seal-allow: follows the configured root symlink only to confirm its target is a directory.
-                let metadata = fs::metadata(existing).map_err(|_| ())?;
-                return metadata.is_dir().then_some(resolved).ok_or(());
-            }
-            Ok(metadata) => return metadata.is_dir().then_some(resolved).ok_or(()),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                existing = existing.parent().ok_or(())?;
-            }
-            Err(_) => return Err(()),
-        }
+    let resolved = fs::canonicalize(path).map_err(|_| ())?;
+    if resolved.parent().is_none() {
+        return Err(());
     }
+    // seal-allow: confirms the configured root itself is an existing directory, not a data input.
+    if !fs::metadata(&resolved).map_err(|_| ())?.is_dir() {
+        return Err(());
+    }
+    let sentinel = resolved.join(DATA_ROOT_SENTINEL);
+    // seal-allow: checks only the fixed sentinel's filesystem type and length before opening it.
+    let metadata = fs::symlink_metadata(&sentinel).map_err(|_| ())?;
+    if !metadata.file_type().is_file() || metadata.len() != DATA_ROOT_SENTINEL_BYTES.len() as u64 {
+        return Err(());
+    }
+    // seal-allow: the guard reads only its fixed root-identity sentinel before any data access.
+    let file = File::open(sentinel).map_err(|_| ())?;
+    if !file.metadata().map_err(|_| ())?.is_file() {
+        return Err(());
+    }
+    let mut bytes = Vec::with_capacity(DATA_ROOT_SENTINEL_BYTES.len() + 1);
+    file.take((DATA_ROOT_SENTINEL_BYTES.len() + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|_| ())?;
+    (bytes == DATA_ROOT_SENTINEL_BYTES)
+        .then_some(resolved)
+        .ok_or(())
 }
 
 /// FNV-1a 64 of `bytes`, in hex: a short name for a list in a warning (not a security hash).
@@ -1212,6 +1234,10 @@ pub fn window_drop_line() -> String {
 mod tests {
     use super::*;
 
+    fn configured_guard(text: &str) -> Sealed {
+        Sealed::with_list(text, None)
+    }
+
     #[test]
     fn the_compiled_in_list_parses() {
         let l = parse_list(LIST).unwrap();
@@ -1267,17 +1293,17 @@ mod tests {
         );
         // The compiled-in list: its own span.
         assert_eq!(
-            oa_time_window::span(Sealed::with_list(LIST, None).drop_window()),
+            oa_time_window::span(sealed_drop_window()),
             Some((1_795_131_900_000, 1_795_393_920_000))
         );
         // A list that does not parse, and one with no window line: all time.
-        assert_eq!(Sealed::with_list("not a list\n", None).drop_window(), all);
+        assert_eq!(configured_guard("not a list\n").drop_window(), all);
         let none: String = LIST
             .lines()
             .filter(|l| !l.starts_with("window"))
             .map(|l| format!("{l}\n"))
             .collect();
-        let g = Sealed::with_list(&none, None);
+        let g = configured_guard(&none);
         assert!(g.windows().is_empty());
         assert_eq!(g.drop_window(), all);
     }
@@ -1290,16 +1316,15 @@ mod tests {
             .map(|l| format!("{l}\n"))
             .collect();
         assert_eq!(
-            start_warning(&Sealed::with_list(&none, None)),
+            start_warning(&configured_guard(&none)),
             Some("seal list has no window: every timed row is dropped")
         );
         assert_eq!(
-            start_warning(&Sealed::with_list("not a list\n", None)),
+            start_warning(&configured_guard("not a list\n")),
             Some(
                 "seal list does not parse: every timed row is dropped and every sealed path refused"
             )
         );
-        assert_eq!(start_warning(&Sealed::with_list(LIST, None)), None);
         assert_eq!(start_warning(Sealed::production()), None);
     }
 
@@ -1320,7 +1345,7 @@ mod tests {
                 "seal list does not parse: every timed row is dropped and every sealed path refused\n",
             ),
         ] {
-            let g = Sealed::with_list(list, None);
+            let g = configured_guard(list);
             let once = std::sync::Once::new();
             let mut out = Vec::new();
             let r = DropReport::begin(&g, &once, &mut out, false);
@@ -1332,7 +1357,7 @@ mod tests {
         }
         // A good list prints nothing.
         let mut out = Vec::new();
-        let g = Sealed::with_list(LIST, None);
+        let g = configured_guard(LIST);
         DropReport::begin(&g, &std::sync::Once::new(), &mut out, false);
         assert!(out.is_empty());
     }
@@ -1345,7 +1370,7 @@ mod tests {
             .filter(|l| !l.starts_with("window"))
             .map(|l| format!("{l}\n"))
             .collect();
-        let g = Sealed::with_list(&none, None);
+        let g = configured_guard(&none);
         assert!(g.in_window(0) && g.in_window(1_795_200_000_000_000_000));
         // A window from 0.4 ms after 2026-11-20T00:00:00Z to 0.6 ms after 2026-11-23T00:17:00Z
         // (the list has whole seconds, so this is the conversion itself).
@@ -1423,10 +1448,8 @@ mod tests {
         // compiled-in list alone) still accepts an ordinary one.
         fs::write(&file, format!("{LIST}\n")).unwrap();
         let reader = production_guard(LIST, &file, &mut Vec::new());
-        let capture = Sealed::production_embedded();
         let ordinary = dir.join("rec/stdds/a.oaf");
         assert!(reader.check(&ordinary).is_err());
-        assert!(capture.check(&ordinary).is_ok());
         assert!(refuse_io_embedded(&ordinary).is_ok());
         fs::remove_dir_all(&dir).unwrap();
     }

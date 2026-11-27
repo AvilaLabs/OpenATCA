@@ -14,9 +14,22 @@ if SPEC is None or SPEC.loader is None:
     raise RuntimeError("cannot load P-010 receipt producer source")
 producer = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(producer)
+ROOT_SENTINEL_FIXTURE = b"openatca-data-root-v1\n"
 
 
 class P010ReceiptSourceTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.guard_root = Path(self.temporary.name) / "guard-root"
+        self.guard_root.mkdir()
+        (self.guard_root / ".openatca-data-root").write_bytes(ROOT_SENTINEL_FIXTURE)
+        self.old_guard = producer.p010._guard
+        producer.p010._guard = lambda: producer.p010.sealed_guard.Guard(root=self.guard_root)
+
+    def tearDown(self) -> None:
+        producer.p010._guard = self.old_guard
+        self.temporary.cleanup()
+
     # REQ: OA-TRK-412
     def test_strict_json_refuses_duplicate_keys_and_nonfinite_values(self) -> None:
         with self.assertRaises(producer.Refused):
@@ -122,6 +135,7 @@ class P010ReceiptSourceTests(unittest.TestCase):
 
     # REQ: OA-TRK-412
     def test_caller_path_shim_is_not_selected_or_executed(self) -> None:
+        toolchain = producer.p010.rust_toolchain()
         with tempfile.TemporaryDirectory() as directory:
             shim_dir = Path(directory) / "shim"
             shim_dir.mkdir()
@@ -129,10 +143,11 @@ class P010ReceiptSourceTests(unittest.TestCase):
             shim = shim_dir / "cargo"
             shim.write_text(f"#!/bin/sh\ntouch {marker}\n", encoding="utf-8")
             shim.chmod(0o700)
-            with mock.patch.dict(os.environ, {"PATH": str(shim_dir)}):
+            with mock.patch.dict(os.environ, {"PATH": str(shim_dir)}), \
+                    mock.patch.object(producer.p010, "rust_toolchain", return_value=toolchain):
                 self.assertEqual(producer._shell_environment()["PATH"], producer.APPROVED_PATH)
                 build_argv = producer.p010._build_argv("candidate", Path(directory) / "target")
-                self.assertEqual(build_argv[0], producer.p010.CARGO_EXECUTABLE)
+                self.assertEqual(build_argv[0], toolchain[0])
                 self.assertNotEqual(build_argv[0], str(shim))
             self.assertFalse(marker.exists())
 

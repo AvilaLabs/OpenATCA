@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import functools
 import hashlib
 import importlib.util
 import io
@@ -71,10 +72,10 @@ LIMITS = {
     "min_free_bytes": 64 * 1024**3,
 }
 BUILD_ARGV = {
-    "clipper": ["cargo", "build", "--release", "--locked", "--offline", "-p", "oa-adsb", "--bin", "oa-adsb-clip", "--message-format=json-render-diagnostics"],
-    "candidate": ["cargo", "build", "--release", "--locked", "--offline", "-p", "oa-track-tools", "--bin", "oa-track-run", "--message-format=json-render-diagnostics"],
-    "candidate_scorer": ["cargo", "build", "--release", "--locked", "--offline", "-p", "oa-track-tools", "--example", "p002", "--message-format=json-render-diagnostics"],
-    "replication_scorer": ["cargo", "build", "--release", "--locked", "--offline", "-p", "oa-track", "--example", "p002", "--message-format=json-render-diagnostics"],
+    "clipper": ["build", "--release", "--locked", "--offline", "-p", "oa-adsb", "--bin", "oa-adsb-clip", "--message-format=json-render-diagnostics"],
+    "candidate": ["build", "--release", "--locked", "--offline", "-p", "oa-track-tools", "--bin", "oa-track-run", "--message-format=json-render-diagnostics"],
+    "candidate_scorer": ["build", "--release", "--locked", "--offline", "-p", "oa-track-tools", "--example", "p002", "--message-format=json-render-diagnostics"],
+    "replication_scorer": ["build", "--release", "--locked", "--offline", "-p", "oa-track", "--example", "p002", "--message-format=json-render-diagnostics"],
 }
 
 
@@ -95,16 +96,18 @@ def rustup_tool(tool: str) -> str:
     return os.fspath(resolved)
 
 
-CARGO_EXECUTABLE = rustup_tool("cargo")
-RUSTC_EXECUTABLE = rustup_tool("rustc")
-TOOLCHAIN_ROOT = os.fspath(Path(CARGO_EXECUTABLE).parent)
-for argv in BUILD_ARGV.values():
-    argv[0] = CARGO_EXECUTABLE
-BUILD_PATH = os.pathsep.join((TOOLCHAIN_ROOT, "/usr/bin", "/bin"))
 TOOLCHAIN_TRUST_ASSUMPTION = (
     "trusted installed Rust 1.89.0 paths; receipt hashes and version probes establish process-time "
     "identity only, not secure-boot or host attestation"
 )
+
+
+@functools.lru_cache(maxsize=1)
+def rust_toolchain() -> tuple[str, str, str, str]:
+    cargo = rustup_tool("cargo")
+    rustc = rustup_tool("rustc")
+    root = os.fspath(Path(cargo).parent)
+    return cargo, rustc, root, os.pathsep.join((root, "/usr/bin", "/bin"))
 ARTIFACT_NAMES = {"clipper": "oa-adsb-clip", "candidate": "oa-track-run", "candidate_scorer": "p002", "replication_scorer": "p002"}
 REPLICATION_TRACKER_COMMIT = "4ad16fe19203c165ff9b8ecf477005ab1fd50384"
 # The C derivative adds only the scorer example and its ERAM export parser module registration;
@@ -225,7 +228,8 @@ def _canonical_build_path(value: Any, where: str) -> Path:
 
 
 def _build_argv(role: str, target_dir: Path) -> list[str]:
-    base = BUILD_ARGV[role]
+    cargo, _, _, _ = rust_toolchain()
+    base = [cargo, *BUILD_ARGV[role]]
     marker = "--message-format=json-render-diagnostics"
     if marker not in base:
         raise Refused(f"internal build argv is missing Cargo JSON output for {role}")
@@ -634,6 +638,7 @@ def _run_guard_probe(binary: Path, expected: bytes) -> None:
 
 
 def _check_build(doc: dict[str, Any], role: str) -> Path:
+    cargo_executable, rustc_executable, _, build_path = rust_toolchain()
     b = doc["builds"][role]
     meta_path = Path(b["metadata"])
     binary = Path(b["binary"])
@@ -661,8 +666,8 @@ def _check_build(doc: dict[str, Any], role: str) -> Path:
                 "RUSTC_WRAPPER": None, "RUSTC_WORKSPACE_WRAPPER": None,
                 "RUSTFLAGS": None, "CARGO_BUILD_RUSTFLAGS": None,
                 "CARGO_ENCODED_RUSTFLAGS": "", "CARGO_BUILD_RUSTC_WRAPPER": None,
-                "CARGO_TARGET_DIR_inherited": False, "PATH": BUILD_PATH,
-                "RUSTC": RUSTC_EXECUTABLE,
+                "CARGO_TARGET_DIR_inherited": False, "PATH": build_path,
+                "RUSTC": rustc_executable,
             }):
         raise Refused(f"{role} build receipt does not prove its isolated fresh target environment")
     toolchain_identity = _exact_keys(meta["toolchain_identity"], {"before", "after"}, f"{role}.toolchain_identity")
@@ -671,8 +676,8 @@ def _check_build(doc: dict[str, Any], role: str) -> Path:
     if toolchain_before != toolchain_after:
         raise Refused(f"{role} trusted Rust toolchain changed during its build/probe")
     for tool_name, expected_path, expected_prefix in (
-            ("cargo", CARGO_EXECUTABLE, "cargo 1.89.0 "),
-            ("rustc", RUSTC_EXECUTABLE, "rustc 1.89.0 ")):
+            ("cargo", cargo_executable, "cargo 1.89.0 "),
+            ("rustc", rustc_executable, "rustc 1.89.0 ")):
         tool = _exact_keys(toolchain_before.get(tool_name), {"path", "bytes", "sha256", "version"},
                            f"{role}.toolchain_identity.{tool_name}")
         if (tool["path"] != expected_path or type(tool["bytes"]) is not int or not 1 <= tool["bytes"] <= 128 * 1024 * 1024
@@ -831,7 +836,7 @@ def _check_build(doc: dict[str, Any], role: str) -> Path:
     _, probe_sha = _hash_file(probe_binary, LIMITS["max_output_file_bytes"])
     if guard["probe_binary_sha256"] != probe_sha:
         raise Refused(f"{role} compiled guard probe hash differs from its receipt")
-    expected_rustc = [RUSTC_EXECUTABLE, "--edition=2021", str(probe_source), "-L",
+    expected_rustc = [rustc_executable, "--edition=2021", str(probe_source), "-L",
                       f"dependency={target_dir}/release/deps", "--extern", f"oa_sealed={guard['sealed_rlib']}",
                       "--extern", f"oa_sha256={guard['digest_rlib']}", "-o", str(probe_binary)]
     if guard["probe_rustc_argv"] != expected_rustc or type(guard["probe_exit_code"]) is not int or guard["probe_exit_code"] != 0:

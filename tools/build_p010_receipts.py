@@ -44,8 +44,9 @@ STOP_GRACE_SECONDS = 3
 MEMORY_LIMIT = 6 * 1024**3
 MIN_FREE_BYTES = 64 * 1024**3
 APPROVED_PATH = "/usr/bin:/bin"
-TRUSTED_CARGO = Path(p010.CARGO_EXECUTABLE)
-TRUSTED_RUSTC = Path(p010.RUSTC_EXECUTABLE)
+def _trusted_tools() -> tuple[Path, Path]:
+    cargo, rustc, _, _ = p010.rust_toolchain()
+    return Path(cargo), Path(rustc)
 
 
 class Refused(Exception):
@@ -264,8 +265,9 @@ def _verify_envelope(paths: tuple[Path, ...]) -> None:
 def _clean_shell_argv(argv: list[str]) -> list[str]:
     # This invokes the same existing replay_clean_env function as replay_compare.sh. Values are
     # passed as argv elements, never interpolated into shell source.
+    _, trusted_rustc = _trusted_tools()
     shell = (f'source "$1"; replay_clean_env; '
-             f'clean_env_prefix+=("PATH={APPROVED_PATH}" "RUSTC={TRUSTED_RUSTC}" '
+             f'clean_env_prefix+=("PATH={APPROVED_PATH}" "RUSTC={trusted_rustc}" '
              '"CARGO_BUILD_JOBS=1" "CARGO_NET_OFFLINE=true"); '
              'shift; exec "${clean_env_prefix[@]}" "$@"')
     return ["/bin/bash", "-c", shell, "p010-build", str(REPLAY_ENV), *argv]
@@ -355,8 +357,9 @@ def _run_bounded(argv: list[str], cwd: Path, stdout_path: Path, stderr_path: Pat
 def _toolchain_snapshot(out: Path, phase: str, disk_paths: tuple[Path, ...],
                         lock_path: Path, lock_fd: int) -> dict[str, dict[str, Any]]:
     records: dict[str, dict[str, Any]] = {}
-    for name, executable, prefix in (("cargo", TRUSTED_CARGO, b"cargo 1.89.0 "),
-                                     ("rustc", TRUSTED_RUSTC, b"rustc 1.89.0 ")):
+    trusted_cargo, trusted_rustc = _trusted_tools()
+    for name, executable, prefix in (("cargo", trusted_cargo, b"cargo 1.89.0 "),
+                                     ("rustc", trusted_rustc, b"rustc 1.89.0 ")):
         p010._guard().check(executable)
         if executable.resolve(strict=True) != executable:
             raise Refused(f"trusted {name} tool path is not canonical")
@@ -635,6 +638,7 @@ def _run_probe(binary: Path, expected: bytes, out_dir: Path,
 def _build_role(doc: dict[str, Any], role: str, out: Path,
                 lock_path: Path, lock_fd: int,
                 expected_toolchain: dict[str, dict[str, Any]]) -> tuple[dict[str, Any], Path, Path]:
+    trusted_cargo, trusted_rustc = _trusted_tools()
     build = doc["builds"][role]
     source = p010._build_source(doc, role)
     p010._guard().check(Path(source["tree"]))
@@ -653,7 +657,7 @@ def _build_role(doc: dict[str, Any], role: str, out: Path,
     source_before = p010._source_state(source["tree"], commit)
     cargo_meta = out / "logs" / f"{role}.cargo-metadata.json"
     cargo_meta_stderr = out / "logs" / f"{role}.cargo-metadata.stderr"
-    meta_argv = [str(TRUSTED_CARGO), "metadata", "--format-version", "1", "--locked", "--offline",
+    meta_argv = [str(trusted_cargo), "metadata", "--format-version", "1", "--locked", "--offline",
                  "--manifest-path", str(source_root / "Cargo.toml")]
     meta_run = _run_bounded(meta_argv, source_root, cargo_meta, cargo_meta_stderr,
                             MAX_CARGO_METADATA, MAX_CARGO_STDERR, 300, (out, target_dir.parent), lock_path, lock_fd)
@@ -716,7 +720,7 @@ def _build_role(doc: dict[str, Any], role: str, out: Path,
     if probe_source.exists() or probe_source.is_symlink() or probe_binary.exists() or probe_binary.is_symlink():
         raise Refused(f"{role} guard probe output path already exists")
     _write_new(probe_source, p010.GUARD_PROBE_SOURCE.encode("utf-8"), 16 * 1024)
-    rustc_argv = [str(TRUSTED_RUSTC), "--edition=2021", str(probe_source), "-L",
+    rustc_argv = [str(trusted_rustc), "--edition=2021", str(probe_source), "-L",
                   f"dependency={target_dir}/release/deps", "--extern", f"oa_sealed={sealed_rlib}",
                   "--extern", f"oa_sha256={digest_rlib}", "-o", str(probe_binary)]
     compile_stdout = out / "logs" / f"{role}.probe-compile.stdout"
@@ -749,7 +753,7 @@ def _build_role(doc: dict[str, Any], role: str, out: Path,
                                        "RUSTFLAGS": None, "CARGO_BUILD_RUSTFLAGS": None,
                                        "CARGO_ENCODED_RUSTFLAGS": "", "CARGO_BUILD_RUSTC_WRAPPER": None,
                                        "CARGO_TARGET_DIR_inherited": False,
-                                       "PATH": APPROVED_PATH, "RUSTC": str(TRUSTED_RUSTC)},
+                                       "PATH": APPROVED_PATH, "RUSTC": str(trusted_rustc)},
         "artifacts": {p010.ARTIFACT_NAMES[role]: selected_artifact},
         "local_artifacts": local_artifacts,
         "target_usage": target_usage,

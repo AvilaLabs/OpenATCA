@@ -33,6 +33,8 @@ from typing import NamedTuple
 
 LIST_PATH = Path(__file__).resolve().parent.parent / "crates" / "oa-sealed" / "sealed_paths.txt"
 DEFAULT_DATA_ROOT = LIST_PATH.parent / "../../../openatca-data"
+DATA_ROOT_SENTINEL = ".openatca-data-root"
+DATA_ROOT_SENTINEL_BYTES = b"openatca-data-root-v1\n"
 MAX_LINKS = 40
 MAX_WALK_DEPTH = 64
 
@@ -43,6 +45,31 @@ _UTC = re.compile(r"([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9
 
 class SealedError(Exception):
     """A path is sealed (or cannot be shown not to be)."""
+
+
+def _validated_data_root(path: str | os.PathLike) -> str:
+    try:
+        resolved = Path(path).resolve(strict=True)
+        if resolved == Path(resolved.anchor) or not resolved.is_dir():
+            raise SealedError("data root is not a directory")
+        sentinel = resolved / DATA_ROOT_SENTINEL
+        info = sentinel.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_size != len(DATA_ROOT_SENTINEL_BYTES):
+            raise SealedError("data root sentinel is not a regular file")
+        nofollow = getattr(os, "O_NOFOLLOW", None)
+        if nofollow is None:
+            raise SealedError("platform cannot verify a non-symlink root sentinel")
+        fd = os.open(sentinel, os.O_RDONLY | nofollow)
+        with os.fdopen(fd, "rb") as stream:
+            opened = os.fstat(stream.fileno())
+            if not stat.S_ISREG(opened.st_mode) or opened.st_size != len(DATA_ROOT_SENTINEL_BYTES):
+                raise SealedError("opened root sentinel is not the expected regular file")
+            sentinel_bytes = stream.read(len(DATA_ROOT_SENTINEL_BYTES) + 1)
+        if sentinel_bytes != DATA_ROOT_SENTINEL_BYTES:
+            raise SealedError("data root sentinel does not identify this data root")
+        return os.fspath(resolved)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise SealedError("data root is missing or invalid") from exc
 
 
 def _parse_utc_ns(t: str):
@@ -275,21 +302,7 @@ class Guard:
                 return
             if not os.path.isabs(r):
                 raise SealedError("data root is not absolute")
-            resolved = _resolve(r)
-            existing = Path(r)
-            while True:
-                try:
-                    if existing.is_symlink() and not existing.exists():
-                        raise SealedError("data root contains an unresolved symlink")
-                    if not stat.S_ISDIR(existing.stat().st_mode):
-                        raise SealedError("data root ancestor is not a directory")
-                    break
-                except FileNotFoundError:
-                    parent = existing.parent
-                    if parent == existing:
-                        raise SealedError("data root has no existing ancestor")
-                    existing = parent
-            self.root = resolved
+            self.root = _validated_data_root(r)
         except (SealedError, OSError, ValueError):
             self.root = ""
             self.broken = True

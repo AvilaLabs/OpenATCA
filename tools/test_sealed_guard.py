@@ -10,6 +10,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import sealed_guard  # noqa: E402
 
+ROOT_SENTINEL_FILE = ".openatca-data-root"
+ROOT_SENTINEL_FIXTURE = b"openatca-data-root-v1\n"
+
 
 def fake_root(base: Path) -> Path:
     root = base / "data"
@@ -19,6 +22,7 @@ def fake_root(base: Path) -> Path:
         (root / d).mkdir(parents=True)
     (root / "scds/rec-20261119/day2/sfdps/a.bin").write_bytes(b"x")
     (root / "scds/day-20261118/rec/b.bin").write_bytes(b"y")
+    (root / ROOT_SENTINEL_FILE).write_bytes(ROOT_SENTINEL_FIXTURE)
     return root
 
 
@@ -30,29 +34,34 @@ class SealedGuardTests(unittest.TestCase):
         self.g = sealed_guard.Guard(root=self.root)
 
     def test_configured_data_root_defaults_to_repository_relative_and_refuses_real_paths(self):
+        expected = sealed_guard._resolve(os.fspath(sealed_guard.DEFAULT_DATA_ROOT))
+        self.assertEqual(expected, sealed_guard._resolve(
+            os.fspath(Path(__file__).resolve().parents[2] / "openatca-data")
+        ))
         with patch.dict(os.environ):
             os.environ.pop("OPENATCA_DATA", None)
-            guard = sealed_guard.Guard()
-            expected = sealed_guard._resolve(
-                os.fspath(Path(__file__).resolve().parents[2] / "openatca-data")
-            )
-            self.assertEqual(guard.root, expected)
+            with patch.object(sealed_guard, "DEFAULT_DATA_ROOT", self.root):
+                guard = sealed_guard.Guard()
+            self.assertEqual(guard.root, str(self.root.resolve()))
             with self.assertRaises(sealed_guard.SealedError):
-                guard.check(Path(expected) / "derived/public/2026.11.20.synthetic.oaf")
+                guard.check(self.root / "derived/public/2026.11.20.synthetic.oaf")
 
     def test_configured_data_root_override_is_resolved_before_refusal_check(self):
         with tempfile.TemporaryDirectory() as temporary:
             data = Path(temporary) / "data"
             data.mkdir()
+            (data / ROOT_SENTINEL_FILE).write_bytes(ROOT_SENTINEL_FIXTURE)
             alias = Path(temporary) / "data-link"
             alias.symlink_to(data, target_is_directory=True)
             with patch.dict(os.environ, {"OPENATCA_DATA": str(data)}):
                 guard = sealed_guard.Guard()
+            self.assertFalse(guard.broken)
             candidate = data / "derived/public/2026.11.20.synthetic.oaf"
             with self.assertRaises(sealed_guard.SealedError):
                 guard.check(candidate)
             with patch.dict(os.environ, {"OPENATCA_DATA": str(alias)}):
                 linked = sealed_guard.Guard()
+            self.assertFalse(linked.broken)
             self.assertEqual(linked.root, str(data.resolve()))
             with self.assertRaises(sealed_guard.SealedError):
                 linked.check(candidate)
@@ -68,6 +77,65 @@ class SealedGuardTests(unittest.TestCase):
         with patch.dict(os.environ, {"OPENATCA_DATA": "relative-data"}):
             guard = sealed_guard.Guard()
             self.assertTrue(guard.broken)
+
+    def test_wrong_default_root_without_override_fails_closed(self):
+        with tempfile.TemporaryDirectory() as temporary, patch.dict(os.environ):
+            os.environ.pop("OPENATCA_DATA", None)
+            with patch.object(sealed_guard, "DEFAULT_DATA_ROOT", Path(temporary) / "missing"):
+                guard = sealed_guard.Guard()
+            self.assertTrue(guard.broken)
+            self.assertTrue(guard.in_window(0))
+            with self.assertRaises(sealed_guard.SealedError):
+                guard.check(Path(temporary) / "ordinary.txt")
+
+    def test_configured_roots_require_a_regular_exact_sentinel(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            missing = base / "missing"
+            no_sentinel = base / "no-sentinel"
+            no_sentinel.mkdir()
+            wrong_bytes = base / "wrong-bytes"
+            wrong_bytes.mkdir()
+            (wrong_bytes / ROOT_SENTINEL_FILE).write_bytes(b"wrong\n")
+            directory_sentinel = base / "directory-sentinel"
+            directory_sentinel.mkdir()
+            (directory_sentinel / ROOT_SENTINEL_FILE).mkdir()
+            linked_sentinel = base / "linked-sentinel"
+            linked_sentinel.mkdir()
+            sentinel_target = base / "sentinel-target"
+            sentinel_target.write_bytes(ROOT_SENTINEL_FIXTURE)
+            (linked_sentinel / ROOT_SENTINEL_FILE).symlink_to(sentinel_target)
+            for bad_root in (missing, no_sentinel, wrong_bytes, directory_sentinel,
+                             linked_sentinel, Path("/")):
+                with self.subTest(root=bad_root):
+                    with patch.dict(os.environ, {"OPENATCA_DATA": str(bad_root)}):
+                        guard = sealed_guard.Guard()
+                    self.assertTrue(guard.broken)
+                    self.assertTrue(guard.in_window(-(1 << 63)))
+                    self.assertTrue(guard.in_window((1 << 63) - 1))
+                    with self.assertRaises(sealed_guard.SealedError):
+                        guard.check(base / "outside-configured-root.txt")
+
+    def test_production_guard_refuses_paths_and_timestamps_for_an_invalid_root(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            missing = Path(temporary) / "missing-data-root"
+            sealed_guard.production.cache_clear()
+            try:
+                with patch.dict(os.environ, {"OPENATCA_DATA": str(missing)}):
+                    guard = sealed_guard.production()
+                self.assertTrue(guard.broken)
+                self.assertTrue(guard.in_window(-(1 << 63)))
+                self.assertTrue(guard.in_window((1 << 63) - 1))
+                with self.assertRaises(sealed_guard.SealedError):
+                    guard.check(Path(temporary) / "outside-root.txt")
+            finally:
+                sealed_guard.production.cache_clear()
+
+    def test_valid_sentinel_root_allows_unsealed_and_refuses_sealed_paths(self):
+        self.assertFalse(self.g.broken)
+        self.assertIsNone(self.g.check(self.root / "ordinary.txt"))
+        with self.assertRaises(sealed_guard.SealedError):
+            self.g.check(self.root / "scds/rec-20261119/day2/sfdps/a.bin")
 
     def tearDown(self):
         self._t.cleanup()
@@ -205,16 +273,17 @@ class SealedGuardTests(unittest.TestCase):
         self.assertEqual(m, 900_000_000_000)
         self.assertEqual(windows[0][1:], (1_795_132_800_000_000_000 - m, 1_795_393_020_000_000_000 + m))
         lo, hi = windows[0][1:]
-        for t, sealed in ((lo - 1, False), (lo, True), (hi - 1, True), (hi, False), (0, False)):
-            self.assertEqual(self.g.in_window(t), sealed, t)
-            self.assertEqual(sealed_guard.in_sealed_window(t), sealed, t)
+        with patch.object(sealed_guard, "production", return_value=self.g):
+            for t, sealed in ((lo - 1, False), (lo, True), (hi - 1, True), (hi, False), (0, False)):
+                self.assertEqual(self.g.in_window(t), sealed, t)
+                self.assertEqual(sealed_guard.in_sealed_window(t), sealed, t)
         self.assertTrue(sealed_guard.Guard(text="garbage").in_window(0))
         two = ("root /d\nseal a\nwindow 2024-02-29T00:00:00Z 2024-03-01T00:00:00Z\n"
                "window 1970-01-01T00:00:01Z 1970-01-01T00:00:02Z\n")
         _, _, _, w2 = sealed_guard.parse_list(two)
         self.assertEqual((w2[0][1], w2[1][1]), (1_709_164_800_000_000_000 - m, 1_000_000_000 - m))
         # A list with no window line seals every instant (fails closed).
-        self.assertTrue(sealed_guard.Guard(text="root /d\nseal a\n").in_window(0))
+        self.assertTrue(sealed_guard.Guard(text="root /d\nseal a\n", root=self.root).in_window(0))
         self.assertTrue(sealed_guard.dump(two).endswith("window 1970-01-01T00:00:01Z 1970-01-01T00:00:02Z\n"))
 
     # REQ: OA-SEAL-014
@@ -224,7 +293,7 @@ class SealedGuardTests(unittest.TestCase):
         from unittest import mock
 
         nowin = "root /d\nseal a\n"
-        self.assertEqual(sealed_guard.start_warning(sealed_guard.Guard(text=nowin)),
+        self.assertEqual(sealed_guard.start_warning(sealed_guard.Guard(text=nowin, root=self.root)),
                          "seal list has no window: every timed row is dropped")
         self.assertEqual(sealed_guard.start_warning(sealed_guard.Guard(text="garbage")),
                          "seal list does not parse: every timed row is dropped and every sealed path refused")
@@ -236,8 +305,9 @@ class SealedGuardTests(unittest.TestCase):
                            (None, "")):
             err = io.StringIO()
             real = sealed_guard.Guard
-            with mock.patch.object(sealed_guard, "Guard", lambda: real(text=text)) if text is not None \
-                    else contextlib.nullcontext():
+            guard_patch = (mock.patch.object(sealed_guard, "Guard", lambda: real(text=text, root=self.root))
+                           if text is not None else mock.patch.object(sealed_guard, "DEFAULT_DATA_ROOT", self.root))
+            with guard_patch:
                 with contextlib.redirect_stderr(err):
                     sealed_guard.production.__wrapped__()
             self.assertEqual(err.getvalue(), line)
@@ -361,6 +431,7 @@ class SealedGuardTests(unittest.TestCase):
         self.assertEqual(r.returncode, 2)
         self.assertIn("OA-SEAL-001", r.stderr)
         ok = subprocess.run([sys.executable, "-I", sealed_guard.__file__, str(self.base / "fine")],
+                            env=dict(os.environ, OPENATCA_DATA=str(self.root)),
                             capture_output=True, text=True)
         self.assertEqual(ok.returncode, 0)
 
@@ -499,6 +570,8 @@ class SealedGuardTests(unittest.TestCase):
         (copy / "crates/oa-notam/tests/common").mkdir(parents=True)
         shutil.copy(repo / "crates/oa-notam/tests/common/mod.rs", copy / "crates/oa-notam/tests/common")
         data = self.base / "mkdata"
+        data.mkdir()
+        (data / ROOT_SENTINEL_FILE).write_bytes(ROOT_SENTINEL_FIXTURE)
         for f in ("cat048.raw", "cat062cat065.raw", "cat21_re.ast"):
             (data / "raw/asterix-samples").mkdir(parents=True, exist_ok=True)
             (data / "raw/asterix-samples" / f).write_bytes(b"")
