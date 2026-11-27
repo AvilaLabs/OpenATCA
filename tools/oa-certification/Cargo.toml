@@ -26,5 +26,9 @@ oa-build-info = { path = "../oa-build-info" }
 # F1 / OA-SEAL-006: guard certification audit paths through the production sealed-data policy.
 oa-sealed = { path = "../../crates/oa-sealed" }
 
+[dev-dependencies]
+# Normalize the legacy synthetic fixture through the current snapshot codec in the negative test.
+oa-airspace = { path = "../../crates/oa-airspace" }
+
 [package.metadata.openatca]
 class = "shell"

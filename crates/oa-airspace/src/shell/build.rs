@@ -1004,7 +1004,9 @@ fn gather_candidates(src: &Sources, ell: &Ellipsoid, info: &mut BuildInfo) -> (R
         cand.region = Some(c.icao_region.clone());
         cand.name = Some(c.name.clone());
         cand.elev = c.elevation_ft;
-        cand.alt_ident = c.iata.clone().filter(|t| *t != c.ident);
+        // IATA is not a NASR facility-location identifier. Keep it out of alt_ident,
+        // whose airport fallback is used for FAA PFR origin/destination joins.
+        cand.alt_ident = None;
         airport_cand(
             &mut reg,
             &mut maps,
@@ -1814,6 +1816,7 @@ fn nasr_effective(src: &Sources) -> Result<(u32, Vec<String>), BuildError> {
             .chain(&n.dps)
             .map(|r| r.base.eff_date.as_str()),
     );
+    dates.extend(n.preferred_routes.iter().map(|r| r.eff_date.as_str()));
     dates.extend(n.class_airspace.iter().map(|r| r.eff_date.as_str()));
     dates.sort_unstable();
     dates.dedup();
@@ -3005,6 +3008,76 @@ pub fn build_model(src: &Sources, params: &BuildParams) -> Result<BuildOutput, B
             .push(strings.intern_opt(Some(u.region.as_str()).filter(|s| !s.is_empty())));
         t.wanted
             .push(strings.intern_opt(Some(u.wanted.as_str()).filter(|s| !s.is_empty())));
+    }
+
+    // Preserve FAA preferred-route source records in the verified model. These are advisory:
+    // descriptive condition text stays opaque and never changes route acceptance.
+    let mut preferred_routes = src.nasr.preferred_routes.iter().collect::<Vec<_>>();
+    preferred_routes.sort_by(|a, b| {
+        (&a.origin, &a.destination, &a.route_type, a.route_no).cmp(&(
+            &b.origin,
+            &b.destination,
+            &b.route_type,
+            b.route_no,
+        ))
+    });
+    model.preferred_route_state = preferred_route_state::PRESENT;
+    for route in preferred_routes {
+        let table = &mut model.preferred_routes;
+        table.eff_date.push(strings.intern(&route.eff_date));
+        table.origin.push(strings.intern(&route.origin));
+        table.destination.push(strings.intern(&route.destination));
+        table.route_type.push(strings.intern(&route.route_type));
+        table.route_no.push(route.route_no);
+        table
+            .area_description
+            .push(strings.intern_opt(route.area_description.as_deref()));
+        table
+            .altitude_description
+            .push(strings.intern_opt(route.altitude_description.as_deref()));
+        table
+            .aircraft_description
+            .push(strings.intern_opt(route.aircraft_description.as_deref()));
+        table
+            .hours_description
+            .push(strings.intern_opt(route.hours_description.as_deref()));
+        table
+            .direction_description
+            .push(strings.intern_opt(route.direction_description.as_deref()));
+        table
+            .route_string
+            .push(strings.intern_opt(route.route_string.as_deref()));
+        table.segments.push(Span {
+            start: PreferredRouteSegmentIx::new(
+                u32::try_from(model.preferred_route_segments.sequence.len())
+                    .map_err(|_| BuildError::Unstorable("preferred route segment index".into()))?,
+            ),
+            len: u32::try_from(route.segments.len())
+                .map_err(|_| BuildError::Unstorable("preferred route segment span".into()))?,
+        });
+        for segment in &route.segments {
+            let output = &mut model.preferred_route_segments;
+            output.sequence.push(segment.sequence);
+            output.value.push(strings.intern(&segment.value));
+            output
+                .segment_type
+                .push(strings.intern(&segment.segment_type));
+            output
+                .state_code
+                .push(strings.intern_opt(segment.state_code.as_deref()));
+            output
+                .country_code
+                .push(strings.intern_opt(segment.country_code.as_deref()));
+            output
+                .icao_region_code
+                .push(strings.intern_opt(segment.icao_region_code.as_deref()));
+            output
+                .nav_type
+                .push(strings.intern_opt(segment.nav_type.as_deref()));
+            output
+                .next_segment
+                .push(strings.intern_opt(segment.next_segment.as_deref()));
+        }
     }
 
     model.strings = strings.table;

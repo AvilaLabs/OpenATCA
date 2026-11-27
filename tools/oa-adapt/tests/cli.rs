@@ -77,13 +77,22 @@ fn command_binary_forbids_unsafe_code() {
 #[test]
 fn issue_cli_binds_catalog_companion_and_reads_it_back_from_v4() {
     let scratch = Scratch::new("issue-pver-v4");
-    let snapshot = include_bytes!("../../oa-ca/tests/fixtures/a3-empty-synthetic.oag2");
+    let legacy_snapshot = include_bytes!("../../oa-ca/tests/fixtures/a3-empty-synthetic.oag2");
+    let model = decode(legacy_snapshot).expect("legacy v3 synthetic snapshot");
+    // Package issuance requires the current canonical encoding, while this fixture
+    // intentionally starts from the legacy snapshot used by older callers.
+    let snapshot = oa_airspace::snapshot::encode(&model).expect("current canonical snapshot");
     let snapshot_path = scratch.path("snapshot.oag2");
-    std::fs::write(&snapshot_path, snapshot).expect("synthetic snapshot");
+    std::fs::write(&snapshot_path, &snapshot).expect("synthetic snapshot");
     let previous_root = scratch.path("previous");
-    let previous_pin =
-        oa_adapt::manifest::write_new_package(&previous_root, snapshot, "before", "ZAU", "initial")
-            .expect("previous package");
+    let previous_pin = oa_adapt::manifest::write_new_package(
+        &previous_root,
+        &snapshot,
+        "before",
+        "ZAU",
+        "initial",
+    )
+    .expect("previous package");
     let catalog_path = scratch.path("pver.csv");
     let catalog = include_bytes!("../../oa-certification/data/synthetic-pver-v1.csv");
     std::fs::write(&catalog_path, catalog).expect("synthetic catalog");

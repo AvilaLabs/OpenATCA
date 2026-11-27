@@ -14,6 +14,7 @@ use oa_nasr::awy::Airway;
 use oa_nasr::cls::ClassAirspace;
 use oa_nasr::fix::Fix;
 use oa_nasr::nav::Navaid;
+use oa_nasr::pfr::PreferredRoute;
 use oa_nasr::procedure::Procedure;
 
 /// The NASR files the model consumes, parsed. Files the model does not take (`FIX_NAV`,
@@ -30,6 +31,7 @@ pub struct NasrData {
     pub airways: Vec<Airway>,
     pub stars: Vec<Procedure>,
     pub dps: Vec<Procedure>,
+    pub preferred_routes: Vec<PreferredRoute>,
     pub class_airspace: Vec<ClassAirspace>,
 }
 

@@ -2463,13 +2463,25 @@ mod tests {
     // REQ: OA-CERT-001
     #[test]
     fn bound_pver_refuses_package_without_issued_catalog() {
-        let snapshot = include_bytes!("../../oa-ca/tests/fixtures/a3-empty-synthetic.oag2");
+        let legacy_snapshot = include_bytes!("../../oa-ca/tests/fixtures/a3-empty-synthetic.oag2");
+        let model = oa_airspace::snapshot::decode(legacy_snapshot)
+            .expect("legacy synthetic snapshot decodes");
+        let snapshot =
+            oa_airspace::snapshot::encode(&model).expect("current canonical synthetic snapshot");
         let root = std::env::temp_dir().join(format!("oa-cert-no-catalog-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let pin =
-            oa_adapt::manifest::write_new_package(&root, snapshot, "release", "ZAU", "change")
-                .expect("legacy package fixture");
-        assert!(run_bound_performance(PverMode::Full, &root, pin).is_err());
+            oa_adapt::manifest::write_new_package(&root, &snapshot, "release", "ZAU", "change")
+                .expect("canonical legacy package fixture");
+        let verified = oa_adapt::manifest::verify_current(&root, pin)
+            .expect("canonical package without catalog verifies");
+        assert!(verified.pver_catalog_bytes().is_none());
+        assert!(matches!(
+            run_bound_performance(PverMode::Full, &root, pin),
+            Err(CertificationError::Catalog(
+                "verified package has no issued PVER catalog"
+            ))
+        ));
         let _ = std::fs::remove_dir_all(root);
     }
 

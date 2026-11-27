@@ -175,7 +175,7 @@ class ReleaseStageTests(unittest.TestCase):
         }
         expected = {path.removeprefix("tests/fixtures/") for path in pinned}
         self.assertEqual(actual, expected)
-        self.assertEqual(len(pinned), 41)
+        self.assertEqual(len(pinned), 43)
         for relative, expected_hash in pinned.items():
             source = fixture_root / relative.removeprefix("tests/fixtures/")
             self.assertEqual(hashlib.sha256(source.read_bytes()).hexdigest(), expected_hash, relative)

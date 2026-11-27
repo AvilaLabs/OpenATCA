@@ -11,7 +11,7 @@ use crate::nam_handoff::{
     NamIngressResult, NamSessionIngress, SessionAcceptedMessage,
 };
 use crate::route::{self, RouteStore, MAX_ROUTE_REVISIONS};
-use oa_airspace::core::model::Model;
+use oa_airspace::core::model::{self as air_model, Model};
 use oa_airspace::shell::route_parse::{
     resolve_icao_item15, Item15Reject as RouteReject, MagneticVariationSource,
 };
@@ -46,6 +46,66 @@ pub struct NamFlightResult {
     pub reply: Message,
     pub applied: bool,
     pub rejection: Option<NamFlightReject>,
+    /// Advisory result from the exact verified NASR PFR source. It never controls ACK/REJ.
+    pub preferred_route: PreferredRouteAssessment,
+}
+
+/// Status of advisory PFR comparison for an applied filed route.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum PreferredRouteStatus {
+    /// This message did not replace a route.
+    NotAssessed = 0,
+    /// The verified adaptation predates PFR data or has no PFR source.
+    SourceUnavailable = 1,
+    /// The published data has no row for this airport pair.
+    NoPublishedPair = 2,
+    /// PFR records exist for the pair, but none of their converted routes match this route.
+    RouteNotPreferred = 3,
+    /// A published route and all applicable known type/direction fields match; no unsupported
+    /// condition description is present.
+    Preferred = 4,
+    /// A candidate route matches, but one or more source condition descriptions need
+    /// coordination because FAA publishes no machine grammar for them.
+    CoordinationRequired = 5,
+    /// The PFR row or route could not be converted safely against this adaptation.
+    Unavailable = 6,
+}
+
+/// Bounded PFR outcome tied to the exact NASR row included in the verified adaptation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PreferredRouteAssessment {
+    pub status: PreferredRouteStatus,
+    /// Row in `Model::preferred_routes`, or `u32::MAX` when no row was selected.
+    pub route_row: u32,
+    /// Effective date from the source archive bound into the model.
+    pub nasr_effective: u32,
+    /// SHA-256 of the exact NASR archive containing the PFR source.
+    pub nasr_sha256: [u8; 32],
+}
+
+fn no_pfr_assessment(status: PreferredRouteStatus) -> PreferredRouteAssessment {
+    PreferredRouteAssessment {
+        status,
+        route_row: u32::MAX,
+        nasr_effective: 0,
+        nasr_sha256: [0; 32],
+    }
+}
+
+fn model_pfr_assessment(
+    model: &Model,
+    status: PreferredRouteStatus,
+    route_row: Option<usize>,
+) -> PreferredRouteAssessment {
+    PreferredRouteAssessment {
+        status,
+        route_row: route_row
+            .and_then(|row| u32::try_from(row).ok())
+            .unwrap_or(u32::MAX),
+        nasr_effective: model.meta.nasr_effective,
+        nasr_sha256: model.meta.nasr_sha256,
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -70,6 +130,7 @@ struct FiledPlan {
     destination_airport: [u8; 4],
     departure_time: Option<model::Hhmm>,
     cancelled: bool,
+    preferred_route: PreferredRouteAssessment,
 }
 
 /// Bounded application state for filed NAM plans. The authoritative flight state remains in
@@ -196,7 +257,17 @@ pub fn nam_flight_apply(
                 ascii_code(&destination),
                 variations,
             ) {
-                Ok(route) => Some((route, departure, destination)),
+                Ok(route) => {
+                    let preferred_route = assess_preferred_route(
+                        model,
+                        &departure,
+                        &destination,
+                        &route,
+                        level_ft,
+                        variations,
+                    );
+                    Some((route, departure, destination, preferred_route))
+                }
                 Err(reason) => return fail(NamFlightReject::Route(nam_route_reject(reason))),
             }
         }
@@ -219,7 +290,7 @@ pub fn nam_flight_apply(
         Err(reason) => return fail(NamFlightReject::Route(reason)),
     };
 
-    let staged_revision = if let Some((resolved, _, _)) = staged_route.as_ref() {
+    let staged_revision = if let Some((resolved, _, _, _)) = staged_route.as_ref() {
         if routes.revisions.len() + routes.route_refusals.len() >= MAX_ROUTE_REVISIONS {
             return fail(NamFlightReject::FlightRuntimeRefusal);
         }
@@ -265,7 +336,14 @@ pub fn nam_flight_apply(
                 context.plan_id,
                 message.f13.and_then(|f| f.time),
             );
-            return accepted_reply(message, context.response_number);
+            let preferred_route = runtime
+                .plan_index(context.key, context.plan_id)
+                .and_then(|index| runtime.plans.get(index))
+                .map_or_else(
+                    || model_pfr_assessment(model, PreferredRouteStatus::NotAssessed, None),
+                    |plan| plan.preferred_route,
+                );
+            return accepted_reply(message, context.response_number, preferred_route);
         }
         _ => return fail(NamFlightReject::WrongMessageKind),
     };
@@ -301,7 +379,8 @@ pub fn nam_flight_apply(
     }
     match message.header.kind {
         Kind::Fpl => {
-            let Some((_, departure_airport, destination_airport)) = staged_route else {
+            let Some((_, departure_airport, destination_airport, preferred_route)) = staged_route
+            else {
                 return fail(NamFlightReject::Route(Item15Reject::Model));
             };
             runtime.plans.push(FiledPlan {
@@ -312,12 +391,16 @@ pub fn nam_flight_apply(
                 destination_airport,
                 departure_time: message.f13.and_then(|field| field.time),
                 cancelled: false,
+                preferred_route,
             });
         }
         Kind::Chg => {
             if let Some(index) = plan_index {
                 if let Some(plan) = runtime.plans.get_mut(index) {
                     plan.status = existing_status;
+                    if let Some((_, _, _, preferred_route)) = staged_route.as_ref() {
+                        plan.preferred_route = *preferred_route;
+                    }
                 }
             }
         }
@@ -334,7 +417,14 @@ pub fn nam_flight_apply(
     if let Some(revision) = staged_revision {
         routes.revisions.push(revision);
     }
-    accepted_reply(message, context.response_number)
+    let preferred_route = runtime
+        .plan_index(context.key, context.plan_id)
+        .and_then(|index| runtime.plans.get(index))
+        .map_or_else(
+            || model_pfr_assessment(model, PreferredRouteStatus::NotAssessed, None),
+            |plan| plan.preferred_route,
+        );
+    accepted_reply(message, context.response_number, preferred_route)
 }
 
 impl NamFlightRuntime {
@@ -392,7 +482,193 @@ fn ascii_code(value: &[u8; 4]) -> &str {
     core::str::from_utf8(value).unwrap_or_default()
 }
 
-fn accepted_reply(message: &Message, response_number: u16) -> NamFlightResult {
+fn alternate_airport_ident<'a>(model: &'a Model, filed_code: &str) -> Option<&'a str> {
+    let mut alternate = None;
+    for row in 0..model.points.kind.len() {
+        if *model.points.kind.get(row)? != air_model::point_kind::AIRPORT {
+            continue;
+        }
+        let ident = air_model::str_at(&model.strings, *model.points.ident.get(row)?)?;
+        let alt = air_model::str_at(&model.strings, *model.points.alt_ident.get(row)?)?;
+        if ident == filed_code || alt == filed_code {
+            let candidate = if ident == filed_code { alt } else { ident };
+            if candidate.is_empty() || alternate.is_some() {
+                return None;
+            }
+            alternate = Some(candidate);
+        }
+    }
+    alternate
+}
+
+fn assess_preferred_route(
+    model: &Model,
+    departure: &[u8; 4],
+    destination: &[u8; 4],
+    filed: &oa_airspace::shell::route_parse::ResolvedItem15,
+    level_ft: Option<i32>,
+    variations: &[MagneticVariationSource],
+) -> PreferredRouteAssessment {
+    use PreferredRouteStatus as S;
+    if model.preferred_route_state != air_model::preferred_route_state::PRESENT {
+        return model_pfr_assessment(model, S::SourceUnavailable, None);
+    }
+    let departure = ascii_code(departure);
+    let destination = ascii_code(destination);
+    let mut range = air_model::preferred_route_range(model, departure, destination);
+    if range.is_empty() {
+        let (Some(origin_alias), Some(destination_alias)) = (
+            alternate_airport_ident(model, departure),
+            alternate_airport_ident(model, destination),
+        ) else {
+            return model_pfr_assessment(model, S::NoPublishedPair, None);
+        };
+        range = air_model::preferred_route_range(model, origin_alias, destination_alias);
+    }
+    if range.is_empty() {
+        return model_pfr_assessment(model, S::NoPublishedPair, None);
+    }
+    // Candidate conversion is bounded by the same fixed point cap as one converted route.
+    if range.len() > oa_airspace::core::route::MAX_ROUTE_POINTS {
+        return model_pfr_assessment(model, S::Unavailable, None);
+    }
+    if filed.route.len == 0 {
+        return model_pfr_assessment(model, S::Unavailable, None);
+    }
+    let table = &model.preferred_routes;
+    let mut conversion_unavailable = false;
+    let mut altitude_indeterminate = false;
+    let mut selected: Option<(usize, bool)> = None;
+    for row in range {
+        let Some(route_text_ix) = table.route_string.get(row).copied() else {
+            return model_pfr_assessment(model, S::Unavailable, None);
+        };
+        let Some(route_text) = air_model::str_at(&model.strings, route_text_ix) else {
+            conversion_unavailable = true;
+            continue;
+        };
+        if route_text.is_empty()
+            || route_text.len() > oa_airspace::shell::route_parse::MAX_ROUTE_TEXT_BYTES
+        {
+            conversion_unavailable = true;
+            continue;
+        }
+        let Some(route_type) = table
+            .route_type
+            .get(row)
+            .and_then(|ix| air_model::str_at(&model.strings, *ix))
+        else {
+            return model_pfr_assessment(model, S::Unavailable, None);
+        };
+        let (altitude_type_matches, type_needs_coordination) = match route_type {
+            "L" | "LSD" | "SLD" => match level_ft {
+                Some(level) => (level < 18_000, route_type == "SLD"),
+                None => {
+                    altitude_indeterminate = true;
+                    (true, true)
+                }
+            },
+            "H" | "HSD" | "SHD" => match level_ft {
+                Some(level) => (level >= 18_000, route_type == "SHD"),
+                None => {
+                    altitude_indeterminate = true;
+                    (true, true)
+                }
+            },
+            // The source identifies these preferred-route families, but this adapter does not
+            // infer their operating envelope from the code or free-text descriptions.
+            _ => (true, true),
+        };
+        if !altitude_type_matches {
+            continue;
+        }
+        let route_elements = route_text
+            .split_ascii_whitespace()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let candidate = match resolve_icao_item15(
+            model,
+            &route_elements,
+            level_ft,
+            departure,
+            destination,
+            variations,
+        ) {
+            Ok(candidate) => candidate,
+            Err(RouteReject::AltitudeBelowMea) => continue,
+            Err(_) => {
+                conversion_unavailable = true;
+                continue;
+            }
+        };
+        if !same_converted_route_geometry(&filed.route, &candidate.route) {
+            continue;
+        }
+        let unsupported_condition = type_needs_coordination
+            || [
+                table.area_description.get(row),
+                table.altitude_description.get(row),
+                table.aircraft_description.get(row),
+                table.hours_description.get(row),
+                table.direction_description.get(row),
+            ]
+            .into_iter()
+            .flatten()
+            .any(|ix| {
+                *ix != air_model::StrIx::NONE
+                    && air_model::str_at(&model.strings, *ix).is_none_or(|value| !value.is_empty())
+            });
+        if selected.is_none_or(|(_, old_unknown)| old_unknown && !unsupported_condition) {
+            selected = Some((row, unsupported_condition));
+        }
+    }
+    if let Some((row, needs_coordination)) = selected {
+        return model_pfr_assessment(
+            model,
+            if needs_coordination {
+                S::CoordinationRequired
+            } else {
+                S::Preferred
+            },
+            Some(row),
+        );
+    }
+    model_pfr_assessment(
+        model,
+        if conversion_unavailable {
+            S::Unavailable
+        } else if altitude_indeterminate {
+            S::CoordinationRequired
+        } else {
+            S::RouteNotPreferred
+        },
+        None,
+    )
+}
+
+/// Compares the resolved navigation path while allowing an airway expansion and an explicit-fix
+/// filing to describe the same geometry. The source route has already passed the same resolver;
+/// unsupported or ambiguous candidate conversions never reach this comparison.
+fn same_converted_route_geometry(
+    left: &oa_airspace::core::route::ConvertedRoute,
+    right: &oa_airspace::core::route::ConvertedRoute,
+) -> bool {
+    let len = usize::from(left.len);
+    if len == 0 || usize::from(right.len) != len {
+        return false;
+    }
+    left.lat_e7.get(..len) == right.lat_e7.get(..len)
+        && left.lon_e7.get(..len) == right.lon_e7.get(..len)
+        && left.ident.get(..len) == right.ident.get(..len)
+        && left.region.get(..len) == right.region.get(..len)
+        && left.scope.get(..len) == right.scope.get(..len)
+}
+
+fn accepted_reply(
+    message: &Message,
+    response_number: u16,
+    preferred_route: PreferredRouteAssessment,
+) -> NamFlightResult {
     let reply = model::bare(model::Header {
         kind: Kind::Lam,
         id: MsgId {
@@ -406,6 +682,7 @@ fn accepted_reply(message: &Message, response_number: u16) -> NamFlightResult {
         reply,
         applied: true,
         rejection: None,
+        preferred_route,
     }
 }
 
@@ -455,6 +732,7 @@ fn rejected(
         reply,
         applied: false,
         rejection: Some(reason),
+        preferred_route: no_pfr_assessment(PreferredRouteStatus::NotAssessed),
     }
 }
 
@@ -505,6 +783,17 @@ mod tests {
             m.points.region.push(region_ix);
             m.points.scope.push(StrIx::NONE);
             m.points.name.push(StrIx::NONE);
+            for bits in [
+                &mut m.points.src_nasr,
+                &mut m.points.src_cifp,
+                &mut m.points.in_area,
+                &mut m.points.cls_b,
+                &mut m.points.cls_c,
+                &mut m.points.cls_d,
+                &mut m.points.cls_e,
+            ] {
+                air_model::bit_push(bits, false);
+            }
             assert_eq!(ix, m.points.kind.len() as u32 - 1);
         }
         m
@@ -517,6 +806,92 @@ mod tests {
             .offsets
             .push(u32::try_from(m.strings.text.len()).expect("bounded test text"));
         StrIx::new(raw)
+    }
+
+    fn add_test_airway(model: &mut Model, from: u32, to: u32) {
+        let airway = intern(model, "V1");
+        let leg_start = u32::try_from(model.airway_legs.from.len()).expect("bounded test index");
+        model.airways.designator.push(airway);
+        model.airways.location.push(b'V');
+        model.airways.legs.push(air_model::Span {
+            start: air_model::AirwayLegIx::new(leg_start),
+            len: 1,
+        });
+        model.airway_legs.from.push(air_model::PointIx::new(from));
+        model.airway_legs.to.push(air_model::PointIx::new(to));
+        model.airway_legs.mea_ft.push(air_model::ALT_NONE);
+        model.airway_legs.mea_opp_ft.push(air_model::ALT_NONE);
+        model.airway_legs.gps_mea_ft.push(air_model::ALT_NONE);
+        model.airway_legs.mea_dir.push(air_model::compass::NONE);
+        model.airway_legs.gps_mea_dir.push(air_model::compass::NONE);
+        model.airway_legs.gap = air_model::bit_zeros(1);
+        model.airway_legs.signal_gap = air_model::bit_zeros(1);
+        model.airway_legs.dogleg = air_model::bit_zeros(1);
+    }
+
+    fn add_test_airport(model: &mut Model, ident: &str) {
+        let ident_ix = intern(model, ident);
+        let region_ix = intern(model, "K1");
+        model.points.kind.push(air_model::point_kind::AIRPORT);
+        model.points.lat.push(0);
+        model.points.lon.push(0);
+        model.points.elev_ft.push(air_model::ELEV_NONE);
+        model.points.ident.push(ident_ix);
+        model.points.alt_ident.push(StrIx::NONE);
+        model.points.region.push(region_ix);
+        model.points.scope.push(StrIx::NONE);
+        model.points.name.push(StrIx::NONE);
+        for bits in [
+            &mut model.points.src_nasr,
+            &mut model.points.src_cifp,
+            &mut model.points.in_area,
+            &mut model.points.cls_b,
+            &mut model.points.cls_c,
+            &mut model.points.cls_d,
+            &mut model.points.cls_e,
+        ] {
+            air_model::bit_push(bits, false);
+        }
+    }
+
+    fn preferred_route(
+        model: &mut Model,
+        origin: &str,
+        destination: &str,
+        route_type: &str,
+        route_text: &str,
+        altitude: Option<&str>,
+        aircraft: Option<&str>,
+    ) {
+        let eff_date = intern(model, "2026/11/01");
+        let origin = intern(model, origin);
+        let destination = intern(model, destination);
+        let route_type = intern(model, route_type);
+        let area = StrIx::NONE;
+        let altitude = altitude.map_or(StrIx::NONE, |value| intern(model, value));
+        let aircraft = aircraft.map_or(StrIx::NONE, |value| intern(model, value));
+        let hours = StrIx::NONE;
+        let direction = StrIx::NONE;
+        let route_text = intern(model, route_text);
+        let segment_start = u32::try_from(model.preferred_route_segments.sequence.len())
+            .expect("bounded test segment index");
+        let table = &mut model.preferred_routes;
+        table.eff_date.push(eff_date);
+        table.origin.push(origin);
+        table.destination.push(destination);
+        table.route_type.push(route_type);
+        table.route_no.push(1);
+        table.area_description.push(area);
+        table.altitude_description.push(altitude);
+        table.aircraft_description.push(aircraft);
+        table.hours_description.push(hours);
+        table.direction_description.push(direction);
+        table.route_string.push(route_text);
+        table.segments.push(air_model::Span {
+            start: air_model::PreferredRouteSegmentIx::new(segment_start),
+            len: 0,
+        });
+        model.preferred_route_state = air_model::preferred_route_state::PRESENT;
     }
 
     fn active_ingress() -> NamSessionIngress {
@@ -823,6 +1198,176 @@ mod tests {
             Some(true)
         );
         assert_eq!(cancelled.reply.header.kind, Kind::Lam);
+    }
+
+    // REQ: OA-NAM-039
+    #[test]
+    fn preferred_route_advice_is_attached_to_the_normal_admitted_fpl_path() {
+        let mut ingress = active_ingress();
+        let mut runtime = nam_flight_runtime_new(4).expect("bounded NAM plans");
+        let mut routes = route::route_store_new([0; 32]);
+        let mut flights = flight_driver_new(FlightDriverConfig {
+            flight_capacity: 4,
+            refusal_log_capacity: 8,
+            conflict_log_capacity: 8,
+        })
+        .expect("bounded flight driver");
+        let mut model = model_fixture();
+        add_test_airway(&mut model, 0, 1);
+        preferred_route(&mut model, "KAAA", "KBBB", "H", "FIXA V1 FIXB", None, None);
+
+        let result = receive(
+            &mut runtime,
+            &mut flights,
+            &mut routes,
+            &mut ingress,
+            Kind::Fpl,
+            1,
+            context(1, 100),
+            &model,
+        );
+        assert!(result.applied);
+        assert_eq!(result.reply.header.kind, Kind::Lam);
+        assert_eq!(
+            result.preferred_route.status,
+            PreferredRouteStatus::Preferred
+        );
+        assert_eq!(result.preferred_route.route_row, 0);
+        assert_eq!(runtime.plans[0].preferred_route, result.preferred_route);
+        assert_eq!(routes.revisions.len(), 1);
+    }
+
+    // REQ: OA-NAM-039
+    #[test]
+    fn pfr_type_direction_and_free_text_are_advisory_and_source_bound() {
+        let mut model = model_fixture();
+        preferred_route(&mut model, "KAAA", "KBBB", "HSD", "FIXA FIXB", None, None);
+        let elements = vec!["FIXA".to_string(), "FIXB".to_string()];
+        let filed = resolve_icao_item15(&model, &elements, Some(35_000), "KAAA", "KBBB", &[])
+            .expect("accepted route geometry");
+        assert_eq!(
+            assess_preferred_route(&model, b"KAAA", b"KBBB", &filed, Some(35_000), &[]).status,
+            PreferredRouteStatus::Preferred
+        );
+        assert_eq!(
+            assess_preferred_route(&model, b"KBBB", b"KAAA", &filed, Some(35_000), &[]).status,
+            PreferredRouteStatus::NoPublishedPair
+        );
+        assert_eq!(
+            assess_preferred_route(&model, b"KAAA", b"KBBB", &filed, Some(10_000), &[]).status,
+            PreferredRouteStatus::RouteNotPreferred
+        );
+        assert_eq!(
+            assess_preferred_route(&model, b"KAAA", b"KBBB", &filed, None, &[]).status,
+            PreferredRouteStatus::CoordinationRequired
+        );
+
+        let mut special_low = model_fixture();
+        preferred_route(
+            &mut special_low,
+            "KAAA",
+            "KBBB",
+            "SLD",
+            "FIXA FIXB",
+            None,
+            None,
+        );
+        let filed = resolve_icao_item15(&special_low, &elements, Some(10_000), "KAAA", "KBBB", &[])
+            .expect("accepted route geometry");
+        assert_eq!(
+            assess_preferred_route(&special_low, b"KAAA", b"KBBB", &filed, Some(10_000), &[])
+                .status,
+            PreferredRouteStatus::CoordinationRequired
+        );
+        assert_eq!(
+            assess_preferred_route(&special_low, b"KAAA", b"KBBB", &filed, Some(35_000), &[])
+                .status,
+            PreferredRouteStatus::RouteNotPreferred
+        );
+
+        let mut constrained = model_fixture();
+        preferred_route(
+            &mut constrained,
+            "KAAA",
+            "KBBB",
+            "HSD",
+            "FIXA FIXB",
+            Some("FL 240 AND ABOVE"),
+            Some("2J/H"),
+        );
+        let filed = resolve_icao_item15(&constrained, &elements, Some(35_000), "KAAA", "KBBB", &[])
+            .expect("accepted route geometry");
+        assert_eq!(
+            assess_preferred_route(&constrained, b"KAAA", b"KBBB", &filed, Some(35_000), &[],)
+                .status,
+            PreferredRouteStatus::CoordinationRequired
+        );
+
+        let mut directional = model_fixture();
+        preferred_route(
+            &mut directional,
+            "KAAA",
+            "KBBB",
+            "H",
+            "FIXA FIXB",
+            None,
+            None,
+        );
+        let direction_ix = intern(&mut directional, "NORTHBOUND ONLY");
+        directional.preferred_routes.direction_description[0] = direction_ix;
+        let filed = resolve_icao_item15(&directional, &elements, Some(35_000), "KAAA", "KBBB", &[])
+            .expect("accepted route geometry");
+        assert_eq!(
+            assess_preferred_route(&directional, b"KAAA", b"KBBB", &filed, Some(35_000), &[],)
+                .status,
+            PreferredRouteStatus::CoordinationRequired
+        );
+
+        let mut terminal = model_fixture();
+        preferred_route(
+            &mut terminal,
+            "KAAA",
+            "KBBB",
+            "TEC",
+            "FIXA FIXB",
+            None,
+            None,
+        );
+        let filed = resolve_icao_item15(&terminal, &elements, Some(35_000), "KAAA", "KBBB", &[])
+            .expect("accepted route geometry");
+        assert_eq!(
+            assess_preferred_route(&terminal, b"KAAA", b"KBBB", &filed, Some(35_000), &[],).status,
+            PreferredRouteStatus::CoordinationRequired
+        );
+
+        constrained.preferred_route_state = air_model::preferred_route_state::UNAVAILABLE;
+        assert_eq!(
+            assess_preferred_route(&constrained, b"KAAA", b"KBBB", &filed, Some(35_000), &[],)
+                .status,
+            PreferredRouteStatus::SourceUnavailable
+        );
+    }
+
+    // REQ: OA-NAM-039
+    #[test]
+    fn iata_only_airport_aliases_cannot_bind_a_pfr_pair() {
+        let mut model = model_fixture();
+        add_test_airport(&mut model, "KAAA");
+        add_test_airport(&mut model, "KBBB");
+        preferred_route(&mut model, "ORD", "JFK", "H", "FIXA FIXB", None, None);
+        assert!(
+            air_model::validate_model(&model).is_ok(),
+            "synthetic model: {:?}",
+            air_model::validate_model(&model)
+        );
+        let elements = vec!["FIXA".to_string(), "FIXB".to_string()];
+        let filed = resolve_icao_item15(&model, &elements, Some(35_000), "KAAA", "KBBB", &[])
+            .expect("accepted route geometry");
+
+        assert_eq!(
+            assess_preferred_route(&model, b"KAAA", b"KBBB", &filed, Some(35_000), &[]).status,
+            PreferredRouteStatus::NoPublishedPair
+        );
     }
 
     // REQ: OA-NAM-039

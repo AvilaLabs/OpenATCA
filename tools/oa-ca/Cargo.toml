@@ -29,6 +29,8 @@ oa-track-tools = { path = "../../crates/oa-track-tools" }
 [dev-dependencies]
 # Workspace crate, not an outside dependency (RULESET F1): frames the recording of the sealed-window test.
 oa-feed = { path = "../../crates/oa-feed" }
+# Workspace crate, test-only: encode the current synthetic adaptation snapshot through its owner.
+oa-airspace = { path = "../../crates/oa-airspace" }
 
 [lib]
 name = "oa_ca_run"

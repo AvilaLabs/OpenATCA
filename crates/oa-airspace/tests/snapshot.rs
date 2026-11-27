@@ -18,6 +18,26 @@ fn fixture_bytes() -> Vec<u8> {
     encode(&fixture_build().model).expect("encode")
 }
 
+fn old_snapshot(version: u32) -> Vec<u8> {
+    let mut bytes = encode(&tiny_model()).expect("encode");
+    let pfr_start = bytes
+        .windows(4)
+        .position(|tag| tag == b"PFRS")
+        .expect("PFRS table");
+    bytes.truncate(pfr_start);
+    let table_start = bytes
+        .windows(4)
+        .position(|tag| tag == b"STRS")
+        .expect("STRS table");
+    let availability_at = table_start - 1;
+    bytes.remove(availability_at); // v5 PFR availability byte
+    if version == FORMAT_VERSION_LEGACY {
+        bytes.drain(availability_at - 4..availability_at); // v5 option-tagged cycle note
+    }
+    bytes[11..15].copy_from_slice(&version.to_le_bytes());
+    bytes
+}
+
 /// Deterministic pseudo-random sequence (no `rand`: the crate has no dependencies).
 struct Lcg(u64);
 
@@ -62,10 +82,10 @@ fn an_empty_model_round_trips_and_has_a_fixed_layout() {
         encode(&decode(&bytes).expect("decode")).expect("encode"),
         bytes
     );
-    // Thirteen tables, each introduced by its tag, in the documented order.
+    // Fifteen tables, each introduced by its tag, in the documented order.
     let tags = [
         "STRS", "PNTS", "VERT", "BNDS", "SEGS", "AWYS", "AWLG", "PROC", "RTES", "LEGS", "MORA",
-        "UNRS", "DISA",
+        "UNRS", "DISA", "PFRS", "PFRG",
     ];
     let mut at = 0;
     for tag in tags {
@@ -74,6 +94,20 @@ fn an_empty_model_round_trips_and_has_a_fixed_layout() {
             .position(|w| w == tag.as_bytes())
             .unwrap_or_else(|| panic!("{tag} missing"));
         at += found + 4;
+    }
+}
+
+// REQ: OA-ASP-006
+#[test]
+fn v3_and_v4_decode_with_preferred_routes_explicitly_unavailable() {
+    for version in [FORMAT_VERSION_LEGACY, FORMAT_VERSION_NOTE] {
+        let decoded = decode(&old_snapshot(version)).expect("old snapshot decode");
+        assert_eq!(
+            decoded.preferred_route_state,
+            preferred_route_state::UNAVAILABLE
+        );
+        assert!(decoded.preferred_routes.origin.is_empty());
+        assert!(decoded.preferred_route_segments.sequence.is_empty());
     }
 }
 
@@ -235,7 +269,7 @@ fn the_reader_rejects_input_over_its_stated_limits() {
     let good = fixture_bytes();
     for tag in [
         "PNTS", "VERT", "BNDS", "SEGS", "AWYS", "AWLG", "PROC", "RTES", "LEGS", "MORA", "UNRS",
-        "DISA",
+        "DISA", "PFRS", "PFRG",
     ] {
         let at = good
             .windows(4)
@@ -260,8 +294,8 @@ fn damaged_headers_trailing_bytes_and_truncation_are_errors() {
     bad[0] ^= 1;
     assert_eq!(decode(&bad), Err(SnapshotError::BadMagic));
     let mut bad = good.clone();
-    bad[11] = 5;
-    assert_eq!(decode(&bad), Err(SnapshotError::BadVersion(5)));
+    bad[11] = 6;
+    assert_eq!(decode(&bad), Err(SnapshotError::BadVersion(6)));
     // The earlier formats (no special-use time code or level; no per-volume completeness) are
     // refused, not misread, and the message says what to do.
     bad[11] = 1;

@@ -59,11 +59,8 @@ class SyntheticPortabilityTests(unittest.TestCase):
         self._write(self.recording / "manifest.tsv", self.index)
         self._write(self.recording / "COMPLETE", (sha(self.index) + "\n").encode())
 
-        self.snapshot = b"OATCA-ADAPT" + struct.pack("<IIIII", 3, 20261029, 20261029, 50000, 3) + b"ZAU" + b"synthetic snapshot body"
-        self.adapt_manifest = (
-            b"OAG2ADPT" + struct.pack("<HHH", 1, 1, 1) + bytes((2, 3, 2, 1))
-            + struct.pack("<Q", len(self.snapshot)) + bytes.fromhex(sha(self.snapshot)) + b"r1ZAUc1"
-        )
+        self.snapshot = self._snapshot(5, None, 1)
+        self.adapt_manifest = self._adaptation_manifest(self.snapshot)
         self._write(self.adaptation / "airspace.snapshot", self.snapshot)
         self._write(self.adaptation / "manifest.oag2", self.adapt_manifest)
 
@@ -95,6 +92,31 @@ class SyntheticPortabilityTests(unittest.TestCase):
     @staticmethod
     def _write(path: Path, data: bytes) -> None:
         path.write_bytes(data)
+
+    @staticmethod
+    def _snapshot(version: int, cycle_note: bytes | None, preferred_route_state: int = 0) -> bytes:
+        value = (
+            b"OATCA-ADAPT"
+            + struct.pack("<IIIII", version, 20261029, 20261029, 50000, 3)
+            + b"ZAU"
+            + bytes(64)
+        )
+        if version == 4:
+            note = cycle_note or b""
+            value += struct.pack("<I", len(note)) + note
+        elif version == 5:
+            note = cycle_note
+            value += struct.pack("<I", 0 if note is None else len(note) + 1)
+            value += b"" if note is None else note
+            value += bytes((preferred_route_state,))
+        return value + b"synthetic snapshot body"
+
+    @staticmethod
+    def _adaptation_manifest(snapshot: bytes) -> bytes:
+        return (
+            b"OAG2ADPT" + struct.pack("<HHH", 1, 1, 1) + bytes((2, 3, 2, 1))
+            + struct.pack("<Q", len(snapshot)) + bytes.fromhex(sha(snapshot)) + b"r1ZAUc1"
+        )
 
     def _export(self, name: str = "bundle") -> Path:
         out = self.root / name
@@ -231,6 +253,23 @@ class SyntheticPortabilityTests(unittest.TestCase):
         version_two = self.adapt_manifest[:8] + struct.pack("<H", 2) + self.adapt_manifest[10:]
         with self.assertRaisesRegex(j2.DrillError, "unsupported OAG2 adaptation manifest version 2"):
             j2.validate_adaptation_package(version_two, self.snapshot)
+
+    def test_adaptation_reader_accepts_v3_v4_and_v5_snapshot_headers(self) -> None:
+        for version, note, state in ((3, None, 0), (4, b"", 0), (5, None, 0), (5, b"cycle", 1)):
+            snapshot = self._snapshot(version, note, state)
+            j2.validate_adaptation_package(self._adaptation_manifest(snapshot), snapshot)
+
+    def test_adaptation_reader_refuses_bad_v5_cycle_note_and_availability(self) -> None:
+        bad_state = self._snapshot(5, None, 2)
+        with self.assertRaisesRegex(j2.DrillError, "preferred-route state"):
+            j2.validate_adaptation_package(self._adaptation_manifest(bad_state), bad_state)
+        bad_utf8 = self._snapshot(5, b"\xff", 0)
+        with self.assertRaisesRegex(j2.DrillError, "not UTF-8"):
+            j2.validate_adaptation_package(self._adaptation_manifest(bad_utf8), bad_utf8)
+        oversized_note = b"x" * (j2.MAX_CYCLE_OVERRIDE_BYTES + 1)
+        bad_length = self._snapshot(5, oversized_note, 0)
+        with self.assertRaisesRegex(j2.DrillError, "exceeds its bound"):
+            j2.validate_adaptation_package(self._adaptation_manifest(bad_length), bad_length)
 
     def test_replay_path_guard_runs_before_any_subprocess(self) -> None:
         bundle = self._export("guard-order-bundle")

@@ -22,6 +22,7 @@ MAX_QUARANTINE_BYTES = 64 * 1024 * 1024
 MAX_COUNTS_BYTES = 64 * 1024
 MAX_IMPORT_MANIFEST_BYTES = 1024 * 1024
 MAX_ADAPTATION_BYTES = 512 * 1024 * 1024
+MAX_CYCLE_OVERRIDE_BYTES = 512
 MAX_ADAPTATION_MANIFEST_BYTES = 512
 FRAME_WIDTH = 800
 FRAME_HEIGHT = 600
@@ -328,6 +329,8 @@ def regional_run_profile(settings: bytes) -> tuple[str, str | None]:
 
 def validate_adaptation_package(manifest: bytes, snapshot: bytes) -> None:
     # OAG2ADPT v1 layout is fixed by tools/oa-adapt/src/manifest.rs.
+    # OATCA-ADAPT is an internal payload; this J2 reader binds its versioned header, while the
+    # authoritative full table decoder remains crates/oa-airspace/src/core/snapshot.rs.
     if len(manifest) < 58 or manifest[:8] != b"OAG2ADPT":
         raise DrillError("adaptation package manifest is truncated or unsupported")
     version, reader_min, reader_max = struct.unpack_from("<HHH", manifest, 8)
@@ -359,13 +362,40 @@ def validate_adaptation_package(manifest: bytes, snapshot: bytes) -> None:
     if len(snapshot) < 31 or snapshot[:11] != b"OATCA-ADAPT":
         raise DrillError("adaptation snapshot has an unsupported header")
     version = struct.unpack_from("<I", snapshot, 11)[0]
-    if version not in (3, 4):
+    if version not in (3, 4, 5):
         raise DrillError("adaptation snapshot version is unsupported")
     artcc_len = struct.unpack_from("<I", snapshot, 27)[0]
     artcc_end = 31 + artcc_len
     if (artcc_len == 0 or artcc_len > 64 or artcc_end > len(snapshot)
             or snapshot[31:artcc_end] != b"ZAU"):
         raise DrillError("adaptation snapshot is not for ZAU")
+    header_end = artcc_end + 64
+    if header_end > len(snapshot):
+        raise DrillError("adaptation snapshot header is truncated before source hashes")
+    if version >= 4:
+        if header_end + 4 > len(snapshot):
+            raise DrillError("adaptation snapshot cycle note header is truncated")
+        raw_length = struct.unpack_from("<I", snapshot, header_end)[0]
+        note_length = raw_length - 1 if version == 5 and raw_length > 0 else raw_length
+        if (version == 5 and raw_length > MAX_CYCLE_OVERRIDE_BYTES + 1) or (
+            version == 4 and raw_length > MAX_CYCLE_OVERRIDE_BYTES
+        ):
+            raise DrillError("adaptation snapshot cycle note exceeds its bound")
+        note_start = header_end + 4
+        note_end = note_start + note_length
+        if note_end > len(snapshot):
+            raise DrillError("adaptation snapshot cycle note is truncated")
+        if raw_length > (1 if version == 5 else 0):
+            try:
+                snapshot[note_start:note_end].decode("utf-8", "strict")
+            except UnicodeDecodeError as exc:
+                raise DrillError("adaptation snapshot cycle note is not UTF-8") from exc
+        header_end = note_end
+    if version == 5:
+        if header_end >= len(snapshot):
+            raise DrillError("adaptation snapshot preferred-route state is truncated")
+        if snapshot[header_end] not in (0, 1):
+            raise DrillError("adaptation snapshot preferred-route state is unsupported")
 
 
 def verify_frame_files(directory: Path, frames: list[list[str]]) -> None:

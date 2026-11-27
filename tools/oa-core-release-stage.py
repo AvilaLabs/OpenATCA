@@ -83,7 +83,9 @@ TEST_ASSETS = {
         "tests/fixtures/zau_low.csv": "aedda625b858f159ecdb4d65952d742198de5dd6865e3cb40a8c8c64f5a8617f",
     },
     "oa-airspace": {
-        "tests/fixtures/PROVENANCE.txt": "6280926d9552dd515003326a88ce5356f83b19863e4085e2bfcd3b1aaeadd107",
+        "tests/fixtures/nasr/PFR_BASE.csv": "cfe72a73611a7423aec11477fae80938cdc89db2a99ab0ad0a39a457b33b9dc5",
+        "tests/fixtures/nasr/PFR_SEG.csv": "25c35407b21f46675f165e639ab06d8eb8f240657108439a9df24784dc4706e4",
+        "tests/fixtures/PROVENANCE.txt": "37841cdc37ad15008a5b875c25206ed2952977a00d46ac8ec4c4fc4fcb2579cd",
         "tests/fixtures/cifp/FAACIFP18": "c551bd277a8d2cb92d71090373ce12a4798332b8d87705d4fe57367e0df67eb9",
         "tests/fixtures/nasr/APT_BASE.csv": "f2c881aa21a42acb3f1ad6e8e43ea0d6facc6a7dc62d1ecbc52af49739859b9f",
         "tests/fixtures/nasr/APT_CSV_DATA_STRUCTURE.csv": "c026f1163bfcdd7c8136943139d74d9b1129d5e803905055b090617c243fe130",
@@ -221,6 +223,8 @@ INPUT_PROVENANCE = {
         ),
     },
     "oa-airspace": {
+        "tests/fixtures/nasr/PFR_BASE.csv": "Synthetic preferred-route rows declared in PROVENANCE.txt; no SWIM input.",
+        "tests/fixtures/nasr/PFR_SEG.csv": "Synthetic preferred-route segments declared in PROVENANCE.txt; no SWIM input.",
         "tests/fixtures/PROVENANCE.txt": (
             "Tracked fixture provenance identifies the selected 2026-10-29 NASR CSV and CIFP "
             "records as FAA public-domain data; test edits are made only to in-memory copies."

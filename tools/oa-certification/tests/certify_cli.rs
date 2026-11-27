@@ -77,11 +77,15 @@ fn certify_cli_commits_all_three_outcomes_from_real_tracker_and_local_digest_inp
     let root = fresh_root();
     fs::create_dir(&root).expect("fixture root");
     let package = root.join("adaptation");
-    let snapshot = include_bytes!("../../oa-ca/tests/fixtures/a3-empty-synthetic.oag2");
+    let legacy_snapshot = include_bytes!("../../oa-ca/tests/fixtures/a3-empty-synthetic.oag2");
+    let model =
+        oa_airspace::snapshot::decode(legacy_snapshot).expect("legacy synthetic snapshot decodes");
+    let snapshot =
+        oa_airspace::snapshot::encode(&model).expect("current canonical synthetic snapshot");
     let previous = root.join("adaptation-previous");
     let previous_pin = oa_adapt::manifest::write_new_package(
         &previous,
-        snapshot,
+        &snapshot,
         "synthetic-1",
         "ZAU",
         "OA-CERT-CLI-TEST",
@@ -90,7 +94,7 @@ fn certify_cli_commits_all_three_outcomes_from_real_tracker_and_local_digest_inp
     let catalog = include_bytes!("../data/synthetic-pver-v1.csv");
     let (_, manifest) = oa_adapt::manifest::issue_new_package_with_pver_catalog(
         &package,
-        snapshot,
+        &snapshot,
         catalog,
         None,
         "synthetic-2",
@@ -108,7 +112,7 @@ fn certify_cli_commits_all_three_outcomes_from_real_tracker_and_local_digest_inp
     fs::copy(env!("CARGO_BIN_EXE_oa-certification"), &artifact)
         .expect("copy standalone binary for guarded artifact hashing");
     let software_digest = oa_sha256::sha256(&fs::read(&artifact).expect("read synthetic binary"));
-    let adaptation_digest = oa_sha256::sha256(snapshot);
+    let adaptation_digest = oa_sha256::sha256(&snapshot);
     let pver = Command::new(&artifact)
         .arg("pver")
         .arg("full")
@@ -293,7 +297,7 @@ fn certify_cli_commits_all_three_outcomes_from_real_tracker_and_local_digest_inp
         let bad_package = root.join(format!("{label}-package"));
         let (_, bad_pin) = oa_adapt::manifest::issue_new_package_with_pver_catalog(
             &bad_package,
-            snapshot,
+            &snapshot,
             &bad_catalog,
             None,
             "synthetic-invalid",

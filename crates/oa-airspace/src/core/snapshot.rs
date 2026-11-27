@@ -7,14 +7,17 @@
 //! magic "OATCA-ADAPT" (11 bytes), format version u32
 //! nasr_effective u32, cifp_cycle u32, buffer_m u32, artcc (u32 length, bytes),
 //! nasr_sha256 [32], cifp_sha256 [32]
-//! (version 4 only: cycle_override, u32 length and UTF-8 bytes)
+//! version-specific header tail: v3 has none; v4 has an untagged cycle_override length u32
+//! followed by UTF-8 bytes; v5 has a tagged length u32 (0 = None, n+1 = Some with n UTF-8
+//! bytes), then preferred-route availability u8 (0 unavailable, 1 present)
 //! then the tables in fixed order, each: 4-byte tag, row count u32, its columns in the order
 //! of the field declarations in `model.rs`; a bitset column is ceil(rows/64) u64 words.
-//! tables: STRS PNTS VERT BNDS SEGS AWYS AWLG PROC RTES LEGS MORA UNRS DISA
+//! versions 3/4 tables: STRS PNTS VERT BNDS SEGS AWYS AWLG PROC RTES LEGS MORA UNRS DISA;
+//! version 5 appends PFRS and PFRG
 //! ```
 //!
-//! Version 3 is written whenever the NASR and CIFP cycles agree; version 4 only when the build
-//! allowed a mismatch and so carries the cycle_override text. Both are read.
+//! Version 5 is written for new builds and carries preferred-route rows plus availability.
+//! Versions 3 and 4 remain readable with preferred-route data explicitly unavailable.
 //!
 //! The snapshot's identity is the SHA-256 of the whole file. Because every table is written in
 //! its sorted key order and nothing is derived from hash-map order, the same inputs always give
@@ -30,10 +33,11 @@ use std::fmt;
 /// File magic.
 pub const MAGIC: &[u8; 11] = b"OATCA-ADAPT";
 /// Format version written and accepted.
-pub const FORMAT_VERSION: u32 = 3;
-/// Format version of a snapshot that carries a cycle-mismatch note (the version 3 layout plus
-/// the note after the header).
+pub const FORMAT_VERSION: u32 = 5;
+/// Older format version with a cycle-mismatch note but no PFR tables.
 pub const FORMAT_VERSION_NOTE: u32 = 4;
+/// Oldest accepted format version.
+pub const FORMAT_VERSION_LEGACY: u32 = 3;
 /// Limit: largest snapshot the reader accepts, 512 MiB. A ZAU model is a few MiB; the whole
 /// national data set would stay under about 100 MiB.
 pub const MAX_SNAPSHOT_BYTES: usize = 512 * 1024 * 1024;
@@ -53,6 +57,8 @@ const TAG_LEGS: &[u8; 4] = b"LEGS";
 const TAG_MORA: &[u8; 4] = b"MORA";
 const TAG_UNRS: &[u8; 4] = b"UNRS";
 const TAG_DISA: &[u8; 4] = b"DISA";
+const TAG_PFRS: &[u8; 4] = b"PFRS";
+const TAG_PFRG: &[u8; 4] = b"PFRG";
 
 /// Why a snapshot could not be written or read.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,7 +102,7 @@ impl fmt::Display for SnapshotError {
             SnapshotError::BadMagic => write!(f, "snapshot: not an OATCA-ADAPT file"),
             SnapshotError::BadVersion(v) => write!(
                 f,
-                "snapshot: format version {v} is not supported (this reader reads versions {FORMAT_VERSION} and {FORMAT_VERSION_NOTE} only); rebuild the snapshot with oa-adapt build"
+                "snapshot: format version {v} is not supported (this reader reads versions {FORMAT_VERSION_LEGACY}, {FORMAT_VERSION_NOTE}, and {FORMAT_VERSION}); rebuild the snapshot with oa-adapt build"
             ),
             SnapshotError::Truncated(w) => write!(f, "snapshot: truncated in {w}"),
             SnapshotError::BadTag { expected } => write!(f, "snapshot: expected table {expected}"),
@@ -208,14 +214,7 @@ pub fn encode(m: &Model) -> Result<Vec<u8>, SnapshotError> {
     {
         return Err(SnapshotError::BadNote);
     }
-    put_u32(
-        &mut out,
-        if m.cycle_override.is_some() {
-            FORMAT_VERSION_NOTE
-        } else {
-            FORMAT_VERSION
-        },
-    );
+    put_u32(&mut out, FORMAT_VERSION);
     put_u32(&mut out, m.meta.nasr_effective);
     put_u32(&mut out, m.meta.cifp_cycle);
     put_u32(&mut out, m.meta.buffer_m);
@@ -223,10 +222,18 @@ pub fn encode(m: &Model) -> Result<Vec<u8>, SnapshotError> {
     out.extend_from_slice(m.meta.artcc.as_bytes());
     out.extend_from_slice(&m.meta.nasr_sha256);
     out.extend_from_slice(&m.meta.cifp_sha256);
+    // Version 5 tags the optional note as length + 1 so `None` and `Some("")` remain distinct.
+    let note_length = match &m.cycle_override {
+        Some(note) => count("cycle note", note.len())?
+            .checked_add(1)
+            .ok_or(SnapshotError::TooLarge("cycle note"))?,
+        None => 0,
+    };
+    put_u32(&mut out, note_length);
     if let Some(note) = &m.cycle_override {
-        put_u32(&mut out, count("cycle note", note.len())?);
         out.extend_from_slice(note.as_bytes());
     }
+    out.push(m.preferred_route_state);
 
     put_header(&mut out, TAG_STRS, count("strings", str_count(&m.strings))?);
     put_u32(&mut out, count("strings", m.strings.text.len())?);
@@ -363,6 +370,40 @@ pub fn encode(m: &Model) -> Result<Vec<u8>, SnapshotError> {
     put_i32s(&mut out, &d.nasr_lat);
     put_i32s(&mut out, &d.nasr_lon);
     put_u32s(&mut out, &d.dist_mm);
+
+    let pfr = &m.preferred_routes;
+    put_header(
+        &mut out,
+        TAG_PFRS,
+        count("preferred_routes", pfr.origin.len())?,
+    );
+    put_strs(&mut out, &pfr.eff_date);
+    put_strs(&mut out, &pfr.origin);
+    put_strs(&mut out, &pfr.destination);
+    put_strs(&mut out, &pfr.route_type);
+    put_u32s(&mut out, &pfr.route_no);
+    put_strs(&mut out, &pfr.area_description);
+    put_strs(&mut out, &pfr.altitude_description);
+    put_strs(&mut out, &pfr.aircraft_description);
+    put_strs(&mut out, &pfr.hours_description);
+    put_strs(&mut out, &pfr.direction_description);
+    put_strs(&mut out, &pfr.route_string);
+    put_spans(&mut out, &pfr.segments, |i| i.get());
+
+    let seg = &m.preferred_route_segments;
+    put_header(
+        &mut out,
+        TAG_PFRG,
+        count("preferred_route_segments", seg.sequence.len())?,
+    );
+    put_u32s(&mut out, &seg.sequence);
+    put_strs(&mut out, &seg.value);
+    put_strs(&mut out, &seg.segment_type);
+    put_strs(&mut out, &seg.state_code);
+    put_strs(&mut out, &seg.country_code);
+    put_strs(&mut out, &seg.icao_region_code);
+    put_strs(&mut out, &seg.nav_type);
+    put_strs(&mut out, &seg.next_segment);
     check_len(out.len())?;
     Ok(out)
 }
@@ -551,7 +592,10 @@ pub fn decode(bytes: &[u8]) -> Result<Model, SnapshotError> {
         return Err(SnapshotError::BadMagic);
     }
     let version = r.u32("version")?;
-    if version != FORMAT_VERSION && version != FORMAT_VERSION_NOTE {
+    if version != FORMAT_VERSION
+        && version != FORMAT_VERSION_NOTE
+        && version != FORMAT_VERSION_LEGACY
+    {
         return Err(SnapshotError::BadVersion(version));
     }
     let nasr_effective = r.u32("header")?;
@@ -579,7 +623,18 @@ pub fn decode(bytes: &[u8]) -> Result<Model, SnapshotError> {
         nasr_sha256,
         cifp_sha256,
     };
-    let cycle_override = if version == FORMAT_VERSION_NOTE {
+    let cycle_override = if version >= FORMAT_VERSION {
+        let tagged_length = r.u32("header")? as usize;
+        if tagged_length == 0 {
+            None
+        } else {
+            let n = tagged_length - 1;
+            if n > MAX_CYCLE_OVERRIDE_BYTES {
+                return Err(SnapshotError::BadNote);
+            }
+            Some(String::from_utf8(r.bytes(n, "header")?).map_err(|_| SnapshotError::BadNote)?)
+        }
+    } else if version >= FORMAT_VERSION_NOTE {
         let n = r.u32("header")? as usize;
         if n > MAX_CYCLE_OVERRIDE_BYTES {
             return Err(SnapshotError::BadNote);
@@ -587,6 +642,14 @@ pub fn decode(bytes: &[u8]) -> Result<Model, SnapshotError> {
         Some(String::from_utf8(r.bytes(n, "header")?).map_err(|_| SnapshotError::BadNote)?)
     } else {
         None
+    };
+    let preferred_route_state = if version >= FORMAT_VERSION {
+        r.bytes(1, "header")?
+            .first()
+            .copied()
+            .ok_or(SnapshotError::Truncated("header"))?
+    } else {
+        preferred_route_state::UNAVAILABLE
     };
 
     // Strings: the count is of strings, with count + 1 offsets, then the text.
@@ -748,6 +811,41 @@ pub fn decode(bytes: &[u8]) -> Result<Model, SnapshotError> {
         dist_mm: r.u32s(n, "DISA")?,
     };
 
+    let (preferred_routes, preferred_route_segments) = if version >= FORMAT_VERSION {
+        let n = r.table(TAG_PFRS, "PFRS", 4 * 11 + 8, 0)?;
+        let preferred_routes = PreferredRoutes {
+            eff_date: r.strs(n, "PFRS")?,
+            origin: r.strs(n, "PFRS")?,
+            destination: r.strs(n, "PFRS")?,
+            route_type: r.strs(n, "PFRS")?,
+            route_no: r.u32s(n, "PFRS")?,
+            area_description: r.strs(n, "PFRS")?,
+            altitude_description: r.strs(n, "PFRS")?,
+            aircraft_description: r.strs(n, "PFRS")?,
+            hours_description: r.strs(n, "PFRS")?,
+            direction_description: r.strs(n, "PFRS")?,
+            route_string: r.strs(n, "PFRS")?,
+            segments: r.spans(n, "PFRS", PreferredRouteSegmentIx::new)?,
+        };
+        let n = r.table(TAG_PFRG, "PFRG", 4 * 8, 0)?;
+        let segments = PreferredRouteSegments {
+            sequence: r.u32s(n, "PFRG")?,
+            value: r.strs(n, "PFRG")?,
+            segment_type: r.strs(n, "PFRG")?,
+            state_code: r.strs(n, "PFRG")?,
+            country_code: r.strs(n, "PFRG")?,
+            icao_region_code: r.strs(n, "PFRG")?,
+            nav_type: r.strs(n, "PFRG")?,
+            next_segment: r.strs(n, "PFRG")?,
+        };
+        (preferred_routes, segments)
+    } else {
+        (
+            PreferredRoutes::default(),
+            PreferredRouteSegments::default(),
+        )
+    };
+
     if r.remaining() != 0 {
         return Err(SnapshotError::TrailingBytes {
             extra: r.remaining(),
@@ -765,6 +863,9 @@ pub fn decode(bytes: &[u8]) -> Result<Model, SnapshotError> {
         procs,
         routes,
         legs,
+        preferred_route_state,
+        preferred_routes,
+        preferred_route_segments,
         mora,
         unresolved,
         disagreements,

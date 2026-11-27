@@ -488,6 +488,8 @@ mod adaptation_preset_tests {
     #![allow(clippy::expect_used)]
 
     use super::*;
+    use oa_airspace::model::{empty_model, Meta};
+    use oa_airspace::snapshot::encode;
     use oa_ca::{
         alert_log_new, ca_check, ca_cycle_with_inhibits, ca_new, ca_open_len, event_log_new,
         AlertLog, CaTrack, EventLog, AIRBORNE,
@@ -550,16 +552,23 @@ mod adaptation_preset_tests {
     // REQ: OA-CA-036
     #[test]
     fn verified_issued_preset_loads_into_runtime_settings_before_ca_cycle() {
-        // Synthetic OAG2 snapshot schema v3: meta 2026-10-29 / CIFP 2611 / 92,600m / ZAU;
-        // provenance hashes are zero and explicitly synthetic; STRS and all 12 data tables empty.
-        // Fixture SHA-256: 4cdabe868c953e70d73e9a9f23af9d5d3b5ebaccaa959ef8a5475d258f13af92cb.
-        let snapshot = include_bytes!("../tests/fixtures/a3-empty-synthetic.oag2");
+        // Encode the synthetic baseline with the current snapshot writer so package readback
+        // exercises the published version-5 shape instead of a stale hand-pinned version-3 file.
+        let snapshot = encode(&empty_model(Meta {
+            nasr_effective: 20_261_029,
+            cifp_cycle: 2611,
+            artcc: "ZAU".to_owned(),
+            buffer_m: 92_600,
+            nasr_sha256: [0; 32],
+            cifp_sha256: [0; 32],
+        }))
+        .expect("synthetic schema snapshot encodes");
         let preset = b"OACA-PRESET-1\nfacility=ZAU\ndefault=box,-900000000,900000000,-1800000000,1800000000,-1000,60000,9260,1000\nmax_alert_suppression_ns=60000000000\nallow_military_group_suppression=true\nvolume=box,414000000,416000000,-881000000,-879000000,0,40000,5556,1000\n";
         let previous_root = temp_root("previous");
         let package_root = temp_root("issued");
         let previous_pin = oa_adapt::manifest::write_new_package(
             &previous_root,
-            snapshot,
+            &snapshot,
             "synthetic-base",
             "ZAU",
             "A3-FIXTURE",
@@ -567,7 +576,7 @@ mod adaptation_preset_tests {
         .expect("synthetic schema snapshot validates as baseline");
         let (_, pin) = oa_adapt::manifest::issue_new_package_with_ca_preset(
             &package_root,
-            snapshot,
+            &snapshot,
             preset,
             "synthetic-v3",
             "ZAU",

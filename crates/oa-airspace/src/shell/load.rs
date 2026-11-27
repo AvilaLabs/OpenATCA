@@ -15,7 +15,7 @@ use crate::sources::{NasrData, Sources};
 use oa_arinc424 as cifp_lib;
 use oa_nasr::procedure::ProcedureKind;
 use oa_nasr::schema::{parse_schemas, validate, Schemas, ViolationKind};
-use oa_nasr::{apt, arb, awy, cls, fix, nav, procedure, NasrError, Parsed, RowError};
+use oa_nasr::{apt, arb, awy, cls, fix, nav, pfr, procedure, NasrError, Parsed, RowError};
 use oa_sha256::{sha256, to_hex};
 use oa_zip::{read_archive_file, Archive, ZipError};
 use std::fmt;
@@ -384,6 +384,12 @@ fn load_nasr(name: &str, bytes: &[u8], diag: &mut Diagnostics) -> Result<NasrDat
             ProcedureKind::Dp => out.dps = recs,
         }
     }
+    let base = rd.bytes("PFR_BASE.csv", diag)?;
+    let segments = rd.bytes("PFR_SEG.csv", diag)?;
+    out.preferred_routes = take(
+        pfr::parse_routes("PFR_BASE.csv", &base[..], "PFR_SEG.csv", &segments[..])?,
+        diag,
+    );
     let b = rd.bytes("CLS_ARSP.csv", diag)?;
     out.class_airspace = take(cls::parse_class_airspace("CLS_ARSP.csv", &b[..])?, diag);
     Ok(out)
