@@ -463,6 +463,10 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
   normal-landing geometry. Missing or ambiguous MAP markers refuse the final route.
 
 
+- **OA-DEMO-002** The browser engine accepts every i32 pointer coordinate without arithmetic
+  overflow. A point outside the target pick radius produces a normal miss and no selection;
+  valid target picking retains its existing nearest-target semantics.
+
 ### Traceability (oa-trace)
 
 - **OA-TRC-001** Lists every requirement without a test or proof and every test or proof tag naming an

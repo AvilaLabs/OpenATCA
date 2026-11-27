@@ -1134,7 +1134,8 @@
     "OA-ZIP-010",
     "OA-ZIP-011",
     "OA-ZIP-061",
-    "OA-ZIP-062"
+    "OA-ZIP-062",
+    "OA-DEMO-002"
   ],
   "non_safety_requirement_assessments": [
     {
@@ -10500,7 +10501,8 @@
         "OA-DSP-081",
         "OA-DSP-082",
         "OA-DSP-083",
-        "OA-WS-004"
+        "OA-WS-004",
+        "OA-DEMO-002"
       ],
       "source_refs": [
         {
@@ -10917,6 +10919,11 @@
           "requirement_id": "OA-WS-004",
           "file": "crates/oa-workstation/tests/workstation.rs",
           "test_name": "position_preferences_are_separate_while_annotations_are_shared"
+        },
+        {
+          "requirement_id": "OA-DEMO-002",
+          "file": "crates/oa-demo-engine/src/core/mod.rs",
+          "test_name": "extreme_pointer_coordinates_miss_without_overflow_and_normal_pick_still_selects"
         }
       ],
       "proof_refs": []
@@ -23540,6 +23547,12 @@
       "function": "migration_comparison_and_safety_evidence",
       "hazard_id": "HZ-EVIDENCE-001",
       "rationale": "Engineering safety candidate: reporting an outcome before durable audit commit, or omitting a failed append, could leave a reviewer with an uncommitted or incomplete certification record. The CLI requires the append receipt after file and directory sync and emits no committed result on failure; this does not authenticate principal or timestamp claims or establish operational certification."
+    },
+    {
+      "id": "OA-DEMO-002",
+      "function": "controller_display_and_interaction",
+      "hazard_id": "HZ-DISPLAY-001",
+      "rationale": "Engineering safety candidate: overflow in pointer distance can trap the demo engine or select a wrong target. Widened deltas and pick-radius bounds precede squaring; regression exercises extreme i32 inputs and an actual valid target."
     }
   ],
   "unresolved_requirement_assessments": []

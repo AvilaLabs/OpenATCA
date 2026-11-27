@@ -691,6 +691,12 @@ impl DemoEngine {
             };
             let dx = i64::from(x) - i64::from(x16 / 16);
             let dy = i64::from(y) - i64::from(y16 / 16);
+            let radius = i64::from(TARGET_PICK_RADIUS_PX);
+            // E8: widened i32 deltas are safe; bound both axes before squaring input values.
+            // A point beyond either radius cannot hit, and the remaining squares sum to <=288.
+            if dx < -radius || dx > radius || dy < -radius || dy > radius {
+                continue;
+            }
             let d2 = dx * dx + dy * dy;
             if d2 <= i64::from(TARGET_PICK_RADIUS_PX * TARGET_PICK_RADIUS_PX)
                 && best.is_none_or(|(old, _)| d2 < old)
@@ -1897,6 +1903,72 @@ mod tests {
             Some(b'a')
         );
     }
+    // REQ: OA-DEMO-002
+    #[test]
+    fn extreme_pointer_coordinates_miss_without_overflow_and_normal_pick_still_selects(
+    ) -> Result<(), super::EngineError> {
+        let config =
+            super::DemoEngineConfig::normal_ord(7, 2_700_000, 0, 5_000, 419_800_000, -878_000_000);
+        let reports = [-10_000, -5_000, 0]
+            .into_iter()
+            .map(|virtual_time_ms| super::SyntheticReport {
+                aircraft_index: 0,
+                flags: 0,
+                virtual_time_ms,
+                lat_e7: 419_800_000,
+                lon_e7: -878_000_000,
+                altitude_ft: 10_000,
+                ground_speed_dkt: 2_200,
+                track_ddeg: 900,
+                vertical_rate_fpm: 0,
+            })
+            .collect();
+        let mut engine = super::DemoEngine::from_reports(config, reports)?;
+        engine.advance_to(0)?;
+        engine.render_frame()?;
+        let target =
+            engine
+                .target_views
+                .first()
+                .copied()
+                .ok_or(super::EngineError::Workstation(
+                    "pointer regression requires a visible target",
+                ))?;
+        let position =
+            engine
+                .target_positions
+                .first()
+                .copied()
+                .ok_or(super::EngineError::Workstation(
+                    "pointer regression requires a target position",
+                ))?;
+        let (x16, y16) = super::project(&engine.projection, position.0, position.1).ok_or(
+            super::EngineError::Workstation("pointer regression target must project"),
+        )?;
+        for (x, y) in [
+            (i32::MIN, i32::MIN),
+            (i32::MAX, i32::MAX),
+            (i32::MIN, i32::MAX),
+            (i32::MAX, i32::MIN),
+        ] {
+            let misses = engine.counters.pointer_misses;
+            engine.handle_pointer(x, y, 1, super::POINTER_DOWN)?;
+            assert_eq!(engine.counters.pointer_misses, misses + 1);
+            assert_eq!(
+                super::interaction::selected_address(&engine.interaction),
+                None
+            );
+        }
+        let misses = engine.counters.pointer_misses;
+        engine.handle_pointer(x16 / 16, y16 / 16, 1, super::POINTER_DOWN)?;
+        assert_eq!(engine.counters.pointer_misses, misses);
+        assert_eq!(
+            super::interaction::selected_address(&engine.interaction),
+            Some(target.address)
+        );
+        Ok(())
+    }
+
     #[test]
     fn engine_navigation_changes_the_frame_and_home_restores_center(
     ) -> Result<(), super::EngineError> {
