@@ -37,6 +37,9 @@ struct WatchConfig {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum WatchStatus {
     Valid,
+    GenerationRegression,
+    GenerationChangedWithoutAdvance,
+    GenerationAdvancedUnverified,
     CheckpointAhead,
     CheckpointUnmatched,
     IncompleteRecord,
@@ -194,7 +197,7 @@ fn run_watch(args: &[String]) -> Result<(), String> {
     let mut alarms = [EMPTY_ALARM; ALARM_COUNT];
     let mut alarm_generations = [0u32; ALARM_COUNT];
     let mut output_bytes = 0usize;
-    let mut previous_config = None;
+    let mut accepted_config: Option<WatchConfig> = None;
     let mut generation_seen_at = started;
     let mut mismatch_signature: Option<(MismatchSignature, u8)> = None;
     let mut mismatch_count: u8;
@@ -208,14 +211,10 @@ fn run_watch(args: &[String]) -> Result<(), String> {
         let now_ns = elapsed_ns(started, now)?;
         let config_result = read_watch_config(&config_path);
         let config_value = config_result.as_ref().ok().copied();
-        let (sample, generation, refresh_ms, config_refused) = match config_result {
+        let (sample, generation, config_refused) = match config_result {
             Ok(config) => {
-                if previous_config != Some(config.generation) {
-                    previous_config = Some(config.generation);
-                    generation_seen_at = now;
-                }
                 let sample = inspect_log(&log_path, config, max_records);
-                (sample, Some(config.generation), config.refresh_ms, false)
+                (sample, Some(config.generation), false)
             }
             Err(error) => {
                 write_bounded_line(
@@ -229,14 +228,37 @@ fn run_watch(args: &[String]) -> Result<(), String> {
                         expected: None,
                     },
                     None,
-                    0,
                     true,
                 )
             }
         };
 
+        let sample = if let Some(config) = config_value {
+            let rejected = rejected_config_status(accepted_config, config, sample.status);
+            if let Some(status) = rejected {
+                WatchSample {
+                    status,
+                    verified_checkpoint: None,
+                    expected: Some(config.checkpoint),
+                }
+            } else {
+                if sample.status == WatchStatus::Valid
+                    && accepted_config
+                        .is_none_or(|accepted| config.generation > accepted.generation)
+                {
+                    accepted_config = Some(config);
+                    generation_seen_at = now;
+                }
+                sample
+            }
+        } else {
+            sample
+        };
+
         let stale = is_stale(
-            (generation.is_some() && refresh_ms > 0).then_some(refresh_ms),
+            accepted_config
+                .filter(|config| config.refresh_ms > 0)
+                .map(|config| config.refresh_ms),
             generation_seen_at,
             now,
         );
@@ -269,14 +291,23 @@ fn run_watch(args: &[String]) -> Result<(), String> {
         let unavailable = config_refused
             || matches!(
                 sample.status,
-                WatchStatus::VerificationUnavailable | WatchStatus::LimitReached
+                WatchStatus::VerificationUnavailable
+                    | WatchStatus::LimitReached
+                    | WatchStatus::GenerationRegression
+                    | WatchStatus::GenerationChangedWithoutAdvance
+                    | WatchStatus::GenerationAdvancedUnverified
             );
         let verified_fresh_pin = sample.status == WatchStatus::Valid;
         let [old_chain, old_role, old_stale, old_divergence, old_unavailable] = active_alarms;
         active_alarms = [
             chain_broken || (!verified_fresh_pin && old_chain),
             wrong_role || (!verified_fresh_pin && old_role),
-            stale || (generation.is_none() && old_stale),
+            stale
+                || (config_refused
+                    || sample.status == WatchStatus::GenerationRegression
+                    || sample.status == WatchStatus::GenerationChangedWithoutAdvance
+                    || sample.status == WatchStatus::GenerationAdvancedUnverified)
+                    && old_stale,
             divergence || (!verified_fresh_pin && old_divergence),
             unavailable || (!verified_fresh_pin && old_unavailable),
         ];
@@ -590,6 +621,9 @@ fn nibble(byte: u8) -> Result<u8, String> {
 fn status_name(status: WatchStatus) -> &'static str {
     match status {
         WatchStatus::Valid => "valid",
+        WatchStatus::GenerationRegression => "generation_regression_unverified",
+        WatchStatus::GenerationChangedWithoutAdvance => "generation_change_without_advance",
+        WatchStatus::GenerationAdvancedUnverified => "generation_advance_unverified",
         WatchStatus::CheckpointAhead => "checkpoint_ahead_pending",
         WatchStatus::CheckpointUnmatched => "checkpoint_unmatched_pending",
         WatchStatus::IncompleteRecord => "incomplete_record_pending",
@@ -597,6 +631,28 @@ fn status_name(status: WatchStatus) -> &'static str {
         WatchStatus::WrongRoleAction => "wrong_role_action",
         WatchStatus::LimitReached => "limit_reached",
         WatchStatus::VerificationUnavailable => "verification_unavailable",
+    }
+}
+
+fn rejected_config_status(
+    accepted: Option<WatchConfig>,
+    proposed: WatchConfig,
+    observed_status: WatchStatus,
+) -> Option<WatchStatus> {
+    match accepted {
+        Some(previous) if proposed.generation < previous.generation => {
+            Some(WatchStatus::GenerationRegression)
+        }
+        Some(previous) if proposed.generation == previous.generation && proposed != previous => {
+            Some(WatchStatus::GenerationChangedWithoutAdvance)
+        }
+        Some(previous)
+            if proposed.generation > previous.generation
+                && observed_status != WatchStatus::Valid =>
+        {
+            Some(WatchStatus::GenerationAdvancedUnverified)
+        }
+        _ => None,
     }
 }
 
@@ -665,6 +721,65 @@ mod tests {
             oa_sha256::to_hex(&checkpoint.tail)
         );
         std::fs::write(path, text).expect("config write");
+    }
+
+    // REQ: OA-AUDIT-011
+    #[test]
+    fn watch_generation_requires_verified_strict_advance_and_immutable_same_generation_pin() {
+        let checkpoint = genesis();
+        let accepted = WatchConfig {
+            generation: 5,
+            checkpoint,
+            refresh_ms: 1,
+        };
+        assert_eq!(
+            rejected_config_status(None, accepted, WatchStatus::Valid),
+            None
+        );
+        assert_eq!(
+            rejected_config_status(
+                Some(accepted),
+                WatchConfig {
+                    generation: 4,
+                    ..accepted
+                },
+                WatchStatus::Valid,
+            ),
+            Some(WatchStatus::GenerationRegression)
+        );
+        assert_eq!(
+            rejected_config_status(
+                Some(accepted),
+                WatchConfig {
+                    refresh_ms: 0,
+                    ..accepted
+                },
+                WatchStatus::Valid,
+            ),
+            Some(WatchStatus::GenerationChangedWithoutAdvance)
+        );
+        assert_eq!(
+            rejected_config_status(
+                Some(accepted),
+                WatchConfig {
+                    generation: 6,
+                    ..accepted
+                },
+                WatchStatus::CheckpointUnmatched,
+            ),
+            Some(WatchStatus::GenerationAdvancedUnverified)
+        );
+        assert_eq!(
+            rejected_config_status(
+                Some(accepted),
+                WatchConfig {
+                    generation: 6,
+                    ..accepted
+                },
+                WatchStatus::Valid,
+            ),
+            None
+        );
     }
 
     // REQ: OA-AUDIT-011
