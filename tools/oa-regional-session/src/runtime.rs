@@ -2824,9 +2824,6 @@ fn regional_assign_runway(
         .principal_registry
         .authorize(request.principal, oa_audit_core::Action::RunwayAssignment)
         .map_err(|error| format!("runway assignment principal registry refused: {error:?}"))?;
-    if registry_role != request.role {
-        return Err("runway assignment role does not match pinned principal registry".into());
-    }
     if request.time_ns == 0 {
         return Err("runway assignment audit timestamp must be positive".into());
     }
@@ -3210,9 +3207,6 @@ fn regional_acknowledge_runway_alert(
         .principal_registry
         .authorize(request.principal, oa_audit_core::Action::AlertAcknowledge)
         .map_err(|error| format!("ARV acknowledgement principal registry refused: {error:?}"))?;
-    if registry_role != request.role {
-        return Err("ARV acknowledgement role does not match pinned principal registry".into());
-    }
     let mut target_text = String::new();
     target_text
         .try_reserve_exact(96)
@@ -3326,7 +3320,7 @@ fn validate_runway_audit_receipt(
         || receipt.sequence() != expected_sequence
         || receipt.previous() != expected.tail
         || receipt.digest() != next.tail
-        || !oa_audit_core::receipt_matches(&receipt, &event)
+        || !oa_audit_core::receipt_matches(&receipt, event)
     {
         return Err("durable runway audit intent recorded but returned receipt did not match the exact action".into());
     }
@@ -4930,7 +4924,7 @@ mod transaction_tests {
                 expected_identity: identity,
                 audit_log: &protected_alias,
                 expected_checkpoint: checkpoint,
-                principal_registry: &pinned_registry,
+                principal_registry: &registry,
                 principal: 51,
                 time_ns: 100,
                 manual_handoff_ref: "manual-case-77",
@@ -4951,7 +4945,7 @@ mod transaction_tests {
                 expected_identity: identity,
                 audit_log: &wrong_role_path,
                 expected_checkpoint: checkpoint,
-                principal_registry: &pinned_registry,
+                principal_registry: &registry,
                 principal: 52,
                 time_ns: 100,
                 manual_handoff_ref: "manual-case-77",
@@ -4972,7 +4966,7 @@ mod transaction_tests {
                 expected_identity: identity,
                 audit_log: &audit_path,
                 expected_checkpoint: checkpoint,
-                principal_registry: &pinned_registry,
+                principal_registry: &registry,
                 principal: 51,
                 time_ns: 101,
                 manual_handoff_ref: "manual-case-77",

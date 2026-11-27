@@ -1185,7 +1185,7 @@ fn init_runner(
                 configuration.registry_sha256,
             )
             .map_err(|error| format!("pinned operator registry refused: {error}"))?;
-            Ok(RunwayAuditState {
+            Ok::<RunwayAuditState, String>(RunwayAuditState {
                 registry,
                 audit_log: configuration.audit_log,
                 checkpoint: configuration.checkpoint,
