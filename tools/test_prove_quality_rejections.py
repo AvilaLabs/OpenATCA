@@ -57,6 +57,7 @@ class QualityRejectionProofTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
 
     def test_e09_actual_clis_refuse_untrusted_roots_without_inherited_config(self) -> None:
+        """Kill ambient OPENATCA_DATA inheritance masking a missing-root refusal."""
         binary = os.environ.get("OPENATCA_OA_TRACE_BIN")
         if not binary or not Path(binary).is_file() or not os.access(binary, os.X_OK):
             self.skipTest("qualified oa-trace executable is not configured")
@@ -64,6 +65,7 @@ class QualityRejectionProofTests(unittest.TestCase):
             inherited = Path(temporary)
             (inherited / ".openatca-data-root").write_bytes(b"openatca-data-root-v1\n")
             with patch.dict(os.environ, {"OPENATCA_DATA": str(inherited)}):
+                self.assertNotIn("OPENATCA_DATA", proof._e09_env(None))
                 digest, refused = proof._prove_e09(Path(__file__).resolve().parents[1])
         self.assertEqual(len(digest), 64)
         for label in ("markerless", "wrong-marker", "missing-root", "slash-root", "empty-configuration"):

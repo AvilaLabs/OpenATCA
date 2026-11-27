@@ -247,11 +247,14 @@ def _e09_env(root: Path | None) -> dict[str, str]:
 
 
 def _expect_e09_refusal(
-    command: list[str], cwd: Path, env: dict[str, str], expected: str, label: str
+    command: list[str], cwd: Path, env: dict[str, str], expected: str, label: str, exit_code: int
 ) -> str:
     result = _run(command, cwd=cwd, env=env)
-    if result.returncode != 2 or expected not in result.stderr:
-        raise RuntimeError(f"E09 {label} was not refused by the sealed-root check")
+    if result.returncode != exit_code or expected not in result.stderr:
+        raise RuntimeError(
+            f"E09 {label} was not refused by the expected sealed-root check: "
+            f"exit={result.returncode} stderr={result.stderr[:160]}"
+        )
     return label
 
 
@@ -296,10 +299,10 @@ def _prove_e09(repo: Path) -> tuple[str, str]:
             if label == "empty-configuration":
                 env["OPENATCA_DATA"] = ""
             refusals.append(_expect_e09_refusal(
-                py_command, repo, env, "refused by OA-SEAL-001", f"python-{label}"
+                py_command, repo, env, "refused by OA-SEAL-001", f"python-{label}", 2
             ))
             refusals.append(_expect_e09_refusal(
-                trace_command, repo, env, "test source is not a bounded UTF-8 file", f"trace-{label}"
+                trace_command, repo, env, "test source is not a bounded UTF-8 file", f"trace-{label}", 1
             ))
         receipt = json.dumps(refusals, separators=(",", ":")).encode()
         return _digest(receipt), ",".join(refusals)
