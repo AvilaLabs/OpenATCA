@@ -11,6 +11,11 @@ on:
         description: "Optional comma-separated enabled proof IDs for a focused diagnostic run"
         required: false
         type: string
+      diagnose_regression:
+        description: "Compare the two E-10 proof failures at the pinned baseline and source revisions"
+        required: false
+        type: boolean
+        default: false
 permissions:
   contents: read
 jobs:
@@ -22,10 +27,18 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: ["0/4", "1/4", "2/4", "3/4"]
+        include: ${{ fromJSON(github.event_name == 'workflow_dispatch' && github.event.inputs.diagnose_regression == 'true' && '[{"diagnostic":true,"case":"baseline-late","source_ref":"8c5923da2f0c7f11ca84e99fc443980d86b4ef5c","proof_id":"late-append-output-projection","shard":"0/1"},{"diagnostic":true,"case":"current-late","source_ref":"64c44e714bc47bdeb956e671d7e15aa4f06edfde","proof_id":"late-append-output-projection","shard":"0/1"},{"diagnostic":true,"case":"baseline-snapshot","source_ref":"8c5923da2f0c7f11ca84e99fc443980d86b4ef5c","proof_id":"large-move-decision-rejected-current-filter-snapshot","shard":"0/1"},{"diagnostic":true,"case":"current-snapshot","source_ref":"64c44e714bc47bdeb956e671d7e15aa4f06edfde","proof_id":"large-move-decision-rejected-current-filter-snapshot","shard":"0/1"}]' || '[{"diagnostic":false,"source_ref":"","proof_id":"","shard":"0/4"},{"diagnostic":false,"source_ref":"","proof_id":"","shard":"1/4"},{"diagnostic":false,"source_ref":"","proof_id":"","shard":"2/4"},{"diagnostic":false,"source_ref":"","proof_id":"","shard":"3/4"}]') }}
+    name: ${{ matrix.diagnostic && matrix.case || format('shard {0}', matrix.shard) }}
     steps:
       - uses: actions/checkout@v4
         with:
+          fetch-depth: 0
+      - name: Check out pinned proof source for diagnostic comparison
+        if: matrix.diagnostic
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.source_ref }}
+          path: source
           fetch-depth: 0
       - name: Install pinned product Rust compiler
         run: rustup toolchain install 1.89.0 --profile minimal && rustup default 1.89.0
@@ -45,6 +58,8 @@ jobs:
         run: python3 tools/test_rust_proof_suite.py
       - name: Test Kani runner and result bindings
         run: python3 tools/test_kani_validation.py
+      - name: Test E-10 diagnostic registry binding
+        run: python3 tools/test_e10_kani_diagnostic.py
       - name: Pick the proofs this run covers
         id: pick
         env:
@@ -74,8 +89,19 @@ jobs:
         env:
           CHANGED_FROM: ${{ steps.pick.outputs.changed_from }}
           PROOF_IDS: ${{ steps.pick.outputs.proof_ids }}
+          DIAGNOSTIC: ${{ matrix.diagnostic }}
+          SOURCE_REF: ${{ matrix.source_ref }}
+          DIAGNOSTIC_PROOF_ID: ${{ matrix.proof_id }}
         shell: bash
         run: |
+          if [ "$DIAGNOSTIC" = "true" ]; then
+            python3 tools/e10_kani_diagnostic.py \
+              --repo "$GITHUB_WORKSPACE/source" \
+              --proof-id "$DIAGNOSTIC_PROOF_ID" \
+              --source-revision "$SOURCE_REF" \
+              --out "$RUNNER_TEMP/kani-proof-evidence/diagnostic"
+            exit $?
+          fi
           args=(--shard "${{ matrix.shard }}")
           if [ -n "$CHANGED_FROM" ]; then args+=(--changed-from "$CHANGED_FROM"); fi
           if [ -n "$PROOF_IDS" ]; then args+=(--proof-ids "$PROOF_IDS"); fi
@@ -93,6 +119,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
   miri:
+    if: ${{ !(github.event_name == 'workflow_dispatch' && github.event.inputs.diagnose_regression == 'true') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:

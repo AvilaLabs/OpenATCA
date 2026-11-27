@@ -20,6 +20,7 @@ from rust_proof_suite import (
     validate_registry,
 )
 from kani_validation import LOOP_UNWIND_PRESETS
+from e10_kani_diagnostic import BASELINE_REF, CURRENT_REF, PROOF_IDS
 
 
 REPO = Path(__file__).resolve().parents[1]
@@ -932,9 +933,19 @@ class ShardBalanceTests(unittest.TestCase):
 
     def test_the_workflow_runs_four_shards(self):
         text = (REPO / ".github" / "workflows" / "rust-proofs.yml").read_text()
-        self.assertIn('shard: ["0/4", "1/4", "2/4", "3/4"]', text)
         self.assertIn("proof_ids:", text)
         self.assertIn("--proof-ids", text)
+        match = re.search(r"&& '(\[.*?\])' \|\| '(\[.*?\])'", text)
+        self.assertIsNotNone(match, text)
+        diagnostic = json.loads(match.group(1))
+        normal = json.loads(match.group(2))
+        self.assertEqual(
+            {(row["source_ref"], row["proof_id"]) for row in diagnostic},
+            {(revision, proof_id) for revision in (BASELINE_REF, CURRENT_REF) for proof_id in PROOF_IDS},
+        )
+        self.assertTrue(all(row["diagnostic"] and row["shard"] == "0/1" for row in diagnostic))
+        self.assertEqual([row["shard"] for row in normal], ["0/4", "1/4", "2/4", "3/4"])
+        self.assertTrue(all(not row["diagnostic"] for row in normal))
         self.assertNotIn("python3 tools/rust_proof_suite.py\n          --fail-fast", text)
 
 
