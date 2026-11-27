@@ -8,17 +8,48 @@
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 fn fresh_root() -> PathBuf {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("test clock after epoch")
-        .as_nanos();
-    std::env::temp_dir().join(format!(
-        "oa-certification-cli-{}-{nonce}",
-        std::process::id()
-    ))
+    static NEXT_FIXTURE_ID: AtomicU64 = AtomicU64::new(0);
+    let parent = std::env::temp_dir();
+    for _ in 0..128 {
+        let fixture_id = NEXT_FIXTURE_ID
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                value.checked_add(1)
+            })
+            .expect("fixture identifier exhausted");
+        let root = parent.join(format!(
+            "oa-certification-cli-{}-{fixture_id}",
+            std::process::id()
+        ));
+        match fs::create_dir(&root) {
+            Ok(()) => return root,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => panic!("create fixture root: {error}"),
+        }
+    }
+    panic!("could not allocate a unique certification CLI fixture root after 128 attempts");
+}
+
+#[test]
+fn concurrent_fixture_roots_are_unique_and_exclusive() {
+    let workers = (0..32)
+        .map(|_| std::thread::spawn(fresh_root))
+        .collect::<Vec<_>>();
+    let roots = workers
+        .into_iter()
+        .map(|worker| worker.join().expect("fixture allocation worker"))
+        .collect::<Vec<_>>();
+    let unique = roots.iter().collect::<std::collections::HashSet<_>>();
+    assert_eq!(unique.len(), roots.len());
+    for (index, root) in roots.iter().enumerate() {
+        assert!(root.is_dir(), "fixture root was not created exclusively");
+        fs::write(root.join("marker"), index.to_string()).expect("write fixture marker");
+    }
+    for root in roots {
+        fs::remove_dir_all(root).expect("remove concurrent fixture root");
+    }
 }
 
 fn checkpoint_from(output: &str) -> (u64, String) {
@@ -50,6 +81,16 @@ fn certify(
     exceptions: &str,
     time_ns: u64,
 ) -> std::process::Output {
+    certify_mode(inputs, checkpoint, exceptions, time_ns, "full")
+}
+
+fn certify_mode(
+    inputs: &CliInputs<'_>,
+    checkpoint: (u64, String),
+    exceptions: &str,
+    time_ns: u64,
+    mode: &str,
+) -> std::process::Output {
     let registry_pin =
         oa_sha256::sha256(&fs::read(inputs.registry).expect("read registry pin input"));
     Command::new(inputs.executable)
@@ -62,7 +103,7 @@ fn certify(
         .arg("11")
         .arg(time_ns.to_string())
         .arg("synthetic-service")
-        .arg("full")
+        .arg(mode)
         .arg(inputs.expected)
         .arg(inputs.observations)
         .arg(exceptions)
@@ -75,7 +116,6 @@ fn certify(
 #[test]
 fn certify_cli_commits_all_three_outcomes_from_real_tracker_and_local_digest_inputs() {
     let root = fresh_root();
-    fs::create_dir(&root).expect("fixture root");
     let package = root.join("adaptation");
     let legacy_snapshot = include_bytes!("../../oa-ca/tests/fixtures/a3-empty-synthetic.oag2");
     let model =
@@ -132,6 +172,10 @@ fn certify_cli_commits_all_three_outcomes_from_real_tracker_and_local_digest_inp
     );
     assert!(
         pver_output.contains("catalog_adaptation_version=Some(1)"),
+        "{pver_output}"
+    );
+    assert!(
+        pver_output.contains("registration_qc=target_lat_e7:"),
         "{pver_output}"
     );
     let abbreviated = Command::new(&artifact)
@@ -194,6 +238,23 @@ fn certify_cli_commits_all_three_outcomes_from_real_tracker_and_local_digest_inp
     let first_output = String::from_utf8_lossy(&first.stdout);
     assert!(first_output.contains("outcome=Certified"), "{first_output}");
     assert!(first_output.contains("audit_durable=true"));
+    assert!(
+        first_output.contains("techops_certification_view=committed outcome=Certified mode=Full"),
+        "{first_output}"
+    );
+    assert!(first_output.contains("processors_expected=1 observed=1 missing=0"));
+    assert!(first_output.contains("techops_target_map="));
+    assert!(first_output.contains("techops_processor_evidence="));
+    assert!(first_output.contains(&format!(
+        "catalog_sha256={}",
+        oa_sha256::to_hex(&oa_sha256::sha256(catalog))
+    )));
+    assert!(first_output.contains(&format!(
+        "expected_inventory_sha256={}",
+        oa_sha256::to_hex(&oa_sha256::sha256(
+            &fs::read(&expected).expect("expected roster bytes")
+        ))
+    )));
     let checkpoint = checkpoint_from(&first_output);
 
     let second = certify(
@@ -212,18 +273,44 @@ fn certify_cli_commits_all_three_outcomes_from_real_tracker_and_local_digest_inp
         second_output.contains("outcome=CertifiedWithExceptions"),
         "{second_output}"
     );
+    assert!(second_output.contains(
+        "techops_certification_view=committed outcome=CertifiedWithExceptions mode=Full"
+    ));
+    assert!(second_output.contains("exceptions=synthetic exception"));
     let checkpoint = checkpoint_from(&second_output);
+
+    let abbreviated = certify_mode(
+        &inputs,
+        checkpoint,
+        "",
+        1_800_000_000_000_000_002,
+        "abbreviated",
+    );
+    assert!(
+        abbreviated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&abbreviated.stderr)
+    );
+    let abbreviated_output = String::from_utf8_lossy(&abbreviated.stdout);
+    assert!(abbreviated_output.contains("outcome=Certified"));
+    assert!(abbreviated_output
+        .contains("techops_certification_view=committed outcome=Certified mode=Abbreviated"));
+    assert!(abbreviated_output.contains("targets=3/3"));
+    assert_eq!(abbreviated_output.matches("techops_target_map=").count(), 3);
+    let checkpoint = checkpoint_from(&abbreviated_output);
 
     fs::write(
         &expected,
         format!(
-            "OA-CERT-EXPECTED-PROCESSORS-V1\n7\t{}\t{}\n",
+            "OA-CERT-EXPECTED-PROCESSORS-V1\n7\t{}\t{}\n8\t{}\t{}\n",
             oa_sha256::to_hex(&[0xa5; 32]),
-            oa_sha256::to_hex(&adaptation_digest)
+            oa_sha256::to_hex(&adaptation_digest),
+            oa_sha256::to_hex(&[0x55; 32]),
+            oa_sha256::to_hex(&adaptation_digest),
         ),
     )
     .expect("mismatched expected digest fixture");
-    let third = certify(&inputs, checkpoint, "", 1_800_000_000_000_000_002);
+    let third = certify(&inputs, checkpoint, "", 1_800_000_000_000_000_003);
     assert!(
         third.status.success(),
         "{}",
@@ -234,6 +321,13 @@ fn certify_cli_commits_all_three_outcomes_from_real_tracker_and_local_digest_inp
         third_output.contains("outcome=NotCertified"),
         "{third_output}"
     );
+    assert!(third_output
+        .contains("techops_certification_view=committed outcome=NotCertified mode=Full"));
+    assert!(third_output.contains("processors_expected=2 observed=1 missing=1"));
+    assert!(third_output.contains("processor_id: 8"));
+    assert!(third_output.contains(
+        "observed_software: CertificationDigestEvidence { state: Missing, sha256: None }"
+    ));
     let checkpoint = checkpoint_from(&third_output);
 
     let report = Command::new(&artifact)
@@ -254,6 +348,11 @@ fn certify_cli_commits_all_three_outcomes_from_real_tracker_and_local_digest_inp
     assert!(report.contains("outcome=not_certified"));
     assert!(report.contains("catalog_version=synthetic-pver-v1"));
     assert!(report.contains("catalog_adaptation_version=1"));
+    assert!(report.contains("registration_qc=target_lat_e7="));
+    assert!(report.contains("observed_lat_e7="));
+    assert!(report.contains("east_velocity_residual_um_s="));
+    assert!(report.contains("runtime_loaded_adaptation=unavailable"));
+    assert!(report.contains("adaptation_observed_source=verified_local_g2_snapshot"));
     assert!(report.contains("catalog_version=synthetic-pver-v1"));
     assert!(report.contains("catalog_adaptation_version=1"));
     assert!(report.contains(&format!(
@@ -346,7 +445,6 @@ fn certify_cli_commits_all_three_outcomes_from_real_tracker_and_local_digest_inp
 #[test]
 fn certification_cli_requires_pinned_configure_principal_before_any_append() {
     let root = fresh_root();
-    fs::create_dir(&root).expect("fixture root");
     let executable = root.join("oa-certification");
     fs::copy(env!("CARGO_BIN_EXE_oa-certification"), &executable).expect("copy CLI");
     let registry = root.join("principals.tsv");
@@ -390,5 +488,54 @@ fn certification_cli_requires_pinned_configure_principal_before_any_append() {
         !log.exists(),
         "wrong pin must not create or append audit log"
     );
+    fs::remove_dir_all(root).expect("fixture cleanup");
+}
+
+// REQ: OA-AUDIT-012
+#[test]
+fn techops_status_cli_reports_verified_empty_log_and_unverified_bad_config() {
+    let root = fresh_root();
+    // Execute Cargo's already-built test binary directly. This test exercises the command's
+    // verification output, not executable-copy semantics; copying immediately before exec
+    // needlessly depends on the runner filesystem's copy/execute behavior (notably ETXTBSY).
+    let executable = PathBuf::from(env!("CARGO_BIN_EXE_oa-certification"));
+    let log = root.join("audit.log");
+    let config = root.join("checkpoint.conf");
+    fs::write(&log, b"").expect("empty audit log");
+    let checkpoint = oa_audit_core::genesis();
+    fs::write(
+        &config,
+        format!(
+            "OA-AUDIT-WATCH-V1\ngeneration=1\ncount=0\ntail={}\nrefresh_ms=0\n",
+            oa_sha256::to_hex(&checkpoint.tail)
+        ),
+    )
+    .expect("exact checkpoint config");
+    let invoke = || {
+        Command::new(&executable)
+            .arg("techops-status")
+            .arg(&log)
+            .arg(&config)
+            .arg("1")
+            .arg("64")
+            .output()
+            .expect("run status CLI")
+    };
+
+    let verified = invoke();
+    assert!(verified.status.success(), "{:?}", verified.stderr);
+    let output = String::from_utf8(verified.stdout).expect("UTF-8 status output");
+    assert!(output.contains("verified_exact_checkpoint"));
+    assert!(output.contains("verified_count=0"));
+    assert!(output.contains("active_alarms=0"));
+    assert!(!output.contains(&oa_sha256::to_hex(&checkpoint.tail)));
+
+    fs::write(&config, b"not a checkpoint").expect("replace config with malformed bytes");
+    let unavailable = invoke();
+    assert!(unavailable.status.success(), "{:?}", unavailable.stderr);
+    let output = String::from_utf8(unavailable.stdout).expect("UTF-8 unavailable status");
+    assert!(output.contains("verification_unavailable"));
+    assert!(output.contains("verified_count=-"));
+
     fs::remove_dir_all(root).expect("fixture cleanup");
 }

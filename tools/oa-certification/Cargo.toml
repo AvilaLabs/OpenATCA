@@ -25,6 +25,9 @@ oa-audit-log = { path = "../../crates/oa-audit-log" }
 oa-build-info = { path = "../oa-build-info" }
 # F1 / OA-SEAL-006: guard certification audit paths through the production sealed-data policy.
 oa-sealed = { path = "../../crates/oa-sealed" }
+# F1 / steer43I1: reuse the existing bounded Tech Ops target-map display row model.
+# F1a: technician-shell status consumes the shared audit watcher and the existing pure alarm model.
+oa-techops = { path = "../../crates/oa-techops" }
 
 [dev-dependencies]
 # Normalize the legacy synthetic fixture through the current snapshot codec in the negative test.

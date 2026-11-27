@@ -155,6 +155,7 @@ dependencies = [
  "oa-build-info",
  "oa-sealed",
  "oa-sha256",
+ "oa-techops",
  "oa-track",
 ]
 
