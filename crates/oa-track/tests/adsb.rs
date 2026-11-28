@@ -147,14 +147,14 @@ fn bounded_quality_cache_carries_across_frames_and_expires_for_refill() {
 
     // An equal timestamp is not a state regression: the row's own quality fields remain usable.
     // Kills changing the state-order boundary from `<` to `<=`.
-    let mut equal_timestamp = row(0, 0x100001, 41.9, -88.25);
+    let mut equal_timestamp = row(1, 0x100001, 41.9, -88.25);
     equal_timestamp.nac_p = 8;
     let (measurements, stats) =
         adsb_measurements_with_cache(&reports(&[equal_timestamp]), &cfg, &mut cache);
     assert_eq!((measurements.len(), stats.passed), (1, 1));
     assert_eq!(stats.quality_state_order_refused, 0);
 
-    let mut out_of_order = row(-1, 0x100001, 41.9, -88.25);
+    let mut out_of_order = row(0, 0x100001, 41.9, -88.25);
     out_of_order.nac_p = NONE_U8;
     out_of_order.nic = NONE_U8;
     out_of_order.sil = NONE_U8;
