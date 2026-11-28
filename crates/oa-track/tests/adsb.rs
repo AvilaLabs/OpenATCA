@@ -218,6 +218,51 @@ fn bounded_quality_cache_carries_across_frames_and_expires_for_refill() {
 
 // REQ: OA-TRK-286
 #[test]
+fn quality_cache_order_and_inclusive_expiry_use_newest_held_field() {
+    let cfg = AdsbConfig {
+        gates: oa_truth::TruthConfig {
+            quality_carry_ms: 10_000,
+            ..DEFAULT_CONFIG
+        },
+        ..AdsbConfig::default()
+    };
+    let mut cache = AdsbQualityCache::new(1);
+    let first = row(1, 0x100001, 41.9, -88.3);
+    let (measurements, _) = adsb_measurements_with_cache(&reports(&[first]), &cfg, &mut cache);
+    assert_eq!(measurements.len(), 1);
+
+    let mut newest_nacp = row(6, 0x100001, 41.9, -88.2);
+    newest_nacp.nac_p = 10;
+    newest_nacp.nic = NONE_U8;
+    newest_nacp.sil = NONE_U8;
+    newest_nacp.version = NONE_U8;
+    newest_nacp.nac_v = NONE_U8;
+    let (measurements, _) =
+        adsb_measurements_with_cache(&reports(&[newest_nacp]), &cfg, &mut cache);
+    assert_eq!(measurements.len(), 1);
+
+    let mut regressing_without_quality = row(5, 0x100001, 41.9, -88.1);
+    regressing_without_quality.nac_p = NONE_U8;
+    regressing_without_quality.nic = NONE_U8;
+    regressing_without_quality.sil = NONE_U8;
+    regressing_without_quality.version = NONE_U8;
+    regressing_without_quality.nac_v = NONE_U8;
+    let (measurements, stats) =
+        adsb_measurements_with_cache(&reports(&[regressing_without_quality]), &cfg, &mut cache);
+    assert!(measurements.is_empty());
+    assert_eq!(stats.quality_state_order_refused, 1);
+    assert_eq!(cache.len(), 1);
+
+    let refill_at_newest_deadline = row(16, 0x100002, 41.9, -88.0);
+    let (measurements, stats) =
+        adsb_measurements_with_cache(&reports(&[refill_at_newest_deadline]), &cfg, &mut cache);
+    assert_eq!(measurements.len(), 1);
+    assert_eq!(stats.quality_state_capacity_refused, 1);
+    assert_eq!(cache.len(), 1);
+}
+
+// REQ: OA-TRK-286
+#[test]
 fn a_geometric_flagged_altitude_passes_flagged_like_a_geometric_column() {
     // The readsb form: the altitude column is geometric (flag set), no barometric altitude.
     let mut flagged = row(0, 5, 41.9, -88.3);

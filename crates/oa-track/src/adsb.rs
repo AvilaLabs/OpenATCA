@@ -234,11 +234,7 @@ fn quality_expiry(state: &QualityState, cfg: &TruthConfig) -> Option<i64> {
         return None;
     }
     let carry_ns = cfg.quality_carry_ms.checked_mul(1_000_000)?;
-    let newest = [state.nacp, state.nic, state.sil, state.version, state.nacv]
-        .iter()
-        .map(|held| held.at_ns)
-        .filter(|time_ns| *time_ns != oa_truth::HELD_NONE.at_ns)
-        .max()?;
+    let newest = state_newest_quality_ns(state)?;
     Some(newest.checked_add(carry_ns).unwrap_or(i64::MAX))
 }
 
