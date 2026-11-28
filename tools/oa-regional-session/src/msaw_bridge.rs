@@ -756,7 +756,12 @@ mod tests {
     fn recorded_profile_passes_more_than_default_rows_through_provider_path() {
         let track_count = crate::surveillance::MAX_TRACKS + 8;
         let pair_count = track_count * (track_count - 1) / 2;
-        let (data, root) = development_provider_data();
+        let (mut data, root) = development_provider_data();
+        // Fixture output limits match the 40-row selected profile; the stock development file
+        // intentionally advertises a much larger open-alert capacity.
+        data.settings.msaw.max_tracks = track_count;
+        data.settings.msaw.max_open = track_count;
+        data.settings.msaw.track_budget = track_count;
         let model = crate::cli::synthetic_model().unwrap();
         let snapshot = oa_airspace::core::snapshot::encode(&model).unwrap();
         let mut profile = crate::runtime::DEFAULT_REGIONAL_RUN_PROFILE;
