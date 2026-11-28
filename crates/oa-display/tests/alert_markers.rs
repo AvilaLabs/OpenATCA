@@ -64,6 +64,53 @@ fn list_for(markers: usize) -> DisplayList {
     .unwrap()
 }
 
+fn list_for_header_reservation(markers: usize, header_bytes: usize) -> DisplayList {
+    list_new(ListCaps {
+        lines: 0,
+        rects: 0,
+        circles: markers * ALERT_CIRCLES_PER_MARKER,
+        polylines: 0,
+        poly_vertices: 0,
+        texts: markers * ALERT_TEXTS_PER_MARKER + ALERT_HEADER_TEXTS,
+        text_bytes: header_bytes + markers * ALERT_TEXT_BYTES_PER_MARKER,
+    })
+    .unwrap()
+}
+
+fn maximum_final_markers() -> Vec<FinalMonitorMarker> {
+    (0..MAX_ALERT_MARKERS)
+        .map(|index| {
+            let severity = if index < 100 {
+                FinalMonitorSeverity::Caution
+            } else if index < 114 {
+                FinalMonitorSeverity::Warning
+            } else {
+                FinalMonitorSeverity::ProtectionLost
+            };
+            let address = u32::try_from(index + 1).unwrap();
+            if index < 100 {
+                FinalMonitorMarker {
+                    address,
+                    lat_e7: CENTRE.0,
+                    lon_e7: -870_000_000,
+                    severity: severity as u8,
+                    position_known: 1,
+                    reserved: [0; 2],
+                }
+            } else {
+                FinalMonitorMarker {
+                    address,
+                    lat_e7: NO_POSITION_E7,
+                    lon_e7: NO_POSITION_E7,
+                    severity: severity as u8,
+                    position_known: 0,
+                    reserved: [0; 2],
+                }
+            }
+        })
+        .collect()
+}
+
 fn texts(list: &DisplayList) -> Vec<String> {
     (0..list.texts.x.len())
         .map(|index| {
@@ -383,46 +430,17 @@ fn final_monitor_hook_renders_caution_warning_and_degraded_status() {
 
 // REQ: OA-RWY-015
 #[test]
-fn maximum_final_degraded_header_fits_the_shared_reservation() {
+fn maximum_final_degraded_header_fits_final_monitor_reservation() {
     let p = projection(800, 160);
-    let markers: Vec<_> = (0..MAX_ALERT_MARKERS)
-        .map(|index| {
-            let severity = if index < 100 {
-                FinalMonitorSeverity::Caution
-            } else if index < 114 {
-                FinalMonitorSeverity::Warning
-            } else {
-                FinalMonitorSeverity::ProtectionLost
-            };
-            if index < 100 {
-                FinalMonitorMarker {
-                    address: u32::try_from(index + 1).unwrap(),
-                    lat_e7: CENTRE.0,
-                    lon_e7: -870_000_000,
-                    severity: severity as u8,
-                    position_known: 1,
-                    reserved: [0; 2],
-                }
-            } else {
-                FinalMonitorMarker {
-                    address: u32::try_from(index + 1).unwrap(),
-                    lat_e7: NO_POSITION_E7,
-                    lon_e7: NO_POSITION_E7,
-                    severity: severity as u8,
-                    position_known: 0,
-                    reserved: [0; 2],
-                }
-            }
-        })
-        .collect();
-    let mut list = list_for(markers.len());
+    let markers = maximum_final_markers();
+    let mut list = list_for_header_reservation(markers.len(), FINAL_MONITOR_HEADER_TEXT_BYTES);
     let stats = append_final_monitor_frame(&mut list, &p, &markers, true).unwrap();
     assert_eq!(stats.caution, 100);
     assert_eq!(stats.warning, 14);
     assert_eq!(stats.protection_lost, 14);
     assert_eq!(stats.off_map, 100);
     assert_eq!(stats.unlocated, 28);
-    assert!(list.text.len() <= ALERT_HEADER_TEXT_BYTES);
+    assert_eq!(list.text.len(), FINAL_MONITOR_HEADER_TEXT_BYTES);
     let rendered_text = texts(&list);
     let header = rendered_text.last().unwrap();
     assert!(header.contains("CAUTION 100"));
@@ -430,6 +448,41 @@ fn maximum_final_degraded_header_fits_the_shared_reservation() {
     assert!(header.contains("PROTECTION LOST 14"));
     assert!(header.contains("OFF 100"));
     assert!(header.contains("UNLOCATED 28"));
+}
+
+// Mutation killed: charge the longer final-monitor heading to MSAW or accept a one-byte-short list.
+// REQ: OA-DSP-077, OA-RWY-015
+#[test]
+fn typed_header_reservations_accept_exact_capacity_and_refuse_one_byte_short() {
+    let p = projection(800, 160);
+    let msaw: Vec<_> = (1..=MAX_ALERT_MARKERS as u32)
+        .map(|address| unknown_marker(address, MarkerState::Warning))
+        .collect();
+    let mut exact_msaw = list_for_header_reservation(msaw.len(), MSAW_HEADER_TEXT_BYTES);
+    append_alert_markers(&mut exact_msaw, &p, &msaw).unwrap();
+    let mut short_msaw =
+        list_for_header_reservation(msaw.len(), MSAW_HEADER_TEXT_BYTES.saturating_sub(1));
+    let before_msaw = short_msaw.clone();
+    assert!(matches!(
+        append_alert_markers(&mut short_msaw, &p, &msaw),
+        Err(DisplayError::Full { .. })
+    ));
+    assert_eq!(short_msaw, before_msaw);
+
+    let final_markers = maximum_final_markers();
+    let mut exact_final =
+        list_for_header_reservation(final_markers.len(), FINAL_MONITOR_HEADER_TEXT_BYTES);
+    append_final_monitor_frame(&mut exact_final, &p, &final_markers, true).unwrap();
+    let mut short_final = list_for_header_reservation(
+        final_markers.len(),
+        FINAL_MONITOR_HEADER_TEXT_BYTES.saturating_sub(1),
+    );
+    let before_final = short_final.clone();
+    assert!(matches!(
+        append_final_monitor_frame(&mut short_final, &p, &final_markers, true),
+        Err(DisplayError::Full { .. })
+    ));
+    assert_eq!(short_final, before_final);
 }
 
 // REQ: OA-RWY-015

@@ -5,10 +5,9 @@
 //! regional bridge currently supplies at most 32. Records must be ordered by unique positive
 //! aircraft address. Validation, view-width checks and list-capacity checks finish before any
 //! display-list mutation. The caller reserves the worst-case table budget with the exported
-//! per-marker and header constants: two circles, one text and one text byte per marker, plus one
-//! header text and 77 header bytes. The fixed labels contribute 65 bytes; five one-digit counts
-//! add five, and the two disjoint count groups add at most seven further digits at the 128-record
-//! cap.
+//! per-marker and typed header constants: two circles, one text and one text byte per marker,
+//! plus one header text. MSAW reserves 64 bytes; final-monitor reserves 77 for its longer
+//! `PROTECTION LOST` heading at the 128-record cap.
 
 use crate::core::font::{text_width_units, CAP_HEIGHT};
 use crate::core::list::{
@@ -24,10 +23,14 @@ pub const MAX_ALERT_MARKERS: usize = 128;
 pub const ALERT_CIRCLES_PER_MARKER: usize = 2;
 /// Each marker reserves room for one short state label, whether or not it is visible.
 pub const ALERT_TEXTS_PER_MARKER: usize = 1;
-/// Header reservation independent of its current decimal values.
+/// Header text rows reserved independently of their current decimal values.
 pub const ALERT_HEADER_TEXTS: usize = 1;
+/// MSAW header reservation at the 128-marker count bound.
+pub const MSAW_HEADER_TEXT_BYTES: usize = 64;
 /// Maximum final-degraded header size at the 128-marker count bounds.
-pub const ALERT_HEADER_TEXT_BYTES: usize = 77;
+pub const FINAL_MONITOR_HEADER_TEXT_BYTES: usize = 77;
+/// Largest typed alert header reservation, retained for callers reserving either mode.
+pub const ALERT_HEADER_TEXT_BYTES: usize = FINAL_MONITOR_HEADER_TEXT_BYTES;
 pub const ALERT_TEXT_BYTES_PER_MARKER: usize = 1;
 
 /// Sentinel used when `position_known` is zero.
@@ -360,7 +363,15 @@ fn header_y(projection: &Projection, source: AlertHeaderSource) -> i32 {
     }
 }
 
-fn reserve_marker_output(list: &DisplayList, marker_count: usize) -> Result<(), DisplayError> {
+fn reserve_marker_output(
+    list: &DisplayList,
+    marker_count: usize,
+    source: AlertHeaderSource,
+) -> Result<(), DisplayError> {
+    let header_bytes = match source {
+        AlertHeaderSource::Msaw => MSAW_HEADER_TEXT_BYTES,
+        AlertHeaderSource::FinalMonitor { .. } => FINAL_MONITOR_HEADER_TEXT_BYTES,
+    };
     let needed_circles =
         marker_count
             .checked_mul(ALERT_CIRCLES_PER_MARKER)
@@ -379,7 +390,7 @@ fn reserve_marker_output(list: &DisplayList, marker_count: usize) -> Result<(), 
         })?;
     let needed_text_bytes = marker_count
         .checked_mul(ALERT_TEXT_BYTES_PER_MARKER)
-        .and_then(|count| count.checked_add(ALERT_HEADER_TEXT_BYTES))
+        .and_then(|count| count.checked_add(header_bytes))
         .ok_or(DisplayError::TooLarge {
             what: "MSAW text byte reservation",
             requested: u128::MAX,
@@ -478,7 +489,7 @@ fn append_alert_markers_titled(
     }
     let (stats, projected) = validate_and_project_markers(projection, markers)?;
     let header_text = checked_header(projection, stats, header_source)?;
-    reserve_marker_output(list, markers.len())?;
+    reserve_marker_output(list, markers.len(), header_source)?;
 
     // All input, header and list budgets are checked before the first display-list write.
     append_marker_geometry(list, markers, &projected)?;
