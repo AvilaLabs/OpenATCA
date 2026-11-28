@@ -150,6 +150,45 @@ struct PendingNormalizedEvent {
     arrival_order: u64,
 }
 
+struct PendingAdsbReport {
+    row: crate::recordings::DecodedAdsbRow,
+    arrival_order: u64,
+}
+
+impl PendingAdsbReport {
+    fn key(&self) -> (i64, i64, u8, u64, u64, usize, u64) {
+        (
+            self.row.source_time_ns(),
+            self.row.frame_receipt_ns(),
+            self.row.stream_index(),
+            self.row.frame_sequence(),
+            self.row.byte_offset(),
+            self.row.source_ordinal(),
+            self.arrival_order,
+        )
+    }
+}
+
+impl PartialEq for PendingAdsbReport {
+    fn eq(&self, other: &Self) -> bool {
+        self.key() == other.key()
+    }
+}
+
+impl Eq for PendingAdsbReport {}
+
+impl PartialOrd for PendingAdsbReport {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for PendingAdsbReport {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.key().cmp(&other.key())
+    }
+}
+
 impl PendingNormalizedEvent {
     fn key(&self) -> (i64, crate::input::SourceKind, u64, u64) {
         (
@@ -1133,7 +1172,9 @@ struct NormalizedStreamState<F> {
         crate::recordings::EventProvenance,
     )>,
     pending_heap: BinaryHeap<Reverse<PendingNormalizedEvent>>,
+    pending_adsb_rows: BinaryHeap<Reverse<PendingAdsbReport>>,
     pending_arrival_order: u64,
+    pending_adsb_arrival_order: u64,
     normalized_sequences: [u64; 5],
     quality_cache: oa_track::adsb::AdsbQualityCache,
     counts: NormalizedAdapterCounts,
@@ -1168,7 +1209,9 @@ where
             sequence_starts: [0; 2],
             pending_group,
             pending_heap,
+            pending_adsb_rows: BinaryHeap::new(),
             pending_arrival_order: 0,
+            pending_adsb_arrival_order: 0,
             normalized_sequences: [0; 5],
             quality_cache: oa_track::adsb::AdsbQualityCache::default(),
             counts: NormalizedAdapterCounts::default(),
@@ -1177,28 +1220,58 @@ where
     }
 
     fn process_frame(&mut self, frame: RecordedFrame) -> Result<(), String> {
-        let mut input_counts = crate::recordings_reader::RecordingCounts::default();
-        input_counts.total_frames = 1;
-        input_counts.total_decoded_bytes = u64::try_from(frame.payload.len())
-            .map_err(|_| "message payload byte count overflow")?;
-        input_counts.total_bytes = input_counts.total_decoded_bytes;
-        let adapted =
-            crate::recordings::adapt_recorded_frames_with_sequence_starts_and_quality_limit(
-                std::slice::from_ref(&frame),
-                input_counts,
-                100_000,
-                self.centre,
-                self.sequence_starts,
-                self.receipt_group_limit,
-                &mut self.quality_cache,
-            )
-            .map_err(|error| format!("normalized adapter refused message: {error:?}"))?;
-        let source_index = match frame.source {
-            RecordingSource::Adsb => 0,
-            RecordingSource::Sfdps => 1,
-        };
-        self.accumulate_adaptation(source_index, &adapted)?;
-        self.queue_adapted_events(&frame, adapted.events.into_iter().zip(adapted.provenance))?;
+        let archive_adsb = frame.source == RecordingSource::Adsb && frame.mono_ns.is_none();
+        if archive_adsb {
+            let decoded = crate::recordings::decode_ordered_adsb_frame(&frame)
+                .map_err(|error| format!("ordered ADS-B frame refused: {error:?}"))?;
+            let dropped = crate::recordings::account_ordered_adsb_drops(&decoded)
+                .map_err(|error| format!("ADS-B drop accounting refused: {error:?}"))?;
+            let (declared_rows, _, _, rows) = decoded.into_parts();
+            self.accumulate_ordered_adsb_frame(&dropped, declared_rows)?;
+            for row in rows {
+                if self.pending_adsb_rows.len() >= MAX_PENDING_NORMALIZED_EVENTS {
+                    return Err("ADS-B report watermark queue capacity exceeded".into());
+                }
+                self.pending_adsb_rows
+                    .try_reserve(1)
+                    .map_err(|_| "ADS-B report watermark queue allocation refused")?;
+                let arrival_order = self.pending_adsb_arrival_order;
+                self.pending_adsb_arrival_order = self
+                    .pending_adsb_arrival_order
+                    .checked_add(1)
+                    .ok_or("ADS-B report order overflow")?;
+                self.pending_adsb_rows
+                    .push(Reverse(PendingAdsbReport { row, arrival_order }));
+            }
+        } else {
+            let mut input_counts = crate::recordings_reader::RecordingCounts::default();
+            input_counts.total_frames = 1;
+            input_counts.total_decoded_bytes = u64::try_from(frame.payload.len())
+                .map_err(|_| "message payload byte count overflow")?;
+            input_counts.total_bytes = input_counts.total_decoded_bytes;
+            let adapted =
+                crate::recordings::adapt_recorded_frames_with_sequence_starts_and_quality_limit(
+                    std::slice::from_ref(&frame),
+                    input_counts,
+                    100_000,
+                    self.centre,
+                    self.sequence_starts,
+                    self.receipt_group_limit,
+                    &mut self.quality_cache,
+                )
+                .map_err(|error| format!("normalized adapter refused message: {error:?}"))?;
+            let source_index = match frame.source {
+                RecordingSource::Adsb => 0,
+                RecordingSource::Sfdps => 1,
+            };
+            self.accumulate_adaptation(source_index, &adapted)?;
+            self.queue_adapted_events(&frame, adapted.events.into_iter().zip(adapted.provenance))?;
+        }
+        // Only OAF1 ADS-B headers are lower bounds for their source report times. SFDPS
+        // receipts and OAF2 ADS-B receipts must not advance this independent watermark.
+        if archive_adsb {
+            self.flush_adsb_rows(frame.receipt_ns)?;
+        }
         self.flush_to(frame.receipt_ns)
     }
 
@@ -1207,33 +1280,76 @@ where
         source_index: usize,
         adapted: &crate::recordings::RecordedAdaptation,
     ) -> Result<(), String> {
+        self.accumulate_adaptation_counts(source_index, adapted, adapted.counts, true)
+    }
+
+    fn accumulate_ordered_adsb_frame(
+        &mut self,
+        adapted: &crate::recordings::RecordedAdaptation,
+        declared_rows: usize,
+    ) -> Result<(), String> {
+        let mut adapter_counts = adapted.counts;
+        adapter_counts.adsb_rows_in = 0;
+        self.accumulate_adaptation_counts(0, adapted, adapter_counts, true)?;
+        let source_counts = self
+            .counts
+            .source_counts
+            .get_mut(0)
+            .ok_or("ADS-B source index invariant")?;
+        source_counts.adsb_rows_in = source_counts
+            .adsb_rows_in
+            .checked_add(u64::try_from(declared_rows).map_err(|_| "ADS-B row count overflow")?)
+            .ok_or("ADS-B row count overflow")?;
+        Ok(())
+    }
+
+    fn accumulate_ordered_adsb_row(
+        &mut self,
+        adapted: &crate::recordings::RecordedAdaptation,
+    ) -> Result<(), String> {
+        let mut adapter_counts = adapted.counts;
+        adapter_counts.adsb_rows_in = 0;
+        adapter_counts.adsb_rows_dropped = 0;
+        adapter_counts.adsb_source_time_regressions = 0;
+        self.accumulate_adaptation_counts(0, adapted, adapter_counts, false)
+    }
+
+    fn accumulate_adaptation_counts(
+        &mut self,
+        source_index: usize,
+        adapted: &crate::recordings::RecordedAdaptation,
+        adapter_counts: crate::recordings::RecordedAdapterCounts,
+        count_message_frame: bool,
+    ) -> Result<(), String> {
         let source_counts = self
             .counts
             .source_counts
             .get_mut(source_index)
             .ok_or("normalized source index invariant")?;
-        source_counts.message_frames = source_counts
-            .message_frames
-            .checked_add(1)
-            .ok_or("source message-frame count overflow")?;
+        if count_message_frame {
+            source_counts.message_frames = source_counts
+                .message_frames
+                .checked_add(1)
+                .ok_or("source message-frame count overflow")?;
+        }
         source_counts.candidate_events_before_receipt_filter = source_counts
             .candidate_events_before_receipt_filter
-            .checked_add(adapted.counts.candidate_events_before_receipt_filter)
+            .checked_add(adapter_counts.candidate_events_before_receipt_filter)
             .ok_or("source candidate-event count overflow")?;
         source_counts.max_candidate_events_per_frame = source_counts
             .max_candidate_events_per_frame
-            .max(adapted.counts.candidate_events_before_receipt_filter);
+            .max(adapter_counts.candidate_events_before_receipt_filter);
         source_counts.receipt_groups_over_capacity = source_counts
             .receipt_groups_over_capacity
-            .checked_add(adapted.counts.receipt_groups_over_capacity)
+            .checked_add(adapter_counts.receipt_groups_over_capacity)
             .ok_or("source over-capacity-group count overflow")?;
         source_counts.receipt_group_events_refused = source_counts
             .receipt_group_events_refused
-            .checked_add(adapted.counts.receipt_group_events_refused)
+            .checked_add(adapter_counts.receipt_group_events_refused)
             .ok_or("source refused-event count overflow")?;
         source_counts.adsb_quality_cache_capacity_refused = source_counts
             .adsb_quality_cache_capacity_refused
-            .checked_add(adapted.counts.adsb_quality_cache_capacity_refused)
+            .checked_add(adapter_counts.adsb_quality_cache_capacity_refused)
             .ok_or("ADS-B quality-cache capacity count overflow")?;
         source_counts.quarantine_rows = source_counts
             .quarantine_rows
@@ -1253,7 +1369,7 @@ where
                     .ok_or("source quarantine reason count overflow")?;
             }
         }
-        accumulate_adapter_diagnostics(source_counts, &adapted.counts, source_index)?;
+        accumulate_adapter_diagnostics(source_counts, &adapter_counts, source_index)?;
         self.counts.quarantine_rows = self
             .counts
             .quarantine_rows
@@ -1279,7 +1395,7 @@ where
         self.counts.unprocessed_frames = self
             .counts
             .unprocessed_frames
-            .checked_add(adapted.counts.unprocessed_frames)
+            .checked_add(adapter_counts.unprocessed_frames)
             .ok_or("unprocessed frame count overflow")?;
         Ok(())
     }
@@ -1298,6 +1414,33 @@ where
             RecordingSource::Adsb => 0,
             RecordingSource::Sfdps => 1,
         };
+        let archive_adsb = frame.source == RecordingSource::Adsb && frame.mono_ns.is_none();
+        self.queue_events(source_index, archive_adsb, events)
+    }
+
+    fn queue_ordered_adsb_events(
+        &mut self,
+        events: impl Iterator<
+            Item = (
+                crate::input::NormalizedEvent,
+                crate::recordings::EventProvenance,
+            ),
+        >,
+    ) -> Result<(), String> {
+        self.queue_events(0, true, events)
+    }
+
+    fn queue_events(
+        &mut self,
+        source_index: usize,
+        archive_adsb: bool,
+        events: impl Iterator<
+            Item = (
+                crate::input::NormalizedEvent,
+                crate::recordings::EventProvenance,
+            ),
+        >,
+    ) -> Result<(), String> {
         for (event, provenance) in events {
             let sequence_index = match event.source {
                 crate::input::SourceKind::Surveillance => Some(0),
@@ -1316,10 +1459,7 @@ where
                         .ok_or("normalized sequence overflow")?,
                 );
             }
-            let archive_adsb_window = (frame.source == RecordingSource::Adsb
-                && frame.mono_ns.is_none())
-            .then_some(self.receive_window_ns)
-            .flatten();
+            let archive_adsb_window = archive_adsb.then_some(self.receive_window_ns).flatten();
             if let Some((start, end)) = archive_adsb_window {
                 if event.source_ns < start || event.source_ns >= end {
                     let source_counts = self
@@ -1368,6 +1508,35 @@ where
         Ok(())
     }
 
+    fn flush_adsb_rows(&mut self, watermark_ns: i64) -> Result<(), String> {
+        while self
+            .pending_adsb_rows
+            .peek()
+            // Keep equality pending: another OAF1 frame may start at the same report time,
+            // and must participate in the deterministic tie ordering before adaptation.
+            .is_some_and(|Reverse(pending)| pending.row.source_time_ns() < watermark_ns)
+        {
+            let Reverse(pending) = self
+                .pending_adsb_rows
+                .pop()
+                .ok_or("ADS-B report watermark queue lost its head")?;
+            let adapted = crate::recordings::adapt_ordered_adsb_row(
+                crate::recordings::OrderedAdsbRowContext {
+                    row: pending.row,
+                    centre: self.centre,
+                    max_events: 100_000,
+                    sequence_starts: self.sequence_starts,
+                    receipt_group_limit: self.receipt_group_limit,
+                    quality_cache: &mut self.quality_cache,
+                },
+            )
+            .map_err(|error| format!("ordered ADS-B row refused: {error:?}"))?;
+            self.accumulate_ordered_adsb_row(&adapted)?;
+            self.queue_ordered_adsb_events(adapted.events.into_iter().zip(adapted.provenance))?;
+        }
+        Ok(())
+    }
+
     fn flush_to(&mut self, watermark_ns: i64) -> Result<(), String> {
         flush_watermarked_groups(
             &mut self.pending_heap,
@@ -1380,6 +1549,7 @@ where
     }
 
     fn finish(mut self, recording: StreamSummary) -> Result<NormalizedStreamSummary, String> {
+        self.flush_adsb_rows(i64::MAX)?;
         self.flush_to(i64::MAX)?;
         Ok(NormalizedStreamSummary {
             recording,
@@ -2172,6 +2342,76 @@ mod tests {
             (base + 3_000_000_000, base + 2_100_000_000, 2),
         ];
         assert_eq!(completed_rows, expected_session_rows);
+        Ok(())
+    }
+
+    #[test]
+    fn archive_quality_uses_report_order_across_overlapping_frames() -> Result<(), Box<dyn Error>> {
+        use super::stream_normalized_events;
+        use std::fs::OpenOptions;
+
+        let path = temporary_path("adsb_quality_source_order")?;
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)?;
+        let base = 1_893_456_780_000_000_000i64;
+        let without_quality = |time_ns| oa_adsb::Row {
+            time_ns,
+            icao: 0xABCDEF,
+            lat_e7: 419_000_000,
+            lon_e7: -873_000_000,
+            baro_alt_ft: 35_000,
+            gs_dkt: 4_500,
+            track_ddeg: 900,
+            vrate_fpm: 0,
+            nic: oa_adsb::NONE_U8,
+            nac_p: oa_adsb::NONE_U8,
+            nac_v: oa_adsb::NONE_U8,
+            sil: oa_adsb::NONE_U8,
+            version: oa_adsb::NONE_U8,
+            source: 0,
+            ..oa_adsb::ROW_EMPTY
+        };
+        let first = without_quality(base + 100_000_000);
+        let future_quality = oa_adsb::Row {
+            time_ns: base + 2_100_000_000,
+            nic: 8,
+            nac_p: 9,
+            nac_v: 2,
+            sil: 3,
+            version: 2,
+            ..first
+        };
+        let middle = without_quality(base + 1_100_000_000);
+        write_adsb_rows(&mut file, 1, &[&first, &future_quality])?;
+        write_adsb_row(&mut file, 2, &middle)?;
+        file.sync_all()?;
+        drop(file);
+
+        let inputs = [StreamInput {
+            source: RecordingSource::Adsb,
+            path: path.clone(),
+        }];
+        let mut events = Vec::new();
+        let result = stream_normalized_events(&inputs, None, *b"ZAU1", |event, _| {
+            events.push(event);
+            Ok(())
+        });
+        let _ = fs::remove_file(&path);
+        let summary = result?;
+        assert_eq!(summary.normalized_events, events.len() as u64);
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.source_ns)
+                .collect::<Vec<_>>(),
+            vec![base + 2_100_000_000]
+        );
+        assert!(events
+            .iter()
+            .all(|event| event.receipt_ns != base + 2_000_000_000));
+        assert_eq!(events[0].receipt_ns, base + 3_000_000_000);
         Ok(())
     }
 
