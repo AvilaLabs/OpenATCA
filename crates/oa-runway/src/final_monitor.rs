@@ -260,9 +260,8 @@ pub fn prepare_pair(
     }
     let ntz_half_width_m = config.ntz_width_ft * FT_TO_M * 0.5;
     let minimum_separation = oa_math::min_f64(sep_outer.abs(), sep_threshold.abs());
-    if ntz_half_width_m * 2.0 >= minimum_separation {
-        return Err(PrepareError::ZoneConsumesSeparation);
-    }
+    // The final clearance check below also rejects an NTZ that equals or exceeds the
+    // separation. Keep one decision point so callers cannot observe equivalent checks diverge.
     let usable_clearance_m = minimum_separation * 0.5 - ntz_half_width_m;
     let max_r95_m = usable_clearance_m - plane::PLANE_ERROR_BOUND_M - 0.01;
     if !max_r95_m.is_finite() || max_r95_m < 0.0 {
@@ -564,10 +563,9 @@ fn validate_update_inputs(
     validate_track_values(pair, projection_plane, tracks)?;
     let has_input_frame = state.clock_flags & HAS_INPUT_FRAME_TIME != 0;
     let has_evaluation = state.clock_flags & HAS_EVALUATION_TIME != 0;
-    if (has_input_frame && now_ns < state.last_input_frame_ns)
-        || (has_evaluation && now_ns < state.last_evaluation_ns)
-        || now_ns < prediction_report_ns
-    {
+    // Evaluation time cannot regress independently: validated state requires it to be no later
+    // than the input-frame time, whose regression check therefore subsumes this comparison.
+    if (has_input_frame && now_ns < state.last_input_frame_ns) || now_ns < prediction_report_ns {
         return Err(UpdateError::ClockRegression);
     }
     let observed_interval_ns = if has_evaluation {
@@ -1016,6 +1014,80 @@ mod tests {
         ))
     }
 
+    fn assert_clock_regression(state: FinalMonitorState, now: u64, report: u64) {
+        let mut candidate = state;
+        let result = evaluate_for(
+            pair(),
+            &mut candidate,
+            TestTrack {
+                now,
+                report,
+                east: 0.0,
+                north: -550.0,
+                vx: 0.0,
+                vy: 0.0,
+                r95: 0.0,
+            },
+        );
+        assert_eq!(result, Err(UpdateError::ClockRegression));
+        assert_eq!(candidate, state);
+    }
+
+    fn update_projected_track(
+        pair: FinalPair,
+        lat_e7_value: i32,
+        lon_e7_value: i32,
+        east_offset_m: f64,
+        north_offset_m: f64,
+    ) -> Result<UpdateResult, UpdateError> {
+        let origin = pair.projection_origin.ok_or(UpdateError::BadInput)?;
+        let projection_plane =
+            plane_new(origin.lat_deg, origin.lon_deg).ok_or(UpdateError::BadInput)?;
+        let geo = Geo {
+            lat_deg: f64::from(lat_e7_value) / 10_000_000.0,
+            lon_deg: f64::from(lon_e7_value) / 10_000_000.0,
+        };
+        let local = crate::plane::to_local(&projection_plane, geo).ok_or(UpdateError::BadInput)?;
+        let addresses = [1234];
+        let east_m = [local.east_m + east_offset_m];
+        let north_m = [local.north_m + north_offset_m];
+        let velocity_east_mps = [0.0];
+        let velocity_north_mps = [0.0];
+        let r95_m = [0.0];
+        let lat_e7 = [lat_e7_value];
+        let lon_e7 = [lon_e7_value];
+        let mut out_addr = [0];
+        let mut out_pair = [pair.id];
+        let mut out_severity = [FinalSeverity::Caution];
+        let mut out_lat = [0];
+        let mut out_lon = [0];
+        let mut out_time = [0];
+        update(
+            pair,
+            &mut FinalMonitorState::new(),
+            1_000_000_000,
+            1_000_000_000,
+            PredictedTracks {
+                addresses: &addresses,
+                east_m: &east_m,
+                north_m: &north_m,
+                velocity_east_mps: &velocity_east_mps,
+                velocity_north_mps: &velocity_north_mps,
+                r95_m: &r95_m,
+                lat_e7: &lat_e7,
+                lon_e7: &lon_e7,
+            },
+            FinalAlertBuffer {
+                addresses: &mut out_addr,
+                pair_ids: &mut out_pair,
+                severity: &mut out_severity,
+                lat_e7: &mut out_lat,
+                lon_e7: &mut out_lon,
+                seconds_to_entry_milli: &mut out_time,
+            },
+        )
+    }
+
     fn assert_bad_input_is_atomic(pair: FinalPair, vx: f64, vy: f64, r95: f64, north: f64) {
         let addresses = [1234];
         let east_m = [0.0];
@@ -1088,6 +1160,8 @@ mod tests {
         assert_eq!(pair.origin.north_m, 0.0);
         assert_eq!(pair.ntz_half_width_m, 304.8);
         assert_eq!(pair.course_length_m, 10_000.0);
+        // Independent geometry gives 550 - 304.8 - 1.5 - 0.01 = 243.69 m.
+        assert!((pair.max_r95_m - 243.69).abs() < 1.0e-12);
     }
 
     // REQ: OA-RWY-014, OA-RWY-015
@@ -1626,11 +1700,110 @@ mod tests {
         assert_eq!(entry_time, [505]);
     }
 
+    // Mutation killed: skip an input-receipt or source-time regression. Evaluation regression is
+    // subsumed because valid state orders evaluation no later than the input receipt.
+    // REQ: OA-RWY-015, OA-RWY-017
+    #[test]
+    fn input_and_source_clocks_reject_regression_and_accept_their_exact_boundary() {
+        let both_clocks = HAS_INPUT_FRAME_TIME | HAS_EVALUATION_TIME;
+        assert_clock_regression(
+            FinalMonitorState {
+                last_input_frame_ns: 10,
+                last_evaluation_ns: 5,
+                clock_flags: both_clocks,
+                ..FinalMonitorState::new()
+            },
+            9,
+            9,
+        );
+        assert_clock_regression(
+            FinalMonitorState {
+                last_input_frame_ns: 5,
+                last_evaluation_ns: 5,
+                clock_flags: both_clocks,
+                ..FinalMonitorState::new()
+            },
+            10,
+            11,
+        );
+
+        let boundary = FinalMonitorState {
+            last_input_frame_ns: 7,
+            last_evaluation_ns: 7,
+            clock_flags: both_clocks,
+            ..FinalMonitorState::new()
+        };
+        let mut same_time = boundary;
+        let result = evaluate_for(
+            pair(),
+            &mut same_time,
+            TestTrack {
+                now: 7,
+                report: 7,
+                east: 0.0,
+                north: -550.0,
+                vx: 0.0,
+                vy: 0.0,
+                r95: 0.0,
+            },
+        );
+        assert!(result.is_ok());
+    }
+
+    // Mutation killed: permit an evaluation timestamp without a preceding input-frame timestamp.
+    // REQ: OA-RWY-015, OA-RWY-017
+    #[test]
+    fn evaluation_clock_requires_input_clock_flag() {
+        let invalid = FinalMonitorState {
+            last_input_frame_ns: 9,
+            last_evaluation_ns: 9,
+            clock_flags: HAS_EVALUATION_TIME,
+            ..FinalMonitorState::new()
+        };
+        let mut rejected = invalid;
+        let refusal = evaluate_for(
+            pair(),
+            &mut rejected,
+            TestTrack {
+                now: 10,
+                report: 10,
+                east: 0.0,
+                north: -550.0,
+                vx: 0.0,
+                vy: 0.0,
+                r95: 0.0,
+            },
+        );
+        assert_eq!(refusal, Err(UpdateError::BadInput));
+        assert_eq!(rejected, invalid);
+
+        let valid = FinalMonitorState {
+            last_input_frame_ns: 9,
+            clock_flags: HAS_INPUT_FRAME_TIME | HAS_EVALUATION_TIME,
+            ..invalid
+        };
+        let mut accepted = valid;
+        let outcome = evaluate_for(
+            pair(),
+            &mut accepted,
+            TestTrack {
+                now: 10,
+                report: 10,
+                east: 0.0,
+                north: -550.0,
+                vx: 0.0,
+                vy: 0.0,
+                r95: 0.0,
+            },
+        );
+        assert!(outcome.is_ok());
+    }
+
     // REQ: OA-RWY-016
     #[test]
     fn runway_derived_pair_refuses_inconsistent_geographic_and_local_positions() {
-        let (plane, first, second) = kord_parallel_runways();
-        let pair = prepare_centerline_pair(
+        let (_plane, first, second) = kord_parallel_runways();
+        let runway_pair = prepare_centerline_pair(
             RunwayFinalSelection {
                 runway_id: 27_001,
                 runway: &first,
@@ -1649,46 +1822,95 @@ mod tests {
             lat_deg: 41.990,
             lon_deg: -87.910,
         };
-        let local = crate::plane::to_local(&plane, geo).expect("point inside runway plane");
-        let addresses = [1234];
-        let east_m = [local.east_m + 20.0];
-        let north_m = [local.north_m];
-        let velocity_east_mps = [0.0];
-        let velocity_north_mps = [0.0];
-        let r95_m = [0.0];
-        let lat_e7 = [(geo.lat_deg * 10_000_000.0) as i32];
-        let lon_e7 = [(geo.lon_deg * 10_000_000.0) as i32];
-        let mut out_addr = [0];
-        let mut out_pair = [pair.id];
-        let mut out_severity = [FinalSeverity::Caution];
-        let mut out_lat = [0];
-        let mut out_lon = [0];
-        let mut out_time = [0];
-        let result = update(
-            pair,
-            &mut FinalMonitorState::new(),
-            1_000_000_000,
-            1_000_000_000,
-            PredictedTracks {
-                addresses: &addresses,
-                east_m: &east_m,
-                north_m: &north_m,
-                velocity_east_mps: &velocity_east_mps,
-                velocity_north_mps: &velocity_north_mps,
-                r95_m: &r95_m,
-                lat_e7: &lat_e7,
-                lon_e7: &lon_e7,
-            },
-            FinalAlertBuffer {
-                addresses: &mut out_addr,
-                pair_ids: &mut out_pair,
-                severity: &mut out_severity,
-                lat_e7: &mut out_lat,
-                lon_e7: &mut out_lon,
-                seconds_to_entry_milli: &mut out_time,
-            },
+        let lat_e7 = (geo.lat_deg * 10_000_000.0) as i32;
+        let lon_e7 = (geo.lon_deg * 10_000_000.0) as i32;
+        // Positive control: coordinates derived from the quantized geographic source remain
+        // admissible, including a displacement equal to the documented plane-error bound.
+        assert!(update_projected_track(runway_pair, lat_e7, lon_e7, 0.0, 0.0).is_ok());
+        assert!(update_projected_track(
+            runway_pair,
+            lat_e7,
+            lon_e7,
+            crate::plane::PLANE_ERROR_BOUND_M,
+            0.0,
+        )
+        .is_ok());
+        assert!(update_projected_track(
+            runway_pair,
+            lat_e7,
+            lon_e7,
+            0.0,
+            crate::plane::PLANE_ERROR_BOUND_M,
+        )
+        .is_ok());
+        assert_eq!(
+            update_projected_track(runway_pair, lat_e7, lon_e7, 20.0, 0.0),
+            Err(UpdateError::CoordinateMismatch)
         );
-        assert_eq!(result, Err(UpdateError::CoordinateMismatch));
+        assert_eq!(
+            update_projected_track(runway_pair, lat_e7, lon_e7, 0.0, 20.0),
+            Err(UpdateError::CoordinateMismatch)
+        );
+
+        // Exact boundary oracle: at the zero origin, a 1.51 m east residual equals the
+        // plane's 1.5 m error bound plus the independently specified 0.01 m guard.
+        let mut boundary_pair = pair();
+        boundary_pair.projection_origin = Some(Geo {
+            lat_deg: 0.0,
+            lon_deg: 0.0,
+        });
+        let tolerance = 1.51;
+        assert!(update_projected_track(boundary_pair, 0, 0, tolerance, 0.0).is_ok());
+        assert!(update_projected_track(boundary_pair, 0, 0, 0.0, tolerance).is_ok());
+        assert_eq!(
+            update_projected_track(boundary_pair, 0, 0, tolerance + 1.0e-9, 0.0),
+            Err(UpdateError::CoordinateMismatch)
+        );
+        assert_eq!(
+            update_projected_track(boundary_pair, 0, 0, 0.0, tolerance + 1.0e-9),
+            Err(UpdateError::CoordinateMismatch)
+        );
+    }
+
+    // Mutation killed: calculate clearance from only one runway end instead of the limiting end.
+    // REQ: OA-RWY-014, OA-RWY-016
+    #[test]
+    fn either_tapered_runway_end_can_limit_r95_clearance() {
+        let first = input(1, -550.0);
+        let outer_limited = FinalCourseInput {
+            runway_id: 2,
+            end_name: *b"27L",
+            outer_fix: Local {
+                east_m: -5_000.0,
+                north_m: 550.0,
+            },
+            threshold: Local {
+                east_m: 5_000.0,
+                north_m: 600.0,
+            },
+        };
+        let pair_outer_limited = prepare_pair(first, outer_limited, DEFAULT_CONFIG)
+            .expect("three-degree parallel taper with outer end limiting separation");
+
+        let threshold_limited = FinalCourseInput {
+            outer_fix: Local {
+                east_m: -5_000.0,
+                north_m: 600.0,
+            },
+            threshold: Local {
+                east_m: 5_000.0,
+                north_m: 550.0,
+            },
+            ..outer_limited
+        };
+        let pair_threshold_limited = prepare_pair(first, threshold_limited, DEFAULT_CONFIG)
+            .expect("three-degree parallel taper with threshold end limiting separation");
+
+        // Independent 60-digit decimal geometry: 1,100 m times the normal's north
+        // component (0.9999968750537098846655), halved, then 304.8 m NTZ half-width,
+        // 1.5 m plane allowance, and 0.01 m guard.
+        assert!((pair_outer_limited.max_r95_m - 243.68828127954044).abs() < 1.0e-9);
+        assert!((pair_threshold_limited.max_r95_m - 243.68828127954044).abs() < 1.0e-9);
     }
 
     // REQ: OA-RWY-018
@@ -1696,6 +1918,19 @@ mod tests {
     fn close_parallel_finals_are_refused() {
         let result = prepare_pair(input(1, -400.0), input(2, 400.0), DEFAULT_CONFIG);
         assert_eq!(result, Err(PrepareError::TooClose));
+    }
+
+    // Mutation killed: admit a pair whose NTZ leaves zero or negative R95 clearance.
+    // REQ: OA-RWY-014, OA-RWY-016
+    #[test]
+    fn zero_and_negative_r95_clearance_are_refused() {
+        let mut config = DEFAULT_CONFIG;
+        config.minimum_separation_ft = 1.0;
+        for separation in [609.6, 611.0] {
+            let half = separation * 0.5;
+            let result = prepare_pair(input(1, -half), input(2, half), config);
+            assert_eq!(result, Err(PrepareError::ZoneConsumesSeparation));
+        }
     }
 
     // REQ: OA-RWY-015
@@ -1839,6 +2074,10 @@ mod tests {
         invalid.ntz_half_width_m = f64::MAX;
         assert_bad_input_is_atomic(invalid, 100.0, 50.0, 0.0, -550.0);
 
+        let mut invalid = pair();
+        invalid.max_r95_m = MAX_TRACK_R95_M + 1.0;
+        assert_bad_input_is_atomic(invalid, 100.0, 50.0, 0.0, -550.0);
+
         assert_bad_input_is_atomic(pair(), f64::MAX, 50.0, 0.0, -550.0);
         assert_bad_input_is_atomic(pair(), 100.0, f64::MAX, 0.0, -550.0);
         assert_bad_input_is_atomic(pair(), 100.0, 50.0, f64::MAX, -550.0);
@@ -1966,5 +2205,56 @@ mod tests {
         assert_eq!(out_lat, [303]);
         assert_eq!(out_lon, [404]);
         assert_eq!(out_time, [505]);
+    }
+
+    // Mutation killed: treat an exactly-full supported track slice as over capacity.
+    // REQ: OA-RWY-015
+    #[test]
+    fn exactly_maximum_track_count_is_admitted() {
+        let addresses: [u32; MAX_TRACKS] =
+            core::array::from_fn(|index| u32::try_from(index + 1).expect("bounded test address"));
+        let east_m = [0.0; MAX_TRACKS];
+        let north_m = [-550.0; MAX_TRACKS];
+        let velocity_east_mps = [0.0; MAX_TRACKS];
+        let velocity_north_mps = [0.0; MAX_TRACKS];
+        let r95_m = [0.0; MAX_TRACKS];
+        let lat_e7 = [100; MAX_TRACKS];
+        let lon_e7 = [200; MAX_TRACKS];
+        let mut out_addr = [0; MAX_TRACKS];
+        let mut out_pair = [pair().id; MAX_TRACKS];
+        let mut out_severity = [FinalSeverity::Caution; MAX_TRACKS];
+        let mut out_lat = [0; MAX_TRACKS];
+        let mut out_lon = [0; MAX_TRACKS];
+        let mut out_time = [0; MAX_TRACKS];
+        let result = update(
+            pair(),
+            &mut FinalMonitorState::new(),
+            1_000_000_000,
+            1_000_000_000,
+            PredictedTracks {
+                addresses: &addresses,
+                east_m: &east_m,
+                north_m: &north_m,
+                velocity_east_mps: &velocity_east_mps,
+                velocity_north_mps: &velocity_north_mps,
+                r95_m: &r95_m,
+                lat_e7: &lat_e7,
+                lon_e7: &lon_e7,
+            },
+            FinalAlertBuffer {
+                addresses: &mut out_addr,
+                pair_ids: &mut out_pair,
+                severity: &mut out_severity,
+                lat_e7: &mut out_lat,
+                lon_e7: &mut out_lon,
+                seconds_to_entry_milli: &mut out_time,
+            },
+        )
+        .expect("the documented maximum track count is valid");
+        assert_eq!(
+            result.examined,
+            u16::try_from(MAX_TRACKS).expect("public track cap fits the result field")
+        );
+        assert!(result.due);
     }
 }

@@ -4917,8 +4917,7 @@ mod transaction_tests {
         )
         .expect("provider can independently construct a 32-row service");
         let error = regional_attach_msaw(&mut too_wide, over_service)
-            .err()
-            .expect("one final row plus 32 MSAW rows exceeds shared capacity");
+            .expect_err("one final row plus 32 MSAW rows exceeds shared capacity");
         assert!(error.contains("open-alert capacity 32 exceeds composed profile allowance 31"));
         assert_eq!(too_wide.frame_sequence, 0);
         assert!(!too_wide.failed);
