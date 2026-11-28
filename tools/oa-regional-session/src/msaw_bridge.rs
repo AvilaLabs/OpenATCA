@@ -874,8 +874,14 @@ mod tests {
 
         let (mut fits, service) = attach_with_open_limit(128);
         assert!(crate::runtime::regional_attach_msaw(&mut fits, service).is_ok());
-        let frame = crate::runtime::regional_step(&mut fits, &bulk_receipt(1, 128))
-            .expect("accepted retained-open limit evaluates a real 128-row frame");
+        let mut frame = None;
+        for second in 1..=4 {
+            frame = Some(
+                crate::runtime::regional_step(&mut fits, &bulk_receipt(second, 128))
+                    .expect("accepted retained-open limit processes its real confirmation scans"),
+            );
+        }
+        let frame = frame.expect("four provider scans produce a confirmed frame");
         assert!(frame.surveillance.raster_rendered);
         assert_eq!(frame.surveillance.tracks.len(), 128);
         let accepted_msaw = frame.surveillance.msaw.as_ref().unwrap();

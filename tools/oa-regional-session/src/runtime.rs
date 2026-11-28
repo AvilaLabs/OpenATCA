@@ -1161,7 +1161,6 @@ fn validate_alert_composition(
         .checked_mul(oa_display::core::alert_markers::ALERT_TEXTS_PER_MARKER)
         .and_then(|count| count.checked_add(family_text_rows))
         .and_then(|count| count.checked_add(surveillance::STATUS_AUX_TEXT_ROWS))
-        .and_then(|count| count.checked_add(profile.max_open_alerts))
         .ok_or("profile alert text reservation overflow")?;
     if texts_needed > texts_reserved {
         return Err("composed alert/status text rows exceed shared reservation".into());
@@ -1182,12 +1181,6 @@ fn validate_alert_composition(
         .checked_mul(oa_display::core::alert_markers::ALERT_TEXT_BYTES_PER_MARKER)
         .and_then(|bytes| bytes.checked_add(family_text_bytes))
         .and_then(|bytes| bytes.checked_add(surveillance::STATUS_AUX_TEXT_BYTES))
-        .and_then(|bytes| {
-            profile
-                .max_open_alerts
-                .checked_mul(2)
-                .and_then(|open_bytes| bytes.checked_add(open_bytes))
-        })
         .ok_or("profile alert text byte reservation overflow")?;
     if bytes_needed > bytes_reserved {
         return Err("composed alert/status text bytes exceed shared reservation".into());
