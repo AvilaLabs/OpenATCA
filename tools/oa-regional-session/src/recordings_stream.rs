@@ -1032,198 +1032,12 @@ pub(crate) fn stream_normalized_events_with_limit(
     if !crate::input::is_valid_centre_code(&centre) {
         return Err("normalization centre must be a valid padded ASCII alphanumeric code".into());
     }
-    let mut sequence_starts = [0u64; 2];
-    let mut pending: Vec<(
-        crate::input::NormalizedEvent,
-        crate::recordings::EventProvenance,
-    )> = Vec::new();
-    pending
-        .try_reserve_exact(receipt_group_limit)
-        .map_err(|_| "normalized event group allocation refused")?;
-    let mut pending_heap = BinaryHeap::new();
-    pending_heap
-        .try_reserve(receipt_group_limit)
-        .map_err(|_| "normalized watermark queue allocation refused")?;
-    let mut pending_arrival_order = 0u64;
-    let mut normalized_sequences = [0u64; 5];
-    let mut quality_cache = oa_track::adsb::AdsbQualityCache::default();
-    let mut counts = NormalizedAdapterCounts::default();
+    let mut normalizer =
+        NormalizedStreamState::new(receive_window_ns, centre, receipt_group_limit, visit)?;
     let recording = stream_oaf_segments_in_window(inputs, receive_window_ns, |frame| {
-        let mut input_counts = crate::recordings_reader::RecordingCounts::default();
-        input_counts.total_frames = 1;
-        input_counts.total_decoded_bytes = u64::try_from(frame.payload.len())
-            .map_err(|_| "message payload byte count overflow")?;
-        input_counts.total_bytes = input_counts.total_decoded_bytes;
-        let adapted =
-            crate::recordings::adapt_recorded_frames_with_sequence_starts_and_quality_limit(
-                std::slice::from_ref(&frame),
-                input_counts,
-                100_000,
-                centre,
-                sequence_starts,
-                receipt_group_limit,
-                &mut quality_cache,
-            )
-            .map_err(|error| format!("normalized adapter refused message: {error:?}"))?;
-        let source_index = match frame.source {
-            RecordingSource::Adsb => 0,
-            RecordingSource::Sfdps => 1,
-        };
-        let source_counts = counts
-            .source_counts
-            .get_mut(source_index)
-            .ok_or("normalized source index invariant")?;
-        source_counts.message_frames = source_counts
-            .message_frames
-            .checked_add(1)
-            .ok_or("source message-frame count overflow")?;
-        source_counts.candidate_events_before_receipt_filter = source_counts
-            .candidate_events_before_receipt_filter
-            .checked_add(adapted.counts.candidate_events_before_receipt_filter)
-            .ok_or("source candidate-event count overflow")?;
-        source_counts.max_candidate_events_per_frame = source_counts
-            .max_candidate_events_per_frame
-            .max(adapted.counts.candidate_events_before_receipt_filter);
-        source_counts.receipt_groups_over_capacity = source_counts
-            .receipt_groups_over_capacity
-            .checked_add(adapted.counts.receipt_groups_over_capacity)
-            .ok_or("source over-capacity-group count overflow")?;
-        source_counts.receipt_group_events_refused = source_counts
-            .receipt_group_events_refused
-            .checked_add(adapted.counts.receipt_group_events_refused)
-            .ok_or("source refused-event count overflow")?;
-        source_counts.adsb_quality_cache_capacity_refused = source_counts
-            .adsb_quality_cache_capacity_refused
-            .checked_add(adapted.counts.adsb_quality_cache_capacity_refused)
-            .ok_or("ADS-B quality-cache capacity count overflow")?;
-        source_counts.quarantine_rows = source_counts
-            .quarantine_rows
-            .checked_add(
-                u64::try_from(adapted.quarantine.len())
-                    .map_err(|_| "source quarantine row count overflow")?,
-            )
-            .ok_or("source quarantine row count overflow")?;
-        for stats in &adapted.quarantine_stats {
-            for (total, count) in source_counts
-                .quarantine_reason_counts
-                .iter_mut()
-                .zip(stats.reason_counts)
-            {
-                *total = total
-                    .checked_add(count)
-                    .ok_or("source quarantine reason count overflow")?;
-            }
-        }
-        accumulate_adapter_diagnostics(source_counts, &adapted.counts, source_index)?;
-        counts.quarantine_rows = counts
-            .quarantine_rows
-            .checked_add(
-                u64::try_from(adapted.quarantine.len())
-                    .map_err(|_| "quarantine row count overflow")?,
-            )
-            .ok_or("quarantine row count overflow")?;
-        counts.manual_handling_required = counts
-            .manual_handling_required
-            .checked_add(
-                u64::try_from(
-                    adapted
-                        .quarantine
-                        .iter()
-                        .filter(|row| row.manual_handling_required)
-                        .count(),
-                )
-                .map_err(|_| "manual-handling count overflow")?,
-            )
-            .ok_or("manual-handling count overflow")?;
-        counts.unprocessed_frames = counts
-            .unprocessed_frames
-            .checked_add(adapted.counts.unprocessed_frames)
-            .ok_or("unprocessed frame count overflow")?;
-        for (event, provenance) in adapted.events.into_iter().zip(adapted.provenance) {
-            let sequence_index = match event.source {
-                crate::input::SourceKind::Surveillance => Some(0),
-                crate::input::SourceKind::Flight | crate::input::SourceKind::Route => Some(1),
-                crate::input::SourceKind::Weather | crate::input::SourceKind::Adaptation => None,
-            };
-            if let Some(index) = sequence_index {
-                let sequence_start = sequence_starts
-                    .get_mut(index)
-                    .ok_or("normalized sequence source index invariant")?;
-                *sequence_start = (*sequence_start).max(
-                    event
-                        .sequence
-                        .checked_add(1)
-                        .ok_or("normalized sequence overflow")?,
-                );
-            }
-            let archive_adsb_window = (frame.source == RecordingSource::Adsb
-                && frame.mono_ns.is_none())
-            .then_some(receive_window_ns)
-            .flatten();
-            if let Some((start, end)) = archive_adsb_window {
-                if event.source_ns < start || event.source_ns >= end {
-                    source_counts.outside_window_events = source_counts
-                        .outside_window_events
-                        .checked_add(1)
-                        .ok_or("outside-window row count overflow")?;
-                    if event.source_ns < start {
-                        source_counts.adsb_warmup_events = source_counts
-                            .adsb_warmup_events
-                            .checked_add(1)
-                            .ok_or("ADS-B warmup row count overflow")?;
-                    }
-                    continue;
-                }
-            }
-            counts.normalized_events = counts
-                .normalized_events
-                .checked_add(1)
-                .ok_or("normalized event count overflow")?;
-            if counts.normalized_events > 10_000_000 {
-                return Err("normalized event full-day cap exceeded".into());
-            }
-            if pending_heap.len() >= MAX_PENDING_NORMALIZED_EVENTS {
-                return Err("normalized watermark queue capacity exceeded".into());
-            }
-            pending_heap
-                .try_reserve(1)
-                .map_err(|_| "normalized watermark queue allocation refused")?;
-            let arrival_order = pending_arrival_order;
-            pending_arrival_order = pending_arrival_order
-                .checked_add(1)
-                .ok_or("normalized event order overflow")?;
-            pending_heap.push(Reverse(PendingNormalizedEvent {
-                event,
-                provenance,
-                arrival_order,
-            }));
-        }
-        flush_watermarked_groups(
-            &mut pending_heap,
-            frame.receipt_ns,
-            receipt_group_limit,
-            &mut pending,
-            &mut normalized_sequences,
-            &mut visit,
-        )?;
-        Ok(())
+        normalizer.process_frame(frame)
     })?;
-    flush_watermarked_groups(
-        &mut pending_heap,
-        i64::MAX,
-        receipt_group_limit,
-        &mut pending,
-        &mut normalized_sequences,
-        &mut visit,
-    )?;
-    Ok(NormalizedStreamSummary {
-        recording,
-        normalized_events: counts.normalized_events,
-        quarantine_rows: counts.quarantine_rows,
-        manual_handling_required: counts.manual_handling_required,
-        unprocessed_frames: counts.unprocessed_frames,
-        source_counts: counts.source_counts,
-    })
+    normalizer.finish(recording)
 }
 
 fn accumulate_adapter_diagnostics(
@@ -1307,6 +1121,275 @@ struct NormalizedAdapterCounts {
     manual_handling_required: u64,
     unprocessed_frames: u64,
     source_counts: [NormalizedInputCounts; 2],
+}
+
+struct NormalizedStreamState<F> {
+    receive_window_ns: Option<(i64, i64)>,
+    centre: [u8; 4],
+    receipt_group_limit: usize,
+    sequence_starts: [u64; 2],
+    pending_group: Vec<(
+        crate::input::NormalizedEvent,
+        crate::recordings::EventProvenance,
+    )>,
+    pending_heap: BinaryHeap<Reverse<PendingNormalizedEvent>>,
+    pending_arrival_order: u64,
+    normalized_sequences: [u64; 5],
+    quality_cache: oa_track::adsb::AdsbQualityCache,
+    counts: NormalizedAdapterCounts,
+    visit: F,
+}
+
+impl<F> NormalizedStreamState<F>
+where
+    F: FnMut(
+        crate::input::NormalizedEvent,
+        crate::recordings::EventProvenance,
+    ) -> Result<(), String>,
+{
+    fn new(
+        receive_window_ns: Option<(i64, i64)>,
+        centre: [u8; 4],
+        receipt_group_limit: usize,
+        visit: F,
+    ) -> Result<Self, String> {
+        let mut pending_group = Vec::new();
+        pending_group
+            .try_reserve_exact(receipt_group_limit)
+            .map_err(|_| "normalized event group allocation refused")?;
+        let mut pending_heap = BinaryHeap::new();
+        pending_heap
+            .try_reserve(receipt_group_limit)
+            .map_err(|_| "normalized watermark queue allocation refused")?;
+        Ok(Self {
+            receive_window_ns,
+            centre,
+            receipt_group_limit,
+            sequence_starts: [0; 2],
+            pending_group,
+            pending_heap,
+            pending_arrival_order: 0,
+            normalized_sequences: [0; 5],
+            quality_cache: oa_track::adsb::AdsbQualityCache::default(),
+            counts: NormalizedAdapterCounts::default(),
+            visit,
+        })
+    }
+
+    fn process_frame(&mut self, frame: RecordedFrame) -> Result<(), String> {
+        let mut input_counts = crate::recordings_reader::RecordingCounts::default();
+        input_counts.total_frames = 1;
+        input_counts.total_decoded_bytes = u64::try_from(frame.payload.len())
+            .map_err(|_| "message payload byte count overflow")?;
+        input_counts.total_bytes = input_counts.total_decoded_bytes;
+        let adapted =
+            crate::recordings::adapt_recorded_frames_with_sequence_starts_and_quality_limit(
+                std::slice::from_ref(&frame),
+                input_counts,
+                100_000,
+                self.centre,
+                self.sequence_starts,
+                self.receipt_group_limit,
+                &mut self.quality_cache,
+            )
+            .map_err(|error| format!("normalized adapter refused message: {error:?}"))?;
+        let source_index = match frame.source {
+            RecordingSource::Adsb => 0,
+            RecordingSource::Sfdps => 1,
+        };
+        self.accumulate_adaptation(source_index, &adapted)?;
+        self.queue_adapted_events(&frame, adapted.events.into_iter().zip(adapted.provenance))?;
+        self.flush_to(frame.receipt_ns)
+    }
+
+    fn accumulate_adaptation(
+        &mut self,
+        source_index: usize,
+        adapted: &crate::recordings::RecordedAdaptation,
+    ) -> Result<(), String> {
+        let source_counts = self
+            .counts
+            .source_counts
+            .get_mut(source_index)
+            .ok_or("normalized source index invariant")?;
+        source_counts.message_frames = source_counts
+            .message_frames
+            .checked_add(1)
+            .ok_or("source message-frame count overflow")?;
+        source_counts.candidate_events_before_receipt_filter = source_counts
+            .candidate_events_before_receipt_filter
+            .checked_add(adapted.counts.candidate_events_before_receipt_filter)
+            .ok_or("source candidate-event count overflow")?;
+        source_counts.max_candidate_events_per_frame = source_counts
+            .max_candidate_events_per_frame
+            .max(adapted.counts.candidate_events_before_receipt_filter);
+        source_counts.receipt_groups_over_capacity = source_counts
+            .receipt_groups_over_capacity
+            .checked_add(adapted.counts.receipt_groups_over_capacity)
+            .ok_or("source over-capacity-group count overflow")?;
+        source_counts.receipt_group_events_refused = source_counts
+            .receipt_group_events_refused
+            .checked_add(adapted.counts.receipt_group_events_refused)
+            .ok_or("source refused-event count overflow")?;
+        source_counts.adsb_quality_cache_capacity_refused = source_counts
+            .adsb_quality_cache_capacity_refused
+            .checked_add(adapted.counts.adsb_quality_cache_capacity_refused)
+            .ok_or("ADS-B quality-cache capacity count overflow")?;
+        source_counts.quarantine_rows = source_counts
+            .quarantine_rows
+            .checked_add(
+                u64::try_from(adapted.quarantine.len())
+                    .map_err(|_| "source quarantine row count overflow")?,
+            )
+            .ok_or("source quarantine row count overflow")?;
+        for stats in &adapted.quarantine_stats {
+            for (total, count) in source_counts
+                .quarantine_reason_counts
+                .iter_mut()
+                .zip(stats.reason_counts)
+            {
+                *total = total
+                    .checked_add(count)
+                    .ok_or("source quarantine reason count overflow")?;
+            }
+        }
+        accumulate_adapter_diagnostics(source_counts, &adapted.counts, source_index)?;
+        self.counts.quarantine_rows = self
+            .counts
+            .quarantine_rows
+            .checked_add(
+                u64::try_from(adapted.quarantine.len())
+                    .map_err(|_| "quarantine row count overflow")?,
+            )
+            .ok_or("quarantine row count overflow")?;
+        self.counts.manual_handling_required = self
+            .counts
+            .manual_handling_required
+            .checked_add(
+                u64::try_from(
+                    adapted
+                        .quarantine
+                        .iter()
+                        .filter(|row| row.manual_handling_required)
+                        .count(),
+                )
+                .map_err(|_| "manual-handling count overflow")?,
+            )
+            .ok_or("manual-handling count overflow")?;
+        self.counts.unprocessed_frames = self
+            .counts
+            .unprocessed_frames
+            .checked_add(adapted.counts.unprocessed_frames)
+            .ok_or("unprocessed frame count overflow")?;
+        Ok(())
+    }
+
+    fn queue_adapted_events(
+        &mut self,
+        frame: &RecordedFrame,
+        events: impl Iterator<
+            Item = (
+                crate::input::NormalizedEvent,
+                crate::recordings::EventProvenance,
+            ),
+        >,
+    ) -> Result<(), String> {
+        let source_index = match frame.source {
+            RecordingSource::Adsb => 0,
+            RecordingSource::Sfdps => 1,
+        };
+        for (event, provenance) in events {
+            let sequence_index = match event.source {
+                crate::input::SourceKind::Surveillance => Some(0),
+                crate::input::SourceKind::Flight | crate::input::SourceKind::Route => Some(1),
+                crate::input::SourceKind::Weather | crate::input::SourceKind::Adaptation => None,
+            };
+            if let Some(index) = sequence_index {
+                let sequence_start = self
+                    .sequence_starts
+                    .get_mut(index)
+                    .ok_or("normalized sequence source index invariant")?;
+                *sequence_start = (*sequence_start).max(
+                    event
+                        .sequence
+                        .checked_add(1)
+                        .ok_or("normalized sequence overflow")?,
+                );
+            }
+            let archive_adsb_window = (frame.source == RecordingSource::Adsb
+                && frame.mono_ns.is_none())
+            .then_some(self.receive_window_ns)
+            .flatten();
+            if let Some((start, end)) = archive_adsb_window {
+                if event.source_ns < start || event.source_ns >= end {
+                    let source_counts = self
+                        .counts
+                        .source_counts
+                        .get_mut(source_index)
+                        .ok_or("normalized source index invariant")?;
+                    source_counts.outside_window_events = source_counts
+                        .outside_window_events
+                        .checked_add(1)
+                        .ok_or("outside-window row count overflow")?;
+                    if event.source_ns < start {
+                        source_counts.adsb_warmup_events = source_counts
+                            .adsb_warmup_events
+                            .checked_add(1)
+                            .ok_or("ADS-B warmup row count overflow")?;
+                    }
+                    continue;
+                }
+            }
+            self.counts.normalized_events = self
+                .counts
+                .normalized_events
+                .checked_add(1)
+                .ok_or("normalized event count overflow")?;
+            if self.counts.normalized_events > 10_000_000 {
+                return Err("normalized event full-day cap exceeded".into());
+            }
+            if self.pending_heap.len() >= MAX_PENDING_NORMALIZED_EVENTS {
+                return Err("normalized watermark queue capacity exceeded".into());
+            }
+            self.pending_heap
+                .try_reserve(1)
+                .map_err(|_| "normalized watermark queue allocation refused")?;
+            let arrival_order = self.pending_arrival_order;
+            self.pending_arrival_order = self
+                .pending_arrival_order
+                .checked_add(1)
+                .ok_or("normalized event order overflow")?;
+            self.pending_heap.push(Reverse(PendingNormalizedEvent {
+                event,
+                provenance,
+                arrival_order,
+            }));
+        }
+        Ok(())
+    }
+
+    fn flush_to(&mut self, watermark_ns: i64) -> Result<(), String> {
+        flush_watermarked_groups(
+            &mut self.pending_heap,
+            watermark_ns,
+            self.receipt_group_limit,
+            &mut self.pending_group,
+            &mut self.normalized_sequences,
+            &mut self.visit,
+        )
+    }
+
+    fn finish(mut self, recording: StreamSummary) -> Result<NormalizedStreamSummary, String> {
+        self.flush_to(i64::MAX)?;
+        Ok(NormalizedStreamSummary {
+            recording,
+            normalized_events: self.counts.normalized_events,
+            quarantine_rows: self.counts.quarantine_rows,
+            manual_handling_required: self.counts.manual_handling_required,
+            unprocessed_frames: self.counts.unprocessed_frames,
+            source_counts: self.counts.source_counts,
+        })
+    }
 }
 
 fn flush_normalized_group(
@@ -2050,8 +2133,10 @@ mod tests {
                 ),
             ]
         );
-        let serialized = crate::recordings::serialize_recorded_events(&normalized_events)
-            .map_err(|error| std::io::Error::other(format!("serialize normalized rows: {error:?}")))?;
+        let serialized =
+            crate::recordings::serialize_recorded_events(&normalized_events).map_err(|error| {
+                std::io::Error::other(format!("serialize normalized rows: {error:?}"))
+            })?;
         let reparsed: Vec<_> = serialized
             .lines()
             .skip(1)
@@ -2140,8 +2225,10 @@ mod tests {
         }));
         assert_ne!(groups[0].0, groups[1].0);
 
-        let serialized = crate::recordings::serialize_recorded_events(&events)
-            .map_err(|error| std::io::Error::other(format!("serialize flight events: {error:?}")))?;
+        let serialized =
+            crate::recordings::serialize_recorded_events(&events).map_err(|error| {
+                std::io::Error::other(format!("serialize flight events: {error:?}"))
+            })?;
         let reparsed: Vec<_> = serialized
             .lines()
             .skip(1)
