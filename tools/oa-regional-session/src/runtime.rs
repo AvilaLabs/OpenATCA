@@ -1266,8 +1266,22 @@ fn execute(
                 None => return Err(format!("surveillance stage invariant: {}", error.message())),
             },
         }
-        let flight_capacity_refusal =
+        let mut flight_capacity_refusal =
             flight::flight_table_capacity_refusal(&runtime.flights, event);
+        let mut pending_flight_key = None;
+        if reasons == 0 {
+            if flight_capacity_refusal {
+                // A full core table can contain terminal rows that are still eligible for
+                // receipt-backed retirement. Reclaim only after all stages validate, then
+                // recheck the real core capacity before classifying this item as refused.
+                reclaim_retired_flight_keys(runtime, event.receipt_ns / 1_000_000)?;
+                flight_capacity_refusal =
+                    flight::flight_table_capacity_refusal(&runtime.flights, event);
+            }
+            if !flight_capacity_refusal {
+                pending_flight_key = preflight_flight_key(runtime, event)?;
+            }
+        }
         if flight_capacity_refusal {
             reasons |= REASON_RESOURCE_LIMIT;
         }
@@ -1306,7 +1320,6 @@ fn execute(
             continue;
         }
 
-        let pending_flight_key = preflight_flight_key(runtime, event)?;
         accept_runtime_item(
             runtime,
             event,
@@ -1987,6 +2000,25 @@ mod transaction_tests {
         .unwrap()
     }
 
+    fn runtime_with_flight_capacity(max_flights: usize) -> RegionalRuntime {
+        let model = synthetic_model().unwrap();
+        let snapshot = oa_airspace::core::snapshot::encode(&model).unwrap();
+        let mut profile = DEFAULT_REGIONAL_RUN_PROFILE;
+        profile.max_flights = max_flights;
+        regional_new_with_profile(
+            model,
+            oa_sha256::sha256(&snapshot),
+            *b"ZAU1",
+            SurveillanceConfig {
+                centre_lat_e7: 410_000_000,
+                centre_lon_e7: -870_000_000,
+                range_nm: 180.0,
+            },
+            profile,
+        )
+        .unwrap()
+    }
+
     fn seeded_claim_frame(
         engine: &mut RegionalRuntime,
         claims: &[(u128, u32, [u8; 4])],
@@ -2073,7 +2105,7 @@ mod transaction_tests {
 
     #[test]
     fn flight_view_key_capacity_refuses_before_a_second_plan_commit() {
-        let mut engine = runtime();
+        let mut engine = runtime_with_flight_capacity(1);
         let first = parse_event_line(
             "v1\t1000000000\t1000000000\t1\tFLIGHT\t00000000000000000000000000000001\tABC101\tZAU1\tFLIGHT\tPLAN\tPLAN00000001\t2",
         )
@@ -2087,13 +2119,11 @@ mod transaction_tests {
             },
         )
         .unwrap();
-        engine.profile.max_flights = 1;
-
         let second = parse_event_line(
             "v1\t2000000000\t2000000000\t2\tFLIGHT\t00000000000000000000000000000002\tABC102\tZAU1\tFLIGHT\tPLAN\tPLAN00000002\t2",
         )
         .unwrap();
-        assert!(regional_step(
+        let frame = regional_step(
             &mut engine,
             &ReceiptBatch {
                 receipt_ns: 2_000_000_000,
@@ -2101,17 +2131,35 @@ mod transaction_tests {
                 events: vec![second],
             },
         )
-        .is_err());
+        .unwrap();
         assert_eq!(flight::flight_driver_report(&engine.flights).flights, 1);
         assert_eq!(engine.known_flights.len(), 1);
+        assert_eq!(frame.quarantine.records.len(), 1);
+        assert_eq!(frame.quarantine.records[0].item_index, 0);
+        assert_eq!(
+            flight::flight_driver_report(&engine.flights).operations,
+            1,
+            "capacity refusal must not apply the second plan"
+        );
+        assert!(engine
+            .known_flights
+            .iter()
+            .any(|key| key.gufi == first.identity.flight_gufi));
+        assert!(!engine
+            .known_flights
+            .iter()
+            .any(|key| key.gufi == second.identity.flight_gufi));
+        assert_eq!(
+            flight::flight_driver_report(&engine.flights).retirements_consumed,
+            0
+        );
     }
 
     // Kills the preflight mutation that retained terminal core rows in the key ledger until
     // capacity refusal, despite the core's explicit retirement receipt path.
     #[test]
     fn terminal_full_key_is_retired_with_receipt_before_reusing_view_capacity() {
-        let mut engine = runtime();
-        engine.profile.max_flights = 1;
+        let mut engine = runtime_with_flight_capacity(1);
         let first = parse_event_line(
             "v1\t1000000000\t1000000000\t1\tFLIGHT\t00000000000000000000000000000001\tABC101\tZAU1\tFLIGHT\tPLAN\tPLAN00000001\t2",
         )
@@ -2141,8 +2189,31 @@ mod transaction_tests {
         let retirements_before_capacity_reuse =
             flight::flight_driver_report(&engine.flights).retirements_consumed;
 
+        let invalid_second = parse_event_line(
+            "v1\t3000000000\t3000000000\t2\tFLIGHT\t00000000000000000000000000000002\tABC102\tZAU1\tFLIGHT\tPLAN\tPLAN00000002\t2",
+        )
+        .unwrap();
+        let invalid_frame = regional_step(
+            &mut engine,
+            &ReceiptBatch {
+                receipt_ns: invalid_second.receipt_ns,
+                source_clock_regressions: 0,
+                events: vec![invalid_second],
+            },
+        )
+        .unwrap();
+        assert_eq!(invalid_frame.quarantine.records.len(), 1);
+        assert_eq!(
+            flight::flight_driver_report(&engine.flights).retirements_consumed,
+            0
+        );
+        assert!(engine
+            .known_flights
+            .iter()
+            .any(|key| key.gufi == first.identity.flight_gufi));
+
         let second = parse_event_line(
-            "v1\t3000000000\t3000000000\t3\tFLIGHT\t00000000000000000000000000000002\tABC102\tZAU1\tFLIGHT\tPLAN\tPLAN00000002\t2",
+            "v1\t4000000000\t4000000000\t3\tFLIGHT\t00000000000000000000000000000002\tABC102\tZAU1\tFLIGHT\tPLAN\tPLAN00000002\t2",
         )
         .unwrap();
         regional_step(
@@ -2161,6 +2232,102 @@ mod transaction_tests {
             report.retirements_consumed,
             retirements_before_capacity_reuse + 1
         );
+        assert!(engine
+            .known_flights
+            .iter()
+            .any(|key| key.gufi == second.identity.flight_gufi));
+        assert!(!engine
+            .known_flights
+            .iter()
+            .any(|key| key.gufi == first.identity.flight_gufi));
+
+        let second_complete = parse_event_line(
+            "v1\t5000000000\t5000000000\t4\tFLIGHT\t00000000000000000000000000000002\tABC102\tZAU1\tFLIGHT\tCOMPLETE",
+        )
+        .unwrap();
+        regional_step(
+            &mut engine,
+            &ReceiptBatch {
+                receipt_ns: second_complete.receipt_ns,
+                source_clock_regressions: 0,
+                events: vec![second_complete],
+            },
+        )
+        .unwrap();
+        let third = parse_event_line(
+            "v1\t6000000000\t6000000000\t5\tFLIGHT\t00000000000000000000000000000003\tABC103\tZAU1\tFLIGHT\tPLAN\tPLAN00000003\t2",
+        )
+        .unwrap();
+        regional_step(
+            &mut engine,
+            &ReceiptBatch {
+                receipt_ns: third.receipt_ns,
+                source_clock_regressions: 0,
+                events: vec![third],
+            },
+        )
+        .unwrap();
+        let report = flight::flight_driver_report(&engine.flights);
+        assert_eq!(report.flights, 1);
+        assert_eq!(report.retirements_consumed, 2);
+        assert_eq!(engine.known_flights.len(), 1);
+        assert!(engine
+            .known_flights
+            .iter()
+            .any(|key| key.gufi == third.identity.flight_gufi));
+        assert!(!engine
+            .known_flights
+            .iter()
+            .any(|key| key.gufi == second.identity.flight_gufi));
+    }
+
+    #[test]
+    fn cancelled_full_key_is_retired_before_capacity_refill() {
+        let mut engine = runtime_with_flight_capacity(1);
+        let first = parse_event_line(
+            "v1\t1000000000\t1000000000\t1\tFLIGHT\t00000000000000000000000000000001\tABC101\tZAU1\tFLIGHT\tPLAN\tPLAN00000001\t2",
+        )
+        .unwrap();
+        regional_step(
+            &mut engine,
+            &ReceiptBatch {
+                receipt_ns: first.receipt_ns,
+                source_clock_regressions: 0,
+                events: vec![first],
+            },
+        )
+        .unwrap();
+        let cancel = parse_event_line(
+            "v1\t2000000000\t2000000000\t2\tFLIGHT\t00000000000000000000000000000001\tABC101\tZAU1\tFLIGHT\tCANCEL",
+        )
+        .unwrap();
+        regional_step(
+            &mut engine,
+            &ReceiptBatch {
+                receipt_ns: cancel.receipt_ns,
+                source_clock_regressions: 0,
+                events: vec![cancel],
+            },
+        )
+        .unwrap();
+        let second = parse_event_line(
+            "v1\t3000000000\t3000000000\t3\tFLIGHT\t00000000000000000000000000000002\tABC102\tZAU1\tFLIGHT\tPLAN\tPLAN00000002\t2",
+        )
+        .unwrap();
+        regional_step(
+            &mut engine,
+            &ReceiptBatch {
+                receipt_ns: second.receipt_ns,
+                source_clock_regressions: 0,
+                events: vec![second],
+            },
+        )
+        .unwrap();
+
+        let report = flight::flight_driver_report(&engine.flights);
+        assert_eq!(report.flights, 1);
+        assert_eq!(report.retirements_consumed, 1);
+        assert_eq!(engine.known_flights.len(), 1);
         assert!(engine
             .known_flights
             .iter()
