@@ -203,9 +203,8 @@ fn required_text_width_px(text: &crate::core::text::TextBuf) -> Result<u32, Disp
         return Err(bad_alert("MSAW count header exceeds its fixed text buffer"));
     }
     let subpixel = i64::from(crate::core::project::SUBPIXEL);
-    let width16 = i64::try_from(text_width_units(text_str(text).chars().count()))
-        .ok()
-        .and_then(|width| width.checked_mul(i64::from(ALERT_TEXT_SIZE)))
+    let width16 = i64::from(text_width_units(text_str(text).chars().count()))
+        .checked_mul(i64::from(ALERT_TEXT_SIZE))
         .and_then(|width| width.checked_mul(subpixel))
         .and_then(|width| width.checked_div(i64::from(CAP_HEIGHT)))
         .ok_or(DisplayError::TooLarge {
