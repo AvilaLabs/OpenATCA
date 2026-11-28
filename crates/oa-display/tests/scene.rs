@@ -409,7 +409,7 @@ fn the_map_draws_boundaries_airways_symbols_rings_and_legend_in_their_colours() 
     assert!(named("ZAU HIGH", pal::ARTCC_HIGH) && named("ZAU LOW", pal::ARTCC_LOW));
     assert!(named("NEIGHBOUR HIGH", pal::NEIGHBOUR_HIGH));
     assert!(named("NEIGHBOUR LOW", pal::NEIGHBOUR_LOW));
-    assert!(t.contains(&"HIDDEN: NONE"));
+    assert!(t.contains(&"HIDDEN NM: NONE"));
 
     // The picture: the south-east own HIGH vertex is a HIGH pixel, and the own boundary is two
     // pixels wide there (a vertical edge: two columns).
@@ -437,7 +437,9 @@ fn detail_depends_on_range_with_configurable_thresholds_and_the_legend_says_what
     // for the VOR and the airport with a coded approach, which remain drawn.
     assert_eq!((st.fixes, st.navaids, st.airports, st.labels), (0, 1, 1, 2));
     let t = texts(&l);
-    assert!(t.contains(&"HIDDEN: FIXES>40NM, TERMINAL WPTS>20NM, RWY/LOC>15NM, NON-IFR APTS>40NM, NDB/DME/TACAN>40NM, LABELS>40NM"));
+    assert!(t.contains(
+        &"HIDDEN NM:FIX>40, TERM>20, RWY/LOC>15, NON-IFR>40, NDB/DME/TACAN>40, LABEL>40"
+    ));
     assert!(t.contains(&"DPA") && t.contains(&"KORD"));
     // Beyond the wider label range those two go as well, and the line says so.
     let (l, st, _) = build(&m, 120.0, |_| {});
@@ -462,7 +464,7 @@ fn detail_depends_on_range_with_configurable_thresholds_and_the_legend_says_what
     assert_eq!((st.fixes, st.navaids, st.airports, st.labels), (2, 2, 2, 2));
     assert!(texts(&l)
         .iter()
-        .any(|t| t.ends_with("RWY/LOC>15NM, LABELS>70NM")));
+        .any(|t| t.ends_with("RWY/LOC>15, LABEL>70")));
     let (_, st, _) = build(&m, 80.0, |v| v.fix_max_nm = 79.0);
     assert_eq!(st.fixes, 0);
     let (_, st, _) = build(&m, 80.0, |v| v.fix_max_nm = 80.0);
@@ -479,7 +481,19 @@ fn every_layer_can_be_switched_off_and_the_legend_says_so() {
             all_open(v);
             assert!(layer_set(&mut v.layers, name, false));
         });
-        let want = format!("HIDDEN: {} OFF", name.to_ascii_uppercase());
+        let label = match name {
+            "own-boundary" => "OWN BOUNDARY",
+            "neighbour-boundaries" => "NEIGHBOUR BOUNDARY",
+            "high-airways" => "HIGH AIRWAYS",
+            "low-airways" => "LOW AIRWAYS",
+            "vors" => "VORS",
+            "airports" => "AIRPORTS",
+            "fixes" => "FIXES",
+            "labels" => "LABELS",
+            "rings" => "RINGS",
+            other => panic!("unexpected layer {other}"),
+        };
+        let want = format!("HIDDEN NM:;OFF:{label}");
         assert!(
             texts(&l).contains(&want.as_str()),
             "{want} not in {:?}",
@@ -517,7 +531,7 @@ fn every_layer_can_be_switched_off_and_the_legend_says_so() {
         layer_set(&mut v.layers, "fixes", false);
         layer_set(&mut v.layers, "rings", false);
     });
-    assert!(texts(&l).contains(&"HIDDEN: FIXES OFF, RINGS OFF"));
+    assert!(texts(&l).contains(&"HIDDEN NM:;OFF:FIXES, RINGS"));
 }
 
 // REQ: OA-DSP-026
@@ -876,7 +890,7 @@ fn terminal_waypoints_runways_and_localizers_follow_the_display_range_not_the_di
     let (l, _, _) = build(&m, 30.0, |_| {});
     assert!(texts(&l)
         .iter()
-        .any(|t| t.starts_with("HIDDEN: TERMINAL WPTS>20NM, RWY/LOC>15NM")));
+        .any(|t| t.starts_with("HIDDEN NM:TERM>20, RWY/LOC>15")));
     let (_, st, _) = build(&m, 30.0, |v| {
         v.terminal_wpt_max_nm = 30.0;
         v.runway_max_nm = 30.0;
@@ -1461,7 +1475,7 @@ fn the_hand_built_map_renders_to_a_pinned_hash() {
     // the right edge by a bar.
     assert_eq!(
         to_hex(&d),
-        "512d78c017fd4a704103ba5f7c1de14769e5ba70e26fd97df022190cdc2ab70d"
+        "04ded5ea84775dd45e4aaaa9964c2874748f855ecb978ec26b6d772d8fc89c17"
     );
 }
 
@@ -1692,8 +1706,7 @@ fn render_text(name: &str, size: &str) -> String {
 // REQ: OA-DSP-034
 #[test]
 fn a_legend_cut_by_a_narrow_screen_is_marked_and_given_whole_in_the_text_output() {
-    let hidden =
-        "HIDDEN: RWY/LOC>15NM, NON-IFR APTS>40NM, NDB/DME/TACAN>40NM, FIXES OFF, LABELS OFF";
+    let hidden = "HIDDEN NM:RWY/LOC>15, NON-IFR>40, NDB/DME/TACAN>40;OFF:FIXES, LABELS";
     let narrow = render_text("legend-narrow", "64x120");
     assert!(narrow.contains(hidden), "{narrow}");
     assert!(narrow.contains("RANGE 60 NM"), "{narrow}");
