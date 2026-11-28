@@ -467,6 +467,13 @@ fn measure(inject: bool, frames: i64, mut work: impl FnMut(i64)) -> Result<Count
     allocator::stop().ok_or("display window did not disarm cleanly")
 }
 
+fn msaw_fixture_projection() -> Result<oa_display::project::Projection, &'static str> {
+    let inset = oa_display::status_strip::regional_status_plan()
+        .map_err(|_| "MSAW status layout")?
+        .top_inset_px();
+    projection_new(ORD.0, ORD.1, 60.0, 640, 400, inset).map_err(|_| "MSAW projection")
+}
+
 pub(super) fn display_window(inject: bool) -> Result<DisplayEvidence, &'static str> {
     // Everything up to the first `measure` is initialisation (C1): not counted.
     let cfg = ReplayConfig {
@@ -949,8 +956,7 @@ pub(super) fn display_window(inject: bool) -> Result<DisplayEvidence, &'static s
     // Allocator witness for OA-DSP-077.
     // Current alert presentation, off-map/unlocated accounting and atomic capacity/identity
     // refusals all execute inside the allocator window; only startup creates these buffers.
-    let msaw_projection =
-        projection_new(ORD.0, ORD.1, 60.0, 640, 400, 160).map_err(|_| "MSAW projection")?;
+    let msaw_projection = msaw_fixture_projection()?;
     let mut msaw_list = list_new(ListCaps {
         lines: 0,
         rects: 0,
