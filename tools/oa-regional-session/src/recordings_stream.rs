@@ -1023,7 +1023,7 @@ pub(crate) fn stream_normalized_events_with_limit(
     receive_window_ns: Option<(i64, i64)>,
     centre: [u8; 4],
     profile: NormalizedStreamProfile,
-    mut visit: impl FnMut(
+    visit: impl FnMut(
         crate::input::NormalizedEvent,
         crate::recordings::EventProvenance,
     ) -> Result<(), String>,
@@ -1590,7 +1590,6 @@ where
         let normalized_sequences = &mut self.normalized_sequences;
         let visit = &mut self.visit;
         let counts = &mut self.counts;
-        let mut refuse_group = |group| record_oversized_receipt_group(counts, group);
         flush_watermarked_groups(
             pending_heap,
             watermark_ns,
@@ -1598,7 +1597,7 @@ where
             pending_group,
             normalized_sequences,
             visit,
-            &mut refuse_group,
+            counts,
         )
     }
 
@@ -1687,12 +1686,7 @@ fn flush_watermarked_groups(
         crate::input::NormalizedEvent,
         crate::recordings::EventProvenance,
     ) -> Result<(), String>,
-    refuse_oversized_group: &mut impl FnMut(
-        &[(
-            crate::input::NormalizedEvent,
-            crate::recordings::EventProvenance,
-        )],
-    ) -> Result<(), String>,
+    counts: &mut NormalizedAdapterCounts,
 ) -> Result<(), String> {
     while heap
         .peek()
@@ -1716,7 +1710,7 @@ fn flush_watermarked_groups(
             group.push((entry.event, entry.provenance));
         }
         if group.len() > receipt_group_limit {
-            refuse_oversized_group(group)?;
+            record_oversized_receipt_group(counts, group)?;
             group.clear();
         } else {
             flush_normalized_group(group, normalized_sequences, visit)?;
@@ -2566,8 +2560,7 @@ mod tests {
                 path: sfdps_second_path.clone(),
             },
         ];
-        let mut cursor = session_cursor_new(64)
-            .map_err(|error| std::io::Error::other(format!("cursor init: {error:?}")))?;
+        let mut cursor = session_cursor_new();
         let mut completed = Vec::new();
         let result = stream_normalized_events(&inputs, None, *b"ZAU1", |event, _| {
             if let Some(batch) = push_event(&mut cursor, event)
