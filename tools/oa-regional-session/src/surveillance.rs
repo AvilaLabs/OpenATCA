@@ -2714,6 +2714,7 @@ mod tests {
     fn position(receipt_ns: i64, source_ns: i64, address: u32, sequence: u64) -> NormalizedEvent {
         NormalizedEvent {
             receipt_ns,
+            input_receipt_ns: receipt_ns,
             source_ns,
             sequence,
             source_message_id: None,

@@ -242,6 +242,7 @@ fn event(
     }
     Ok(NormalizedEvent {
         receipt_ns: time.receipt_ns,
+        input_receipt_ns: time.receipt_ns,
         source_ns: time.source_ns,
         sequence: time.sequence,
         source_message_id: None,

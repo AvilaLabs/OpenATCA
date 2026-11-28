@@ -197,6 +197,9 @@ pub enum EventKind {
 /// session state. The reader rejects future source timestamps and source-clock regressions.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NormalizedEvent {
+    /// Exact receipt clock supplied by the source before an offline adapter applies its issue
+    /// cutoff ceiling. For ordinary normalized rows this equals `receipt_ns`.
+    pub input_receipt_ns: i64,
     pub receipt_ns: i64,
     pub source_ns: i64,
     pub sequence: u64,
@@ -534,12 +537,101 @@ fn parse_filed_route(parts: &[&str]) -> Result<EventKind, InputError> {
     })
 }
 
+fn parse_event_kind(kind_name: &str, parts: &[&str]) -> Result<EventKind, InputError> {
+    let kind = match kind_name {
+        "POS" if parts.len() == 15 || parts.len() == 17 => parse_position(parts)?,
+        "FLIGHT" => parse_flight(parts)?,
+        "COMMAND" if parts.len() == 14 || parts.len() == 15 => {
+            use oa_display::interaction::Intent;
+            let name = part(parts, 13)?;
+            let intent = match (name, parts.len()) {
+                ("ASSIGNED", 15) => Intent::SetAssignedAltitude(parse_i32(part(parts, 14)?)?),
+                ("UNASSIGNED", 14) => Intent::ClearAssignedAltitude,
+                ("INTERIM", 15) => Intent::SetInterimAltitude(parse_i32(part(parts, 14)?)?),
+                ("CLEAR_INTERIM", 14) => Intent::ClearInterimAltitude,
+                ("HO_OFFER", 15) => Intent::OfferHandoff(
+                    part(parts, 14)?
+                        .parse()
+                        .map_err(|_| InputError::InvalidInteger)?,
+                ),
+                ("HO_ACCEPT", 15) => Intent::AcceptHandoff(
+                    part(parts, 14)?
+                        .parse()
+                        .map_err(|_| InputError::InvalidInteger)?,
+                ),
+                ("HO_TAKE", 15) => Intent::TakeHandoff(
+                    part(parts, 14)?
+                        .parse()
+                        .map_err(|_| InputError::InvalidInteger)?,
+                ),
+                ("HO_CANCEL", 15) => Intent::CancelHandoff(
+                    part(parts, 14)?
+                        .parse()
+                        .map_err(|_| InputError::InvalidInteger)?,
+                ),
+                _ => return Err(InputError::InvalidOperation),
+            };
+            EventKind::Operator(OperatorCommand {
+                plan_id: fixed_field::<12>(part(parts, 9)?)?,
+                target_generation: part(parts, 10)?
+                    .parse()
+                    .map_err(|_| InputError::InvalidInteger)?,
+                view_sequence: part(parts, 11)?
+                    .parse()
+                    .map_err(|_| InputError::InvalidInteger)?,
+                actor_unit: part(parts, 12)?
+                    .parse()
+                    .map_err(|_| InputError::InvalidInteger)?,
+                intent,
+            })
+        }
+        "ROUTE" if parts.len() == 12 => parse_route(parts)?,
+        "FILED_ROUTE" if parts.len() == 12 => parse_filed_route(parts)?,
+        "CURSOR" if parts.len() == 12 => {
+            let hex = part(parts, 10)?;
+            if hex.len() != 64 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Err(InputError::InvalidHex);
+            }
+            let mut route_payload_sha256 = [0; 32];
+            for (slot, pair) in route_payload_sha256
+                .iter_mut()
+                .zip(hex.as_bytes().chunks_exact(2))
+            {
+                let value = std::str::from_utf8(pair).map_err(|_| InputError::InvalidHex)?;
+                *slot = u8::from_str_radix(value, 16).map_err(|_| InputError::InvalidHex)?;
+            }
+            let value = part(parts, 11)?;
+            let fix = field::<MAX_FILED_ROUTE_BYTES>(value)?;
+            EventKind::ActiveCursor {
+                plan_id: fixed_field::<12>(part(parts, 9)?)?,
+                route_payload_sha256,
+                fix_len: u16::try_from(value.len()).map_err(|_| InputError::InvalidLabel)?,
+                fix,
+            }
+        }
+        "FEED" if parts.len() == 11 => {
+            let available = match part(parts, 9)? {
+                "UP" => true,
+                "DOWN" => false,
+                _ => return Err(InputError::InvalidFeedState),
+            };
+            let reason = part(parts, 10)?
+                .parse()
+                .map_err(|_| InputError::InvalidInteger)?;
+            EventKind::FeedState { available, reason }
+        }
+        _ => return Err(InputError::BadFieldCount),
+    };
+    Ok(kind)
+}
+
 /// Parses one protocol event. The caller checks line length before calling this function.
 ///
 /// Position rows have 15 legacy fields, or 17 fields with a source callsign extension; the event type selects the remaining fields:
 /// `v1<TAB>receipt_ns<TAB>source_ns<TAB>sequence<TAB>source<TAB>gufi_hex<TAB>address_hex<TAB>centre<TAB>kind...`.
 /// Position rows append `lat<TAB>lon<TAB>alt-or--<TAB>east-mmps<TAB>north-mmps<TAB>vertical-rate-or--`, then optionally `CALLSIGN<TAB>value`;
-/// flight and route payloads use the field counts checked below.
+/// flight and route payloads use the field counts checked below. Recorded rows may append
+/// `RAWRECEIPT<TAB>ns` to preserve an exact source receipt distinct from the issue cutoff.
 pub fn parse_event_line(line: &str) -> Result<NormalizedEvent, InputError> {
     if line.len() > MAX_EVENT_LINE_BYTES {
         return Err(InputError::RowTooLong);
@@ -554,6 +646,16 @@ pub fn parse_event_line(line: &str) -> Result<NormalizedEvent, InputError> {
         } else {
             None
         };
+    let raw_input_receipt_ns =
+        if parts.len() >= 2 && parts.get(parts.len() - 2).copied() == Some("RAWRECEIPT") {
+            let value = Some(parse_i64(
+                parts.last().copied().ok_or(InputError::BadFieldCount)?,
+            )?);
+            parts.truncate(parts.len() - 2);
+            value
+        } else {
+            None
+        };
     if parts.len() < 9 {
         return Err(InputError::BadFieldCount);
     }
@@ -562,9 +664,13 @@ pub fn parse_event_line(line: &str) -> Result<NormalizedEvent, InputError> {
     }
     let receipt_ns = parse_i64(part(&parts, 1)?)?;
     let source_ns = parse_i64(part(&parts, 2)?)?;
+    let input_receipt_ns = raw_input_receipt_ns.unwrap_or(receipt_ns);
     // The time envelope is checked before parsing identity or body payload, including malformed
     // rows. Renaming a sealed input to a neutral path cannot bypass the timed-row guard.
-    if oa_sealed::in_sealed_window(source_ns) || oa_sealed::in_sealed_window(receipt_ns) {
+    if oa_sealed::in_sealed_window(source_ns)
+        || oa_sealed::in_sealed_window(receipt_ns)
+        || oa_sealed::in_sealed_window(input_receipt_ns)
+    {
         return Err(InputError::SealedTimestamp);
     }
     let sequence = parse_u64(part(&parts, 3)?)?;
@@ -592,10 +698,13 @@ pub fn parse_event_line(line: &str) -> Result<NormalizedEvent, InputError> {
     if aircraft_address > 0x01ff_ffff {
         return Err(InputError::AddressOutOfRange);
     }
-    if receipt_ns < 0 || source_ns < 0 {
+    if receipt_ns < 0 || input_receipt_ns < 0 || source_ns < 0 {
         return Err(InputError::InvalidInteger);
     }
-    if source_ns > receipt_ns {
+    if input_receipt_ns > receipt_ns {
+        return Err(InputError::SourceAfterReceipt);
+    }
+    if source_ns > input_receipt_ns {
         return Err(InputError::SourceAfterReceipt);
     }
     let expected_source = match kind_name {
@@ -610,91 +719,9 @@ pub fn parse_event_line(line: &str) -> Result<NormalizedEvent, InputError> {
     if source_message_id.is_some() && (source != SourceKind::Flight || kind_name != "FLIGHT") {
         return Err(InputError::InvalidOperation);
     }
-    let kind = match kind_name {
-        "POS" if parts.len() == 15 || parts.len() == 17 => parse_position(&parts)?,
-        "FLIGHT" => parse_flight(&parts)?,
-        "COMMAND" if parts.len() == 14 || parts.len() == 15 => {
-            use oa_display::interaction::Intent;
-            let name = part(&parts, 13)?;
-            let intent = match (name, parts.len()) {
-                ("ASSIGNED", 15) => Intent::SetAssignedAltitude(parse_i32(part(&parts, 14)?)?),
-                ("UNASSIGNED", 14) => Intent::ClearAssignedAltitude,
-                ("INTERIM", 15) => Intent::SetInterimAltitude(parse_i32(part(&parts, 14)?)?),
-                ("CLEAR_INTERIM", 14) => Intent::ClearInterimAltitude,
-                ("HO_OFFER", 15) => Intent::OfferHandoff(
-                    part(&parts, 14)?
-                        .parse()
-                        .map_err(|_| InputError::InvalidInteger)?,
-                ),
-                ("HO_ACCEPT", 15) => Intent::AcceptHandoff(
-                    part(&parts, 14)?
-                        .parse()
-                        .map_err(|_| InputError::InvalidInteger)?,
-                ),
-                ("HO_TAKE", 15) => Intent::TakeHandoff(
-                    part(&parts, 14)?
-                        .parse()
-                        .map_err(|_| InputError::InvalidInteger)?,
-                ),
-                ("HO_CANCEL", 15) => Intent::CancelHandoff(
-                    part(&parts, 14)?
-                        .parse()
-                        .map_err(|_| InputError::InvalidInteger)?,
-                ),
-                _ => return Err(InputError::InvalidOperation),
-            };
-            EventKind::Operator(OperatorCommand {
-                plan_id: fixed_field::<12>(part(&parts, 9)?)?,
-                target_generation: part(&parts, 10)?
-                    .parse()
-                    .map_err(|_| InputError::InvalidInteger)?,
-                view_sequence: part(&parts, 11)?
-                    .parse()
-                    .map_err(|_| InputError::InvalidInteger)?,
-                actor_unit: part(&parts, 12)?
-                    .parse()
-                    .map_err(|_| InputError::InvalidInteger)?,
-                intent,
-            })
-        }
-        "ROUTE" if parts.len() == 12 => parse_route(&parts)?,
-        "FILED_ROUTE" if parts.len() == 12 => parse_filed_route(&parts)?,
-        "CURSOR" if parts.len() == 12 => {
-            let hex = part(&parts, 10)?;
-            if hex.len() != 64 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
-                return Err(InputError::InvalidHex);
-            }
-            let mut route_payload_sha256 = [0; 32];
-            for (slot, pair) in route_payload_sha256
-                .iter_mut()
-                .zip(hex.as_bytes().chunks_exact(2))
-            {
-                let value = std::str::from_utf8(pair).map_err(|_| InputError::InvalidHex)?;
-                *slot = u8::from_str_radix(value, 16).map_err(|_| InputError::InvalidHex)?;
-            }
-            let value = part(&parts, 11)?;
-            let fix = field::<MAX_FILED_ROUTE_BYTES>(value)?;
-            EventKind::ActiveCursor {
-                plan_id: fixed_field::<12>(part(&parts, 9)?)?,
-                route_payload_sha256,
-                fix_len: u16::try_from(value.len()).map_err(|_| InputError::InvalidLabel)?,
-                fix,
-            }
-        }
-        "FEED" if parts.len() == 11 => {
-            let available = match part(&parts, 9)? {
-                "UP" => true,
-                "DOWN" => false,
-                _ => return Err(InputError::InvalidFeedState),
-            };
-            let reason = part(&parts, 10)?
-                .parse()
-                .map_err(|_| InputError::InvalidInteger)?;
-            EventKind::FeedState { available, reason }
-        }
-        _ => return Err(InputError::BadFieldCount),
-    };
+    let kind = parse_event_kind(kind_name, &parts)?;
     Ok(NormalizedEvent {
+        input_receipt_ns,
         receipt_ns,
         source_ns,
         sequence,
@@ -802,6 +829,23 @@ mod tests {
         ));
         let legacy_serialized = serialize_recorded_events(&[legacy]).unwrap();
         assert!(legacy_serialized.contains("\tIDENTITY\t-\tKAAA\tKBBB"));
+    }
+
+    #[test]
+    fn raw_receipt_extension_round_trips_and_refuses_out_of_envelope_values() {
+        let line = "v1\t2000000000\t1000000000\t7\tFLIGHT\t00000000000000000000000000000001\t000000\tZAU\tFLIGHT\tIDENTITY_PARTIAL\tABC123\t-\t-\tRAWRECEIPT\t1999999999";
+        let event = parse_event_line(line).unwrap();
+        assert_eq!(event.receipt_ns, 2_000_000_000);
+        assert_eq!(event.input_receipt_ns, 1_999_999_999);
+        let serialized = serialize_recorded_events(&[event]).unwrap();
+        let row = serialized.lines().nth(1).unwrap();
+        assert!(row.ends_with("\tRAWRECEIPT\t1999999999"));
+        assert_eq!(parse_event_line(row).unwrap(), event);
+
+        let future_raw = line.replace("1999999999", "2000000001");
+        assert!(parse_event_line(&future_raw).is_err());
+        let source_after_raw = line.replace("1000000000", "2000000000");
+        assert!(parse_event_line(&source_after_raw).is_err());
     }
 
     #[test]

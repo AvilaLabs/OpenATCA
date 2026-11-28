@@ -2085,6 +2085,7 @@ mod recorded_hour_tests {
     ) -> NormalizedEvent {
         NormalizedEvent {
             receipt_ns,
+            input_receipt_ns: receipt_ns,
             source_ns: receipt_ns,
             sequence,
             source_message_id: None,
@@ -2411,6 +2412,7 @@ mod recorded_hour_tests {
         let plan_events = [
             NormalizedEvent {
                 receipt_ns: plan_receipt,
+                input_receipt_ns: plan_receipt,
                 source_ns: plan_receipt,
                 sequence: 1,
                 source_message_id: Some(1),
@@ -2427,6 +2429,7 @@ mod recorded_hour_tests {
             },
             NormalizedEvent {
                 receipt_ns: plan_receipt,
+                input_receipt_ns: plan_receipt,
                 source_ns: plan_receipt,
                 sequence: 2,
                 source_message_id: Some(1),
@@ -2440,6 +2443,7 @@ mod recorded_hour_tests {
             },
             NormalizedEvent {
                 receipt_ns: plan_receipt,
+                input_receipt_ns: plan_receipt,
                 source_ns: plan_receipt,
                 sequence: 3,
                 source_message_id: Some(2),
@@ -2787,6 +2791,7 @@ mod recorded_hour_tests {
         let events = [
             NormalizedEvent {
                 receipt_ns: plan_receipt,
+                input_receipt_ns: plan_receipt,
                 source_ns: plan_receipt,
                 sequence: 1,
                 source_message_id: Some(1),
@@ -2803,6 +2808,7 @@ mod recorded_hour_tests {
             },
             NormalizedEvent {
                 receipt_ns: plan_receipt,
+                input_receipt_ns: plan_receipt,
                 source_ns: plan_receipt,
                 sequence: 2,
                 source_message_id: Some(1),

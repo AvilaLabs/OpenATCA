@@ -594,6 +594,7 @@ mod tests {
             source_clock_regressions: 0,
             events: vec![crate::NormalizedEvent {
                 receipt_ns: second * 1_000_000_000,
+                input_receipt_ns: second * 1_000_000_000,
                 source_ns: second * 1_000_000_000,
                 sequence: second as u64,
                 source_message_id: None,
@@ -708,6 +709,7 @@ mod tests {
         let events = (0..count)
             .map(|index| crate::NormalizedEvent {
                 receipt_ns,
+                input_receipt_ns: receipt_ns,
                 source_ns: receipt_ns,
                 sequence: u64::try_from((second - 1) * i64::from(count) + i64::from(index) + 1)
                     .unwrap(),
@@ -870,6 +872,7 @@ mod tests {
                 source_clock_regressions: 0,
                 events: vec![crate::NormalizedEvent {
                     receipt_ns: 3_000_000_000,
+                    input_receipt_ns: 3_000_000_000,
                     source_ns: 3_000_000_000,
                     sequence: 3,
                     source_message_id: None,

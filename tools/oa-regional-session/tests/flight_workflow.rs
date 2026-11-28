@@ -38,6 +38,7 @@ fn flight_event(
     NormalizedEvent {
         source_message_id: None,
         receipt_ns: time_ms * 1_000_000,
+        input_receipt_ns: time_ms * 1_000_000,
         source_ns: time_ms * 1_000_000,
         sequence,
         source: SourceKind::Flight,
@@ -643,6 +644,7 @@ fn identity_binding_requires_an_explicit_flight_operation_and_source_precision_i
     );
     let position = NormalizedEvent {
         receipt_ns: 2_000_000,
+        input_receipt_ns: 2_000_000,
         source_ns: 1_000_000,
         sequence: 1,
         source_message_id: None,

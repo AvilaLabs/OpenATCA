@@ -45,6 +45,7 @@ fn position(
 ) -> NormalizedEvent {
     NormalizedEvent {
         receipt_ns,
+        input_receipt_ns: receipt_ns,
         source_ns,
         sequence,
         source_message_id: None,
@@ -69,6 +70,7 @@ fn position(
 fn feed_fault(receipt_ns: i64, sequence: u64, source: SourceKind) -> NormalizedEvent {
     NormalizedEvent {
         receipt_ns,
+        input_receipt_ns: receipt_ns,
         source_ns: receipt_ns,
         sequence,
         source_message_id: None,

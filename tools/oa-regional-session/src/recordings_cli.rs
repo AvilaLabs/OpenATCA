@@ -374,6 +374,7 @@ mod recorded_hour_window_tests {
     fn centre_scope_fixture() -> CentreScopeFixture {
         let make_event = |centre| NormalizedEvent {
             receipt_ns: 2_000_000_000,
+            input_receipt_ns: 2_000_000_000,
             source_ns: 1_000_000_000,
             sequence: 4,
             source_message_id: Some(3),
@@ -403,6 +404,7 @@ mod recorded_hour_window_tests {
         let zxx = make_event(*b"ZXX\0");
         let adsb = NormalizedEvent {
             receipt_ns: 2_000_000_000,
+            input_receipt_ns: 2_000_000_000,
             source_ns: 1_000_000_000,
             sequence: 5,
             source_message_id: None,

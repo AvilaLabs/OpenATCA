@@ -785,20 +785,22 @@ fn commit_flight_key(
         return Ok(());
     };
     if outcome.adapter_refusal.is_some()
-        || !matches!(
-            outcome.operation,
-            Some(oa_flight::Outcome::Applied | oa_flight::Outcome::Unchanged)
-        )
+        || !matches!(outcome.operation, Some(oa_flight::Outcome::Applied))
     {
         return Ok(());
     }
+    let source_current = flight_source_is_current(
+        event.source_ns,
+        event.input_receipt_ns,
+        surveillance::tracker_drop_after_ns(&runtime.surveillance),
+    );
     match pending {
         Some((pending_key, insert_at)) if pending_key == key => {
             runtime.known_flights.insert(
                 insert_at,
                 KnownFlight {
                     key,
-                    last_consumed_receipt_ns: Some(event.receipt_ns),
+                    last_consumed_receipt_ns: source_current.then_some(event.input_receipt_ns),
                 },
             );
         }
@@ -814,10 +816,22 @@ fn commit_flight_key(
                 .known_flights
                 .get_mut(index)
                 .ok_or("successful flight key ledger index invariant")?;
-            known.last_consumed_receipt_ns = Some(event.receipt_ns);
+            if source_current {
+                known.last_consumed_receipt_ns = Some(event.input_receipt_ns);
+            }
         }
     }
     Ok(())
+}
+
+fn flight_source_is_current(source_ns: i64, receipt_ns: i64, drop_after_ns: i64) -> bool {
+    source_ns >= 0
+        && receipt_ns >= 0
+        && drop_after_ns >= 0
+        && source_ns <= receipt_ns
+        && receipt_ns
+            .checked_sub(source_ns)
+            .is_some_and(|age| age <= drop_after_ns)
 }
 
 fn runtime_item_outcome(
@@ -1834,10 +1848,12 @@ fn execute(
     performance: Option<&[PerformanceEnvelope]>,
 ) -> Result<RegionalFrame, String> {
     if batch.events.len() > runtime.profile.max_events_per_receipt
-        || batch
-            .events
-            .iter()
-            .any(|e| e.receipt_ns != batch.receipt_ns)
+        || batch.events.iter().any(|e| {
+            e.receipt_ns != batch.receipt_ns
+                || e.input_receipt_ns < 0
+                || e.input_receipt_ns > e.receipt_ns
+                || e.source_ns > e.input_receipt_ns
+        })
     {
         return Err("malformed receipt batch".into());
     }
@@ -2808,6 +2824,23 @@ mod transaction_tests {
         runtime_with_model_and_centre(synthetic_model().unwrap(), centre)
     }
 
+    fn runtime_with_profile(profile: RegionalRunProfile) -> RegionalRuntime {
+        let model = synthetic_model().unwrap();
+        let snapshot = oa_airspace::core::snapshot::encode(&model).unwrap();
+        regional_new_with_profile(
+            model,
+            oa_sha256::sha256(&snapshot),
+            *b"ZAU1",
+            SurveillanceConfig {
+                centre_lat_e7: 410_000_000,
+                centre_lon_e7: -870_000_000,
+                range_nm: 180.0,
+            },
+            profile,
+        )
+        .unwrap()
+    }
+
     fn runtime_with_model_and_centre(model: Model, centre: [u8; 4]) -> RegionalRuntime {
         let snapshot = oa_airspace::core::snapshot::encode(&model).unwrap();
         regional_new(
@@ -2879,6 +2912,7 @@ mod transaction_tests {
             {
                 events.push(NormalizedEvent {
                     receipt_ns,
+                    input_receipt_ns: receipt_ns,
                     source_ns: receipt_ns,
                     sequence: sequence.saturating_add(offset as u64),
                     source_message_id: None,
@@ -2914,6 +2948,7 @@ mod transaction_tests {
             .enumerate()
             .map(|(index, source_ns)| NormalizedEvent {
                 receipt_ns,
+                input_receipt_ns: receipt_ns,
                 source_ns,
                 sequence: u64::try_from(index + 1).unwrap(),
                 source_message_id: None,
@@ -3530,13 +3565,18 @@ mod transaction_tests {
             Some(("N123AB", unchanged_receipt)),
         );
         assert!(flight::flight_driver_report(&positive.flights).unchanged > unchanged_before);
+        assert_eq!(
+            positive.known_flights[0].last_consumed_receipt_ns,
+            Some(first_identity_receipt),
+            "a successful no-op is not a new flight receipt"
+        );
         assert_eq!(refreshed.flight_correlation.matched_observed_tracks, 1);
         assert!(refreshed
             .surveillance
             .traffic_stats
             .is_some_and(|stats| stats.full_blocks > 0));
 
-        let boundary_receipt = unchanged_receipt + 60 * surveillance::SECOND_NS;
+        let boundary_receipt = first_identity_receipt + 60 * surveillance::SECOND_NS;
         let boundary = co_timed_frame_with_plan_refusal(
             &mut positive,
             address,
@@ -3573,6 +3613,218 @@ mod transaction_tests {
             .surveillance
             .traffic_stats
             .is_some_and(|stats| stats.full_blocks == 0));
+    }
+
+    // Kills the same-value stale restatement mutation that refreshed a flight's lease.
+    // A current applied identity change refreshes the lease; an old-source no-op does not.
+    // REQ: OA-REG-002
+    #[test]
+    fn stale_same_value_flight_restatement_cannot_refresh_identity_lease() {
+        let base = 1_800_000_000_000_000_000i64;
+        let first_receipt = base + surveillance::SECOND_NS;
+        let changed_receipt = first_receipt + surveillance::SECOND_NS;
+        let stale_restatement_receipt = changed_receipt + 60 * surveillance::SECOND_NS + 1;
+        let address = 0x00ab_cdef;
+        let gufi = 0x1000_0000_0000_0000_0000_0000_0000_0001;
+        let mut runtime = runtime_with_centre(*b"ZAU\0");
+        seeded_claim_frame(&mut runtime, &[(gufi, address, *b"ZAU\0")], base);
+        co_timed_identity_frame(
+            &mut runtime,
+            address,
+            first_receipt,
+            Some("N123AB"),
+            Some(("N123AB", first_receipt)),
+        );
+        let changed = co_timed_identity_frame(
+            &mut runtime,
+            address,
+            changed_receipt,
+            Some("N123AC"),
+            Some(("N123AC", changed_receipt)),
+        );
+        assert!(changed
+            .flight_operations
+            .iter()
+            .any(|outcome| matches!(outcome.operation, Some(oa_flight::Outcome::Applied))));
+        assert_eq!(
+            runtime.known_flights[0].last_consumed_receipt_ns,
+            Some(changed_receipt)
+        );
+
+        let restatement = co_timed_identity_frame(
+            &mut runtime,
+            address,
+            stale_restatement_receipt,
+            Some("N123AC"),
+            Some(("N123AC", changed_receipt)),
+        );
+        assert!(restatement
+            .flight_operations
+            .iter()
+            .any(|outcome| matches!(outcome.operation, Some(oa_flight::Outcome::Unchanged))));
+        assert_eq!(
+            runtime.known_flights[0].last_consumed_receipt_ns,
+            Some(changed_receipt)
+        );
+        assert_eq!(restatement.flight_correlation.matched_observed_tracks, 0);
+        assert!(restatement
+            .surveillance
+            .traffic_stats
+            .is_some_and(|stats| stats.full_blocks == 0));
+
+        let mut stale_applied_runtime = runtime_with_centre(*b"ZAU\0");
+        seeded_claim_frame(
+            &mut stale_applied_runtime,
+            &[(gufi, address, *b"ZAU\0")],
+            base,
+        );
+        let stale_source = base + surveillance::SECOND_NS;
+        let stale_applied_receipt = stale_source + 60 * surveillance::SECOND_NS + 1;
+        let stale_applied = co_timed_identity_frame(
+            &mut stale_applied_runtime,
+            address,
+            stale_applied_receipt,
+            Some("N123AB"),
+            Some(("N123AB", stale_source)),
+        );
+        assert!(stale_applied
+            .flight_operations
+            .iter()
+            .any(|outcome| matches!(outcome.operation, Some(oa_flight::Outcome::Applied))));
+        assert_eq!(
+            stale_applied_runtime.known_flights[0].last_consumed_receipt_ns,
+            Some(base)
+        );
+        assert_eq!(stale_applied.flight_correlation.matched_observed_tracks, 0);
+        assert!(stale_applied
+            .surveillance
+            .traffic_stats
+            .is_some_and(|stats| stats.full_blocks == 0));
+    }
+
+    // Kills using the rounded issue cutoff instead of the raw receipt for lease expiry: an
+    // archived receipt just over 120 s old can still look fresh on the rounded issue grid.
+    // REQ: OA-REG-013
+    #[test]
+    fn flight_lease_uses_raw_receipt_at_the_120_second_freshness_boundary() {
+        let base = 1_800_000_000_000_000_000i64;
+        let raw_receipt_ns = base + 100_000_000;
+        let issue_receipt_ns = base + surveillance::SECOND_NS;
+        let address = 0x00ab_cdef;
+        let gufi = 0x1000_0000_0000_0000_0000_0000_0000_0001u128;
+        let drop_ns = surveillance::RECORDED_HOUR_DROP_AFTER_NS;
+        let mut profile = DEFAULT_REGIONAL_RUN_PROFILE;
+        profile.surveillance.tracker_timing =
+            surveillance::TrackerTimingProfile::ArchivedFixed10_30_120V1;
+
+        for offset_ns in [-1, 0, 1] {
+            let mut runtime = runtime_with_profile(profile);
+            seeded_claim_frame(&mut runtime, &[(gufi, address, *b"ZAU\0")], base);
+            let identity = format!(
+                "v1\t{issue_receipt_ns}\t{raw_receipt_ns}\t3\tFLIGHT\t{gufi:032x}\t{address:06x}\tZAU\tFLIGHT\tIDENTITY_PARTIAL\tN123AB\t-\t-\tRAWRECEIPT\t{raw_receipt_ns}"
+            );
+            let accepted = regional_step(
+                &mut runtime,
+                &ReceiptBatch {
+                    receipt_ns: issue_receipt_ns,
+                    source_clock_regressions: 0,
+                    events: vec![parse_event_line(&identity).unwrap()],
+                },
+            )
+            .unwrap();
+            assert!(accepted
+                .flight_operations
+                .iter()
+                .any(|outcome| matches!(outcome.operation, Some(oa_flight::Outcome::Applied))));
+
+            for tick in 1..=9i64 {
+                let receipt_ns = raw_receipt_ns + tick * 10 * surveillance::SECOND_NS;
+                let line = format!(
+                    "v1\t{receipt_ns}\t{receipt_ns}\t{}\tSURVEILLANCE\t00000000000000000000000000000000\t{address:06x}\tZAU\tPOS\t410000000\t-870000000\t10000\t0\t0\t0\tCALLSIGN\tN123AB",
+                    tick + 10
+                );
+                regional_step(
+                    &mut runtime,
+                    &ReceiptBatch {
+                        receipt_ns,
+                        source_clock_regressions: 0,
+                        events: vec![parse_event_line(&line).unwrap()],
+                    },
+                )
+                .unwrap();
+            }
+
+            let now_ns = raw_receipt_ns + drop_ns + offset_ns;
+            let mut events = Vec::with_capacity(4);
+            for (index, source_ns) in [
+                now_ns - 2 * 10 * surveillance::SECOND_NS,
+                now_ns - 10 * surveillance::SECOND_NS,
+                now_ns,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let line = format!(
+                    "v1\t{now_ns}\t{source_ns}\t{}\tSURVEILLANCE\t00000000000000000000000000000000\t{address:06x}\tZAU\tPOS\t410000000\t-870000000\t10000\t0\t0\t0\tCALLSIGN\tN123AB",
+                    index + 1
+                );
+                events.push(parse_event_line(&line).unwrap());
+            }
+            let route = format!(
+                "v1\t{now_ns}\t{now_ns}\t1\tROUTE\t{gufi:032x}\t{address:06x}\tZAU\tFILED_ROUTE\tPLAN00000001\tFIXB\tFIX:FIXA:K1:1:- FIX:FIXB:K1:1:-"
+            );
+            events.push(parse_event_line(&route).unwrap());
+            let frame = regional_step(
+                &mut runtime,
+                &ReceiptBatch {
+                    receipt_ns: now_ns,
+                    source_clock_regressions: 0,
+                    events,
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                runtime.known_flights[0].last_consumed_receipt_ns,
+                Some(raw_receipt_ns)
+            );
+            if offset_ns <= 0 {
+                assert_eq!(frame.flight_correlation.matched_observed_tracks, 1);
+                assert!(frame
+                    .surveillance
+                    .traffic_stats
+                    .is_some_and(|stats| stats.full_blocks > 0));
+            } else {
+                assert_eq!(frame.flight_correlation.matched_observed_tracks, 0);
+                assert!(frame
+                    .surveillance
+                    .traffic_stats
+                    .is_some_and(|stats| stats.full_blocks == 0));
+            }
+        }
+    }
+
+    // Kills the mutation that accepts a caller-constructed raw receipt after its issue cutoff.
+    // REQ: OA-REG-013
+    #[test]
+    fn runtime_refuses_inconsistent_raw_receipt_at_the_batch_boundary() {
+        let mut runtime = runtime_with_centre(*b"ZAU1");
+        let receipt_ns = 1_800_000_001_000_000_000i64;
+        let mut event = parse_event_line(&format!(
+            "v1\t{receipt_ns}\t{receipt_ns}\t1\tFLIGHT\t00000000000000000000000000000001\t000000\tZAU1\tFLIGHT\tIDENTITY_PARTIAL\tABC123\t-\t-"
+        ))
+        .unwrap();
+        event.input_receipt_ns = receipt_ns + 1;
+        let result = regional_step(
+            &mut runtime,
+            &ReceiptBatch {
+                receipt_ns,
+                source_clock_regressions: 0,
+                events: vec![event],
+            },
+        );
+        assert!(result.is_err());
+        assert!(runtime.known_flights.is_empty());
+        assert_eq!(flight::flight_driver_report(&runtime.flights).applied, 0);
     }
 
     // Kills mismatched-call-sign authority and verifies missing-call-sign and terminal views stay advisory.
@@ -3897,6 +4149,7 @@ mod transaction_tests {
             events: (1..=MAX_EVENTS_PER_RECEIPT + 1)
                 .map(|sequence| NormalizedEvent {
                     receipt_ns,
+                    input_receipt_ns: receipt_ns,
                     source_ns: receipt_ns,
                     sequence: sequence as u64,
                     source_message_id: None,

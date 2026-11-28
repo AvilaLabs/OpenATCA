@@ -151,6 +151,14 @@ Within one receipt the categories are surveillance, flight, route, weather, adap
 numbers increase per category. Older source stamps remain visible and cannot silently replace
 newer source state. Flight/trajectory timestamps require exact whole milliseconds.
 
+The serializer may append `RAWRECEIPT<TAB>ns` to retain a decoded SFDPS flight row's exact
+frame receipt when `receipt_ns` is rounded up to the runtime issue cutoff. Older rows without this
+extension use `receipt_ns` as the raw receipt. The parser requires the raw receipt to be
+nonnegative, no later than the issue receipt, and no earlier than the event source time. This
+preserves the OA-REG-013 flight-lease clock; `raw_receipt_extension_round_trips_and_refuses_out_of_envelope_values`
+and `flight_lease_uses_raw_receipt_at_the_120_second_freshness_boundary` cover the encoding and
+runtime consumer.
+
 `POS` carries lat/lon in 1e-7 degrees, optional altitude feet (`-` absent), east/north velocity
 mm/s, and optional vertical rate ft/min. `FLIGHT` carries authoritative upstream plan, address,
 identity, clearance and ownership updates. Its bootstrap `OWNER` operation is trusted normalized

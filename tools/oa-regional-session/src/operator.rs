@@ -438,6 +438,7 @@ pub fn prepare_batch(
             (
                 NormalizedEvent {
                     receipt_ns: recorded.receipt_ns,
+                    input_receipt_ns: recorded.receipt_ns,
                     source_ns: recorded.receipt_ns,
                     sequence: 0,
                     source_message_id: None,

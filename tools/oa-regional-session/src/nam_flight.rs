@@ -399,6 +399,7 @@ pub fn nam_flight_apply(
     };
     let event = NormalizedEvent {
         receipt_ns: context.receipt_ns,
+        input_receipt_ns: context.receipt_ns,
         source_ns: context.source_ns,
         sequence: u64::from(number),
         source_message_id: None,

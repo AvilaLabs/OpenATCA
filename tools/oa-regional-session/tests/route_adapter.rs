@@ -60,6 +60,7 @@ fn event(
     NormalizedEvent {
         source_ns: source_ms * 1_000_000,
         receipt_ns: receipt_ms * 1_000_000,
+        input_receipt_ns: receipt_ms * 1_000_000,
         sequence,
         source_message_id: None,
         source: SourceKind::Route,

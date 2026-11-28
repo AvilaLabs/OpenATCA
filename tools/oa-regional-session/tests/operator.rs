@@ -111,6 +111,7 @@ fn local_events_are_inserted_before_route_and_sequences_are_audited() {
             RecordedEvent {
                 event: NormalizedEvent {
                     receipt_ns: 1_000_000_000,
+                    input_receipt_ns: 1_000_000_000,
                     source_ns: 1_000_000_000,
                     sequence: 9,
                     source_message_id: None,
@@ -125,6 +126,7 @@ fn local_events_are_inserted_before_route_and_sequences_are_audited() {
             RecordedEvent {
                 event: NormalizedEvent {
                     receipt_ns: 1_000_000_000,
+                    input_receipt_ns: 1_000_000_000,
                     source_ns: 1_000_000_000,
                     sequence: 7,
                     source_message_id: None,

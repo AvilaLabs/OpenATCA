@@ -324,6 +324,7 @@ mod profile_limit_tests {
     fn event_at(sequence: u64, receipt_ns: i64) -> NormalizedEvent {
         NormalizedEvent {
             receipt_ns,
+            input_receipt_ns: receipt_ns,
             source_ns: receipt_ns,
             sequence,
             source_message_id: None,

@@ -2560,6 +2560,7 @@ fn adapt_sfdps_frame(
                     pending.push((
                         NormalizedEvent {
                             receipt_ns: issue_receipt_ns,
+                            input_receipt_ns: frame.receipt_ns,
                             source_ns,
                             sequence: 0,
                             source_message_id: None,
@@ -2873,6 +2874,7 @@ pub fn adapt_positions(
         }
         events.push(NormalizedEvent {
             receipt_ns: row.receipt_ns,
+            input_receipt_ns: row.receipt_ns,
             source_ns: row.source_ns,
             sequence: row.sequence,
             source_message_id: None,
@@ -2973,6 +2975,12 @@ fn serialize_recorded_event_row(event: &NormalizedEvent) -> Result<String, Adapt
     {
         return Err(AdapterError::InvalidCentre);
     }
+    if event.input_receipt_ns < 0
+        || event.input_receipt_ns > event.receipt_ns
+        || event.source_ns > event.input_receipt_ns
+    {
+        return Err(AdapterError::InvalidField);
+    }
     let mut row = String::new();
     write!(
         row,
@@ -2988,6 +2996,16 @@ fn serialize_recorded_event_row(event: &NormalizedEvent) -> Result<String, Adapt
     )
     .map_err(|_| AdapterError::CountOverflow)?;
     append_recorded_event_payload(&mut row, event)?;
+    if event.input_receipt_ns != event.receipt_ns {
+        write!(row, "\tRAWRECEIPT\t{}", event.input_receipt_ns)
+            .map_err(|_| AdapterError::CountOverflow)?;
+    }
+    if let Some(source_message_id) = event.source_message_id {
+        if event.source != SourceKind::Flight {
+            return Err(AdapterError::UnsupportedEvent);
+        }
+        write!(row, "\tSRCMSG\t{source_message_id}").map_err(|_| AdapterError::CountOverflow)?;
+    }
     if row.len() > MAX_EVENT_LINE_BYTES {
         return Err(AdapterError::RowTooLong);
     }
@@ -3124,12 +3142,6 @@ fn append_recorded_event_payload(
             .map_err(|_| AdapterError::CountOverflow)?;
         }
         _ => return Err(AdapterError::UnsupportedEvent),
-    }
-    if let Some(source_message_id) = event.source_message_id {
-        if event.source != SourceKind::Flight {
-            return Err(AdapterError::UnsupportedEvent);
-        }
-        write!(out, "\tSRCMSG\t{source_message_id}").map_err(|_| AdapterError::CountOverflow)?;
     }
     Ok(())
 }
@@ -3774,7 +3786,11 @@ mod tests {
     fn sfdps_short_codes_lifecycle_and_unknown_owner_reach_the_flight_table() {
         let xml = br#"<ns5:MessageCollection xmlns:ns5="http://www.faa.aero/nas/3.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><message xsi:type="ns5:FlightMessageType"><flight xsi:type="ns5:NasFlightType" centre="ZXX" source="AH" system="SLC" timestamp="2030-01-02T03:04:05.000Z"><gufi codeSpace="urn:uuid">11111111-2222-3333-4444-555555555555</gufi><flightPlan identifier="FP7"/><flightStatus fdpsFlightStatus="ACTIVE"/><departure><runwayPositionAndTime><runwayTime><actual time="2030-01-02T03:00:00Z"/></runwayTime></runwayPositionAndTime></departure><controllingUnit unitIdentifier="???"/></flight></message><message xsi:type="ns5:FlightMessageType"><flight xsi:type="ns5:NasFlightType" centre="ZXX" source="TH" system="SLC" timestamp="2030-01-02T03:04:06.000Z"><gufi codeSpace="urn:uuid">11111111-2222-3333-4444-555555555555</gufi><flightPlan identifier="FP7"/><flightStatus fdpsFlightStatus="ACTIVE"/><flightIdentification aircraftIdentification="ABC123"/><aircraftDescription aircraftAddress="ABCDEF"/><controllingUnit unitIdentifier="ZXX" sectorIdentifier="03"/></flight></message></ns5:MessageCollection>"#;
         let receipt_ms = oa_fixm::parse_iso_ms(b"2030-01-02T03:04:07.250Z").unwrap();
-        let receipt_ns = receipt_ms.checked_mul(1_000_000).unwrap();
+        let receipt_ns = receipt_ms
+            .checked_mul(1_000_000)
+            .unwrap()
+            .checked_add(1)
+            .unwrap();
         let frame = RecordedFrame {
             source: RecordingSource::Sfdps,
             stream_index: 0,
@@ -3803,6 +3819,13 @@ mod tests {
         assert!(adapted.counts.sfdps_rows_nonempty_callsign > 0);
         assert!(adapted.counts.sfdps_emitted_operations[usize::from(OP_ADDRESS)] > 0);
         assert!(adapted.counts.sfdps_emitted_operations[usize::from(OP_IDENTITY)] > 0);
+        assert!(adapted
+            .events
+            .iter()
+            .all(|event| event.input_receipt_ns == receipt_ns));
+        assert!(adapted.events.iter().all(|event| {
+            event.receipt_ns == receipt_ns + (NS_PER_SECOND - receipt_ns % NS_PER_SECOND)
+        }));
         assert!(!adapted.events.is_empty());
         let first_message_id = adapted.events.first().unwrap().source_message_id;
         let second_message_id = adapted
@@ -3993,6 +4016,7 @@ mod tests {
         use crate::input::FlightOperation;
         let event = NormalizedEvent {
             receipt_ns: 20,
+            input_receipt_ns: 20,
             source_ns: 10,
             sequence: 3,
             source_message_id: None,
@@ -4383,6 +4407,7 @@ mod tests {
         };
         NormalizedEvent {
             receipt_ns: 2_000_000_000,
+            input_receipt_ns: 2_000_000_000,
             source_ns: 1_000_000_000,
             sequence,
             source_message_id: None,

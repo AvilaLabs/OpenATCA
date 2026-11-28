@@ -83,6 +83,7 @@ fn driver() -> (
     ] {
         let event = NormalizedEvent {
             receipt_ns: time * 1_000_000,
+            input_receipt_ns: time * 1_000_000,
             source_ns: time * 1_000_000,
             sequence,
             source: SourceKind::Flight,
