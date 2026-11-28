@@ -173,6 +173,97 @@ fn regional_block_policy_refuses_missing_target_entries() {
     assert!(matches!(err, DisplayError::BadView(_)));
 }
 
+fn assert_bad_policy_is_atomic(target: &Target, policy: &[TrafficBlockPolicy]) {
+    let mut set = targets_new(1).unwrap();
+    targets_push(&mut set, target).unwrap();
+    let mut list = list_new(traffic_caps(1, &DEFAULT_STYLE).unwrap()).unwrap();
+    let result = build_traffic_with_policy(
+        &mut list,
+        &proj(),
+        &oa_geo::wgs84(),
+        &set,
+        &DEFAULT_STYLE,
+        Some(policy),
+    );
+    assert!(matches!(result, Err(DisplayError::BadView(_))));
+    assert!(!list.faulted);
+    assert!(list.lines.x0.is_empty());
+    assert!(list.rects.x0.is_empty());
+    assert!(list.circles.x.is_empty());
+    assert!(texts_of(&list).is_empty());
+}
+
+// REQ: OA-DSP-041
+#[test]
+fn regional_policy_rejects_over_capacity_sorted_complete_input_atomically() {
+    let mut target = plain(ORD.0, ORD.1);
+    target.addr = 1;
+    let policy: Vec<_> = (0..=MAX_TARGETS)
+        .map(|address| TrafficBlockPolicy {
+            address: address as u32,
+            detail: TrafficBlockDetail::SymbolOnly,
+            flight_callsign: None,
+        })
+        .collect();
+    assert_bad_policy_is_atomic(&target, &policy);
+}
+
+// REQ: OA-DSP-041
+#[test]
+fn regional_policy_accepts_its_exact_capacity_boundary() {
+    let mut target = plain(ORD.0, ORD.1);
+    target.addr = 1;
+    let policy: Vec<_> = (0..MAX_TARGETS)
+        .map(|address| TrafficBlockPolicy {
+            address: address as u32,
+            detail: TrafficBlockDetail::SymbolOnly,
+            flight_callsign: None,
+        })
+        .collect();
+    let mut set = targets_new(1).unwrap();
+    targets_push(&mut set, &target).unwrap();
+    let mut list = list_new(traffic_caps(1, &DEFAULT_STYLE).unwrap()).unwrap();
+    let stats = build_traffic_with_policy(
+        &mut list,
+        &proj(),
+        &oa_geo::wgs84(),
+        &set,
+        &DEFAULT_STYLE,
+        Some(&policy),
+    )
+    .unwrap();
+    assert_eq!(stats.symbol_only_targets, 1);
+    assert_eq!(stats.drawn, 1);
+}
+
+// REQ: OA-DSP-041
+#[test]
+fn regional_policy_rejects_each_detail_that_disagrees_with_target_state() {
+    let mut target = plain(ORD.0, ORD.1);
+    target.addr = 1;
+    let invalid_full = [TrafficBlockPolicy {
+        address: target.addr,
+        detail: TrafficBlockDetail::Full,
+        flight_callsign: None,
+    }];
+    assert_bad_policy_is_atomic(&target, &invalid_full);
+
+    let invalid_altitude_only = [TrafficBlockPolicy {
+        address: target.addr,
+        detail: TrafficBlockDetail::AltitudeOnly,
+        flight_callsign: None,
+    }];
+    assert_bad_policy_is_atomic(&target, &invalid_altitude_only);
+
+    target.alt_ft = 27_000;
+    let invalid_symbol_only = [TrafficBlockPolicy {
+        address: target.addr,
+        detail: TrafficBlockDetail::SymbolOnly,
+        flight_callsign: None,
+    }];
+    assert_bad_policy_is_atomic(&target, &invalid_symbol_only);
+}
+
 type Line = ((i32, i32), (i32, i32), u8, u8);
 
 fn lines_of(l: &DisplayList) -> Vec<Line> {
@@ -808,6 +899,29 @@ fn a_callsign_conflict_shows_the_address_and_the_tag_not_either_callsign() {
     assert_eq!(tx.last().unwrap().0, "CS?");
     assert_eq!(st.cs_conflict, 1);
     assert_eq!(traffic_loss(&st), 0, "it is shown, not lost");
+}
+
+// REQ: OA-DSP-046
+#[test]
+fn a_zero_r95_is_unknown_and_does_not_emit_a_radius_circle() {
+    let mut target = plain(ORD.0, ORD.1);
+    target.flags = T_UNCERTAIN;
+    target.r95_m = 0.0;
+    let (list, stats) = draw(&[target], &DEFAULT_STYLE);
+    assert_eq!(stats.r95_unknown, 1);
+    assert_eq!(stats.circle_failed, 0);
+    assert!(list.circles.x.is_empty());
+    assert!(texts_of(&list)
+        .iter()
+        .any(|(text, _, _)| text.contains("R95?")));
+}
+
+// REQ: OA-DSP-046
+#[test]
+fn unrelated_target_flags_do_not_create_a_callsign_conflict() {
+    let (list, stats) = draw(&[plain(ORD.0, ORD.1)], &DEFAULT_STYLE);
+    assert_eq!(stats.cs_conflict, 0);
+    assert!(texts_of(&list).iter().all(|(text, _, _)| text != "CS?"));
 }
 
 // REQ: OA-DSP-046
