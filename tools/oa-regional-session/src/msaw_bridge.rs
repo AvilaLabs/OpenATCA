@@ -128,11 +128,10 @@ pub(crate) const fn regional_msaw_row_limit(service: &RegionalMsaw) -> usize {
 }
 
 pub(crate) fn regional_msaw_alert_limit(service: &RegionalMsaw) -> usize {
-    service
-        .settings
-        .msaw
-        .max_open
-        .min(service.settings.msaw.max_tracks)
+    // `max_tracks` is the per-cycle input bound. Previously open alerts may be retained while
+    // a lower-address violation enters that bound, so attachment must reserve the actual open
+    // table capacity independently.
+    service.settings.msaw.max_open
 }
 
 // A3/C6: bounded cold frame evidence; all rows are copied before the core logs are drained.
@@ -809,6 +808,45 @@ mod tests {
             "empty terrain fixture stays uncovered"
         );
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    // Mutation killed: use the per-cycle MSAW input limit instead of its retained open-alert cap
+    // when reserving the shared rendered marker family.
+    // REQ: OA-REG-011, OA-DSP-078
+    #[test]
+    fn rendered_attachment_uses_retained_open_capacity_not_cycle_track_limit() {
+        let attach_with_open_limit = |open_limit| {
+            let (mut data, root) = development_provider_data();
+            data.settings.msaw.max_tracks = 128;
+            data.settings.msaw.max_open = open_limit;
+            data.settings.msaw.track_budget = 129;
+            let service = regional_msaw_new(data, 129).expect("bounded 129-row MSAW service");
+            let model = crate::cli::synthetic_model().expect("public synthetic model");
+            let snapshot = oa_airspace::core::snapshot::encode(&model).expect("model encoding");
+            let runtime = crate::runtime::regional_new_with_profile(
+                model,
+                oa_sha256::sha256(&snapshot),
+                *b"ZAU1",
+                crate::surveillance::SurveillanceConfig {
+                    centre_lat_e7: 410_000_000,
+                    centre_lon_e7: -870_000_000,
+                    range_nm: 180.0,
+                },
+                crate::runtime::RegionalRunProfile::recorded_peak_rendered(),
+            )
+            .expect("bounded rendered profile");
+            std::fs::remove_dir_all(root).expect("remove synthetic provider fixture");
+            (runtime, service)
+        };
+
+        let (mut fits, service) = attach_with_open_limit(128);
+        assert!(crate::runtime::regional_attach_msaw(&mut fits, service).is_ok());
+
+        let (mut exceeds, service) = attach_with_open_limit(129);
+        let error = crate::runtime::regional_attach_msaw(&mut exceeds, service)
+            .expect_err("129 retained alerts exceed the presenter family limit");
+        assert!(error.contains("open-alert capacity 129 exceeds composed profile allowance 128"));
+        assert_eq!(exceeds.frame_sequence, 0);
     }
 
     // Kills the fixed 512-cycle MSAW bridge limit.

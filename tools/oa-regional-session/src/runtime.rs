@@ -1044,7 +1044,7 @@ pub fn regional_new_from_issued_package_with_runtime_final_monitor(
     profile: RegionalRunProfile,
     monitor: RuntimeFinalMonitorConfig,
 ) -> Result<RegionalRuntime, String> {
-    let configured = configure_final_monitor(monitor, profile.surveillance)?;
+    let configured = configure_final_monitor(monitor, profile)?;
     let mut runtime = regional_new_from_issued_package(package, centre, cfg, profile)?;
     runtime.final_monitor = Some(configured);
     Ok(runtime)
@@ -1060,7 +1060,7 @@ pub fn regional_new_with_runtime_final_monitor(
     profile: RegionalRunProfile,
     monitor: RuntimeFinalMonitorConfig,
 ) -> Result<RegionalRuntime, String> {
-    let configured = configure_final_monitor(monitor, profile.surveillance)?;
+    let configured = configure_final_monitor(monitor, profile)?;
     let mut runtime = regional_new_with_profile(model, snapshot_sha256, centre, cfg, profile)?;
     runtime.final_monitor = Some(configured);
     Ok(runtime)
@@ -1210,8 +1210,9 @@ fn maximum_operator_status_bytes() -> usize {
 
 fn configure_final_monitor(
     monitor: RuntimeFinalMonitorConfig,
-    profile: surveillance::SurveillanceProfile,
+    run_profile: RegionalRunProfile,
 ) -> Result<ConfiguredFinalMonitor, String> {
+    let profile = run_profile.surveillance;
     if monitor.assignments.is_empty() {
         return Err("final-monitor requires at least one runway assignment".into());
     }
@@ -1225,6 +1226,13 @@ fn configure_final_monitor(
             "final-monitor assignment count {} exceeds selected profile track capacity {}",
             monitor.assignments.len(),
             profile.max_tracks
+        ));
+    }
+    if monitor.assignments.len() > run_profile.max_flights {
+        return Err(format!(
+            "final-monitor assignment count {} exceeds active full-key flight/view capacity {}",
+            monitor.assignments.len(),
+            run_profile.max_flights
         ));
     }
     validate_alert_composition(profile, monitor.assignments.len(), 0)?;
@@ -4878,6 +4886,35 @@ mod transaction_tests {
             .err()
             .expect("first count past the 32-track profile must refuse at startup");
         assert!(error.contains("selected profile track capacity 32"));
+    }
+
+    // Mutation killed: admit more assigned full-key views than the runtime can retain.
+    // REQ: OA-REG-019
+    #[test]
+    fn final_monitor_admission_uses_effective_flight_view_capacity() {
+        let mut profile = DEFAULT_REGIONAL_RUN_PROFILE;
+        profile.surveillance.max_tracks = 32;
+        profile.max_flights = 1;
+        let mut at_edge = final_monitor_config(100.0);
+        at_edge.assignments = vec![FinalApproachAssignment {
+            flight: oa_flight::key_gufi(1),
+            runway_id: 27_001,
+            end_name: *b"27R",
+        }];
+        assert!(configured_runtime_with_profile(profile, at_edge).is_ok());
+
+        let mut beyond_edge = final_monitor_config(100.0);
+        beyond_edge.assignments = (1..=2)
+            .map(|key| FinalApproachAssignment {
+                flight: oa_flight::key_gufi(key),
+                runway_id: 27_001,
+                end_name: *b"27R",
+            })
+            .collect();
+        let error = configured_runtime_with_profile(profile, beyond_edge)
+            .err()
+            .expect("first assignment beyond the active view capacity must refuse");
+        assert!(error.contains("active full-key flight/view capacity 1"));
     }
 
     // Mutation killed: install a final monitor on a frame too narrow for its real presenter.
