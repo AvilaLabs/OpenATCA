@@ -2858,10 +2858,6 @@ mod transaction_tests {
         runtime_with_model_and_centre(synthetic_model().unwrap(), centre)
     }
 
-    fn runtime_with_profile(profile: RegionalRunProfile) -> RegionalRuntime {
-        runtime_with_profile_and_centre(profile, *b"ZAU1")
-    }
-
     fn runtime_with_profile_and_centre(
         profile: RegionalRunProfile,
         centre: [u8; 4],
@@ -3792,6 +3788,7 @@ mod transaction_tests {
             let mut runtime = runtime_with_profile_and_centre(profile, *b"ZAU\0");
             seeded_claim_frame(&mut runtime, &[(gufi, address, *b"ZAU\0")], base);
             let raw_receipt_ns = now_ns - drop_ns + offset_ns;
+            let source_ns = base + 20 * surveillance::SECOND_NS;
             let issue_receipt_ns = base
                 + if offset_ns > 0 {
                     31 * surveillance::SECOND_NS
@@ -3799,7 +3796,7 @@ mod transaction_tests {
                     30 * surveillance::SECOND_NS
                 };
             let identity = format!(
-                "v1\t{issue_receipt_ns}\t{raw_receipt_ns}\t3\tFLIGHT\t{gufi:032x}\t{address:06x}\tZAU\tFLIGHT\tIDENTITY_PARTIAL\tN123AB\t-\t-\tRAWRECEIPT\t{raw_receipt_ns}"
+                "v1\t{issue_receipt_ns}\t{source_ns}\t3\tFLIGHT\t{gufi:032x}\t{address:06x}\tZAU\tFLIGHT\tIDENTITY_PARTIAL\tN123AB\t-\t-\tRAWRECEIPT\t{raw_receipt_ns}"
             );
             let accepted = regional_step(
                 &mut runtime,
@@ -3810,10 +3807,14 @@ mod transaction_tests {
                 },
             )
             .unwrap();
-            assert!(accepted
-                .flight_operations
-                .iter()
-                .any(|outcome| matches!(outcome.operation, Some(oa_flight::Outcome::Applied))));
+            assert!(
+                accepted
+                    .flight_operations
+                    .iter()
+                    .any(|outcome| matches!(outcome.operation, Some(oa_flight::Outcome::Applied))),
+                "expected current aligned flight identity to apply, got {:?}",
+                accepted.flight_operations
+            );
 
             for tick in 1..=9i64 {
                 let receipt_ns = issue_receipt_ns + tick * 10 * surveillance::SECOND_NS;
