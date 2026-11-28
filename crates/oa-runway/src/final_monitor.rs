@@ -387,9 +387,9 @@ pub struct FinalMonitorState {
 
 const _: () = assert!(core::mem::size_of::<FinalMonitorState>() == 24);
 
-const HAS_INPUT_FRAME_TIME: u8 = 1 << 0;
-const HAS_EVALUATION_TIME: u8 = 1 << 1;
-const KNOWN_CLOCK_FLAGS: u8 = HAS_INPUT_FRAME_TIME | HAS_EVALUATION_TIME;
+const HAS_INPUT_FRAME_TIME: u8 = 0b01;
+const HAS_EVALUATION_TIME: u8 = 0b10;
+const KNOWN_CLOCK_FLAGS: u8 = 0b11;
 
 impl FinalMonitorState {
     pub const fn new() -> Self {
