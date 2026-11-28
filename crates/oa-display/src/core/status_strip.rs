@@ -16,13 +16,24 @@ const STRIP_LAYER: u8 = 15;
 const MODE_ROW_SIZE: u8 = 7;
 const ALERT_ROW_SIZE: u8 = 10;
 const SAFETY_ROW_SIZE: u8 = 8;
+const DATA_BLOCK_NOTICE_SIZE: u8 = 8;
 const STRIP_ROW_PITCH_PX: u32 = 14;
+const SAFETY_ROW_PITCH_PX: u32 = 12;
+const NOTICE_ROW_PITCH_PX: u32 = 10;
+const CONSOLE_ROW_PITCH_PX: u32 = 9;
 const MODE_ROW_MAX_CHARS: usize = 64;
 const CONSOLE_ROW_CHARS: usize = 64;
 const MAX_CONSOLE_BYTES: usize = CONSOLE_ROW_CHARS * 2;
 const HEADING_ROW_MAX_CHARS: usize = crate::core::text::TEXT_BYTES;
 const SAFETY_ROW_MAX_CHARS: usize = crate::core::text::TEXT_BYTES;
-const OVERFLOW_ROW_MAX_CHARS: usize = 64;
+const MAX_DECIMAL_U64_DIGITS: usize = 20;
+const OVERFLOW_ROW_MAX_CHARS: usize = "MSAW +".len()
+    + MAX_DECIMAL_U64_DIGITS
+    + " NOT SHOWN".len()
+    + " (".len()
+    + MAX_DECIMAL_U64_DIGITS
+    + " WARNING)".len();
+const DATA_BLOCK_NOTICE_MAX_CHARS: usize = 64;
 
 /// One stable row in the composed regional status band.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -33,19 +44,19 @@ pub enum StatusStripRow {
     Safety(usize),
     MsawOverflow,
     FinalOverflow,
+    DataBlockOmitted,
     Console(usize),
 }
 
 /// Pixel placement and draw style for one status row. Coordinates use whole canvas pixels.
 // D5: prepared renderer geometry; methods query the privately constructed row reservation.
-// A7.2: cold struct, size guard waived (one of nine fixed renderer configuration rows).
+// A7.2: cold struct, size guard waived (one of ten fixed renderer configuration rows).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StatusStripPlacement {
     x_px: i32,
     y_px: i32,
     size: u8,
     pitch_px: u32,
-    align: u8,
     colour: u8,
     layer: u8,
     bounds: TextBounds,
@@ -69,16 +80,16 @@ impl StatusStripPlacement {
         self.pitch_px
     }
 
-    pub const fn align(&self) -> u8 {
-        self.align
-    }
-
     pub const fn colour(&self) -> u8 {
         self.colour
     }
 
     pub const fn layer(&self) -> u8 {
         self.layer
+    }
+
+    pub const fn max_chars(&self) -> usize {
+        self.max_chars
     }
 
     pub const fn reserved_bounds(&self) -> TextBounds {
@@ -95,7 +106,7 @@ impl StatusStripPlacement {
         Ok(text_block_bounds_px(
             (self.x_px * 16, self.y_px * 16),
             self.size,
-            self.align,
+            ALIGN_LEFT,
             text.chars().count(),
             1,
             self.pitch_px,
@@ -114,6 +125,7 @@ pub struct RegionalStatusPlan {
     safety: [StatusStripPlacement; 2],
     msaw_overflow: StatusStripPlacement,
     final_overflow: StatusStripPlacement,
+    data_block_omitted: StatusStripPlacement,
     console: [StatusStripPlacement; 2],
     top_inset_px: u32,
 }
@@ -128,6 +140,7 @@ impl RegionalStatusPlan {
             StatusStripRow::Safety(index) => self.safety.get(index).copied(),
             StatusStripRow::MsawOverflow => Some(self.msaw_overflow),
             StatusStripRow::FinalOverflow => Some(self.final_overflow),
+            StatusStripRow::DataBlockOmitted => Some(self.data_block_omitted),
             StatusStripRow::Console(index) => self.console.get(index).copied(),
         }
     }
@@ -208,7 +221,6 @@ fn placement_at(y_px: i32, style: RowStyle) -> Result<StatusStripPlacement, Disp
         y_px,
         size: style.size,
         pitch_px: style.pitch_px,
-        align: ALIGN_LEFT,
         colour: style.colour,
         layer: STRIP_LAYER,
         bounds,
@@ -240,13 +252,23 @@ pub fn regional_status_plan() -> Result<RegionalStatusPlan, DisplayError> {
     };
     let safety_style = RowStyle {
         size: SAFETY_ROW_SIZE,
-        pitch_px: STRIP_ROW_PITCH_PX,
+        pitch_px: SAFETY_ROW_PITCH_PX,
         colour: palette::ALERT,
         max_chars: SAFETY_ROW_MAX_CHARS,
     };
     let overflow_style = RowStyle {
         max_chars: OVERFLOW_ROW_MAX_CHARS,
         ..alert_style
+    };
+    let notice_style = RowStyle {
+        size: DATA_BLOCK_NOTICE_SIZE,
+        pitch_px: NOTICE_ROW_PITCH_PX,
+        colour: palette::ALERT,
+        max_chars: DATA_BLOCK_NOTICE_MAX_CHARS,
+    };
+    let console_style = RowStyle {
+        pitch_px: CONSOLE_ROW_PITCH_PX,
+        ..mode_style
     };
     let mut y = STRIP_FIRST_ANCHOR_PX;
     let mode = placement_at(y, mode_style)?;
@@ -263,9 +285,11 @@ pub fn regional_status_plan() -> Result<RegionalStatusPlan, DisplayError> {
     y = next_anchor(msaw_overflow)?;
     let final_overflow = placement_at(y, overflow_style)?;
     y = next_anchor(final_overflow)?;
-    let console_first = placement_at(y, mode_style)?;
+    let data_block_omitted = placement_at(y, notice_style)?;
+    y = next_anchor(data_block_omitted)?;
+    let console_first = placement_at(y, console_style)?;
     y = next_anchor(console_first)?;
-    let console_second = placement_at(y, mode_style)?;
+    let console_second = placement_at(y, console_style)?;
     let top_inset_px = u32::try_from(console_second.bounds.y1)
         .map_err(|_| DisplayError::BadView("status strip inset is unrepresentable"))?;
     Ok(RegionalStatusPlan {
@@ -275,6 +299,7 @@ pub fn regional_status_plan() -> Result<RegionalStatusPlan, DisplayError> {
         safety: [safety_first, safety_second],
         msaw_overflow,
         final_overflow,
+        data_block_omitted,
         console: [console_first, console_second],
         top_inset_px,
     })
@@ -366,7 +391,7 @@ fn push_placement_text(
         list,
         (placement.x_px * 16, placement.y_px * 16),
         placement.size,
-        placement.align,
+        ALIGN_LEFT,
         placement.colour,
         placement.layer,
         text,
@@ -388,25 +413,61 @@ mod tests {
     #[test]
     fn reserved_rows_have_independent_numeric_bounds_and_derived_inset() {
         let plan = regional_status_plan().expect("status plan is valid");
-        let rows: [(StatusStripRow, i32, u8, usize, u8); 9] = [
-            (StatusStripRow::Mode, 106, 7, 64, palette::TEXT),
-            (StatusStripRow::MsawHeading, 124, 10, 128, palette::ALERT),
-            (StatusStripRow::FinalHeading, 142, 10, 128, palette::ALERT),
-            (StatusStripRow::Safety(0), 160, 8, 128, palette::ALERT),
-            (StatusStripRow::Safety(1), 178, 8, 128, palette::ALERT),
-            (StatusStripRow::MsawOverflow, 196, 10, 64, palette::ALERT),
-            (StatusStripRow::FinalOverflow, 214, 10, 64, palette::ALERT),
-            (StatusStripRow::Console(0), 232, 7, 64, palette::TEXT),
-            (StatusStripRow::Console(1), 250, 7, 64, palette::TEXT),
+        let rows: [(StatusStripRow, i32, u8, u32, usize, u8); 10] = [
+            (StatusStripRow::Mode, 106, 7, 14, 64, palette::TEXT),
+            (
+                StatusStripRow::MsawHeading,
+                124,
+                10,
+                14,
+                128,
+                palette::ALERT,
+            ),
+            (
+                StatusStripRow::FinalHeading,
+                142,
+                10,
+                14,
+                128,
+                palette::ALERT,
+            ),
+            (StatusStripRow::Safety(0), 160, 8, 12, 128, palette::ALERT),
+            (StatusStripRow::Safety(1), 176, 8, 12, 128, palette::ALERT),
+            (
+                StatusStripRow::MsawOverflow,
+                192,
+                10,
+                14,
+                67,
+                palette::ALERT,
+            ),
+            (
+                StatusStripRow::FinalOverflow,
+                210,
+                10,
+                14,
+                67,
+                palette::ALERT,
+            ),
+            (
+                StatusStripRow::DataBlockOmitted,
+                228,
+                8,
+                10,
+                64,
+                palette::ALERT,
+            ),
+            (StatusStripRow::Console(0), 242, 7, 9, 64, palette::TEXT),
+            (StatusStripRow::Console(1), 255, 7, 9, 64, palette::TEXT),
         ];
         let mut bottoms = 0i32;
-        for (index, (row_kind, anchor, size, chars, colour)) in rows.iter().enumerate() {
+        for (index, (row_kind, anchor, size, pitch, chars, colour)) in rows.iter().enumerate() {
             let row = plan.row(*row_kind).expect("reserved row exists");
             assert_eq!(row.x_px(), 8);
             assert_eq!(row.y_px(), *anchor);
             assert_eq!(row.size(), *size);
-            assert_eq!(row.pitch_px(), 14);
-            assert_eq!(row.align(), ALIGN_LEFT);
+            assert_eq!(row.pitch_px(), *pitch);
+            assert_eq!(row.max_chars(), *chars);
             assert_eq!(row.colour(), *colour);
             assert_eq!(row.layer(), 15);
             let width_px = i32::try_from(
@@ -420,7 +481,10 @@ mod tests {
                 x0: 6,
                 y0: *anchor - 2,
                 x1: 6 + width_px,
-                y1: *anchor + 16,
+                y1: *anchor
+                    + i32::try_from((*pitch).max((u32::from(*size) * 7 / 6) + 1))
+                        .expect("bounded row pitch")
+                    + 2,
             };
             assert_eq!(row.reserved_bounds(), expected);
             assert_eq!(
@@ -452,8 +516,8 @@ mod tests {
     #[test]
     fn operator_width_uses_actual_mode_and_console_row_metrics() {
         let plan = regional_status_plan().expect("status plan is valid");
-        let mode = "M".repeat(MODE_ROW_MAX_CHARS);
-        let console = "C".repeat(MAX_CONSOLE_BYTES);
+        let mode = "M".repeat(64);
+        let console = "C".repeat(128);
         let minimum = plan
             .minimum_width_for_operator_rows(&mode, &console)
             .expect("maximum admitted operator rows fit a finite width");
@@ -488,5 +552,46 @@ mod tests {
         let plan = regional_status_plan().expect("valid renderer plan");
         assert!(plan.row(StatusStripRow::Safety(2)).is_none());
         assert!(plan.row(StatusStripRow::Console(2)).is_none());
+    }
+
+    // Mutation: dropping operator rows or corrupting their pixel coordinates must change output.
+    // REQ: OA-REG-020
+    #[test]
+    fn operator_rows_render_the_exact_reserved_text_and_refuse_short_capacity_atomically() {
+        use crate::core::list::{list_new, ListCaps};
+        let plan = regional_status_plan().unwrap();
+        let mode = "MODE SURVEILLANCE | FUSION OFF";
+        let first = "A".repeat(64);
+        let second = "B".repeat(64);
+        let console = first.clone() + &second;
+        let caps = ListCaps {
+            lines: 0,
+            rects: 0,
+            circles: 0,
+            polylines: 0,
+            poly_vertices: 0,
+            texts: 3,
+            text_bytes: mode.len() + 128,
+        };
+        let mut list = list_new(caps).unwrap();
+        append_regional_operator_rows(&mut list, &plan, mode, &console).unwrap();
+        assert_eq!(list.texts.x, [128, 128, 128]);
+        assert_eq!(list.texts.y, [1696, 3872, 4080]);
+        assert_eq!(list.texts.size, [7, 7, 7]);
+        assert_eq!(list.texts.align, [0, 0, 0]);
+        for (row, expected) in [mode, first.as_str(), second.as_str()].iter().enumerate() {
+            let start = list.texts.start[row] as usize;
+            let end = start + list.texts.len[row] as usize;
+            assert_eq!(list.text.get(start..end), Some(*expected));
+        }
+        let mut short = list_new(ListCaps { texts: 2, ..caps }).unwrap();
+        let before = short.clone();
+        assert!(matches!(
+            append_regional_operator_rows(&mut short, &plan, mode, &console),
+            Err(DisplayError::Full { table: "texts", .. })
+        ));
+        assert_eq!(short, before);
+        let empty_console = regional_operator_rows("M", "").unwrap();
+        assert_eq!(empty_console.console_count, 0);
     }
 }

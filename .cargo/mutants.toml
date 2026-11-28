@@ -12,7 +12,7 @@ exclude_re = [
   '^crates/oa-runway/src/plane\.rs:171:(34|55): replace && with \|\| in true_velocity_to_local$',
   '^crates/oa-runway/src/plane\.rs:171:(49|71): replace > with >= in true_velocity_to_local$',
   '^crates/oa-runway/src/final_monitor\.rs:267:44: replace < with <= in prepare_pair$',
-  '^crates/oa-display/src/core/alert_markers\.rs:272:30: replace > with >= in maximum_header_stats$',
-  '^crates/oa-display/src/core/alert_markers\.rs:286:30: replace > with >= in maximum_header_stats$',
+  '^crates/oa-display/src/core/alert_markers\.rs:301:30: replace > with >= in maximum_header_stats$',
+  '^crates/oa-display/src/core/alert_markers\.rs:315:30: replace > with >= in maximum_header_stats$',
 ]
 exclude_globs = ['**/proofs.rs', '**/proofs_wire.rs']

@@ -26,19 +26,21 @@ fn overflow_runtime(profile: RegionalRunProfile) -> RegionalRuntime {
     .expect("bounded overflow fixture runtime")
 }
 
-fn overflow_runtime_with_monitor(
+fn overflow_runtime_with_dimensions(
     mut profile: RegionalRunProfile,
     monitor: RuntimeFinalMonitorConfig,
+    centre: [u8; 4],
+    frame_width: u32,
     frame_height: u32,
 ) -> RegionalRuntime {
-    profile.surveillance.frame_width = 2_400;
+    profile.surveillance.frame_width = frame_width;
     profile.surveillance.frame_height = frame_height;
     let model = synthetic_model().expect("public synthetic adaptation");
     let snapshot = oa_airspace::core::snapshot::encode(&model).expect("encode synthetic model");
     regional_new_with_runtime_final_monitor(
         model,
         oa_sha256::sha256(&snapshot),
-        *b"ZAU1",
+        centre,
         SurveillanceConfig {
             centre_lat_e7: 410_000_000,
             centre_lon_e7: -870_000_000,
@@ -207,10 +209,14 @@ fn valid_open_table_limit_discloses_one_refused_warning_and_keeps_notice_next_fr
     assert_eq!(msaw.completed_floor_samples, msaw.planned_points);
     assert_eq!(msaw.open.len(), OPEN_LIMIT);
     assert_eq!(msaw.open_table_refused, 1);
+    assert_eq!(msaw.open_table_refused_caution, 0);
+    assert_eq!(msaw.open_table_refused_warning, 1);
     let core_stats = msaw
         .stats
         .expect("completed MSAW cycle reports core counts");
     assert_eq!(core_stats.open_full, 1);
+    assert_eq!(core_stats.open_full_caution, 0);
+    assert_eq!(core_stats.open_full_warning, 1);
     assert_eq!(core_stats.alerts_dropped, 0);
     assert_eq!(msaw.closed.len(), 1, "the refused warning is logged once");
     assert_eq!(
@@ -230,7 +236,7 @@ fn valid_open_table_limit_discloses_one_refused_warning_and_keeps_notice_next_fr
     assert_eq!(marker_stats.omitted, 1);
     let rows = surveillance::surveillance_text_rows(&runtime.surveillance)
         .expect("actual runtime display-list text rows");
-    assert_eq!(overflow_count(&rows, "MSAW +1 NOT SHOWN"), 1);
+    assert_eq!(overflow_count(&rows, "MSAW +1 NOT SHOWN (1 WARNING)"), 1);
     assert!(overflow
         .surveillance
         .warnings
@@ -239,7 +245,7 @@ fn valid_open_table_limit_discloses_one_refused_warning_and_keeps_notice_next_fr
     assert!(overflow.surveillance.raster_rendered);
     super::overflow_pixels::assert_notice_isolated(
         &runtime,
-        "MSAW +1 NOT SHOWN",
+        "MSAW +1 NOT SHOWN (1 WARNING)",
         oa_display::core::status_strip::StatusStripRow::MsawOverflow,
     );
 
@@ -255,12 +261,95 @@ fn valid_open_table_limit_discloses_one_refused_warning_and_keeps_notice_next_fr
     assert_eq!(next.surveillance.msaw_markers.unwrap().omitted, 1);
     let next_rows = surveillance::surveillance_text_rows(&runtime.surveillance)
         .expect("next actual display-list text rows");
-    assert_eq!(overflow_count(&next_rows, "MSAW +1 NOT SHOWN"), 1);
+    assert_eq!(
+        overflow_count(&next_rows, "MSAW +1 NOT SHOWN (1 WARNING)"),
+        1
+    );
     assert!(next.surveillance.raster_rendered);
     super::overflow_pixels::assert_notice_isolated(
         &runtime,
-        "MSAW +1 NOT SHOWN",
+        "MSAW +1 NOT SHOWN (1 WARNING)",
         oa_display::core::status_strip::StatusStripRow::MsawOverflow,
+    );
+}
+
+// Mutation killed: flattening severity at the bridge makes a refused warning indistinguishable
+// from a caution and omits the required warning-qualified consumer notice.
+// REQ: OA-REG-011, OA-DSP-078
+#[test]
+fn mixed_grade_open_table_refusal_is_disclosed_by_runtime_notice() {
+    const TRACKS: usize = 129;
+    const OPEN_LIMIT: usize = 128;
+    let mut profile = overflow_profile(TRACKS);
+    profile.surveillance.max_open_alerts = OPEN_LIMIT + MAX_FINAL_APPROACH_ASSIGNMENTS;
+    let mut runtime = overflow_runtime(profile);
+    let service = crate::msaw_bridge::regional_msaw_synthetic_with_reported_open_limit_for_test(
+        TRACKS,
+        TRACKS,
+        OPEN_LIMIT,
+        OPEN_LIMIT,
+        profile.surveillance.max_frames,
+    )
+    .expect("synthetic provider uses the configured retained-alert limit");
+    regional_attach_msaw(&mut runtime, service).expect("valid MSAW capacity is admitted");
+
+    let mixed_batch = |receipt_ns: i64, include_warning: bool| {
+        let count = if include_warning { TRACKS } else { OPEN_LIMIT };
+        let mut batch =
+            low_altitude_population_batch_with_address_range(receipt_ns, 0x00ab_c101, count);
+        for (index, event) in batch.events.iter_mut().enumerate() {
+            if let crate::EventKind::Position {
+                altitude_ft,
+                vertical_rate_fpm,
+                ..
+            } = &mut event.kind
+            {
+                *altitude_ft = Some(if index < OPEN_LIMIT { 1500 } else { 1000 });
+                *vertical_rate_fpm = Some(-600);
+            }
+        }
+        batch
+    };
+
+    for scan in 1_i64..=4 {
+        regional_step(
+            &mut runtime,
+            &mixed_batch(scan * surveillance::SECOND_NS, false),
+        )
+        .expect("128 caution tracks open normally");
+    }
+    let mut latest = None;
+    for scan in 5_i64..=7 {
+        latest = Some(
+            regional_step(
+                &mut runtime,
+                &mixed_batch(scan * surveillance::SECOND_NS, true),
+            )
+            .expect("new warning is evaluated behind retained cautions"),
+        );
+    }
+    let frame = latest.expect("the configured scans produce a runtime frame");
+    let msaw = frame.surveillance.msaw.as_ref().expect("MSAW frame exists");
+    assert_eq!(msaw.open.len(), OPEN_LIMIT);
+    assert_eq!(msaw.open_table_refused_caution, 0);
+    assert_eq!(msaw.open_table_refused_warning, 1);
+    assert_eq!(msaw.open_table_refused, 1);
+    let rows = surveillance::surveillance_text_rows(&runtime.surveillance)
+        .expect("actual runtime status text is available");
+    assert_eq!(overflow_count(&rows, "MSAW +1 NOT SHOWN (1 WARNING)"), 1);
+    assert!(frame.surveillance.raster_rendered);
+
+    let next = regional_step(
+        &mut runtime,
+        &mixed_batch(8 * surveillance::SECOND_NS, true),
+    )
+    .expect("the next evaluated frame retains the current-cycle refusal evidence");
+    assert_eq!(next.surveillance.msaw_markers.unwrap().omitted, 1);
+    let next_rows = surveillance::surveillance_text_rows(&runtime.surveillance)
+        .expect("next-frame runtime status text is available");
+    assert_eq!(
+        overflow_count(&next_rows, "MSAW +1 NOT SHOWN (1 WARNING)"),
+        1
     );
 }
 
@@ -272,8 +361,13 @@ fn composed_overflow_runtime(frame_height: u32) -> RegionalRuntime {
     // The profile reserves both complete output families. The attached provider still uses its
     // real 128-entry open table and receives 129 live violating reports.
     let profile = overflow_profile(OPEN_LIMIT + MAX_FINAL_APPROACH_ASSIGNMENTS);
-    let mut runtime =
-        overflow_runtime_with_monitor(profile, final_monitor_config(100.0), frame_height);
+    let mut runtime = overflow_runtime_with_dimensions(
+        profile,
+        final_monitor_config(100.0),
+        *b"ZAU1",
+        2_400,
+        frame_height,
+    );
     let service = crate::msaw_bridge::regional_msaw_synthetic_with_reported_open_limit_for_test(
         TRACKS,
         TRACKS,
@@ -302,24 +396,21 @@ fn composed_overflow_runtime(frame_height: u32) -> RegionalRuntime {
         .expect("assigned flight produces an actual final-monitor alert");
 
     for scan in 5_i64..=8 {
-        regional_step(
-            &mut runtime,
-            &spatial_low_altitude_batch(scan * surveillance::SECOND_NS, FIRST_LOW_ADDRESS + 1, 128),
-        )
-        .expect("128 spread synthetic positions complete the normal provider cycle");
+        let batch =
+            spatial_low_altitude_batch(scan * surveillance::SECOND_NS, FIRST_LOW_ADDRESS + 1, 128);
+        regional_step(&mut runtime, &batch)
+            .expect("128 synthetic positions complete the normal provider cycle");
     }
     let mut overflow = None;
     for scan in 9_i64..=11 {
+        let batch = spatial_low_altitude_batch(
+            scan * surveillance::SECOND_NS,
+            FIRST_LOW_ADDRESS,
+            TRACKS - 1,
+        );
         overflow = Some(
-            regional_step(
-                &mut runtime,
-                &spatial_low_altitude_batch(
-                    scan * surveillance::SECOND_NS,
-                    FIRST_LOW_ADDRESS,
-                    TRACKS - 1,
-                ),
-            )
-            .expect("129 spread positions complete the normal provider cycle"),
+            regional_step(&mut runtime, &batch)
+                .expect("129 synthetic positions complete the normal provider cycle"),
         );
     }
     let overflow = overflow.expect("overflow scans produce a complete runtime frame");
@@ -332,7 +423,11 @@ fn composed_overflow_runtime(frame_height: u32) -> RegionalRuntime {
     assert!(msaw.evaluation_attempted);
     assert_eq!(msaw.open.len(), OPEN_LIMIT);
     assert_eq!(msaw.open_table_refused, 1);
+    assert_eq!(msaw.open_table_refused_caution, 0);
+    assert_eq!(msaw.open_table_refused_warning, 1);
     assert_eq!(msaw.stats.expect("MSAW accounting").open_full, 1);
+    assert_eq!(msaw.stats.expect("MSAW accounting").open_full_warning, 1);
+    assert_eq!(msaw.stats.expect("MSAW accounting").open_full_caution, 0);
     assert_eq!(msaw.stats.expect("MSAW accounting").alerts_dropped, 0);
     assert!(matches!(
         msaw.report,
@@ -377,14 +472,14 @@ fn composed_overflow_runtime(frame_height: u32) -> RegionalRuntime {
         .expect("whole composed display list text evidence");
     let console_line = "C".repeat(MAX_OPERATOR_CONSOLE_BYTES / 2);
     assert_eq!(overflow_count(&rows, &console_line), 2);
-    assert_eq!(overflow_count(&rows, "MSAW +1 NOT SHOWN"), 1);
+    assert_eq!(overflow_count(&rows, "MSAW +1 NOT SHOWN (1 WARNING)"), 1);
     assert_eq!(overflow_count(&rows, "FINAL +1 NOT SHOWN"), 1);
     assert!(rows.iter().any(|row| row.text == "MSAW PARTIAL"));
     assert_safety_row_text(&rows, "FEED FLIGHT LOST 10.0S", 0);
     assert_safety_row_text(&rows, "+6 MORE STATES NOT SHOWN", 1);
     super::overflow_pixels::assert_notice_isolated(
         &runtime,
-        "MSAW +1 NOT SHOWN",
+        "MSAW +1 NOT SHOWN (1 WARNING)",
         oa_display::core::status_strip::StatusStripRow::MsawOverflow,
     );
     super::overflow_pixels::assert_notice_isolated(
@@ -408,4 +503,112 @@ fn simultaneous_alert_overflows_have_disjoint_text_at_review_canvas() {
 fn simultaneous_alert_overflows_keep_notice_pixels_at_compact_canvas() {
     let runtime = composed_overflow_runtime(1_000);
     super::overflow_pixels::assert_all_text_disjoint(&runtime);
+}
+
+// Mutation killed: leave traffic blocks under late warning text or silently omit exhausted labels.
+// REQ: OA-REG-019, OA-DSP-078
+#[test]
+fn exhausted_compact_scene_keeps_warnings_clear_and_reports_unplaced_blocks() {
+    let mut runtime = overflow_runtime_with_dimensions(
+        overflow_profile(8),
+        final_monitor_config(100.0),
+        *b"ZAU\0",
+        800,
+        342,
+    );
+    let assigned = seed_confirmed_final_monitor_track(&mut runtime, 410_000_000, 0);
+    assert_eq!(assigned.final_monitor.status, FinalMonitorStatus::Available);
+    let target = *assigned
+        .final_monitor
+        .alerts
+        .first()
+        .expect("the correlated target has a real final-monitor alert");
+    // The actual target is on the NTZ centreline and is itself a warning.
+    assert_eq!(target.severity, final_monitor_core::FinalSeverity::Warning);
+    let mut alerts = vec![target];
+    // Same explicit input view as overflow_runtime_with_dimensions; no private state bypass.
+    let projection = oa_display::core::project::projection_new(
+        410_000_000,
+        -870_000_000,
+        90.0,
+        800,
+        342,
+        oa_display::status_strip::regional_status_plan()
+            .unwrap()
+            .top_inset_px(),
+    )
+    .expect("known compact runtime input view is valid");
+    let center = oa_display::core::project::project(&projection, target.lat_e7, target.lon_e7)
+        .expect("correlated target projects into the compact frame");
+    let initial_rows = surveillance::surveillance_text_rows(&runtime.surveillance)
+        .expect("initial runtime exposes its actual traffic block");
+    let callsign = initial_rows
+        .iter()
+        .find(|row| row.text == "N123AB")
+        .expect("the correlated target initially has its full callsign block");
+    let width = callsign.bounds.x1 - callsign.bounds.x0;
+    let height = callsign.bounds.y1 - callsign.bounds.y0;
+    let center_x = center.0 / 16;
+    let center_y = center.1 / 16;
+    for (distance_index, distance) in [60_i32, 160, 320].into_iter().enumerate() {
+        for direction in [-1_i32, 1] {
+            let candidate_center_x = if direction > 0 {
+                center_x + distance + width / 2
+            } else {
+                center_x - distance - width / 2
+            };
+            // The warning glyph uses a 10px font and a five-pixel label offset. Align its
+            // renderer-derived padded bounds with the callsign candidate's actual vertical band.
+            let candidate_top_y = center_y - height / 2;
+            let point_y = candidate_top_y + 7;
+            let (latitude, longitude) = oa_display::core::project::unproject(
+                &projection,
+                candidate_center_x * 16,
+                point_y * 16,
+            )
+            .expect("bounded compact warning candidate maps to geographic coordinates");
+            let mut warning = target;
+            warning.address = 0x00ad_0100
+                + u32::try_from(distance_index * 2 + if direction > 0 { 1 } else { 0 })
+                    .expect("six bounded warning addresses");
+            warning.lat_e7 = latitude;
+            warning.lon_e7 = longitude;
+            warning.severity = final_monitor_core::FinalSeverity::Warning;
+            alerts.push(warning);
+        }
+    }
+    alerts.sort_unstable_by_key(|alert| alert.address);
+    runtime.final_monitor_display.alerts = alerts;
+    runtime.final_monitor_marker_budget = runtime.final_monitor_display.alerts.len();
+    regional_console_overlay(&mut runtime, "")
+        .expect("actual regional presenter composes bounded compact warnings");
+
+    let spec = regional_frame_spec(&runtime).expect("compact frame geometry is available");
+    assert_eq!((spec.width, spec.height), (800, 342));
+    super::overflow_pixels::assert_all_text_disjoint(&runtime);
+
+    let rows = surveillance::surveillance_text_rows(&runtime.surveillance)
+        .expect("compact runtime exposes actual rendered text rows");
+    let notice = rows
+        .iter()
+        .find(|row| row.text.starts_with("DATA BLOCK +") && row.text.ends_with(" NOT PLACED"))
+        .expect("exhausted candidate layout reports omitted full blocks");
+    assert_eq!(rows.iter().filter(|row| row.text == "W").count(), 7);
+    assert!(!rows.iter().any(|row| row.text == "N123AB"));
+    assert_eq!(
+        rows.iter().filter(|row| row.text == notice.text).count(),
+        1,
+        "only one shared-plan omission line is rendered"
+    );
+    let warnings = surveillance::surveillance_current_warnings(&runtime.surveillance)
+        .expect("current runtime warnings include rendered omissions");
+    assert!(
+        warnings.iter().any(|warning| warning == &notice.text),
+        "data-block omission reaches the existing warning channel"
+    );
+    super::overflow_pixels::assert_notice_isolated(
+        &runtime,
+        &notice.text,
+        oa_display::core::status_strip::StatusStripRow::DataBlockOmitted,
+    );
 }

@@ -400,7 +400,13 @@ fn the_map_draws_boundaries_airways_symbols_rings_and_legend_in_their_colours() 
     }
 
     // Legend: facility, cycles, range, ring spacing; the boundary key in its own colours.
-    assert!(t.contains(&"ZAU NASR 20261029 CIFP 2611  NORTH UP  RANGE 50 NM  RINGS 20 NM"));
+    let title = t
+        .iter()
+        .position(|text| *text == "ZAU NASR 20261029 CIFP 2611  NORTH UP  RANGE 50 NM  RINGS 20 NM")
+        .unwrap();
+    let own_key = t.iter().position(|text| *text == "ZAU HIGH").unwrap();
+    assert_eq!((l.texts.x[title], l.texts.y[title]), (8 * 16, 8 * 16));
+    assert_eq!((l.texts.x[own_key], l.texts.y[own_key]), (8 * 16, 27 * 16));
     let named = |name: &str, colour: u8| {
         t.iter()
             .zip(&l.texts.colour)

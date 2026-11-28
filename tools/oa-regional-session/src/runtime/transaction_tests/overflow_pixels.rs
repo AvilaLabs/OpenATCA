@@ -71,7 +71,7 @@ pub(super) fn assert_notice_isolated(
         &mut isolated,
         (placement.x_px() * 16, placement.y_px() * 16),
         placement.size(),
-        placement.align(),
+        oa_display::core::list::ALIGN_LEFT,
         placement.colour(),
         placement.layer(),
         expected,

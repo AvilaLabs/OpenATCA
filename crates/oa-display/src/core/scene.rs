@@ -97,7 +97,8 @@ pub const LAYER_ARTCC_LOW: u8 = 3;
 pub const LAYER_ARTCC_HIGH: u8 = 4;
 pub const LAYER_SYMBOL: u8 = 5;
 pub const LAYER_TEXT: u8 = 6;
-// Layers 7 to 10 hold the live traffic (`crate::core::traffic`); the legend strip covers it.
+// Layers 7 to 10 order live traffic (`crate::core::traffic`); layer 7 also carries protected
+// inhibition captions, and the legend strip covers these map-area layers.
 pub const LAYER_LEGEND_BG: u8 = 11;
 pub const LAYER_LEGEND: u8 = 12;
 

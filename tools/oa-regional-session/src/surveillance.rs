@@ -14,7 +14,7 @@ use oa_display::core::ownership::OwnershipStatus;
 use oa_display::core::project::{project, Projection};
 use oa_display::core::raster::frame_digest;
 use oa_display::core::safety::{FeedState, FeedStatus, SafetyStats};
-use oa_display::core::scene::LAYER_TEXT;
+use oa_display::core::scene::{LAYER_ARTCC_HIGH, LAYER_TEXT, LEGEND_STRIP_PX};
 use oa_display::core::traffic::{targets_columns, DEFAULT_STYLE, LAYER_BLOCK};
 use oa_safety::inhibit::{inhibits_new, InhibitTable};
 use oa_safety::net::{state_table_new, StateTable};
@@ -53,7 +53,8 @@ pub const FRAME_WIDTH: u32 = 800;
 pub const FRAME_HEIGHT: u32 = 600;
 pub const REVIEW_FRAME_WIDTH: u32 = 1_600;
 pub const REVIEW_FRAME_HEIGHT: u32 = 1_200;
-/// Bounded byte allowance for mode, maximum console text, and two safety summaries.
+/// Base allowance for mode, maximum console text, and two safety summaries; the shared status
+/// plan adds the data-block omission row's exact maximum bytes at admission.
 pub(crate) const STATUS_AUX_TEXT_BYTES: usize = 256;
 /// C7: control redraws over the entire offline session, including ordinary completed frames.
 pub const MAX_PRESENTATION_UPDATES: usize = 8192;
@@ -175,6 +176,7 @@ pub struct Surveillance {
     overlay_base: Option<OverlayBase>,
     presentation_updates: usize,
     map_labels_yielded: usize,
+    data_blocks_not_placed: usize,
     priority_text_start: Option<usize>,
     traffic_blocks: Vec<BlockGroup>,
     msaw: Option<crate::msaw_bridge::RegionalMsaw>,
@@ -445,7 +447,18 @@ pub(crate) fn status_aux_text_rows() -> Result<usize, String> {
     1usize
         .checked_add(operator.console_count)
         .and_then(|rows| rows.checked_add(safety_rows))
+        .and_then(|rows| rows.checked_add(1))
         .ok_or_else(|| "operator status rows overflow".into())
+}
+
+pub(crate) fn status_aux_text_bytes() -> Result<usize, String> {
+    let plan = regional_status_plan()?;
+    let notice = plan
+        .row(oa_display::core::status_strip::StatusStripRow::DataBlockOmitted)
+        .ok_or("data-block notice row is unavailable")?;
+    STATUS_AUX_TEXT_BYTES
+        .checked_add(notice.max_chars())
+        .ok_or_else(|| "operator status text reservation overflow".into())
 }
 
 pub(crate) fn alert_family_text_reservation() -> Result<(usize, usize), String> {
@@ -525,6 +538,7 @@ pub fn surveillance_new_with_profile(
         overlay_base: None,
         presentation_updates: 0,
         map_labels_yielded: 0,
+        data_blocks_not_placed: 0,
         priority_text_start: None,
         traffic_blocks: Vec::new(),
     })
@@ -642,7 +656,7 @@ fn new_regional_scope(
             + profile.max_tracks * oa_display::core::alert_markers::ALERT_TEXTS_PER_MARKER
             + family_text_rows
             + profile.max_open_alerts,
-        text_bytes: STATUS_AUX_TEXT_BYTES
+        text_bytes: status_aux_text_bytes()?
             + profile.max_tracks * oa_display::core::alert_markers::ALERT_TEXT_BYTES_PER_MARKER
             + family_text_bytes
             + profile.max_open_alerts * 2,
@@ -754,6 +768,7 @@ fn surveillance_begin_with_resolution(
     s.completed = false;
     s.overlay_base = None;
     s.map_labels_yielded = 0;
+    s.data_blocks_not_placed = 0;
     s.priority_text_start = None;
     s.traffic_blocks.clear();
     Ok(())
@@ -1663,12 +1678,14 @@ fn render_scope_frame(
         }
     }
     s.traffic_blocks.clear();
+    let mut data_blocks_not_placed = 0usize;
     let mut map_labels_yielded = declutter_scope_blocks(
         &mut s.scope.list,
         &s.scope.view.proj,
         &displayed,
         &mut s.traffic_blocks,
         None,
+        &mut data_blocks_not_placed,
     )?;
     let appended_text_start = s.scope.list.texts.x.len();
     let ca_overlay = if context.include_surveillance {
@@ -1697,6 +1714,7 @@ fn render_scope_frame(
             &targets_columns(&s.scope.set),
             &mut s.traffic_blocks,
             Some(appended_text_start),
+            &mut data_blocks_not_placed,
         )?)
         .ok_or("map label yield count overflow")?;
     map_labels_yielded = map_labels_yielded
@@ -1706,6 +1724,9 @@ fn render_scope_frame(
         )?)
         .ok_or("map label yield count overflow")?;
     s.map_labels_yielded = map_labels_yielded;
+    s.data_blocks_not_placed = data_blocks_not_placed;
+    s.overlay_base = Some(capture_overlay_base(&s.scope.list)?);
+    append_data_block_notice(s)?;
     replay_raster(&mut s.scope).map_err(err)?;
     let warnings = surveillance_current_warnings(s)?;
     let digest = frame_digest(&s.scope.spec, &s.scope.buf).map_err(err)?;
@@ -1726,7 +1747,10 @@ fn push_status_band(s: &mut Surveillance) -> Result<(), String> {
     let inset_i32 = i32::try_from(inset).map_err(|_| "status strip inset")?;
     oa_display::list::push_rect(
         &mut s.scope.list,
-        (0, 104 * 16),
+        (
+            0,
+            i32::try_from(LEGEND_STRIP_PX).map_err(|_| "legend strip height")? * 16,
+        ),
         (
             i32::try_from(s.scope.view.proj.width).map_err(|_| "panel width")? * 16,
             inset_i32 * 16,
@@ -1744,6 +1768,27 @@ fn push_status_band(s: &mut Surveillance) -> Result<(), String> {
         ),
         oa_display::palette::DIM_TEXT,
         15,
+    )
+    .map_err(err)
+}
+
+fn append_data_block_notice(s: &mut Surveillance) -> Result<(), String> {
+    if s.data_blocks_not_placed == 0 {
+        return Ok(());
+    }
+    let placement = regional_status_plan()?
+        .row(oa_display::core::status_strip::StatusStripRow::DataBlockOmitted)
+        .ok_or("data-block notice row is unavailable")?;
+    let text = format!("DATA BLOCK +{} NOT PLACED", s.data_blocks_not_placed);
+    placement.bounds_for(&text).map_err(err)?;
+    oa_display::core::list::push_text(
+        &mut s.scope.list,
+        (placement.x_px() * 16, placement.y_px() * 16),
+        placement.size(),
+        oa_display::core::list::ALIGN_LEFT,
+        placement.colour(),
+        placement.layer(),
+        &text,
     )
     .map_err(err)
 }
@@ -1782,12 +1827,15 @@ fn append_msaw_markers(
         });
     }
     markers.sort_by_key(|marker| marker.address);
-    oa_display::core::alert_markers::append_alert_markers_with_budget_and_producer_omissions(
+    oa_display::core::alert_markers::append_alert_markers_with_budget_and_producer_refusals(
         &mut s.scope.list,
         &s.scope.view.proj,
         &markers,
         s.msaw_marker_budget,
-        frame.open_table_refused,
+        oa_display::core::alert_markers::ProducerRefusalCounts {
+            caution: frame.open_table_refused_caution,
+            warning: frame.open_table_refused_warning,
+        },
     )
     .map(Some)
     .map_err(err)
@@ -1828,6 +1876,12 @@ pub(crate) fn surveillance_current_warnings(s: &Surveillance) -> Result<Vec<Stri
     let mut warnings = scope_warnings(&s.scope.list)?;
     if s.map_labels_yielded > 0 {
         warnings.push(format!("MAP LABELS YIELDED: {}", s.map_labels_yielded));
+    }
+    if s.data_blocks_not_placed > 0 {
+        warnings.push(format!(
+            "DATA BLOCK +{} NOT PLACED",
+            s.data_blocks_not_placed
+        ));
     }
     Ok(warnings)
 }
@@ -2021,9 +2075,11 @@ struct BlockGroup {
     end: u32,
     center: (i32, i32),
     original: TextBounds,
+    original_lengths: [u8; 4],
 }
-// A7: 4 + 4 + 4 + 8 + 16 = 36 bytes per displayed target; the selected profile caps the row count.
-const _: () = assert!(core::mem::size_of::<BlockGroup>() == 36);
+// A7: packed 40-byte per-target record; +4 bytes are four original u8 text lengths for redraw
+// restoration. At the selected-profile maximum of 4,096 groups this is 163,840 bytes per frame.
+const _: () = assert!(core::mem::size_of::<BlockGroup>() == 40);
 
 fn block_group_text_span(group: &BlockGroup) -> Result<(usize, usize), String> {
     Ok((
@@ -2097,7 +2153,7 @@ const BLOCK_PLACEMENT_DIRECTIONS: [(i32, i32); 8] = [
 ];
 const BLOCK_PLACEMENT_BASE_DISTANCES_PX: [i32; 2] = [60, 160];
 const BLOCK_PLACEMENT_FALLBACK_PX: i32 = 320;
-/// Sixteen historical candidates plus at most eight priority-warning fallbacks.
+/// Sixteen historical candidates plus at most eight bounded outer-ring candidates.
 const BLOCK_PLACEMENT_MAX_CANDIDATES: usize =
     BLOCK_PLACEMENT_DIRECTIONS.len() * (BLOCK_PLACEMENT_BASE_DISTANCES_PX.len() + 1);
 const _: () = assert!(BLOCK_PLACEMENT_MAX_CANDIDATES == 24);
@@ -2171,10 +2227,10 @@ fn choose_block_bounds(
             .saturating_add(map_labels.iter().fold(0i64, |sum, (_, bounds)| {
                 sum.saturating_add(overlap_area(candidate, *bounds))
             }));
-        // Preserve edge preference, then protect warning text from ordinary layout costs.
+        // Warning text is a hard exclusion; ordinary scene collisions remain soft costs.
         let cost = (
-            outside.saturating_mul(1000),
             priority_overlap,
+            outside.saturating_mul(1000),
             ordinary_overlap,
         );
         (candidate, cost)
@@ -2201,10 +2257,52 @@ fn choose_block_bounds(
     best
 }
 
-/// Repositions mandatory traffic blocks using the same measured-text, map-label-yielding
-/// placement policy as the demonstration renderer. Flight data remains visible; only colliding
-/// map text yields. Work is bounded by the regional profile's track cap and the display's
-/// existing 100,000-text frame limit.
+fn block_bounds_in_view(projection: &Projection, bounds: TextBounds) -> bool {
+    let left = 2;
+    let top = i32::try_from(projection.top_inset)
+        .unwrap_or(i32::MAX)
+        .saturating_add(2);
+    let right = i32::try_from(projection.width)
+        .unwrap_or(i32::MAX)
+        .saturating_sub(2);
+    let bottom = i32::try_from(projection.height)
+        .unwrap_or(i32::MAX)
+        .saturating_sub(2);
+    bounds.x0 >= left && bounds.y0 >= top && bounds.x1 <= right && bounds.y1 <= bottom
+}
+
+fn address_fallback_line(address: u32, line: &str) -> bool {
+    let mut rendered = oa_display::core::text::text_new();
+    oa_display::core::text::text_push_hex(&mut rendered, address, 6);
+    line == oa_display::core::text::text_str(&rendered)
+}
+
+fn rendered_callsign_fallback(
+    list: &DisplayList,
+    group: &BlockGroup,
+) -> Result<Option<TextBounds>, String> {
+    let (start, end) = block_group_text_span(group)?;
+    if end.saturating_sub(start) < 2 {
+        return Ok(None);
+    }
+    let line = text_at(list, start);
+    if line.is_empty() || line.len() > 8 || address_fallback_line(group.address, line) {
+        return Ok(None);
+    }
+    let mut padded = [0u8; 8];
+    padded
+        .get_mut(..line.len())
+        .ok_or("rendered callsign exceeds its fixed width")?
+        .copy_from_slice(line.as_bytes());
+    if !valid_track_callsign(padded) {
+        return Ok(None);
+    }
+    text_row_bounds(list, start).map(Some)
+}
+
+/// Places data blocks in a clear in-view candidate, then tries the renderer's validated first
+/// callsign row; if neither fits, only the target symbol remains and the shared strip reports it.
+/// Colliding map labels yield. Work is bounded by the profile's track cap and text-row limit.
 fn collect_block_groups(
     list: &DisplayList,
     projection: &Projection,
@@ -2250,12 +2348,21 @@ fn collect_block_groups(
         }
         cursor = end;
         let original = block_bounds(list, start, end)?;
+        let mut original_lengths = [0u8; 4];
+        for (offset, row) in (start..end).enumerate() {
+            let len = *list.texts.len.get(row).ok_or("missing block row length")?;
+            *original_lengths
+                .get_mut(offset)
+                .ok_or("traffic block has more than four rows")? =
+                u8::try_from(len).map_err(|_| "traffic block text row is too long")?;
+        }
         groups.push(BlockGroup {
             address,
             start: u32::try_from(start).map_err(|_| "traffic block start exceeds u32")?,
             end: u32::try_from(end).map_err(|_| "traffic block end exceeds u32")?,
             center,
             original,
+            original_lengths,
         });
     }
     groups.sort_unstable_by_key(|group| group.address);
@@ -2263,15 +2370,16 @@ fn collect_block_groups(
 }
 
 fn refresh_block_groups(
-    list: &DisplayList,
+    list: &mut DisplayList,
     groups: &[BlockGroup],
 ) -> Result<Vec<BlockGroup>, String> {
     let mut refreshed = Vec::with_capacity(groups.len());
     for group in groups {
         let (start, end) = block_group_text_span(group)?;
-        if start >= end || end > list.texts.x.len() {
+        if start >= end || end > list.texts.x.len() || end - start > group.original_lengths.len() {
             return Err("cached traffic block span is invalid".into());
         }
+        restore_block_group_lengths(list, group, start, end)?;
         let x = *list
             .texts
             .x
@@ -2306,8 +2414,31 @@ fn refresh_block_groups(
     Ok(refreshed)
 }
 
+fn restore_block_group_lengths(
+    list: &mut DisplayList,
+    group: &BlockGroup,
+    start: usize,
+    end: usize,
+) -> Result<(), String> {
+    if start >= end || end - start > group.original_lengths.len() {
+        return Err("cached traffic block text lengths are invalid".into());
+    }
+    for row in start..end {
+        let length = *group
+            .original_lengths
+            .get(row - start)
+            .ok_or("cached traffic block length is absent")?;
+        *list
+            .texts
+            .len
+            .get_mut(row)
+            .ok_or("cached traffic block text row is absent")? = u32::from(length);
+    }
+    Ok(())
+}
+
 fn map_text_layer(layer: u8) -> bool {
-    matches!(layer, 4 | LAYER_TEXT)
+    matches!(layer, LAYER_ARTCC_HIGH | LAYER_TEXT)
 }
 
 fn text_row_bounds(list: &DisplayList, row: usize) -> Result<TextBounds, String> {
@@ -2352,18 +2483,140 @@ fn collect_priority_text_bounds(
         return Err("priority text evidence table is outside its bounded shape".into());
     }
     let mut bounds = Vec::new();
-    for row in start..list.texts.x.len() {
+    for row in 0..list.texts.x.len() {
         let layer = *list
             .texts
             .layer
             .get(row)
             .ok_or("missing priority text layer")?;
-        if text_at(list, row).is_empty() || map_text_layer(layer) || layer == LAYER_BLOCK {
+        if text_at(list, row).is_empty()
+            || map_text_layer(layer)
+            || layer == LAYER_BLOCK
+            || (row < start && layer != oa_display::core::safety::LAYER_INHIBITION_CAPTION)
+        {
             continue;
         }
         bounds.push(text_row_bounds(list, row)?);
     }
     Ok(bounds)
+}
+
+fn block_candidate_is_safe(
+    projection: &Projection,
+    bounds: TextBounds,
+    obstacles: BlockPlacementObstacles<'_>,
+    symbols: &[(i32, i32)],
+) -> bool {
+    block_bounds_in_view(projection, bounds)
+        && obstacles
+            .priority
+            .iter()
+            .chain(obstacles.placed)
+            .all(|obstacle| overlap_area(bounds, *obstacle) == 0)
+        && symbols
+            .iter()
+            .all(|&center| overlap_area(bounds, symbol_bounds(center)) == 0)
+}
+
+fn choose_renderable_block(
+    group: &BlockGroup,
+    list: &DisplayList,
+    projection: &Projection,
+    obstacles: BlockPlacementObstacles<'_>,
+    symbols: &[(i32, i32)],
+    labels: &[(usize, TextBounds)],
+) -> Result<(Option<TextBounds>, bool), String> {
+    let width = group.original.x1 - group.original.x0;
+    let height = group.original.y1 - group.original.y0;
+    let with_map = choose_block_bounds(
+        group.center,
+        width,
+        height,
+        obstacles,
+        symbols,
+        labels,
+        projection,
+    );
+    let without_map = choose_block_bounds(
+        group.center,
+        width,
+        height,
+        obstacles,
+        symbols,
+        &[],
+        projection,
+    );
+    let full = if labels
+        .iter()
+        .any(|(_, bounds)| overlap_area(without_map, *bounds) > 0)
+    {
+        without_map
+    } else {
+        with_map
+    };
+    if block_candidate_is_safe(projection, full, obstacles, symbols) {
+        return Ok((Some(full), false));
+    }
+
+    let Some(first) = rendered_callsign_fallback(list, group)? else {
+        return Ok((None, false));
+    };
+    let call = choose_block_bounds(
+        group.center,
+        first.x1 - first.x0,
+        first.y1 - first.y0,
+        obstacles,
+        symbols,
+        labels,
+        projection,
+    );
+    if block_candidate_is_safe(projection, call, obstacles, symbols) {
+        Ok((Some(call), true))
+    } else {
+        Ok((None, false))
+    }
+}
+
+fn move_block_rows(
+    list: &mut DisplayList,
+    group: &BlockGroup,
+    chosen: TextBounds,
+) -> Result<(), String> {
+    let (start, end) = block_group_text_span(group)?;
+    let dx = chosen
+        .x0
+        .saturating_sub(group.original.x0)
+        .saturating_mul(16);
+    let dy = chosen
+        .y0
+        .saturating_sub(group.original.y0)
+        .saturating_mul(16);
+    for row in start..end {
+        let x = list.texts.x.get_mut(row).ok_or("missing block row x")?;
+        *x = x.saturating_add(dx);
+        let y = list.texts.y.get_mut(row).ok_or("missing block row y")?;
+        *y = y.saturating_add(dy);
+    }
+    Ok(())
+}
+
+fn hide_block_rows(
+    list: &mut DisplayList,
+    group: &BlockGroup,
+    keep_first: bool,
+) -> Result<(), String> {
+    let (start, end) = block_group_text_span(group)?;
+    for row in start..end {
+        if keep_first && row == start {
+            continue;
+        }
+        *list
+            .texts
+            .len
+            .get_mut(row)
+            .ok_or("missing block text length")? = 0;
+    }
+    Ok(())
 }
 
 fn map_rows_near_block(
@@ -2433,7 +2686,7 @@ fn yield_map_labels_against_appended_text(
     }
     let mut map_rows = collect_map_text_rows(list)?;
     let mut obstacles = Vec::new();
-    for row in appended_start..row_count {
+    for row in 0..row_count {
         if text_at(list, row).is_empty() {
             continue;
         }
@@ -2442,7 +2695,10 @@ fn yield_map_labels_against_appended_text(
             .layer
             .get(row)
             .ok_or("missing appended text layer")?;
-        if !map_text_layer(layer) {
+        if !map_text_layer(layer)
+            && (row >= appended_start
+                || layer == oa_display::core::safety::LAYER_INHIBITION_CAPTION)
+        {
             obstacles.push(text_row_bounds(list, row)?);
         }
     }
@@ -2455,84 +2711,58 @@ fn declutter_scope_blocks(
     targets: &oa_display::core::traffic::TargetColumns<'_>,
     cached_groups: &mut Vec<BlockGroup>,
     obstacle_start: Option<usize>,
+    not_placed: &mut usize,
 ) -> Result<usize, String> {
     let groups = if cached_groups.is_empty() {
         collect_block_groups(list, projection, targets)?
     } else {
         refresh_block_groups(list, cached_groups)?
     };
-    let priority_obstacles = obstacle_start
-        .map(|start| collect_priority_text_bounds(list, start))
-        .transpose()?
-        .unwrap_or_default();
+    let priority_obstacles = collect_priority_text_bounds(list, obstacle_start.unwrap_or(0))?;
     let mut map_rows = collect_map_text_rows(list)?;
     let symbols: Vec<_> = groups.iter().map(|group| group.center).collect();
     let mut placed = Vec::with_capacity(groups.len());
     let mut updated_groups = Vec::with_capacity(groups.len());
     let mut yielded = 0usize;
+    *not_placed = 0;
     for group in groups {
-        let width = group.original.x1 - group.original.x0;
-        let height = group.original.y1 - group.original.y0;
-        let labels = map_rows_near_block(&map_rows, group.center, width, height);
-        let first = choose_block_bounds(
+        let labels = map_rows_near_block(
+            &map_rows,
             group.center,
-            width,
-            height,
-            BlockPlacementObstacles {
-                placed: &placed,
-                priority: &priority_obstacles,
-            },
-            &symbols,
-            &labels,
-            projection,
+            group.original.x1 - group.original.x0,
+            group.original.y1 - group.original.y0,
         );
-        let clear = choose_block_bounds(
-            group.center,
-            width,
-            height,
-            BlockPlacementObstacles {
-                placed: &placed,
-                priority: &priority_obstacles,
-            },
-            &symbols,
-            &[],
-            projection,
-        );
-        let should_yield = labels
-            .iter()
-            .any(|(_, bounds)| overlap_area(clear, *bounds) > 0);
-        let chosen = if should_yield {
+        let obstacles = BlockPlacementObstacles {
+            placed: &placed,
+            priority: &priority_obstacles,
+        };
+        let (chosen, callsign_only) =
+            choose_renderable_block(&group, list, projection, obstacles, &symbols, &labels)?;
+        let updated = if let Some(chosen) = chosen {
+            move_block_rows(list, &group, chosen)?;
+            if callsign_only {
+                hide_block_rows(list, &group, true)?;
+            }
+            let (start, end) = block_group_text_span(&group)?;
+            let bounds = block_bounds(list, start, end)?;
             yielded = yielded
                 .checked_add(yield_map_labels_in_bounds(
                     list,
                     &mut map_rows,
-                    std::slice::from_ref(&clear),
+                    std::slice::from_ref(&bounds),
                 )?)
                 .ok_or("map label yield count overflow")?;
-            clear
+            placed.push(bounds);
+            bounds
         } else {
-            first
+            hide_block_rows(list, &group, false)?;
+            *not_placed = not_placed
+                .checked_add(1)
+                .ok_or("unplaced data block count overflow")?;
+            group.original
         };
-        let dx = chosen
-            .x0
-            .saturating_sub(group.original.x0)
-            .saturating_mul(16);
-        let dy = chosen
-            .y0
-            .saturating_sub(group.original.y0)
-            .saturating_mul(16);
-        let (start, end) = block_group_text_span(&group)?;
-        for row in start..end {
-            if let Some(x) = list.texts.x.get_mut(row) {
-                *x = x.saturating_add(dx);
-            }
-            if let Some(y) = list.texts.y.get_mut(row) {
-                *y = y.saturating_add(dy);
-            }
-        }
-        placed.push(chosen);
         updated_groups.push(BlockGroup {
-            original: chosen,
+            original: updated,
             ..group
         });
     }
@@ -2653,47 +2883,6 @@ pub(crate) fn surveillance_present_controls_with_mode(
 ) -> Result<[u8; 32], String> {
     surveillance_present_controls_inner(s, interaction, mode, console, None)
         .map(|(digest, _)| digest)
-}
-
-/// Render the configured final-monitor result on the same admitted scope frame and within the
-/// ordinary single presentation update. Empty degraded results still draw their status header.
-pub fn surveillance_present_controls_with_final_monitor(
-    s: &mut Surveillance,
-    interaction: &oa_display::interaction::InteractionState,
-    console: &str,
-    markers: &[oa_display::core::alert_markers::FinalMonitorMarker],
-    degraded: bool,
-) -> Result<[u8; 32], String> {
-    surveillance_present_controls_with_final_monitor_and_mode(
-        s,
-        interaction,
-        "MODE SURVEILLANCE | FUSION OFF",
-        console,
-        markers,
-        degraded,
-    )
-}
-
-pub(crate) fn surveillance_present_controls_with_final_monitor_and_mode(
-    s: &mut Surveillance,
-    interaction: &oa_display::interaction::InteractionState,
-    mode: &str,
-    console: &str,
-    markers: &[oa_display::core::alert_markers::FinalMonitorMarker],
-    degraded: bool,
-) -> Result<[u8; 32], String> {
-    surveillance_present_controls_inner(
-        s,
-        interaction,
-        mode,
-        console,
-        Some((
-            markers,
-            degraded,
-            oa_display::core::alert_markers::MAX_ALERT_MARKERS,
-        )),
-    )
-    .map(|(digest, _)| digest)
 }
 
 pub(crate) fn surveillance_present_controls_with_final_monitor_budget(
@@ -2828,6 +3017,7 @@ fn surveillance_present_controls_inner(
         &targets_columns(&s.scope.set),
         &mut s.traffic_blocks,
         Some(priority_text_start),
+        &mut s.data_blocks_not_placed,
     )?;
     let newly_yielded =
         yield_map_labels_against_appended_text(&mut s.scope.list, priority_text_start)?;
@@ -2836,6 +3026,7 @@ fn surveillance_present_controls_inner(
         .checked_add(traffic_yielded)
         .and_then(|count| count.checked_add(newly_yielded))
         .ok_or("map label yield count overflow")?;
+    append_data_block_notice(s)?;
     replay_raster(&mut s.scope).map_err(err)?;
     let digest = frame_digest(&s.scope.spec, &s.scope.buf).map_err(err)?;
     s.failed = false;
@@ -3379,6 +3570,10 @@ mod tests {
             &[msaw_marker],
         )
         .expect("append synthetic MSAW presentation packet");
+        session.overlay_base = Some(
+            capture_overlay_base(&session.scope.list)
+                .expect("manual MSAW fixture is part of the completed overlay base"),
+        );
         let automation = crate::runtime::RegionalAutomationStatus {
             selected: crate::runtime::RegionalAutomationMode::Surveillance,
             effective: crate::runtime::EffectiveAutomationMode::Surveillance,
@@ -3396,13 +3591,14 @@ mod tests {
             position_known: 0,
             reserved: [0; 2],
         };
-        surveillance_present_controls_with_final_monitor_and_mode(
+        surveillance_present_controls_with_final_monitor_budget(
             &mut session,
             &oa_display::interaction::interaction_new(),
             mode_text,
             &operator_console,
             &[final_marker],
             true,
+            oa_display::core::alert_markers::MAX_ALERT_MARKERS,
         )
         .expect("compose mode, both alerts, and compact safety headers");
 
@@ -3435,28 +3631,36 @@ mod tests {
             .collect();
         let final_row = rows
             .clone()
-            .find(|row| text_at(list, *row).contains("PROTECTION LOST"))
+            .find(|row| {
+                text_at(list, *row).starts_with("FINAL ")
+                    && text_at(list, *row).contains("PROTECTION LOST")
+            })
             .expect("final-monitor protection-lost header remains present");
         let final_bounds = one_line_bounds(list, final_row).expect("final header bounds");
         let final_y = *list.texts.y.get(final_row).expect("final row y");
-        let msaw = rows
+        let msaw_row = rows
             .clone()
-            .filter(|row| {
-                list.texts.y.get(*row).is_some_and(|y| *y < final_y)
-                    && list.texts.colour.get(*row) == Some(&oa_display::palette::ALERT)
-                    && list.texts.layer.get(*row) == Some(&15)
-            })
-            .find_map(|row| one_line_bounds(list, row))
-            .expect("MSAW summary header bounds");
-        let safety: Vec<_> = rows
-            .filter(|row| {
-                !mode_rows.contains(row) && list.texts.y.get(*row).is_some_and(|y| *y > final_y)
-            })
-            .filter_map(|row| one_line_bounds(list, row))
-            .filter(|bounds| {
-                bounds.y1
-                    < i32::try_from(regional_status_plan().expect("status plan").top_inset_px())
-                        .unwrap_or(i32::MAX)
+            .find(|row| text_at(list, *row).starts_with("MSAW WARNING "))
+            .expect("legacy synthetic MSAW count header remains present");
+        assert!(
+            list.texts.y.get(msaw_row).is_some_and(|y| *y < final_y),
+            "MSAW header stays above final-monitor header"
+        );
+        let msaw = one_line_bounds(list, msaw_row).expect("MSAW summary header bounds");
+        let plan = regional_status_plan().expect("status plan");
+        let safety: Vec<_> = (0..2)
+            .map(|index| {
+                let placement = plan
+                    .row(oa_display::core::status_strip::StatusStripRow::Safety(
+                        index,
+                    ))
+                    .expect("reserved safety row");
+                let anchor = placement.y_px() * 16;
+                let row = rows
+                    .clone()
+                    .find(|row| list.texts.y.get(*row) == Some(&anchor))
+                    .expect("actual safety summary occupies its planned row");
+                one_line_bounds(list, row).expect("safety summary bounds")
             })
             .collect();
         assert!(safety.len() >= 2, "compact safety rows must be included");
@@ -4356,12 +4560,21 @@ mod tests {
             "MSAW W",
         )
         .expect("synthetic higher-priority warning");
+        let mut not_placed = 0usize;
         assert_eq!(
-            declutter_scope_blocks(list, projection, targets, groups, Some(obstacle_start))
-                .expect("reposition retained traffic groups around warning"),
+            declutter_scope_blocks(
+                list,
+                projection,
+                targets,
+                groups,
+                Some(obstacle_start),
+                &mut not_placed,
+            )
+            .expect("reposition retained traffic groups around warning"),
             0,
             "previously yielded map labels are not counted again"
         );
+        assert_eq!(not_placed, 0);
         let first_final = block_bounds(list, 0, 2).expect("first group survives second pass");
         let second_final = block_bounds(list, 2, 4).expect("second group survives second pass");
         let warning = text_row_bounds(list, obstacle_start).expect("measured warning obstacle");
@@ -4424,6 +4637,17 @@ mod tests {
             .expect("fallback-ring label remains a yield candidate");
         assert!(overlap_area(retained, fallback_box) > 0);
         assert!(!candidates.iter().any(|(row, _)| *row == farther_row));
+    }
+
+    // Mutation killed: assume every rendered address fallback has exactly six hex digits.
+    // REQ: OA-REG-019
+    #[test]
+    fn callsign_fallback_rejects_the_renderers_full_width_non_icao_address() {
+        let mut rendered = oa_display::core::text::text_new();
+        oa_display::core::traffic::ident_text(&mut rendered, &[0; 8], u32::MAX, false);
+        let actual_first_row = oa_display::core::text::text_str(&rendered);
+        assert_eq!(actual_first_row, "FFFFFFFF");
+        assert!(address_fallback_line(u32::MAX, actual_first_row));
     }
 
     // Mutation killed: add warning overlap into normal area cost, allowing ordinary clutter to beat it.
@@ -4509,6 +4733,8 @@ mod tests {
             .any(|&bounds| overlap_area(chosen, bounds) > 0));
     }
 
+    // Mutation killed: suppressing every row after a successful full-block placement removes required traffic detail.
+    // REQ: OA-REG-019, OA-DSP-078
     #[test]
     fn dense_airport_traffic_blocks_reposition_without_losing_targets() {
         use oa_display::core::list::{list_new, push_text, ListCaps};
@@ -4598,15 +4824,29 @@ mod tests {
         rasterize(&list, &spec, &mut before).expect("baseline synthetic raster");
 
         let mut groups = Vec::new();
+        let mut not_placed = 0usize;
         let first_yielded = declutter_scope_blocks(
             &mut list,
             &projection,
             &targets_columns(&targets),
             &mut groups,
             None,
+            &mut not_placed,
         )
         .expect("layout all visible traffic blocks");
         assert_eq!(first_yielded, 1);
+        assert_eq!(not_placed, 0);
+        for group in &groups {
+            let (start, end) = block_group_text_span(group).expect("cached full-block span");
+            assert!(end - start >= 2, "full data block has its rendered rows");
+            for row in start..end {
+                assert_ne!(
+                    list.texts.len.get(row),
+                    Some(&0),
+                    "a safely placed full block remains visible"
+                );
+            }
+        }
         let first_after = block_bounds(&list, 0, 2).expect("first block remains");
         let second_after = block_bounds(&list, 2, 4).expect("second block remains");
         assert_eq!(overlap_area(first_after, second_after), 0);
@@ -4925,5 +5165,169 @@ mod tests {
             .buf
             .chunks_exact(4)
             .any(|pixel| pixel == alert_colour.as_slice()));
+    }
+
+    fn assert_caption_glyph_outside_warning(
+        session: &Surveillance,
+        caption: TextBounds,
+        warning: TextBounds,
+    ) {
+        let alert_colour = oa_display::core::palette::bytes_of(oa_display::core::palette::ALERT)
+            .expect("alert palette entry exists");
+        let stride = usize::try_from(session.scope.spec.stride).expect("scope stride fits");
+        let visible = (caption.y0..caption.y1).any(|y| {
+            (caption.x0..caption.x1).any(|x| {
+                if x >= warning.x0 && x < warning.x1 && y >= warning.y0 && y < warning.y1 {
+                    return false;
+                }
+                let offset = usize::try_from(y).expect("caption y is nonnegative") * stride
+                    + usize::try_from(x).expect("caption x is nonnegative") * 4;
+                session.scope.buf.get(offset..offset + 4) == Some(alert_colour.as_slice())
+            })
+        });
+        assert!(
+            visible,
+            "caption glyphs remain visible outside warning overlap"
+        );
+    }
+
+    // Mutation killed: treating an inhibition caption as ordinary map text lets a later alert
+    // overlay blank the safety label during map-label yielding.
+    // REQ: OA-DSP-078
+    #[test]
+    fn inhibition_caption_survives_overlapping_priority_overlay() {
+        use oa_display::core::alert_markers::{append_alert_markers, AlertMarker, MarkerState};
+        use oa_display::core::list::push_text;
+        use oa_display::core::scene::{LAYER_ARTCC_HIGH, LAYER_TEXT};
+        use oa_safety::geom::Vertex;
+        use oa_safety::inhibit::{inhibit_config_none, inhibit_create, InhibitRequest};
+        use oa_safety::net::NetId;
+
+        let mut session = new_surveillance();
+        let mut policy = inhibit_config_none();
+        policy.max_duration_ns[NetId::ConflictAlert as usize] = Some(200 * SECOND_NS);
+        policy.max_start_ahead_ns = Some(0);
+        policy.max_extent_e7 = Some(2_000_000);
+        let vertices: [Vertex; 4] = [
+            (410_000_000, -870_000_000),
+            (411_000_000, -870_000_000),
+            (411_000_000, -869_000_000),
+            (410_000_000, -869_000_000),
+        ];
+        inhibit_create(
+            &mut session.inhibits,
+            &policy,
+            &InhibitRequest {
+                net: NetId::ConflictAlert,
+                vertices: &vertices,
+                alt_low_ft: 0,
+                alt_high_ft: 60_000,
+                start_ns: SECOND_NS,
+                end_ns: 100 * SECOND_NS,
+                reason: "COORDINATION",
+                author: "SUP A",
+            },
+            SECOND_NS,
+        )
+        .expect("test inhibition is valid");
+        surveillance_begin(&mut session, SECOND_NS).expect("begin active-inhibition frame");
+        surveillance_finish(&mut session, None).expect("render active-inhibition frame");
+
+        let caption_row = session
+            .scope
+            .list
+            .texts
+            .layer
+            .iter()
+            .position(|&layer| layer == oa_display::core::safety::LAYER_INHIBITION_CAPTION)
+            .expect("real surveillance presenter retains the protected caption");
+        let caption = text_at(&session.scope.list, caption_row).to_owned();
+        assert!(caption.contains("COORDINATION"));
+        let caption_bounds = text_row_bounds(&session.scope.list, caption_row)
+            .expect("caption has measured text bounds");
+        let alert_x16 = ((caption_bounds.x0 + caption_bounds.x1) / 2)
+            .checked_mul(16)
+            .expect("alert x is representable");
+        let alert_label_y_px = (caption_bounds.y0 + caption_bounds.y1) / 2;
+        let alert_point_y16 = alert_label_y_px
+            .checked_add(5)
+            .and_then(|value| value.checked_mul(16))
+            .expect("alert y is representable");
+        let (alert_lat_e7, alert_lon_e7) = oa_display::core::project::unproject(
+            &session.scope.view.proj,
+            alert_x16,
+            alert_point_y16,
+        )
+        .expect("warning position remains inside the view");
+        let alert_label_y16 = alert_point_y16 - 5 * 16;
+        let map_size = *session
+            .scope
+            .list
+            .texts
+            .size
+            .get(caption_row)
+            .expect("caption size exists");
+        push_text(
+            &mut session.scope.list,
+            (alert_x16, alert_label_y16),
+            map_size,
+            1,
+            oa_display::palette::ALERT,
+            LAYER_ARTCC_HIGH,
+            "FIX",
+        )
+        .expect("overlapping map label is appended");
+        let map_row = session.scope.list.texts.layer.len() - 1;
+        let appended_start = session.scope.list.texts.x.len();
+        append_alert_markers(
+            &mut session.scope.list,
+            &session.scope.view.proj,
+            &[AlertMarker {
+                address: SPARSE_TEST_ADDRESS,
+                lat_e7: alert_lat_e7,
+                lon_e7: alert_lon_e7,
+                state: MarkerState::Warning,
+                position_known: 1,
+                reserved: [0; 2],
+            }],
+        )
+        .expect("actual alert presenter appends a warning label");
+        let warning_row = (appended_start..session.scope.list.texts.layer.len())
+            .find(|&row| text_at(&session.scope.list, row) == "W")
+            .expect("warning label is in the late alert output");
+        let warning_bounds = text_row_bounds(&session.scope.list, warning_row)
+            .expect("warning has measured text bounds");
+        assert!(
+            overlap_area(caption_bounds, warning_bounds) > 0,
+            "warning {:?} intersects caption {:?}",
+            warning_bounds,
+            caption_bounds
+        );
+
+        let yielded =
+            yield_map_labels_against_appended_text(&mut session.scope.list, appended_start)
+                .expect("late alert composition yields ordinary map text");
+        assert!(yielded > 0, "the overlapping map label yields");
+        assert!(
+            text_at(&session.scope.list, map_row).is_empty(),
+            "ordinary map label yields"
+        );
+        assert_eq!(text_at(&session.scope.list, caption_row), caption);
+        let caption_layer = *session
+            .scope
+            .list
+            .texts
+            .layer
+            .get(caption_row)
+            .expect("caption layer remains present");
+        assert_eq!(
+            caption_layer,
+            oa_display::core::safety::LAYER_INHIBITION_CAPTION
+        );
+        assert!(map_text_layer(LAYER_TEXT));
+        assert!(!map_text_layer(caption_layer));
+        replay_raster(&mut session.scope).expect("composed alert and caption reach the raster");
+
+        assert_caption_glyph_outside_warning(&session, caption_bounds, warning_bounds);
     }
 }

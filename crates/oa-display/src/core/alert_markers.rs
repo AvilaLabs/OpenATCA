@@ -7,7 +7,9 @@
 //! list-capacity checks finish before any display-list mutation. Renderer-owned budgets use the
 //! same typed headings and font metrics as presentation, including a dedicated overflow row.
 
-use crate::core::list::{push_circle, push_text, DisplayError, DisplayList, ALIGN_CENTRE};
+use crate::core::list::{
+    push_circle, push_text, DisplayError, DisplayList, ALIGN_CENTRE, ALIGN_LEFT,
+};
 use crate::core::palette;
 use crate::core::project::{project, Projection};
 use crate::core::status_strip::{
@@ -50,6 +52,24 @@ pub enum AlertRenderKind {
     Msaw,
     FinalMonitor { degraded: bool },
 }
+
+/// Per-cycle MSAW alerts refused by the producer's retained open table, split by core grade.
+/// These counts do not represent examined rows or positions.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(C)]
+pub struct ProducerRefusalCounts {
+    pub caution: u64,
+    pub warning: u64,
+}
+const _: () = assert!(core::mem::size_of::<ProducerRefusalCounts>() == 16);
+
+#[derive(Clone, Copy, Default)]
+#[repr(C)]
+struct ProducerRefusalInput {
+    graded: ProducerRefusalCounts,
+    ungraded: u64,
+}
+const _: () = assert!(core::mem::size_of::<ProducerRefusalInput>() == 24);
 
 impl From<AlertRenderKind> for AlertHeaderSource {
     fn from(kind: AlertRenderKind) -> Self {
@@ -122,12 +142,12 @@ struct ValidatedMarkerSet {
     projected: [Option<(i32, i32)>; MAX_ALERT_MARKERS],
     visible_count: usize,
     visible_high_severity: usize,
+    refused_warning: u64,
 }
 
 #[derive(Clone, Copy)]
 struct AlertPresentationMode {
     header_source: AlertHeaderSource,
-    overflow_reserved: bool,
 }
 
 fn bad_alert(what: &'static str) -> DisplayError {
@@ -245,7 +265,11 @@ fn required_row_width_px(
     })
 }
 
-fn overflow_text(source: AlertHeaderSource, omitted: u64) -> crate::core::text::TextBuf {
+fn overflow_text(
+    source: AlertHeaderSource,
+    omitted: u64,
+    refused_warning: u64,
+) -> crate::core::text::TextBuf {
     let mut text = text_new();
     match source {
         AlertHeaderSource::Msaw => text_push_str(&mut text, "MSAW +"),
@@ -253,6 +277,11 @@ fn overflow_text(source: AlertHeaderSource, omitted: u64) -> crate::core::text::
     }
     text_push_dec(&mut text, omitted, 0);
     text_push_str(&mut text, " NOT SHOWN");
+    if matches!(source, AlertHeaderSource::Msaw) && refused_warning > 0 {
+        text_push_str(&mut text, " (");
+        text_push_dec(&mut text, refused_warning, 0);
+        text_push_str(&mut text, " WARNING)");
+    }
     text
 }
 
@@ -324,7 +353,15 @@ pub fn alert_render_budget(
         header_bytes = header_bytes.max(text_str(&partial).len());
     }
     // The displayed omitted count is exact for every supported target's representable slice size.
-    let overflow = overflow_text(source, u64::MAX);
+    let overflow = overflow_text(
+        source,
+        u64::MAX,
+        if matches!(source, AlertHeaderSource::Msaw) {
+            u64::MAX
+        } else {
+            0
+        },
+    );
     minimum_width_px = minimum_width_px.max(required_row_width_px(overflow_row, &overflow)?);
     let overflow_bytes = text_str(&overflow).len();
     let circles = draws
@@ -413,7 +450,7 @@ pub fn append_alert_markers(
         AlertHeaderSource::Msaw,
         MAX_ALERT_MARKERS,
         false,
-        0,
+        ProducerRefusalInput::default(),
     )
 }
 
@@ -452,7 +489,32 @@ pub fn append_alert_markers_with_budget_and_producer_omissions(
         AlertHeaderSource::Msaw,
         marker_budget,
         true,
-        producer_omitted,
+        ProducerRefusalInput {
+            ungraded: producer_omitted,
+            ..ProducerRefusalInput::default()
+        },
+    )
+}
+
+/// Append MSAW markers and preserve per-grade producer refusal counts in the omission notice.
+pub fn append_alert_markers_with_budget_and_producer_refusals(
+    list: &mut DisplayList,
+    projection: &Projection,
+    markers: &[AlertMarker],
+    marker_budget: usize,
+    producer_refusals: ProducerRefusalCounts,
+) -> Result<MarkerStats, DisplayError> {
+    append_alert_markers_titled(
+        list,
+        projection,
+        markers,
+        AlertHeaderSource::Msaw,
+        marker_budget,
+        true,
+        ProducerRefusalInput {
+            graded: producer_refusals,
+            ..ProducerRefusalInput::default()
+        },
     )
 }
 
@@ -512,10 +574,7 @@ fn append_final_monitor_frame_impl(
     overflow_reserved: bool,
 ) -> Result<MarkerStats, DisplayError> {
     let plan = regional_status_plan()?;
-    if (!overflow_reserved && projection.width < MIN_ALERT_VIEW_WIDTH)
-        || projection.top_inset < plan.top_inset_px()
-        || projection.height <= projection.top_inset
-    {
+    if projection.top_inset < plan.top_inset_px() || projection.height <= projection.top_inset {
         return Err(bad_alert(
             "final monitor markers do not fit the reserved view",
         ));
@@ -533,7 +592,8 @@ fn append_final_monitor_frame_impl(
         markers.len(),
         markers.iter().map(final_marker_as_alert),
         marker_budget,
-        0,
+        ProducerRefusalInput::default(),
+        overflow_reserved,
     )?;
     let visible = validated
         .states
@@ -545,9 +605,9 @@ fn append_final_monitor_frame_impl(
         visible,
         validated.stats,
         &validated.projected,
+        validated.refused_warning,
         AlertPresentationMode {
             header_source: source,
-            overflow_reserved,
         },
     )
 }
@@ -655,14 +715,10 @@ fn select_visible_marker(
             selected.visible_high_severity += 1;
             Some(insertion)
         }
-    } else if !prioritize || !high_severity {
-        if selected.visible_count < marker_budget {
-            let index = selected.visible_count;
-            selected.visible_count += 1;
-            Some(index)
-        } else {
-            None
-        }
+    } else if selected.visible_count < marker_budget {
+        let index = selected.visible_count;
+        selected.visible_count += 1;
+        Some(index)
     } else {
         None
     };
@@ -687,31 +743,25 @@ fn validate_and_project_markers<I>(
     input_count: usize,
     markers: I,
     marker_budget: usize,
-    producer_omitted: u64,
+    producer_omitted: ProducerRefusalInput,
+    overflow_reserved: bool,
 ) -> Result<ValidatedMarkerSet, DisplayError>
 where
     I: IntoIterator<Item = Result<AlertMarker, DisplayError>>,
 {
-    let renderer_omitted = input_count.saturating_sub(marker_budget);
-    let renderer_omitted_u64 =
-        u64::try_from(renderer_omitted).map_err(|_| DisplayError::TooLarge {
-            what: "omitted alert marker count",
-            requested: renderer_omitted as u128,
+    let producer_total = producer_omitted
+        .graded
+        .caution
+        .checked_add(producer_omitted.graded.warning)
+        .and_then(|count| count.checked_add(producer_omitted.ungraded))
+        .ok_or(DisplayError::TooLarge {
+            what: "producer refusal count",
+            requested: u128::from(producer_omitted.graded.caution)
+                + u128::from(producer_omitted.graded.warning)
+                + u128::from(producer_omitted.ungraded),
             limit: u64::MAX as u128,
         })?;
-    let requested_omitted = u128::from(renderer_omitted_u64) + u128::from(producer_omitted);
-    let omitted =
-        renderer_omitted_u64
-            .checked_add(producer_omitted)
-            .ok_or(DisplayError::TooLarge {
-                what: "combined omitted alert marker count",
-                requested: requested_omitted,
-                limit: u64::MAX as u128,
-            })?;
-    let stats = MarkerStats {
-        omitted,
-        ..MarkerStats::default()
-    };
+    let stats = MarkerStats::default();
     let states = [MarkerState::Caution; MAX_ALERT_MARKERS];
     let projected = [None; MAX_ALERT_MARKERS];
     let mut selected = ValidatedMarkerSet {
@@ -720,6 +770,7 @@ where
         projected,
         visible_count: 0,
         visible_high_severity: 0,
+        refused_warning: producer_omitted.graded.warning,
     };
     let prioritize = input_count > marker_budget;
     let mut seen = 0usize;
@@ -748,16 +799,37 @@ where
             MarkerState::ProtectionLost => increment(&mut selected.stats.protection_lost)?,
         }
         let point = validate_marker_position(projection, marker, &mut selected.stats)?;
-        select_visible_marker(
-            &mut selected,
-            marker.state,
-            point,
-            marker_budget,
-            prioritize,
-        )?;
+        if point.is_some() || !overflow_reserved {
+            select_visible_marker(
+                &mut selected,
+                marker.state,
+                point,
+                marker_budget,
+                prioritize,
+            )?;
+        }
     }
     if seen != input_count {
         return Err(bad_alert("alert input iterator length changed"));
+    }
+    if overflow_reserved {
+        let input_count_u64 = u64::try_from(input_count).map_err(|_| DisplayError::TooLarge {
+            what: "omitted alert marker input count",
+            requested: input_count as u128,
+            limit: u64::MAX as u128,
+        })?;
+        let renderer_omitted = input_count_u64
+            .checked_sub(selected.stats.drawn)
+            .ok_or_else(|| bad_alert("drawn marker count exceeds input count"))?;
+        let requested_omitted = u128::from(renderer_omitted) + u128::from(producer_total);
+        selected.stats.omitted =
+            renderer_omitted
+                .checked_add(producer_total)
+                .ok_or(DisplayError::TooLarge {
+                    what: "combined omitted alert marker count",
+                    requested: requested_omitted,
+                    limit: u64::MAX as u128,
+                })?;
     }
     Ok(selected)
 }
@@ -809,7 +881,7 @@ fn append_status_text(
         list,
         (placement.x_px() * 16, placement.y_px() * 16),
         placement.size(),
-        placement.align(),
+        ALIGN_LEFT,
         placement.colour(),
         placement.layer(),
         text,
@@ -934,7 +1006,7 @@ fn append_alert_markers_titled(
     header_source: AlertHeaderSource,
     marker_budget: usize,
     overflow_reserved: bool,
-    producer_omitted: u64,
+    producer_omitted: ProducerRefusalInput,
 ) -> Result<MarkerStats, DisplayError> {
     let plan = regional_status_plan()?;
     if (!overflow_reserved && projection.width < MIN_ALERT_VIEW_WIDTH)
@@ -963,6 +1035,7 @@ fn append_alert_markers_titled(
         markers.iter().copied().map(Ok),
         marker_budget,
         producer_omitted,
+        overflow_reserved,
     )?;
     let drawn_states = validated
         .states
@@ -974,10 +1047,8 @@ fn append_alert_markers_titled(
         drawn_states,
         validated.stats,
         &validated.projected,
-        AlertPresentationMode {
-            header_source,
-            overflow_reserved,
-        },
+        validated.refused_warning,
+        AlertPresentationMode { header_source },
     )
 }
 
@@ -987,6 +1058,7 @@ fn append_validated_markers(
     drawn_states: &[MarkerState],
     stats: MarkerStats,
     projected: &[Option<(i32, i32)>; MAX_ALERT_MARKERS],
+    refused_warning: u64,
     mode: AlertPresentationMode,
 ) -> Result<MarkerStats, DisplayError> {
     if list.faulted {
@@ -995,11 +1067,11 @@ fn append_validated_markers(
     let plan = regional_status_plan()?;
     let (header_text, heading_row) = checked_header(projection, stats, mode.header_source, &plan)?;
     let (_, overflow_row) = alert_status_rows(&plan, mode.header_source)?;
-    let overflow = (stats.omitted > 0).then(|| overflow_text(mode.header_source, stats.omitted));
+    let overflow = (stats.omitted > 0)
+        .then(|| overflow_text(mode.header_source, stats.omitted, refused_warning));
     let overflow_bytes = overflow.as_ref().map_or(0, |text| text_str(text).len());
     if let Some(text) = overflow.as_ref() {
-        if !mode.overflow_reserved
-            || crate::core::text::text_clipped(text)
+        if crate::core::text::text_clipped(text)
             || projection.width < required_row_width_px(overflow_row, text)?
         {
             return Err(bad_alert(

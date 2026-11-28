@@ -200,12 +200,29 @@ fn reserved_banner_keeps_first_lost_feed_visible_before_its_overflow_summary() {
         u32::try_from(feeds.len().saturating_sub(1)).unwrap()
     );
     let lines = texts(&list);
-    assert!(lines
-        .first()
-        .is_some_and(|line| line.starts_with("FEED FLIGHT LOST")));
-    assert!(lines
-        .get(1)
-        .is_some_and(|line| { line.starts_with('+') && line.contains("MORE STATES NOT SHOWN") }));
+    assert_eq!(lines, ["FEED FLIGHT LOST 2.0S", "+2 MORE STATES NOT SHOWN"]);
+    assert_eq!(list.texts.x, [8 * 16, 8 * 16]);
+    assert_eq!(list.texts.y, [160 * 16, 176 * 16]);
+    assert_eq!(list.rects.x0, [6 * 16]);
+    assert_eq!(list.rects.y0, [158 * 16]);
+    assert_eq!(list.rects.x1, [199 * 16]);
+    // Second row176 + line pitch12 + padding2 - inclusive edge1 =189px.
+    assert_eq!(list.rects.y1, [189 * 16]);
+
+    // Raster output retains the independently pinned banner border and opaque interior.
+    let spec = FrameSpec {
+        width: 800,
+        height: 600,
+        stride: 3200,
+    };
+    let mut pixels = vec![0; frame_len(&spec)];
+    rasterize(&list, &spec, &mut pixels).unwrap();
+    let sample = |x: usize, y: usize| {
+        let start = (y * 800 + x) * 4;
+        u32::from_le_bytes(pixels[start..start + 4].try_into().unwrap())
+    };
+    assert_eq!(sample(6, 170), pal::PALETTE[usize::from(pal::ALERT)]);
+    assert_eq!(sample(7, 170), pal::PALETTE[usize::from(pal::BACKGROUND)]);
 }
 
 fn texts(l: &DisplayList) -> Vec<String> {

@@ -455,6 +455,7 @@ fn selected_interaction() -> InteractionState {
     state
 }
 
+// Mutations killed: selection_width_chars returns zero or one instead of the full selected line.
 // REQ: OA-UI-018, OA-UI-019
 #[test]
 fn interaction_text_uses_pixel_coordinates_and_follows_the_legend() {
@@ -466,6 +467,22 @@ fn interaction_text_uses_pixel_coordinates_and_follows_the_legend() {
     assert_eq!(list.texts.x[0], list.texts.x[1]);
     assert_eq!(list.texts.y, [(104 + 10) * 16, (104 + 10 + 14) * 16]);
     assert_eq!(list.texts.layer, [LAYER_INTERACTION, LAYER_INTERACTION]);
+    let start = usize::try_from(list.texts.start[0]).unwrap();
+    let end = start + usize::try_from(list.texts.len[0]).unwrap();
+    assert_eq!(list.text.get(start..end), Some("SELECT FLT 123456"));
+    assert_eq!(list.texts.x[0], 426 * 16);
+    let bounds = text_block_bounds_px(
+        (list.texts.x[0], list.texts.y[0]),
+        list.texts.size[0],
+        list.texts.align[0],
+        17,
+        1,
+        14,
+    );
+    assert_eq!(
+        (bounds.x0, bounds.y0, bounds.x1, bounds.y1),
+        (424, 112, 632, 131)
+    );
 }
 
 // REQ: OA-UI-019, OA-UI-020
@@ -498,6 +515,28 @@ fn interaction_avoids_the_left_safety_panel_and_uses_bottom_fallbacks() {
     present_interaction(&state, &mut full_width_panel, &proj).unwrap();
     assert!(full_width_panel.texts.x[0] > 320 * 16);
     assert_eq!(full_width_panel.texts.y[0], (400 - 42 - 32) * 16);
+
+    // Mutations killed: extent subtraction becomes addition, or subpixel multiplication becomes
+    // addition/division. Outside panels must keep the candidate; exact-edge overlap moves it down.
+    for (rect, expected_y) in [
+        ((635 * 16, 120 * 16, 639 * 16, 130 * 16), 114 * 16),
+        ((430 * 16, 147 * 16, 440 * 16, 150 * 16), 114 * 16),
+        ((620 * 16, 120 * 16, 630 * 16, 130 * 16), 326 * 16),
+        ((430 * 16, 135 * 16, 440 * 16, 140 * 16), 326 * 16),
+    ] {
+        let mut measured = list_new(display_caps(2, 128)).unwrap();
+        push_rect(
+            &mut measured,
+            (rect.0, rect.1),
+            (rect.2, rect.3),
+            BACKGROUND,
+            14,
+        )
+        .unwrap();
+        present_interaction(&state, &mut measured, &proj).unwrap();
+        assert_eq!(measured.texts.x[0], 426 * 16);
+        assert_eq!(measured.texts.y[0], expected_y);
+    }
 }
 
 // REQ: OA-UI-019, OA-UI-020
@@ -544,6 +583,32 @@ fn narrow_and_short_viewports_refuse_without_mutating_the_list() {
         ))
     ));
     assert_eq!(list, before);
+
+    let exact_width = projection_new(420_000_000, -880_000_000, 100.0, 216, 400, 104).unwrap();
+    let mut exact_width_list = list_new(display_caps(2, 128)).unwrap();
+    present_interaction(&state, &mut exact_width_list, &exact_width).unwrap();
+    assert_eq!(exact_width_list.texts.x[0], 2 * 16);
+    let width_bounds = text_block_bounds_px(
+        (exact_width_list.texts.x[0], exact_width_list.texts.y[0]),
+        exact_width_list.texts.size[0],
+        exact_width_list.texts.align[0],
+        17,
+        1,
+        14,
+    );
+    assert_eq!(width_bounds.x0, 0);
+    assert_eq!(width_bounds.x1, 208);
+
+    let one_pixel_short = projection_new(420_000_000, -880_000_000, 100.0, 215, 400, 104).unwrap();
+    let mut too_narrow = list_new(display_caps(2, 128)).unwrap();
+    let before = too_narrow.clone();
+    assert!(matches!(
+        present_interaction(&state, &mut too_narrow, &one_pixel_short),
+        Err(DisplayError::BadView(
+            "frame is too narrow for interaction status"
+        ))
+    ));
+    assert_eq!(too_narrow, before);
 }
 
 // Mutation: accepting one pixel below the shared padded minimum must fail without list mutation.
@@ -553,6 +618,8 @@ fn planned_minimum_height_fits_padded_selection_at_the_strip_boundary() {
     let plan = regional_status_plan().unwrap();
     let inset = plan.top_inset_px();
     let minimum = plan.minimum_frame_height_with_selection().unwrap();
+    assert_eq!(inset, 266);
+    assert_eq!(minimum, 342);
     let state = selected_interaction();
     let mut too_short = list_new(display_caps(2, 128)).unwrap();
     let before = too_short.clone();

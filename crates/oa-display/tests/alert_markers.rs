@@ -261,6 +261,19 @@ fn invalid_records_and_short_lists_refuse_without_mutating_the_list() {
     ));
     assert_eq!(list, before);
 
+    let one_missing_coordinate = AlertMarker {
+        position_known: 0,
+        lat_e7: NO_POSITION_E7,
+        lon_e7: CENTRE.1,
+        ..valid
+    };
+    let before = list.clone();
+    assert!(matches!(
+        append_alert_markers(&mut list, &p, &[one_missing_coordinate]),
+        Err(DisplayError::BadView(_))
+    ));
+    assert_eq!(list, before);
+
     let mut short = list_new(ListCaps {
         lines: 0,
         rects: 0,
@@ -571,6 +584,63 @@ fn renderer_budget_pins_empty_degraded_loss_heading_at_its_first_pixel_width() {
     assert_eq!(short, before);
 }
 
+// Mutation killed: remove either edge of final-monitor view validation, or reject its exact bounds.
+// REQ: OA-RWY-015
+#[test]
+fn final_monitor_legacy_view_accepts_exact_width_inset_and_first_map_row() {
+    let plan = regional_status_plan().unwrap();
+    let exact_width = projection(620, plan.top_inset_px());
+    let mut exact = list_for(0);
+    append_final_monitor_frame(&mut exact, &exact_width, &[], false).unwrap();
+    assert!(texts(&exact)
+        .last()
+        .is_some_and(|heading| heading.starts_with("FINAL WARNING 0")));
+
+    let mut narrow = list_for(0);
+    let before_narrow = narrow.clone();
+    let below_header_width = projection(619, plan.top_inset_px());
+    assert!(matches!(
+        append_final_monitor_frame(&mut narrow, &below_header_width, &[], false),
+        Err(DisplayError::BadView(_))
+    ));
+    assert_eq!(narrow, before_narrow);
+
+    let mut legacy_width = list_for(0);
+    let before_legacy_width = legacy_width.clone();
+    let below_old_minimum = projection(499, plan.top_inset_px());
+    assert!(matches!(
+        append_final_monitor_frame(&mut legacy_width, &below_old_minimum, &[], false),
+        Err(DisplayError::BadView(_))
+    ));
+    assert_eq!(legacy_width, before_legacy_width);
+
+    let mut shallow_inset = projection(800, plan.top_inset_px().saturating_sub(1));
+    let mut refused_inset = list_for(0);
+    let before_inset = refused_inset.clone();
+    assert!(matches!(
+        append_final_monitor_frame(&mut refused_inset, &shallow_inset, &[], false),
+        Err(DisplayError::BadView(_))
+    ));
+    assert_eq!(refused_inset, before_inset);
+
+    shallow_inset.top_inset = plan.top_inset_px();
+    shallow_inset.height = plan.top_inset_px();
+    let mut no_map_row = list_for(0);
+    let before_no_map_row = no_map_row.clone();
+    assert!(matches!(
+        append_final_monitor_frame(&mut no_map_row, &shallow_inset, &[], false),
+        Err(DisplayError::BadView(_))
+    ));
+    assert_eq!(no_map_row, before_no_map_row);
+
+    shallow_inset.height = plan.top_inset_px() + 1;
+    let mut first_map_row = list_for(0);
+    append_final_monitor_frame(&mut first_map_row, &shallow_inset, &[], false).unwrap();
+    assert!(texts(&first_map_row)
+        .last()
+        .is_some_and(|heading| heading.starts_with("FINAL WARNING 0")));
+}
+
 // Mutation killed: omit one of the independently specified count terms from the widest heading.
 // REQ: OA-RWY-015
 #[test]
@@ -604,14 +674,7 @@ fn full_budget_worst_header_uses_the_independent_780_pixel_witness() {
     assert_eq!(budget.minimum_width_px, 780);
     let mut exact = list_for_render_budget(budget);
     let exact_view = projection(780, budget.minimum_top_inset_px);
-    let stats = append_final_monitor_frame_with_budget(
-        &mut exact,
-        &exact_view,
-        &markers,
-        true,
-        MAX_ALERT_MARKERS,
-    )
-    .unwrap();
+    let stats = append_final_monitor_frame(&mut exact, &exact_view, &markers, true).unwrap();
     assert_eq!(stats.warning, 10);
     assert_eq!(stats.caution, 10);
     assert_eq!(stats.protection_lost, 108);
@@ -625,19 +688,13 @@ fn full_budget_worst_header_uses_the_independent_780_pixel_witness() {
     let before = narrow.clone();
     let narrow_view = projection(779, budget.minimum_top_inset_px);
     assert!(matches!(
-        append_final_monitor_frame_with_budget(
-            &mut narrow,
-            &narrow_view,
-            &markers,
-            true,
-            MAX_ALERT_MARKERS,
-        ),
+        append_final_monitor_frame(&mut narrow, &narrow_view, &markers, true),
         Err(DisplayError::BadView(_))
     ));
     assert_eq!(narrow, before);
 }
 
-// Mutation killed: write marker geometry before discovering the notice has no text slot.
+// Mutation killed: treat a zero-text-slot heading failure as evidence that notice reservation is atomic.
 // REQ: OA-RWY-015
 #[test]
 fn missing_notice_slot_refuses_before_any_marker_mutation() {
@@ -648,18 +705,39 @@ fn missing_notice_slot_refuses_before_any_marker_mutation() {
         circles: budget.circles,
         polylines: 0,
         poly_vertices: 0,
-        texts: 0,
+        texts: ALERT_HEADER_TEXTS + ALERT_TEXTS_PER_MARKER,
         text_bytes: budget.text_bytes,
     })
     .unwrap();
     let before = list.clone();
     let view = regional_projection(800);
-    let markers = [marker(1, MarkerState::Warning, CENTRE.0, CENTRE.1)];
+    let markers = [
+        marker(1, MarkerState::Warning, CENTRE.0, CENTRE.1),
+        unknown_marker(2, MarkerState::Caution),
+    ];
     assert!(matches!(
         append_alert_markers_with_budget(&mut list, &view, &markers, 1),
         Err(DisplayError::Full { table: "texts", .. })
     ));
     assert_eq!(list, before);
+
+    let mut with_notice_slot = list_new(ListCaps {
+        lines: 0,
+        rects: 0,
+        circles: budget.circles,
+        polylines: 0,
+        poly_vertices: 0,
+        texts: budget.texts,
+        text_bytes: budget.text_bytes,
+    })
+    .unwrap();
+    let stats =
+        append_alert_markers_with_budget(&mut with_notice_slot, &view, &markers, 1).unwrap();
+    assert_eq!(stats.drawn, 1);
+    assert_eq!(stats.omitted, 1);
+    assert!(texts(&with_notice_slot)
+        .iter()
+        .any(|text| text == "MSAW +1 NOT SHOWN"));
 }
 
 // Mutation killed: validate the partial heading but skip the longer overflow notice bound.
@@ -772,7 +850,7 @@ fn budget_prioritizes_warning_and_protection_lost_at_the_tail() {
         (MarkerState::ProtectionLost, "L"),
     ] {
         let mut markers: Vec<_> = (1..=u32::try_from(MAX_ALERT_MARKERS + 1).unwrap())
-            .map(|address| unknown_marker(address, MarkerState::Caution))
+            .map(|address| marker(address, MarkerState::Caution, CENTRE.0, CENTRE.1))
             .collect();
         *markers.last_mut().unwrap() = marker(
             u32::try_from(MAX_ALERT_MARKERS + 1).unwrap(),
@@ -787,7 +865,7 @@ fn budget_prioritizes_warning_and_protection_lost_at_the_tail() {
             stats.examined,
             u64::try_from(MAX_ALERT_MARKERS + 1).unwrap()
         );
-        assert_eq!(stats.drawn, 1);
+        assert_eq!(stats.drawn, u64::try_from(MAX_ALERT_MARKERS).unwrap());
         assert_eq!(stats.caution, u64::try_from(MAX_ALERT_MARKERS).unwrap());
         assert_eq!(stats.omitted, 1);
         assert_eq!(stats.warning, u64::from(state == MarkerState::Warning));
@@ -806,11 +884,14 @@ fn budget_prioritizes_warning_and_protection_lost_at_the_tail() {
             Some(visible_point.1 - 80)
         );
         assert!(rendered.iter().any(|text| text == "MSAW +1 NOT SHOWN"));
-        assert_eq!(list.circles.x.len(), ALERT_CIRCLES_PER_MARKER);
+        assert_eq!(
+            list.circles.x.len(),
+            MAX_ALERT_MARKERS - 1 + ALERT_CIRCLES_PER_MARKER
+        );
     }
 
     let mut markers: Vec<_> = (1..=u32::try_from(MAX_ALERT_MARKERS + 2).unwrap())
-        .map(|address| unknown_marker(address, MarkerState::Caution))
+        .map(|address| marker(address, MarkerState::Caution, CENTRE.0, CENTRE.1))
         .collect();
     let warning_address = u32::try_from(MAX_ALERT_MARKERS + 1).unwrap();
     let lost_address = warning_address + 1;
@@ -831,10 +912,87 @@ fn budget_prioritizes_warning_and_protection_lost_at_the_tail() {
     let warning = rendered.iter().position(|text| text == "W").unwrap();
     let lost = rendered.iter().position(|text| text == "L").unwrap();
     assert!(warning < lost);
-    assert_eq!(stats.drawn, 2);
+    assert_eq!(stats.drawn, u64::try_from(MAX_ALERT_MARKERS).unwrap());
     assert_eq!(stats.omitted, 2);
     assert_eq!(stats.caution, u64::try_from(MAX_ALERT_MARKERS).unwrap());
-    assert_eq!(list.circles.x.len(), 2 * ALERT_CIRCLES_PER_MARKER);
+    assert_eq!(
+        list.circles.x.len(),
+        MAX_ALERT_MARKERS - 2 + 2 * ALERT_CIRCLES_PER_MARKER
+    );
+}
+
+// Mutation killed: let an unlocated or off-map low address consume the sole drawable slot.
+// REQ: OA-RWY-015
+#[test]
+fn budget_selects_drawable_warning_before_unlocated_or_off_map_warning() {
+    for marker_budget in [1, 2] {
+        let budget = alert_render_budget(AlertRenderKind::Msaw, marker_budget).unwrap();
+        let view = projection(800, budget.minimum_top_inset_px);
+        for low in [
+            unknown_marker(1, MarkerState::Warning),
+            marker(1, MarkerState::Warning, -899_000_000, CENTRE.1),
+        ] {
+            let markers = [low, marker(2, MarkerState::Warning, CENTRE.0, CENTRE.1)];
+            let mut list = list_for_render_budget(budget);
+            let stats = append_alert_markers_with_budget(&mut list, &view, &markers, marker_budget)
+                .unwrap();
+            assert_eq!(stats.examined, 2);
+            assert_eq!(stats.drawn, 1);
+            assert_eq!(stats.warning, 2);
+            assert_eq!(stats.omitted, 1);
+            assert_eq!(stats.unlocated, u64::from(low.position_known == 0));
+            assert_eq!(stats.off_map, u64::from(low.position_known == 1));
+            let label = texts(&list).iter().position(|text| text == "W").unwrap();
+            assert_eq!(list.texts.x.get(label).copied(), Some(6_400));
+            assert_eq!(list.texts.y.get(label).copied(), Some(6_848));
+            assert_eq!(list.circles.x.len(), ALERT_CIRCLES_PER_MARKER);
+            assert!(texts(&list).iter().any(|text| text == "MSAW +1 NOT SHOWN"));
+        }
+    }
+
+    for marker_budget in [1, 2] {
+        let final_budget = alert_render_budget(
+            AlertRenderKind::FinalMonitor { degraded: false },
+            marker_budget,
+        )
+        .unwrap();
+        let final_view = projection(800, final_budget.minimum_top_inset_px);
+        for (lat_e7, lon_e7, position_known, expected_unlocated, expected_off_map) in [
+            (NO_POSITION_E7, NO_POSITION_E7, 0, 1, 0),
+            (-899_000_000, CENTRE.1, 1, 0, 1),
+        ] {
+            let markers = [
+                FinalMonitorMarker {
+                    address: 1,
+                    lat_e7,
+                    lon_e7,
+                    severity: FinalMonitorSeverity::Warning as u8,
+                    position_known,
+                    reserved: [0; 2],
+                },
+                final_marker(2, FinalMonitorSeverity::Warning),
+            ];
+            let mut list = list_for_render_budget(final_budget);
+            let stats = append_final_monitor_frame_with_budget(
+                &mut list,
+                &final_view,
+                &markers,
+                false,
+                marker_budget,
+            )
+            .unwrap();
+            assert_eq!(stats.drawn, 1);
+            assert_eq!(stats.warning, 2);
+            assert_eq!(stats.omitted, 1);
+            assert_eq!(stats.unlocated, expected_unlocated);
+            assert_eq!(stats.off_map, expected_off_map);
+            let label = texts(&list).iter().position(|text| text == "W").unwrap();
+            assert_eq!(list.texts.x.get(label).copied(), Some(6_400));
+            assert_eq!(list.texts.y.get(label).copied(), Some(6_848));
+            assert_eq!(list.circles.x.len(), ALERT_CIRCLES_PER_MARKER);
+            assert!(texts(&list).iter().any(|text| text == "FINAL +1 NOT SHOWN"));
+        }
+    }
 }
 
 // Mutation killed: drop a producer-reported open-table refusal when the retained list fills its budget.
@@ -844,7 +1002,7 @@ fn producer_refused_open_rows_are_checked_and_visible_without_fake_severity() {
     let budget = alert_render_budget(AlertRenderKind::Msaw, MAX_ALERT_MARKERS).unwrap();
     let view = projection(budget.minimum_width_px, budget.minimum_top_inset_px);
     let markers: Vec<_> = (1..=u32::try_from(MAX_ALERT_MARKERS).unwrap())
-        .map(|address| unknown_marker(address, MarkerState::Caution))
+        .map(|address| marker(address, MarkerState::Caution, CENTRE.0, CENTRE.1))
         .collect();
     let mut list = list_for_render_budget(budget);
     let stats = append_alert_markers_with_budget_and_producer_omissions(
@@ -856,6 +1014,7 @@ fn producer_refused_open_rows_are_checked_and_visible_without_fake_severity() {
     )
     .unwrap();
     assert_eq!(stats.examined, u64::try_from(MAX_ALERT_MARKERS).unwrap());
+    assert_eq!(stats.drawn, u64::try_from(MAX_ALERT_MARKERS).unwrap());
     assert_eq!(stats.caution, u64::try_from(MAX_ALERT_MARKERS).unwrap());
     assert_eq!(stats.warning, 0);
     assert_eq!(stats.protection_lost, 0);
@@ -877,6 +1036,61 @@ fn producer_refused_open_rows_are_checked_and_visible_without_fake_severity() {
     assert!(texts(&next_frame)
         .iter()
         .any(|text| text == "MSAW +1 NOT SHOWN"));
+
+    // Mutation killed: drop caution-grade refusals from the checked producer total.
+    for (refusals, expected_omitted, expected_notice) in [
+        (
+            ProducerRefusalCounts {
+                caution: 1,
+                warning: 0,
+            },
+            1,
+            "MSAW +1 NOT SHOWN",
+        ),
+        (
+            ProducerRefusalCounts {
+                caution: 1,
+                warning: 2,
+            },
+            3,
+            "MSAW +3 NOT SHOWN (2 WARNING)",
+        ),
+    ] {
+        let mut typed = list_for_render_budget(budget);
+        let typed_stats = append_alert_markers_with_budget_and_producer_refusals(
+            &mut typed,
+            &view,
+            &markers,
+            MAX_ALERT_MARKERS,
+            refusals,
+        )
+        .unwrap();
+        assert_eq!(typed_stats.drawn, u64::try_from(MAX_ALERT_MARKERS).unwrap());
+        assert_eq!(
+            typed_stats.caution,
+            u64::try_from(MAX_ALERT_MARKERS).unwrap()
+        );
+        assert_eq!(typed_stats.warning, 0);
+        assert_eq!(typed_stats.omitted, expected_omitted);
+        assert!(texts(&typed).iter().any(|text| text == expected_notice));
+    }
+
+    let mut refusing_grade_sum = list_for_render_budget(budget);
+    let before_grade_sum = refusing_grade_sum.clone();
+    assert!(matches!(
+        append_alert_markers_with_budget_and_producer_refusals(
+            &mut refusing_grade_sum,
+            &view,
+            &markers,
+            MAX_ALERT_MARKERS,
+            ProducerRefusalCounts {
+                caution: u64::MAX,
+                warning: 1,
+            },
+        ),
+        Err(DisplayError::TooLarge { .. })
+    ));
+    assert_eq!(refusing_grade_sum, before_grade_sum);
 
     let too_many = (1..=u32::try_from(MAX_ALERT_MARKERS + 1).unwrap())
         .map(|address| unknown_marker(address, MarkerState::Caution))
@@ -1198,6 +1412,12 @@ fn final_monitor_invalid_packets_and_capacity_refuse_atomically() {
         },
         FinalMonitorMarker {
             position_known: 0,
+            ..valid
+        },
+        FinalMonitorMarker {
+            position_known: 0,
+            lat_e7: NO_POSITION_E7,
+            lon_e7: CENTRE.1,
             ..valid
         },
     ] {

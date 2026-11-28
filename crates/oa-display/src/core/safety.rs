@@ -79,9 +79,11 @@ use oa_safety::net::{
     NetStatus, StateTable,
 };
 
-/// Inhibition outlines and labels share the map's text layer: above the map, below the traffic
-/// and the legend strip, so the strip still covers them and a target is never hidden by one.
+/// Inhibition outlines use the map text layer, above the map and below traffic.
 pub const LAYER_INHIBIT: u8 = 6;
+/// Inhibition captions are protected safety text, not declutterable map labels. Layer 7 is
+/// otherwise used only by non-text trail primitives; captions remain below traffic on layer 8.
+pub const LAYER_INHIBITION_CAPTION: u8 = 7;
 /// The banner's box and its text, above every other layer.
 pub const LAYER_BANNER_BG: u8 = 14;
 pub const LAYER_BANNER: u8 = 15;
@@ -740,7 +742,7 @@ fn build_inner(
             LABEL_SIZE,
             ALIGN_LEFT,
             palette::ALERT,
-            LAYER_INHIBIT,
+            LAYER_INHIBITION_CAPTION,
             text_str(&tb),
         )?;
         stats.inhibitions_drawn += 1;

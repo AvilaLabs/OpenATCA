@@ -292,7 +292,7 @@ fn protection_lost_suffix_pixels() -> (Vec<u8>, (usize, usize, usize, usize)) {
             heading.y_px() * SUBPIXEL,
         ),
         text_size,
-        heading.align(),
+        oa_display::core::list::ALIGN_LEFT,
         heading.colour(),
         heading.layer(),
         PROTECTION_LOST_PHRASE,

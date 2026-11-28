@@ -519,6 +519,10 @@ pub struct CycleStats {
     pub closed: u64,
     /// Alerts that did not fit the open table and were logged at once.
     pub open_full: u64,
+    /// Of `open_full`, refusals whose actual alert grade was caution.
+    pub open_full_caution: u64,
+    /// Of `open_full`, refusals whose actual alert grade was warning.
+    pub open_full_warning: u64,
     /// Finished alerts the alert log could not hold.
     pub alerts_dropped: u64,
     /// Skipped tracks the skip log could not hold.

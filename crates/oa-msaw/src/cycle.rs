@@ -80,6 +80,8 @@ fn add(a: &mut CycleStats, b: &CycleStats) {
     a.opened = a.opened.saturating_add(b.opened);
     a.closed = a.closed.saturating_add(b.closed);
     a.open_full = a.open_full.saturating_add(b.open_full);
+    a.open_full_caution = a.open_full_caution.saturating_add(b.open_full_caution);
+    a.open_full_warning = a.open_full_warning.saturating_add(b.open_full_warning);
     a.alerts_dropped = a.alerts_dropped.saturating_add(b.alerts_dropped);
     a.skips_dropped = a.skips_dropped.saturating_add(b.skips_dropped);
     a.floor_mismatch = a.floor_mismatch.saturating_add(b.floor_mismatch);
@@ -620,6 +622,14 @@ fn raise(
             } else {
                 // The open table is full: the alert is logged at once, never lost.
                 stats.open_full = stats.open_full.saturating_add(1);
+                match grade {
+                    Grade::Caution => {
+                        stats.open_full_caution = stats.open_full_caution.saturating_add(1);
+                    }
+                    Grade::Warning => {
+                        stats.open_full_warning = stats.open_full_warning.saturating_add(1);
+                    }
+                }
                 if !alert_push(alerts, &fresh) {
                     stats.alerts_dropped = stats.alerts_dropped.saturating_add(1);
                 }

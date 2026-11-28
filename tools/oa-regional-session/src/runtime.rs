@@ -1138,20 +1138,13 @@ fn validate_alert_composition(
     if circles_needed > circles_reserved {
         return Err("composed alert circles exceed the shared display reservation".into());
     }
-    let operator_rows =
-        oa_display::status_strip::regional_operator_rows(maximum_mode, &maximum_console)
-            .map_err(|error| format!("regional operator rows: {error:?}"))?;
-    let status_rows = 1usize
-        .checked_add(operator_rows.console_count)
-        .and_then(|rows| rows.checked_add(2)) // The plan reserves two safety rows.
-        .ok_or("operator status row requirement overflow")?;
+    let status_rows = surveillance::status_aux_text_rows()?;
     let texts_needed = budgets
         .iter()
         .flatten()
         .try_fold(status_rows, |sum, budget| sum.checked_add(budget.texts))
         .ok_or("composed alert/status text row requirement overflow")?;
     let (family_text_rows, family_text_bytes) = surveillance::alert_family_text_reservation()?;
-    let status_rows = surveillance::status_aux_text_rows()?;
     let texts_reserved = profile
         .max_tracks
         .checked_mul(oa_display::core::alert_markers::ALERT_TEXTS_PER_MARKER)
@@ -1172,11 +1165,12 @@ fn validate_alert_composition(
             sum.checked_add(budget.text_bytes)
         })
         .ok_or("composed alert text byte requirement overflow")?;
+    let status_aux_bytes = surveillance::status_aux_text_bytes()?;
     let bytes_reserved = profile
         .max_tracks
         .checked_mul(oa_display::core::alert_markers::ALERT_TEXT_BYTES_PER_MARKER)
         .and_then(|bytes| bytes.checked_add(family_text_bytes))
-        .and_then(|bytes| bytes.checked_add(surveillance::STATUS_AUX_TEXT_BYTES))
+        .and_then(|bytes| bytes.checked_add(status_aux_bytes))
         .ok_or("profile alert text byte reservation overflow")?;
     if bytes_needed > bytes_reserved {
         return Err("composed alert/status text bytes exceed shared reservation".into());
@@ -5629,13 +5623,12 @@ mod transaction_tests {
         let mut latest = None;
         for scan in 0_i64..4 {
             let time_ns = first_scan_ns + scan * 1_000_000_000;
-            latest = Some(
-                regional_step(
-                    runtime,
-                    &final_monitor_batch(time_ns, time_ns, latitude_e7, north_mmps, scan == 0),
-                )
-                .unwrap(),
-            );
+            let mut batch =
+                final_monitor_batch(time_ns, time_ns, latitude_e7, north_mmps, scan == 0);
+            for event in &mut batch.events {
+                event.centre = runtime.centre;
+            }
+            latest = Some(regional_step(runtime, &batch).unwrap());
         }
         latest.expect("four synthetic scans produce a final frame")
     }

@@ -147,8 +147,12 @@ pub struct RegionalMsawFrame {
     pub synthetic: bool,
     /// Submitted tracker rows, including missing/stale-altitude rows counted by the core.
     pub submitted_rows: usize,
-    /// New warnings refused by the retained open-alert table during this evaluation only.
+    /// New alerts refused by the retained open-alert table during this evaluation only.
     pub open_table_refused: u64,
+    /// Of this cycle's open-table refusals, those graded caution by the core.
+    pub open_table_refused_caution: u64,
+    /// Of this cycle's open-table refusals, those graded warning by the core.
+    pub open_table_refused_warning: u64,
     pub vfr_service_eligibility_available: bool,
     pub terrain_tiles: Vec<(String, [u8; 32])>,
     pub failure: String,
@@ -440,6 +444,8 @@ fn evaluate_cycle(
         report: cycle.report,
         stats: Some(cycle.stats),
         open_table_refused: cycle.stats.open_full,
+        open_table_refused_caution: cycle.stats.open_full_caution,
+        open_table_refused_warning: cycle.stats.open_full_warning,
         open: msaw_open(&service.state).to_vec(),
         closed: service.alerts.items.clone(),
         skipped: service.skips.items.clone(),
@@ -491,6 +497,8 @@ pub fn regional_msaw_cycle(
                 },
                 stats: None,
                 open_table_refused: 0,
+                open_table_refused_caution: 0,
+                open_table_refused_warning: 0,
                 open: msaw_open(&service.state).to_vec(),
                 closed: service.alerts.items.clone(),
                 skipped: service.skips.items.clone(),
@@ -788,6 +796,8 @@ mod tests {
             )
             .unwrap();
             assert_eq!(frame.open_table_refused, 0);
+            assert_eq!(frame.open_table_refused_caution, 0);
+            assert_eq!(frame.open_table_refused_warning, 0);
             if second < 14 {
                 assert_eq!(frame.open.len(), 128);
             } else {
@@ -807,6 +817,64 @@ mod tests {
         .unwrap();
         assert_eq!(refilled.open.len(), 128);
         assert_eq!(refilled.open_table_refused, 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    // Mutation killed: reporting only the aggregate refusal count hides whether a newly refused
+    // episode was warning severity behind a full table of retained cautions.
+    // REQ: OA-REG-011, OA-DSP-078
+    #[test]
+    fn provider_counts_open_table_refusals_by_actual_grade_each_cycle() {
+        let (mut service, root) = provider_with_open_limit(129, 128, 256);
+        let mut states = oa_safety::net::state_table_new(10_000_000_000, 0).unwrap();
+        let mut inhibits = oa_safety::inhibit::inhibits_new();
+        let mut rows = violating_rows(129);
+        for row in &mut rows {
+            row.alt_ft = 1500.0;
+        }
+
+        let caution = regional_msaw_cycle(
+            &mut service,
+            2_000_000_000,
+            &rows,
+            &mut states,
+            &mut inhibits,
+        )
+        .unwrap();
+        let caution_stats = caution.stats.unwrap();
+        assert_eq!(caution.open.len(), 128);
+        assert_eq!(caution.open_table_refused, 1);
+        assert_eq!(caution.open_table_refused_caution, 1);
+        assert_eq!(caution.open_table_refused_warning, 0);
+        assert_eq!(caution_stats.open_full, 1);
+        assert_eq!(caution_stats.open_full_caution, 1);
+        assert_eq!(caution_stats.open_full_warning, 0);
+
+        if let Some(warning) = rows.last_mut() {
+            warning.alt_ft = 1000.0;
+        }
+        for second in [3_i64, 4] {
+            let frame = regional_msaw_cycle(
+                &mut service,
+                second * 1_000_000_000,
+                &rows,
+                &mut states,
+                &mut inhibits,
+            )
+            .unwrap();
+            let stats = frame.stats.unwrap();
+            assert_eq!(frame.open.len(), 128);
+            assert_eq!(frame.open_table_refused, 1);
+            assert_eq!(frame.open_table_refused_caution, 0);
+            assert_eq!(frame.open_table_refused_warning, 1);
+            assert_eq!(stats.open_full, 1);
+            assert_eq!(stats.open_full_caution, 0);
+            assert_eq!(stats.open_full_warning, 1);
+        }
+        let totals = oa_msaw::msaw_totals(&service.state);
+        assert_eq!(totals.open_full, 3);
+        assert_eq!(totals.open_full_caution, 1);
+        assert_eq!(totals.open_full_warning, 2);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -830,7 +898,11 @@ mod tests {
         assert_eq!(frame.open.len(), 128);
         assert_eq!(stats.open_full, 2);
         assert_eq!(stats.alerts_dropped, 1);
+        assert_eq!(stats.open_full_warning, 2);
+        assert_eq!(stats.open_full_caution, 0);
         assert_eq!(frame.open_table_refused, 2);
+        assert_eq!(frame.open_table_refused_warning, 2);
+        assert_eq!(frame.open_table_refused_caution, 0);
         std::fs::remove_dir_all(root).unwrap();
     }
 

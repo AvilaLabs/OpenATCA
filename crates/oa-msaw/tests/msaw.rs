@@ -980,8 +980,22 @@ fn a_full_open_table_logs_the_alert_at_once_and_counts_it() {
     ];
     let o = cycle(&mut r, S, &rows, &flat(2000, 100));
     assert_eq!((o.stats.opened, o.stats.open_full), (1, 1));
+    assert_eq!(
+        (o.stats.open_full_caution, o.stats.open_full_warning),
+        (0, 1)
+    );
     assert_eq!(r.alerts.items.len(), 1, "the second alert is not lost");
     assert_eq!(r.alerts.items[0].addr, 2);
+    assert_eq!(r.alerts.items[0].peak, Grade::Warning);
+    let totals = msaw_totals(&r.st);
+    assert_eq!(
+        (
+            totals.open_full,
+            totals.open_full_caution,
+            totals.open_full_warning
+        ),
+        (1, 0, 1)
+    );
     assert!(matches!(
         o.report,
         NetReport::Degraded {
@@ -989,6 +1003,37 @@ fn a_full_open_table_logs_the_alert_at_once_and_counts_it() {
             ..
         }
     ));
+}
+
+// Mutation killed: classify a refused caution using anything other than the core's actual grade.
+// REQ: OA-MSAW-012
+#[test]
+fn a_full_open_table_counts_and_logs_a_refused_caution_grade() {
+    let mut c = cfg();
+    c.max_open = 1;
+    let mut r = rig(&c);
+    let rows = [
+        tr(1, 40.0, -88.0, 0.0, 0.0, 3000.0, -2000.0),
+        tr(2, 40.5, -88.0, 0.0, 0.0, 3000.0, -2000.0),
+    ];
+    let o = cycle(&mut r, S, &rows, &flat(1000, 100));
+    assert_eq!((o.stats.opened, o.stats.open_full), (1, 1));
+    assert_eq!(
+        (o.stats.open_full_caution, o.stats.open_full_warning),
+        (1, 0)
+    );
+    assert_eq!(r.alerts.items.len(), 1);
+    assert_eq!(r.alerts.items[0].addr, 2);
+    assert_eq!(r.alerts.items[0].peak, Grade::Caution);
+    let totals = msaw_totals(&r.st);
+    assert_eq!(
+        (
+            totals.open_full,
+            totals.open_full_caution,
+            totals.open_full_warning
+        ),
+        (1, 1, 0)
+    );
 }
 
 // REQ: OA-MSAW-013
