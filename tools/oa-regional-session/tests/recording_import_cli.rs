@@ -249,7 +249,10 @@ fn synthetic_oaf_import_runs_through_tracking_and_stage_contract() {
         complete.trim(),
         oa_sha256::to_hex(&oa_sha256::sha256(&manifest))
     );
-    let evidence = fs::read_to_string(run.join("frame-0001.txt")).unwrap();
+    // Three causal cutoffs are exported: two archive reports, then the SFDPS message.
+    let first_evidence = fs::read_to_string(run.join("frame-0001.txt")).unwrap();
+    assert!(first_evidence.contains("confirmed: 0"), "{first_evidence}");
+    let evidence = fs::read_to_string(run.join("frame-0003.txt")).unwrap();
     assert!(evidence.contains("address: 11259375"), "{evidence}");
     let ca_stats = evidence.split("ca_stats: CycleStats {").nth(1).unwrap();
     assert!(ca_stats.contains("tracks: 1,"), "{evidence}");
