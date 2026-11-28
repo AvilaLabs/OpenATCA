@@ -1321,6 +1321,7 @@ fn flush_normalized_group(
     ) -> Result<(), String>,
 ) -> Result<(), String> {
     pending.sort_by_key(|(event, _)| (event.source, event.sequence));
+    let mut current_message: Option<(u64, u64)> = None;
     for (mut event, provenance) in pending.drain(..) {
         let sequence_index = match event.source {
             crate::input::SourceKind::Surveillance => 0,
@@ -1336,6 +1337,28 @@ fn flush_normalized_group(
         *next_sequence = next_sequence
             .checked_add(1)
             .ok_or("normalized sequence overflow")?;
+        if event.source == crate::input::SourceKind::Flight {
+            event.source_message_id = match event.source_message_id {
+                Some(source_message_id) => {
+                    let normalized_id = match current_message {
+                        Some((prior_id, normalized_id)) if prior_id == source_message_id => {
+                            normalized_id
+                        }
+                        _ => {
+                            current_message = Some((source_message_id, event.sequence));
+                            event.sequence
+                        }
+                    };
+                    Some(normalized_id)
+                }
+                None => {
+                    current_message = None;
+                    None
+                }
+            };
+        } else {
+            current_message = None;
+        }
         visit(event, provenance)?;
     }
     Ok(())
@@ -1941,36 +1964,44 @@ mod tests {
         let mut observed = Vec::new();
         let mut completed = Vec::new();
         let result = stream_normalized_events(&inputs, None, *b"ZAU1", |event, provenance| {
-            let batch = push_event(&mut cursor, event)
-                .map_err(|error| format!("session rejected normalized event: {error:?}"))?;
             observed.push((
-                event.receipt_ns,
-                event.source_ns,
-                event.sequence,
+                event,
+                event.source_message_id,
                 provenance.frame_sequence,
                 provenance.input_receipt_ns,
                 provenance.emitted_item_ordinal,
             ));
-            if let Some(batch) = batch {
-                completed.push(batch);
-            }
             Ok(())
         });
         let _ = fs::remove_file(&path);
         let summary = result?;
-        if let Some(batch) = flush_receipt_group(&mut cursor)
-            .map_err(|error| std::io::Error::other(format!("session flush: {error:?}")))?
-        {
-            completed.push(batch);
-        }
+        let normalized_events: Vec<_> = observed.iter().map(|entry| entry.0).collect();
         assert_eq!(summary.normalized_events, 3);
+        assert_eq!(normalized_events.len(), 3);
+        let observed_rows: Vec<_> = observed
+            .iter()
+            .map(
+                |(event, source_message_id, frame_sequence, input_receipt_ns, ordinal)| {
+                    (
+                        event.receipt_ns,
+                        event.source_ns,
+                        event.sequence,
+                        *source_message_id,
+                        *frame_sequence,
+                        *input_receipt_ns,
+                        *ordinal,
+                    )
+                },
+            )
+            .collect();
         assert_eq!(
-            observed,
+            observed_rows,
             vec![
                 (
                     base + 1_000_000_000,
                     base + 100_000_000,
                     0,
+                    None,
                     1,
                     base + 100_000_000,
                     0,
@@ -1979,6 +2010,7 @@ mod tests {
                     base + 2_000_000_000,
                     base + 1_100_000_000,
                     1,
+                    None,
                     2,
                     base + 1_100_000_000,
                     0,
@@ -1987,12 +2019,33 @@ mod tests {
                     base + 3_000_000_000,
                     base + 2_100_000_000,
                     2,
+                    None,
                     1,
                     base + 100_000_000,
                     1,
                 ),
             ]
         );
+        let serialized = crate::recordings::serialize_recorded_events(&normalized_events)?;
+        let reparsed: Vec<_> = serialized
+            .lines()
+            .skip(1)
+            .map(crate::input::parse_event_line)
+            .collect::<Result<_, _>>()?;
+        assert_eq!(reparsed, normalized_events);
+        for event in reparsed {
+            let batch = push_event(&mut cursor, event).map_err(|error| {
+                std::io::Error::other(format!("session rejected event: {error:?}"))
+            })?;
+            if let Some(batch) = batch {
+                completed.push(batch);
+            }
+        }
+        if let Some(batch) = flush_receipt_group(&mut cursor)
+            .map_err(|error| std::io::Error::other(format!("session flush: {error:?}")))?
+        {
+            completed.push(batch);
+        }
         let completed_rows: Vec<_> = completed
             .iter()
             .flat_map(|batch| {
