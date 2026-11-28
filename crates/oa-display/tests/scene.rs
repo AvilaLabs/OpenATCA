@@ -446,7 +446,7 @@ fn detail_depends_on_range_with_configurable_thresholds_and_the_legend_says_what
     assert_eq!(st.labels, 0);
     assert!(texts(&l)
         .iter()
-        .any(|t| t.ends_with("LABELS>40NM, VOR/IFR APT LABELS>100NM")));
+        .any(|t| t.ends_with("LABEL>40, VOR/IFR LABEL>100")));
     // Labels are on at 50 NM with the thresholds open, one per drawn symbol.
     let (l, st, _) = build(&m, 50.0, all_open);
     assert_eq!(st.labels, 6);
