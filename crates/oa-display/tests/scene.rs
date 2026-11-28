@@ -473,6 +473,41 @@ fn detail_depends_on_range_with_configurable_thresholds_and_the_legend_says_what
 
 // REQ: OA-DSP-025
 #[test]
+fn every_range_tier_is_visible_at_its_exact_threshold() {
+    let m = model(Tail::None);
+    let (list, stats, _) = build(&m, 80.0, |view| {
+        view.fix_max_nm = 80.0;
+        view.terminal_wpt_max_nm = 80.0;
+        view.runway_max_nm = 80.0;
+        view.non_ifr_airport_max_nm = 80.0;
+        view.minor_navaid_max_nm = 80.0;
+        view.label_max_nm = 80.0;
+        view.major_label_max_nm = 80.0;
+    });
+    assert_eq!((stats.fixes, stats.navaids, stats.airports), (2, 2, 2));
+    assert!(texts(&list).contains(&"HIDDEN NM: NONE"));
+}
+
+// REQ: OA-DSP-025
+#[test]
+fn a_multi_item_hidden_line_keeps_each_disclosure_and_delimiter() {
+    let m = model(Tail::None);
+    let (list, _, _) = build(&m, 80.0, |view| {
+        view.fix_max_nm = 70.0;
+        view.terminal_wpt_max_nm = 60.0;
+        view.runway_max_nm = 50.0;
+        view.non_ifr_airport_max_nm = 40.0;
+        view.minor_navaid_max_nm = 30.0;
+        view.label_max_nm = 20.0;
+        view.major_label_max_nm = 10.0;
+    });
+    assert!(texts(&list).contains(
+        &"HIDDEN NM:FIX>70, TERM>60, RWY/LOC>50, NON-IFR>40, NDB/DME/TACAN>30, LABEL>20, VOR/IFR LABEL>10"
+    ));
+}
+
+// REQ: OA-DSP-025
+#[test]
 fn every_layer_can_be_switched_off_and_the_legend_says_so() {
     let m = model(Tail::None);
     let (_, base, _) = build(&m, 50.0, all_open);
@@ -1750,6 +1785,44 @@ fn every_legend_text_past_the_edge_gets_a_bar_at_the_narrowest_width() {
         .filter(|(&la, &x)| la == LAYER_LEGEND && x == 63 * 16)
         .count();
     assert_eq!(bars, st.legend_cut as usize);
+}
+
+// REQ: OA-DSP-025
+#[test]
+fn compact_hidden_legend_uses_nine_pixel_text_and_fits_its_full_line() {
+    let expected = "HIDDEN NM:FIX>19999.9, TERM>19999.9, RWY/LOC>19999.9, NON-IFR>19999.9, NDB/DME/TACAN>19999.9, LABEL>19999.9, VOR/IFR LABEL>19999.9";
+    let m = model(Tail::None);
+    let expected_chars = expected.chars().count() as i32;
+    let bounds = (6, 42, 8 + expected_chars * 9 + 2, 57);
+    assert_eq!(bounds, (6, 42, 1_180, 57));
+    assert!(bounds.2 <= 1_200);
+    assert!(8 + expected_chars * 12 + 2 > 1_200);
+    for (width, expected_cuts) in [(1_200, 0u32), (1_150, 1u32)] {
+        let mut view = view_new(ORD.0, ORD.1, 20_000.0, width, 600).unwrap();
+        view.fix_max_nm = 19_999.9;
+        view.terminal_wpt_max_nm = 19_999.9;
+        view.runway_max_nm = 19_999.9;
+        view.non_ifr_airport_max_nm = 19_999.9;
+        view.minor_navaid_max_nm = 19_999.9;
+        view.label_max_nm = 19_999.9;
+        view.major_label_max_nm = 19_999.9;
+        let mut list = list_new(scene_caps(&m).unwrap()).unwrap();
+        let stats = build_scene(
+            &mut list,
+            &m,
+            &scene_index(&m),
+            &view,
+            &mut scratch_for(&m, &view).unwrap(),
+        )
+        .unwrap();
+        let row = texts(&list)
+            .iter()
+            .position(|text| *text == expected)
+            .expect("complete hidden legend row is present");
+        assert_eq!(list.texts.size[row], 9);
+        assert_eq!((list.texts.x[row], list.texts.y[row]), (8 * 16, 44 * 16));
+        assert_eq!(stats.legend_cut, expected_cuts);
+    }
 }
 
 // REQ: OA-DSP-035
