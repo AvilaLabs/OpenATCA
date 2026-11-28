@@ -123,7 +123,7 @@ jobs:
       - name: Format
         run: cargo +1.89.0 fmt --all --check
       - name: Lint
-        run: cargo +1.89.0 clippy --workspace --all-targets --locked -- -D warnings -W clippy::too_many_lines -W clippy::too_many_arguments
+        run: cargo +1.89.0 clippy --workspace --all-targets --locked -- -D warnings --force-warn clippy::too_many_lines --force-warn clippy::too_many_arguments
       - name: Candidate evaluator tests
         run: python3 tools/test_validate_candidate.py
       - name: Latency aggregate validation tests
