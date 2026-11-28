@@ -682,6 +682,27 @@ pub fn adapt_recorded_frames_with_sequence_starts_and_quality_limit(
     {
         return Err(AdapterError::WorkBudget);
     }
+    validate_recorded_adaptation_input(frames, recording_counts, max_events, &adsb_centre)?;
+    let mut adapter = RecordedFrameAdapter::new(
+        recording_counts,
+        max_events,
+        adsb_centre,
+        sequence_starts,
+        receipt_group_limit,
+        quality_cache,
+    )?;
+    for frame in frames {
+        adapter.process_frame(frame)?;
+    }
+    adapter.finish()
+}
+
+fn validate_recorded_adaptation_input(
+    frames: &[RecordedFrame],
+    recording_counts: RecordingCounts,
+    max_events: usize,
+    adsb_centre: &[u8; 4],
+) -> Result<(), AdapterError> {
     if max_events == 0 {
         return Err(AdapterError::ZeroCapacity);
     }
@@ -690,7 +711,7 @@ pub fn adapt_recorded_frames_with_sequence_starts_and_quality_limit(
     {
         return Err(AdapterError::WorkBudget);
     }
-    if !crate::input::is_valid_centre_code(&adsb_centre) {
+    if !crate::input::is_valid_centre_code(adsb_centre) {
         return Err(AdapterError::InvalidCentre);
     }
     let declared_decoded = usize::try_from(recording_counts.total_decoded_bytes)
@@ -729,227 +750,248 @@ pub fn adapt_recorded_frames_with_sequence_starts_and_quality_limit(
             return Err(AdapterError::FramesNotMerged);
         }
     }
-    let mut out = RecordedAdaptation {
-        events: Vec::new(),
-        provenance: Vec::new(),
-        counts: zero_recorded_adapter_counts(),
-        recording: recording_counts,
-        quarantine: Vec::new(),
-        quarantine_stats: zero_quarantine_stats(),
-    };
-    out.events
-        .try_reserve_exact(max_events.min(4096))
-        .map_err(|_| AdapterError::AllocationRefused)?;
-    out.provenance
-        .try_reserve_exact(max_events.min(4096))
-        .map_err(|_| AdapterError::AllocationRefused)?;
-    let mut parser = Parser::new(XmlLimits {
-        max_input_bytes: oa_feed::MAX_PAYLOAD,
-        max_elements: 262_144,
-        max_attributes: 524_288,
-        max_text_nodes: 262_144,
-        ..XmlLimits::default()
-    })
-    .map_err(|_| AdapterError::UnsupportedEvent)?;
-    let mut fixm_limits = FixmLimits::new(oa_sealed::sealed_drop_window());
-    fixm_limits.max_elements = 262_144;
-    let mut sfdps_decoder = Decoder::new(fixm_limits);
-    let mut quarantine_queue = queue_new();
-    let conversion_started = Instant::now();
-    let mut next_surveillance_sequence = sequence_starts[0];
-    let mut next_flight_sequence = sequence_starts[1];
-    for frame in frames {
+    Ok(())
+}
+
+struct RecordedFrameAdapter<'a> {
+    out: RecordedAdaptation,
+    max_events: usize,
+    adsb_centre: [u8; 4],
+    next_surveillance_sequence: u64,
+    next_flight_sequence: u64,
+    parser: Parser,
+    sfdps_decoder: Decoder,
+    quarantine_queue: QuarantineQueue,
+    conversion_started: Instant,
+    receipt_group_limit: usize,
+    quality_cache: &'a mut oa_track::adsb::AdsbQualityCache,
+}
+
+impl<'a> RecordedFrameAdapter<'a> {
+    fn new(
+        recording_counts: RecordingCounts,
+        max_events: usize,
+        adsb_centre: [u8; 4],
+        sequence_starts: [u64; 2],
+        receipt_group_limit: usize,
+        quality_cache: &'a mut oa_track::adsb::AdsbQualityCache,
+    ) -> Result<Self, AdapterError> {
+        let mut out = RecordedAdaptation {
+            events: Vec::new(),
+            provenance: Vec::new(),
+            counts: zero_recorded_adapter_counts(),
+            recording: recording_counts,
+            quarantine: Vec::new(),
+            quarantine_stats: zero_quarantine_stats(),
+        };
+        out.events
+            .try_reserve_exact(max_events.min(4096))
+            .map_err(|_| AdapterError::AllocationRefused)?;
+        out.provenance
+            .try_reserve_exact(max_events.min(4096))
+            .map_err(|_| AdapterError::AllocationRefused)?;
+        let parser = Parser::new(XmlLimits {
+            max_input_bytes: oa_feed::MAX_PAYLOAD,
+            max_elements: 262_144,
+            max_attributes: 524_288,
+            max_text_nodes: 262_144,
+            ..XmlLimits::default()
+        })
+        .map_err(|_| AdapterError::UnsupportedEvent)?;
+        let mut fixm_limits = FixmLimits::new(oa_sealed::sealed_drop_window());
+        fixm_limits.max_elements = 262_144;
+        Ok(Self {
+            out,
+            max_events,
+            adsb_centre,
+            next_surveillance_sequence: sequence_starts[0],
+            next_flight_sequence: sequence_starts[1],
+            parser,
+            sfdps_decoder: Decoder::new(fixm_limits),
+            quarantine_queue: queue_new(),
+            conversion_started: Instant::now(),
+            receipt_group_limit,
+            quality_cache,
+        })
+    }
+
+    fn process_frame(&mut self, frame: &RecordedFrame) -> Result<(), AdapterError> {
         let frame_started = Instant::now();
+        let Some(issue_receipt_ns) = self.admit_frame(frame, frame_started)? else {
+            return Ok(());
+        };
+        self.adapt_frame(frame, issue_receipt_ns, frame_started)
+    }
+
+    fn admit_frame(
+        &mut self,
+        frame: &RecordedFrame,
+        frame_started: Instant,
+    ) -> Result<Option<i64>, AdapterError> {
         if frame.kind != oa_feed::Kind::Message {
-            out.counts.nonmessage_frames_refused =
-                out.counts.nonmessage_frames_refused.saturating_add(1);
-            quarantine_item(
-                &mut quarantine_queue,
-                &mut out.quarantine,
-                frame,
-                QUARANTINE_FRAME_ROW_LOCATOR,
-                REASON_INPUT_INVALID,
-                u32::try_from(frame.payload.len()).unwrap_or(u32::MAX),
-                oa_feed::MAX_PAYLOAD as u32,
-                conversion_started,
-                frame_started,
-            )?;
-            continue;
+            self.out.counts.nonmessage_frames_refused =
+                self.out.counts.nonmessage_frames_refused.saturating_add(1);
+            let observed = u32::try_from(frame.payload.len()).unwrap_or(u32::MAX);
+            self.quarantine_frame(frame, REASON_INPUT_INVALID, observed, frame_started)?;
+            return Ok(None);
         }
         if frame.payload.len() > oa_feed::MAX_PAYLOAD {
-            out.counts.invalid_frame_metadata = out.counts.invalid_frame_metadata.saturating_add(1);
-            quarantine_item(
-                &mut quarantine_queue,
-                &mut out.quarantine,
-                frame,
-                QUARANTINE_FRAME_ROW_LOCATOR,
-                REASON_RESOURCE_LIMIT,
-                u32::try_from(frame.payload.len()).unwrap_or(u32::MAX),
-                oa_feed::MAX_PAYLOAD as u32,
-                conversion_started,
-                frame_started,
-            )?;
-            continue;
+            self.out.counts.invalid_frame_metadata =
+                self.out.counts.invalid_frame_metadata.saturating_add(1);
+            let observed =
+                u32::try_from(frame.payload.len()).map_err(|_| AdapterError::WorkBudget)?;
+            self.quarantine_frame(frame, REASON_RESOURCE_LIMIT, observed, frame_started)?;
+            return Ok(None);
         }
         let issue_receipt_ns = match issue_cutoff(frame.receipt_ns) {
             Ok(value) => value,
-            Err(CutoffRefusal::Negative) => {
-                out.counts.cutoff_negative_refused =
-                    out.counts.cutoff_negative_refused.saturating_add(1);
-                quarantine_item(
-                    &mut quarantine_queue,
-                    &mut out.quarantine,
+            Err(refusal) => {
+                self.count_cutoff_refusal(refusal);
+                self.quarantine_frame(
                     frame,
-                    QUARANTINE_FRAME_ROW_LOCATOR,
                     REASON_INPUT_INVALID,
                     frame.payload.len() as u32,
-                    oa_feed::MAX_PAYLOAD as u32,
-                    conversion_started,
                     frame_started,
                 )?;
-                continue;
-            }
-            Err(CutoffRefusal::Zero) => {
-                out.counts.cutoff_zero_refused = out.counts.cutoff_zero_refused.saturating_add(1);
-                quarantine_item(
-                    &mut quarantine_queue,
-                    &mut out.quarantine,
-                    frame,
-                    QUARANTINE_FRAME_ROW_LOCATOR,
-                    REASON_INPUT_INVALID,
-                    frame.payload.len() as u32,
-                    oa_feed::MAX_PAYLOAD as u32,
-                    conversion_started,
-                    frame_started,
-                )?;
-                continue;
-            }
-            Err(CutoffRefusal::SealedReceipt) => {
-                out.counts.cutoff_sealed_receipt_refused =
-                    out.counts.cutoff_sealed_receipt_refused.saturating_add(1);
-                quarantine_item(
-                    &mut quarantine_queue,
-                    &mut out.quarantine,
-                    frame,
-                    QUARANTINE_FRAME_ROW_LOCATOR,
-                    REASON_INPUT_INVALID,
-                    frame.payload.len() as u32,
-                    oa_feed::MAX_PAYLOAD as u32,
-                    conversion_started,
-                    frame_started,
-                )?;
-                continue;
-            }
-            Err(CutoffRefusal::Overflow) => {
-                out.counts.cutoff_overflow_refused =
-                    out.counts.cutoff_overflow_refused.saturating_add(1);
-                quarantine_item(
-                    &mut quarantine_queue,
-                    &mut out.quarantine,
-                    frame,
-                    QUARANTINE_FRAME_ROW_LOCATOR,
-                    REASON_INPUT_INVALID,
-                    frame.payload.len() as u32,
-                    oa_feed::MAX_PAYLOAD as u32,
-                    conversion_started,
-                    frame_started,
-                )?;
-                continue;
-            }
-            Err(CutoffRefusal::SealedCutoff) => {
-                out.counts.cutoff_sealed_issue_refused =
-                    out.counts.cutoff_sealed_issue_refused.saturating_add(1);
-                quarantine_item(
-                    &mut quarantine_queue,
-                    &mut out.quarantine,
-                    frame,
-                    QUARANTINE_FRAME_ROW_LOCATOR,
-                    REASON_INPUT_INVALID,
-                    frame.payload.len() as u32,
-                    oa_feed::MAX_PAYLOAD as u32,
-                    conversion_started,
-                    frame_started,
-                )?;
-                continue;
+                return Ok(None);
             }
         };
-        if out.events.len() >= max_events {
-            out.counts.unprocessed_frames = out.counts.unprocessed_frames.saturating_add(1);
-            quarantine_item(
-                &mut quarantine_queue,
-                &mut out.quarantine,
+        if self.out.events.len() >= self.max_events {
+            self.out.counts.unprocessed_frames =
+                self.out.counts.unprocessed_frames.saturating_add(1);
+            self.quarantine_frame(
                 frame,
-                QUARANTINE_FRAME_ROW_LOCATOR,
                 REASON_RESOURCE_LIMIT,
                 frame.payload.len() as u32,
-                oa_feed::MAX_PAYLOAD as u32,
-                conversion_started,
                 frame_started,
             )?;
-            continue;
+            return Ok(None);
         }
+        Ok(Some(issue_receipt_ns))
+    }
+
+    fn count_cutoff_refusal(&mut self, refusal: CutoffRefusal) {
+        match refusal {
+            CutoffRefusal::Negative => {
+                self.out.counts.cutoff_negative_refused =
+                    self.out.counts.cutoff_negative_refused.saturating_add(1);
+            }
+            CutoffRefusal::Zero => {
+                self.out.counts.cutoff_zero_refused =
+                    self.out.counts.cutoff_zero_refused.saturating_add(1);
+            }
+            CutoffRefusal::SealedReceipt => {
+                self.out.counts.cutoff_sealed_receipt_refused = self
+                    .out
+                    .counts
+                    .cutoff_sealed_receipt_refused
+                    .saturating_add(1);
+            }
+            CutoffRefusal::Overflow => {
+                self.out.counts.cutoff_overflow_refused =
+                    self.out.counts.cutoff_overflow_refused.saturating_add(1);
+            }
+            CutoffRefusal::SealedCutoff => {
+                self.out.counts.cutoff_sealed_issue_refused = self
+                    .out
+                    .counts
+                    .cutoff_sealed_issue_refused
+                    .saturating_add(1);
+            }
+        }
+    }
+
+    fn quarantine_frame(
+        &mut self,
+        frame: &RecordedFrame,
+        reason: ReasonFlags,
+        observed: u32,
+        frame_started: Instant,
+    ) -> Result<(), AdapterError> {
+        quarantine_item(
+            &mut self.quarantine_queue,
+            &mut self.out.quarantine,
+            frame,
+            QUARANTINE_FRAME_ROW_LOCATOR,
+            reason,
+            observed,
+            oa_feed::MAX_PAYLOAD as u32,
+            self.conversion_started,
+            frame_started,
+        )
+    }
+
+    fn adapt_frame(
+        &mut self,
+        frame: &RecordedFrame,
+        issue_receipt_ns: i64,
+        frame_started: Instant,
+    ) -> Result<(), AdapterError> {
         match frame.source {
             RecordingSource::Adsb => {
-                out.counts.frames_adsb = out.counts.frames_adsb.saturating_add(1);
-                let mut quarantine = std::mem::take(&mut out.quarantine);
+                self.out.counts.frames_adsb = self.out.counts.frames_adsb.saturating_add(1);
+                let mut quarantine = std::mem::take(&mut self.out.quarantine);
                 let result = adapt_adsb_frame(
                     frame,
                     AdsbFrameContext {
                         issue_receipt_ns,
-                        adsb_centre,
-                        max_events,
-                        next_sequence: &mut next_surveillance_sequence,
-                        quarantine_queue: &mut quarantine_queue,
+                        adsb_centre: self.adsb_centre,
+                        max_events: self.max_events,
+                        next_sequence: &mut self.next_surveillance_sequence,
+                        quarantine_queue: &mut self.quarantine_queue,
                         quarantine: &mut quarantine,
-                        conversion_started,
+                        conversion_started: self.conversion_started,
                         frame_started,
-                        out: &mut out,
-                        quality_cache,
+                        out: &mut self.out,
+                        quality_cache: self.quality_cache,
                     },
                 );
-                out.quarantine = quarantine;
-                result?;
+                self.out.quarantine = quarantine;
+                result
             }
             RecordingSource::Sfdps => {
-                out.counts.frames_sfdps = out.counts.frames_sfdps.saturating_add(1);
-                let mut quarantine = std::mem::take(&mut out.quarantine);
+                self.out.counts.frames_sfdps = self.out.counts.frames_sfdps.saturating_add(1);
+                let mut quarantine = std::mem::take(&mut self.out.quarantine);
                 let result = adapt_sfdps_frame(
                     frame,
                     issue_receipt_ns,
-                    max_events,
-                    &mut next_flight_sequence,
-                    &mut parser,
-                    &mut sfdps_decoder,
-                    &mut quarantine_queue,
+                    self.max_events,
+                    &mut self.next_flight_sequence,
+                    &mut self.parser,
+                    &mut self.sfdps_decoder,
+                    &mut self.quarantine_queue,
                     &mut quarantine,
-                    conversion_started,
+                    self.conversion_started,
                     frame_started,
-                    &mut out,
+                    &mut self.out,
                 );
-                out.quarantine = quarantine;
-                result?;
+                self.out.quarantine = quarantine;
+                result
             }
         }
     }
-    out.counts.candidate_events_before_receipt_filter =
-        u64::try_from(out.events.len()).map_err(|_| AdapterError::CountOverflow)?;
-    sort_and_refuse_oversize_receipt_groups_with_quarantine(
-        &mut out,
-        &mut quarantine_queue,
-        conversion_started,
-        receipt_group_limit,
-    )?;
-    out.counts.events_emitted =
-        u64::try_from(out.events.len()).map_err(|_| AdapterError::CountOverflow)?;
-    out.quarantine_stats = [
-        oa_quarantine::source_stats(&quarantine_queue, InputSource::FlightData)
-            .map_err(|_| AdapterError::WorkBudget)?,
-        oa_quarantine::source_stats(&quarantine_queue, InputSource::Surveillance)
-            .map_err(|_| AdapterError::WorkBudget)?,
-        oa_quarantine::source_stats(&quarantine_queue, InputSource::Adaptation)
-            .map_err(|_| AdapterError::WorkBudget)?,
-    ];
-    Ok(out)
+
+    fn finish(mut self) -> Result<RecordedAdaptation, AdapterError> {
+        self.out.counts.candidate_events_before_receipt_filter =
+            u64::try_from(self.out.events.len()).map_err(|_| AdapterError::CountOverflow)?;
+        sort_and_refuse_oversize_receipt_groups_with_quarantine(
+            &mut self.out,
+            &mut self.quarantine_queue,
+            self.conversion_started,
+            self.receipt_group_limit,
+        )?;
+        self.out.counts.events_emitted =
+            u64::try_from(self.out.events.len()).map_err(|_| AdapterError::CountOverflow)?;
+        self.out.quarantine_stats = [
+            oa_quarantine::source_stats(&self.quarantine_queue, InputSource::FlightData)
+                .map_err(|_| AdapterError::WorkBudget)?,
+            oa_quarantine::source_stats(&self.quarantine_queue, InputSource::Surveillance)
+                .map_err(|_| AdapterError::WorkBudget)?,
+            oa_quarantine::source_stats(&self.quarantine_queue, InputSource::Adaptation)
+                .map_err(|_| AdapterError::WorkBudget)?,
+        ];
+        Ok(self.out)
+    }
 }
 
 struct AdsbFrameContext<'a> {
