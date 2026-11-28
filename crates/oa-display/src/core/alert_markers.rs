@@ -339,34 +339,28 @@ fn checked_header(
         return Err(bad_alert("MSAW count header exceeds its fixed text buffer"));
     }
     let subpixel = i64::from(crate::core::project::SUBPIXEL);
+    // A u32 canvas width times the fixed subpixel scale fits in u128.
+    let overflow_error = DisplayError::TooLarge {
+        what: "MSAW header width",
+        requested: u128::MAX,
+        limit: u128::from(projection.width).saturating_mul(16),
+    };
     let width16 = i64::from(text_width_units(text_str(&text).chars().count()))
         .checked_mul(i64::from(ALERT_TEXT_SIZE))
         .and_then(|width| width.checked_mul(subpixel))
         .and_then(|width| width.checked_div(i64::from(CAP_HEIGHT)))
-        .ok_or(DisplayError::TooLarge {
-            what: "MSAW header width",
-            requested: u128::MAX,
-            limit: u128::from(projection.width) * 16,
-        })?;
+        .ok_or(overflow_error.clone())?;
     let required_width16 = i64::from(ALERT_HEADER_X_PX)
         .checked_mul(subpixel)
         .and_then(|origin| origin.checked_add(width16))
-        .ok_or(DisplayError::TooLarge {
-            what: "MSAW header width",
-            requested: u128::MAX,
-            limit: u128::from(projection.width) * 16,
-        })?;
+        .ok_or(overflow_error.clone())?;
     // The projection width is whole pixels. Ceil the rightmost subpixel extent so this is
     // equivalent to comparing the original subpixel values without discarding a partial pixel.
     let minimum_width_px = u64::try_from(required_width16)
         .ok()
         .map(|extent| u64::div_ceil(extent, 16))
         .and_then(|width| u32::try_from(width).ok())
-        .ok_or(DisplayError::TooLarge {
-            what: "MSAW header width",
-            requested: u128::MAX,
-            limit: u128::from(projection.width) * 16,
-        })?;
+        .ok_or(overflow_error)?;
     if projection.width < minimum_width_px {
         return Err(bad_alert("MSAW count header does not fit the view width"));
     }
