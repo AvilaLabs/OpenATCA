@@ -506,8 +506,7 @@ fn maximum_final_degraded_header_fits_final_monitor_reservation() {
 // REQ: OA-RWY-015
 #[test]
 fn renderer_budget_pins_empty_degraded_loss_heading_at_its_first_pixel_width() {
-    let budget =
-        alert_render_budget(AlertRenderKind::FinalMonitor { degraded: true }, 1, 1).unwrap();
+    let budget = alert_render_budget(AlertRenderKind::FinalMonitor { degraded: true }, 1).unwrap();
     assert_eq!(budget.minimum_width_px, 705);
     let mut exact = list_for_render_budget(budget);
     let exact_view = projection(budget.minimum_width_px, budget.minimum_top_inset_px);
@@ -533,7 +532,7 @@ fn renderer_budget_pins_empty_degraded_loss_heading_at_its_first_pixel_width() {
 // REQ: OA-RWY-015
 #[test]
 fn family_overflow_draws_allocated_rows_and_reports_omissions_in_reserved_strip() {
-    let msaw_budget = alert_render_budget(AlertRenderKind::Msaw, 2, 1).unwrap();
+    let msaw_budget = alert_render_budget(AlertRenderKind::Msaw, 1).unwrap();
     let msaw_view = projection(
         msaw_budget.minimum_width_px,
         msaw_budget.minimum_top_inset_px,
@@ -566,7 +565,7 @@ fn family_overflow_draws_allocated_rows_and_reports_omissions_in_reserved_strip(
     );
 
     let final_budget =
-        alert_render_budget(AlertRenderKind::FinalMonitor { degraded: true }, 2, 1).unwrap();
+        alert_render_budget(AlertRenderKind::FinalMonitor { degraded: true }, 1).unwrap();
     let final_view = projection(
         final_budget.minimum_width_px,
         final_budget.minimum_top_inset_px,
@@ -608,8 +607,7 @@ fn family_overflow_draws_allocated_rows_and_reports_omissions_in_reserved_strip(
 #[test]
 fn budgeted_presenters_validate_and_count_the_129th_input_without_drawing_it() {
     let input_count = MAX_ALERT_MARKERS + 1;
-    let msaw_budget =
-        alert_render_budget(AlertRenderKind::Msaw, input_count, MAX_ALERT_MARKERS).unwrap();
+    let msaw_budget = alert_render_budget(AlertRenderKind::Msaw, MAX_ALERT_MARKERS).unwrap();
     let msaw_view = projection(
         msaw_budget.minimum_width_px,
         msaw_budget.minimum_top_inset_px,
@@ -635,7 +633,6 @@ fn budgeted_presenters_validate_and_count_the_129th_input_without_drawing_it() {
 
     let final_budget = alert_render_budget(
         AlertRenderKind::FinalMonitor { degraded: true },
-        input_count,
         MAX_ALERT_MARKERS,
     )
     .unwrap();
@@ -679,8 +676,7 @@ fn budgeted_presenters_validate_and_count_the_129th_input_without_drawing_it() {
 #[test]
 fn budgeted_presenters_refuse_invalid_tail_records_before_mutating_the_list() {
     let input_count = MAX_ALERT_MARKERS + 1;
-    let budget =
-        alert_render_budget(AlertRenderKind::Msaw, input_count, MAX_ALERT_MARKERS).unwrap();
+    let budget = alert_render_budget(AlertRenderKind::Msaw, MAX_ALERT_MARKERS).unwrap();
     let view = projection(budget.minimum_width_px, budget.minimum_top_inset_px);
     let mut markers: Vec<_> = (1..=u32::try_from(input_count).unwrap())
         .map(|address| unknown_marker(address, MarkerState::Warning))
@@ -697,7 +693,6 @@ fn budgeted_presenters_refuse_invalid_tail_records_before_mutating_the_list() {
 
     let final_budget = alert_render_budget(
         AlertRenderKind::FinalMonitor { degraded: true },
-        input_count,
         MAX_ALERT_MARKERS,
     )
     .unwrap();

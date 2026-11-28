@@ -1076,19 +1076,14 @@ pub fn regional_new_with_runtime_final_monitor(
 #[derive(Clone, Copy)]
 struct AlertFamilyDemand {
     kind: oa_display::core::alert_markers::AlertRenderKind,
-    max_input_rows: usize,
     marker_budget: usize,
 }
 
 fn alert_family_budget(
     demand: AlertFamilyDemand,
 ) -> Result<oa_display::core::alert_markers::AlertRenderBudget, String> {
-    oa_display::core::alert_markers::alert_render_budget(
-        demand.kind,
-        demand.max_input_rows,
-        demand.marker_budget,
-    )
-    .map_err(|error| format!("alert renderer budget: {error:?}"))
+    oa_display::core::alert_markers::alert_render_budget(demand.kind, demand.marker_budget)
+        .map_err(|error| format!("alert renderer budget: {error:?}"))
 }
 
 fn validate_alert_composition(
@@ -1160,11 +1155,13 @@ fn validate_alert_composition(
         .flatten()
         .try_fold(mode_rows, |sum, budget| sum.checked_add(budget.texts))
         .ok_or("composed alert text row requirement overflow")?;
+    let (family_text_rows, family_text_bytes) = surveillance::alert_family_text_reservation()?;
     let texts_reserved = profile
         .max_tracks
         .checked_mul(oa_display::core::alert_markers::ALERT_TEXTS_PER_MARKER)
-        .and_then(|count| count.checked_add(oa_display::core::alert_markers::ALERT_HEADER_TEXTS))
+        .and_then(|count| count.checked_add(family_text_rows))
         .and_then(|count| count.checked_add(surveillance::STATUS_AUX_TEXT_ROWS))
+        .and_then(|count| count.checked_add(profile.max_open_alerts))
         .ok_or("profile alert text reservation overflow")?;
     if texts_needed > texts_reserved {
         return Err("composed alert/status text rows exceed shared reservation".into());
@@ -1183,10 +1180,14 @@ fn validate_alert_composition(
     let bytes_reserved = profile
         .max_tracks
         .checked_mul(oa_display::core::alert_markers::ALERT_TEXT_BYTES_PER_MARKER)
-        .and_then(|bytes| {
-            bytes.checked_add(oa_display::core::alert_markers::ALERT_HEADER_TEXT_BYTES)
-        })
+        .and_then(|bytes| bytes.checked_add(family_text_bytes))
         .and_then(|bytes| bytes.checked_add(surveillance::STATUS_AUX_TEXT_BYTES))
+        .and_then(|bytes| {
+            profile
+                .max_open_alerts
+                .checked_mul(2)
+                .and_then(|open_bytes| bytes.checked_add(open_bytes))
+        })
         .ok_or("profile alert text byte reservation overflow")?;
     if bytes_needed > bytes_reserved {
         return Err("composed alert/status text bytes exceed shared reservation".into());
@@ -1270,7 +1271,6 @@ fn configure_final_monitor(
         profile,
         Some(AlertFamilyDemand {
             kind: oa_display::core::alert_markers::AlertRenderKind::FinalMonitor { degraded: true },
-            max_input_rows: monitor.assignments.len(),
             marker_budget: monitor.assignments.len(),
         }),
         None,
@@ -2875,12 +2875,10 @@ pub fn regional_attach_msaw(
         .map_or(0, |monitor| monitor.assignments.len());
     let final_demand = (final_rows > 0).then_some(AlertFamilyDemand {
         kind: oa_display::core::alert_markers::AlertRenderKind::FinalMonitor { degraded: true },
-        max_input_rows: final_rows,
         marker_budget: final_rows,
     });
     let msaw_demand = (alert_limit > 0).then_some(AlertFamilyDemand {
         kind: oa_display::core::alert_markers::AlertRenderKind::Msaw,
-        max_input_rows: alert_limit,
         marker_budget: alert_limit.min(MAX_FINAL_APPROACH_ASSIGNMENTS),
     });
     validate_alert_composition(runtime.profile.surveillance, final_demand, msaw_demand)?;
@@ -4986,7 +4984,16 @@ mod transaction_tests {
             runway_id: 27_001,
             end_name: *b"27R",
         }];
-        assert!(configured_runtime_with_profile(profile, at_edge).is_ok());
+        let mut accepted = configured_runtime_with_profile(profile, at_edge)
+            .expect("one assignment fits the effective flight-view capacity");
+        let frame = seed_confirmed_final_monitor_track(&mut accepted, 410_009_000, -10_000);
+        assert_eq!(frame.final_monitor.status, FinalMonitorStatus::Available);
+        assert!(frame.surveillance.raster_rendered);
+        assert!(!frame.final_monitor.alerts.is_empty());
+        assert!(frame
+            .final_monitor
+            .display_stats
+            .is_some_and(|stats| stats.drawn > 0));
 
         let mut beyond_edge = final_monitor_config(100.0);
         beyond_edge.assignments = (1..=2)

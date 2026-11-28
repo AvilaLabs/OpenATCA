@@ -427,6 +427,23 @@ fn prune_track_callsigns(s: &mut Surveillance, tracks: &[ObservedTrack], now_ns:
     });
 }
 
+pub(crate) fn alert_family_text_reservation() -> Result<(usize, usize), String> {
+    use oa_display::core::alert_markers::{alert_render_budget, AlertRenderKind};
+
+    let msaw = alert_render_budget(AlertRenderKind::Msaw, 0).map_err(err)?;
+    let final_monitor =
+        alert_render_budget(AlertRenderKind::FinalMonitor { degraded: true }, 0).map_err(err)?;
+    let rows = msaw
+        .texts
+        .checked_add(final_monitor.texts)
+        .ok_or("alert family text-row reservation overflow")?;
+    let bytes = msaw
+        .text_bytes
+        .checked_add(final_monitor.text_bytes)
+        .ok_or("alert family text-byte reservation overflow")?;
+    Ok((rows, bytes))
+}
+
 pub fn surveillance_new(model: Model, cfg: SurveillanceConfig) -> Result<Surveillance, String> {
     surveillance_new_with_profile(model, cfg, DEFAULT_SURVEILLANCE_PROFILE)
 }
@@ -576,6 +593,7 @@ fn new_regional_scope(
     if profile.fixes_to_view_range {
         scope.view.fix_max_nm = scope.view.proj.range_nm;
     }
+    let (family_text_rows, family_text_bytes) = alert_family_text_reservation()?;
     let interaction_caps = oa_display::list::ListCaps {
         // One current conflict connector and one label per retained active alert.
         lines: 1 + profile.max_open_alerts,
@@ -587,11 +605,11 @@ fn new_regional_scope(
         poly_vertices: 0,
         texts: STATUS_AUX_TEXT_ROWS
             + profile.max_tracks * oa_display::core::alert_markers::ALERT_TEXTS_PER_MARKER
-            + oa_display::core::alert_markers::ALERT_HEADER_TEXTS
+            + family_text_rows
             + profile.max_open_alerts,
         text_bytes: STATUS_AUX_TEXT_BYTES
             + profile.max_tracks * oa_display::core::alert_markers::ALERT_TEXT_BYTES_PER_MARKER
-            + oa_display::core::alert_markers::ALERT_HEADER_TEXT_BYTES
+            + family_text_bytes
             + profile.max_open_alerts * 2,
     };
     let caps = oa_display::traffic::caps_add(&scope.list.caps, &interaction_caps).map_err(err)?;

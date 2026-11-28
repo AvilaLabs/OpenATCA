@@ -319,11 +319,10 @@ fn maximum_header_stats(source: AlertHeaderSource, total: usize) -> MarkerStats 
 
 /// Derive the family's display-list needs and minimum view geometry from its real headings.
 ///
-/// `max_input_rows` records the producer's declared bound; `marker_budget` bounds drawn rows.
-/// The visible overflow row is always reserved, including for unexpected input beyond the bound.
+/// `marker_budget` bounds drawn rows. The visible overflow row is always reserved, including for
+/// unexpected input beyond the producer's declared bound.
 pub fn alert_render_budget(
     kind: AlertRenderKind,
-    _max_input_rows: usize,
     marker_budget: usize,
 ) -> Result<AlertRenderBudget, DisplayError> {
     if marker_budget > MAX_ALERT_MARKERS {

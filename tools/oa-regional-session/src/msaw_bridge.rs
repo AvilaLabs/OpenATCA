@@ -515,9 +515,11 @@ pub fn regional_msaw_cycle(
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     const LEGACY_MAX_ROWS: usize = 32;
     const LEGACY_CORE_TRACKS: usize = 16;
+    static NEXT_PROVIDER_FIXTURE: AtomicU64 = AtomicU64::new(1);
 
     fn track(alt_ft: f32, vrate_fpm: f32) -> MsawTrack {
         MsawTrack {
@@ -660,9 +662,11 @@ mod tests {
             load_regional_data, RegionalDataLimits, RegionalDataPaths, WeatherAdmission,
         };
 
-        let root =
-            std::env::temp_dir().join(format!("oa-regional-msaw-provider-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let fixture_id = NEXT_PROVIDER_FIXTURE.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "oa-regional-msaw-provider-{}-{fixture_id}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(root.join("tiles")).unwrap();
         let config = root.join("dev.cfg");
         let config_text = include_str!("../../oa-msaw/testdata/dev.cfg")
@@ -850,6 +854,8 @@ mod tests {
             let service = regional_msaw_new(data, 129).expect("bounded 129-row MSAW service");
             let model = crate::cli::synthetic_model().expect("public synthetic model");
             let snapshot = oa_airspace::core::snapshot::encode(&model).expect("model encoding");
+            let mut profile = crate::runtime::RegionalRunProfile::recorded_peak_rendered();
+            profile.max_flights = 128;
             let runtime = crate::runtime::regional_new_with_profile(
                 model,
                 oa_sha256::sha256(&snapshot),
@@ -859,7 +865,7 @@ mod tests {
                     centre_lon_e7: -870_000_000,
                     range_nm: 180.0,
                 },
-                crate::runtime::RegionalRunProfile::recorded_peak_rendered(),
+                profile,
             )
             .expect("bounded rendered profile");
             std::fs::remove_dir_all(root).expect("remove synthetic provider fixture");
@@ -868,6 +874,13 @@ mod tests {
 
         let (mut fits, service) = attach_with_open_limit(128);
         assert!(crate::runtime::regional_attach_msaw(&mut fits, service).is_ok());
+        let frame = crate::runtime::regional_step(&mut fits, &bulk_receipt(1, 128))
+            .expect("accepted retained-open limit evaluates a real 128-row frame");
+        assert!(frame.surveillance.raster_rendered);
+        assert_eq!(frame.surveillance.tracks.len(), 128);
+        let accepted_msaw = frame.surveillance.msaw.as_ref().unwrap();
+        assert_eq!(accepted_msaw.submitted_rows, 128);
+        assert!(accepted_msaw.evaluation_attempted);
 
         let (mut exceeds, service) = attach_with_open_limit(129);
         let error = crate::runtime::regional_attach_msaw(&mut exceeds, service)
