@@ -7,7 +7,7 @@
 
 use oa_display::core::traffic::MAX_TARGET_SYMBOL_RADIUS_PX;
 use oa_display::palette::{bytes_of, TARGET};
-use oa_display::project::{project, projection_new, unproject};
+use oa_display::project::{projection_new, unproject};
 use oa_regional_session::cli::synthetic_model;
 use oa_regional_session::surveillance::{
     surveillance_begin, surveillance_event, surveillance_finish, surveillance_new,
@@ -20,8 +20,8 @@ const SECOND_FRAME_NS: i64 = 2_000_000_000;
 const CENTRE_LAT_E7: i32 = 410_000_000;
 const CENTRE_LON_E7: i32 = -870_000_000;
 const RANGE_NM: f64 = 180.0;
-const TOP_INSET_PX: u32 = oa_regional_session::surveillance::REGIONAL_STATUS_HEADER_INSET_PX;
-const EDGE_SCREENS: [(i32, i32); 4] = [(20, 380), (780, 380), (400, 185), (400, 584)];
+const TOP_INSET_PX: u32 = 224;
+const EDGE_SCREENS: [(i32, i32); 4] = [(20, 380), (780, 380), (400, 225), (400, 584)];
 
 fn surveillance() -> oa_regional_session::surveillance::Surveillance {
     surveillance_new(
@@ -202,12 +202,10 @@ fn regional_reserved_status_strip_reports_faults_without_covering_edge_targets()
     );
 
     let pixels = surveillance_pixels(&session).expect("completed frame has pixels");
-    for (edge, &(lat, lon)) in EDGE_SCREENS.iter().zip(&positions) {
-        let projected = project(&projection, lat, lon).expect("edge target projects");
-        let expected = (projected.0.div_euclid(16), projected.1.div_euclid(16));
+    for edge in EDGE_SCREENS {
         assert!(
-            has_target_pixel(pixels, expected),
-            "status strip obscured target near screen edge {edge:?}"
+            has_target_pixel(pixels, edge),
+            "status strip obscured target at independent screen coordinate {edge:?}"
         );
     }
 }

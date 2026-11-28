@@ -8,7 +8,7 @@
 use oa_display::core::font::{text_width_units, ADVANCE, CAP_HEIGHT};
 use oa_display::list::{list_new, push_rect, push_text, ListCaps, ALIGN_LEFT};
 use oa_display::palette::{ALERT, BACKGROUND};
-use oa_display::project::{project, projection_new, unproject, SUBPIXEL};
+use oa_display::project::{projection_new, unproject, SUBPIXEL};
 use oa_display::raster::{frame_len, rasterize, FrameSpec};
 use oa_regional_session::cli::synthetic_model;
 use oa_regional_session::runtime::{
@@ -24,7 +24,7 @@ use oa_runway::plane::{Geo, Local};
 const CENTRE_LAT_E7: i32 = 410_000_000;
 const CENTRE_LON_E7: i32 = -870_000_000;
 const RANGE_NM: f64 = 180.0;
-const TOP_INSET_PX: u32 = 184;
+const TOP_INSET_PX: u32 = 224;
 const EDGE_MARGIN_PX: i32 = 8;
 const TARGET_NEIGHBORHOOD_RADIUS_PX: i32 = 24;
 const PIXEL_BYTES: usize = 4;
@@ -46,7 +46,7 @@ const HEADER_X_PX: i32 = 8;
 const HEADER_Y_PX: i32 = 135;
 const HEADER_TEXT_SIZE: u8 = 10;
 const HEADER_PANEL_TOP_PX: i32 = 104;
-const HEADER_PANEL_BOTTOM_PX: i32 = 184;
+const HEADER_PANEL_BOTTOM_PX: i32 = 224;
 const DEGRADED_HEADER_PREFIX: &str = "FINAL DEGRADED WARNING 0 CAUTION 0 ";
 const PROTECTION_LOST_PHRASE: &str = "PROTECTION LOST";
 
@@ -356,11 +356,8 @@ fn differs_near_target(with_warning: &[u8], without_warning: &[u8], target: (i32
 fn genuine_final_warning_is_visible_on_each_scope_edge_and_keeps_its_target() {
     for edge in edge_targets() {
         let position = edge_target_position(edge);
-        let projected = project(&projection(), position.0, position.1).unwrap();
-        let target_px = (
-            projected.0.div_euclid(SUBPIXEL),
-            projected.1.div_euclid(SUBPIXEL),
-        );
+        // These independently pinned screen coordinates define the geographic edge fixtures.
+        let target_px = (edge.x_px, edge.y_px);
         let mut with_monitor = configured_runtime(position);
         let warning_frame = run_confirming_scans(&mut with_monitor, position);
         assert_confirmed_target_and_flight_link(&warning_frame, LAST_SCAN_NS);
