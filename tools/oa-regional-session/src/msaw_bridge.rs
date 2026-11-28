@@ -846,7 +846,9 @@ mod tests {
         let error = crate::runtime::regional_attach_msaw(&mut exceeds, service)
             .expect_err("129 retained alerts exceed the presenter family limit");
         assert!(error.contains("open-alert capacity 129 exceeds composed profile allowance 128"));
-        assert_eq!(exceeds.frame_sequence, 0);
+        let next = crate::runtime::regional_step(&mut exceeds, &receipt(1, None))
+            .expect("refused attachment leaves the runtime usable for its first frame");
+        assert_eq!(next.sequence, 1);
     }
 
     // Kills the fixed 512-cycle MSAW bridge limit.
