@@ -79,6 +79,7 @@ jobs:
           fi
           [[ "$base" =~ ^[0-9a-f]{40}$ ]]
           git diff --binary "$base" HEAD -- '*.rs' > "$RUNNER_TEMP/safety-source.diff"
+          git diff "$base" HEAD -- .cargo/mutants.toml
           packages=(
             --package oa-asterix
             --package oa-ca
