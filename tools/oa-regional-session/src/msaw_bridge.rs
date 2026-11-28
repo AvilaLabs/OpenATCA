@@ -250,8 +250,17 @@ pub fn regional_msaw_synthetic_for_profile(
     max_rows: usize,
     max_cycles: usize,
 ) -> Result<RegionalMsaw, String> {
+    regional_msaw_synthetic_with_limits(max_rows, max_rows, max_rows, max_cycles)
+}
+
+fn regional_msaw_synthetic_with_limits(
+    max_rows: usize,
+    max_tracks: usize,
+    max_open: usize,
+    max_cycles: usize,
+) -> Result<RegionalMsaw, String> {
     let config = format!(
-        "look_ahead_s=60\nwarning_s=20\nsamples=13\nhysteresis_s=3\ngtm_clearance_ft=500\nobstacle_clearance_ft=500\nmax_tracks={max_rows}\nmax_open={max_rows}\ntrack_budget={max_rows}\nmax_speed_mps=400\nwide_degrade_share=0.2\nnet_stale_limit_s=10\nnet_future_horizon_s=0\nalert_log_capacity=64\nskip_log_capacity=4096\ninhibit_max_duration_s=3600\ninhibit_max_start_ahead_s=0\ninhibit_max_extent_deg=2\napproach_half_width_nm=1\napproach_allowance_ft=100\napproach_min_clearance_ft=100\ndeparture_min_clearance_ft=100\nvelocity_uncertainty_mps=0\nmax_altitude_age_s=5\nstale_hold_s=30\naltitude_loss_degrade_share=0\nterminal_lookahead_s=60\ncapture_heading_deg=10\nno_qnh_allowance_ft=100\nmetar_radius_nm=50\nmetar_max_age_s=3600\nairport_area_nm=5\nairport_area_ceiling_ft_agl=3000\nairport_area_clearance_ft=200\n"
+        "look_ahead_s=60\nwarning_s=20\nsamples=13\nhysteresis_s=3\ngtm_clearance_ft=500\nobstacle_clearance_ft=500\nmax_tracks={max_tracks}\nmax_open={max_open}\ntrack_budget={max_rows}\nmax_speed_mps=400\nwide_degrade_share=0.2\nnet_stale_limit_s=10\nnet_future_horizon_s=0\nalert_log_capacity=64\nskip_log_capacity=4096\ninhibit_max_duration_s=3600\ninhibit_max_start_ahead_s=0\ninhibit_max_extent_deg=2\napproach_half_width_nm=1\napproach_allowance_ft=100\napproach_min_clearance_ft=100\ndeparture_min_clearance_ft=100\nvelocity_uncertainty_mps=0\nmax_altitude_age_s=5\nstale_hold_s=30\naltitude_loss_degrade_share=0\nterminal_lookahead_s=60\ncapture_heading_deg=10\nno_qnh_allowance_ft=100\nmetar_radius_nm=50\nmetar_max_age_s=3600\nairport_area_nm=5\nairport_area_ceiling_ft_agl=3000\nairport_area_clearance_ft=200\n"
     );
     let settings = oa_msaw_run::config::parse_config(&config)?;
     let mut qnh = Qnh::from_stations(vec![(41.0, -87.0, vec![(0, 1013.25)])], 50.0, 3600);
@@ -267,6 +276,24 @@ pub fn regional_msaw_synthetic_for_profile(
         max_rows,
         max_cycles,
     )
+}
+
+#[cfg(test)]
+pub(crate) fn regional_msaw_synthetic_with_reported_open_limit_for_test(
+    max_rows: usize,
+    core_track_limit: usize,
+    core_open_limit: usize,
+    reported_open_limit: usize,
+    max_cycles: usize,
+) -> Result<RegionalMsaw, String> {
+    let mut service = regional_msaw_synthetic_with_limits(
+        max_rows,
+        core_track_limit,
+        core_open_limit,
+        max_cycles,
+    )?;
+    service.settings.msaw.max_open = reported_open_limit;
+    Ok(service)
 }
 
 pub fn regional_msaw_net_policy(service: &RegionalMsaw) -> (i64, i64) {

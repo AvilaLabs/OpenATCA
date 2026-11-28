@@ -53,11 +53,12 @@ pub const FRAME_WIDTH: u32 = 800;
 pub const FRAME_HEIGHT: u32 = 600;
 pub const REVIEW_FRAME_WIDTH: u32 = 1_600;
 pub const REVIEW_FRAME_HEIGHT: u32 = 1_200;
-pub const REGIONAL_STATUS_HEADER_INSET_PX: u32 = 224;
-/// Existing interaction-list allowance shared by the operator status and alert family headers.
+pub const REGIONAL_STATUS_HEADER_INSET_PX: u32 =
+    oa_display::core::alert_markers::ALERT_OVERFLOW_STATUS_INSET_PX;
+/// Existing operator-status reservation; alert headings and overflow rows are budgeted by renderer.
 pub(crate) const STATUS_AUX_TEXT_ROWS: usize = 4;
 pub(crate) const STATUS_AUX_TEXT_BYTES: usize = 256;
-const REGIONAL_MODE_HEADER_Y_PX: i32 = 180;
+pub(crate) const REGIONAL_MODE_HEADER_Y_PX: i32 = 208;
 const REGIONAL_MODE_HEADER_PITCH_PX: i32 = 14;
 /// C7: control redraws over the entire offline session, including ordinary completed frames.
 pub const MAX_PRESENTATION_UPDATES: usize = 8192;
@@ -179,6 +180,7 @@ pub struct Surveillance {
     overlay_base: Option<OverlayBase>,
     presentation_updates: usize,
     msaw: Option<crate::msaw_bridge::RegionalMsaw>,
+    msaw_marker_budget: usize,
     baro_seen: BTreeMap<u32, i64>,
     track_callsigns: BTreeMap<u32, TrackCallsignEvidence>,
     profile: SurveillanceProfile,
@@ -471,6 +473,7 @@ pub fn surveillance_new_with_profile(
         down: [false; 5],
         track_down: false,
         msaw: None,
+        msaw_marker_budget: 0,
         baro_seen: BTreeMap::new(),
         track_callsigns: BTreeMap::new(),
         track_measurement_seen_ns: None,
@@ -619,12 +622,14 @@ pub(crate) fn tracker_drop_after_ns(s: &Surveillance) -> i64 {
 pub fn surveillance_enable_msaw(
     s: &mut Surveillance,
     service: crate::msaw_bridge::RegionalMsaw,
+    marker_budget: usize,
 ) -> Result<(), String> {
     if s.frames != 0 || s.previous_ns.is_some() || s.msaw.is_some() {
         return Err("MSAW must be configured exactly once before the first frame".into());
     }
     let (stale_ns, future_ns) = crate::msaw_bridge::regional_msaw_net_policy(&service);
     s.states = state_table_new(stale_ns, future_ns).map_err(err)?;
+    s.msaw_marker_budget = marker_budget;
     s.msaw = Some(service);
     Ok(())
 }
@@ -1627,7 +1632,7 @@ fn render_scope_frame(
 }
 
 fn push_status_band(s: &mut Surveillance) -> Result<(), String> {
-    // Reserve rows 104..224 for alerts, compact safety status, and operator text.
+    // Reserve rows 104..252 for alert headings/overflow, safety status, and operator text.
     oa_display::list::push_rect(
         &mut s.scope.list,
         (0, 104 * 16),
@@ -1676,9 +1681,6 @@ fn append_msaw_markers(
     use oa_display::core::alert_markers::{
         append_alert_markers, AlertMarker, MarkerState, NO_POSITION_E7,
     };
-    if frame.open.len() > s.profile.max_tracks {
-        return Err("MSAW alert marker capacity exceeded".into());
-    }
     let mut markers = Vec::with_capacity(frame.open.len());
     for alert in &frame.open {
         let position = tracks.iter().find(|track| track.address == alert.addr);
@@ -1700,9 +1702,14 @@ fn append_msaw_markers(
         });
     }
     markers.sort_by_key(|marker| marker.address);
-    append_alert_markers(&mut s.scope.list, &s.scope.view.proj, &markers)
-        .map(Some)
-        .map_err(err)
+    oa_display::core::alert_markers::append_alert_markers_with_budget(
+        &mut s.scope.list,
+        &s.scope.view.proj,
+        &markers,
+        s.msaw_marker_budget,
+    )
+    .map(Some)
+    .map_err(err)
 }
 
 fn scope_warnings(list: &DisplayList) -> Result<Vec<String>, String> {
@@ -2341,7 +2348,7 @@ pub fn surveillance_present_controls(
     interaction: &oa_display::interaction::InteractionState,
     console: &str,
 ) -> Result<[u8; 32], String> {
-    surveillance_present_controls_inner(s, interaction, console, None)
+    surveillance_present_controls_inner(s, interaction, console, None).map(|(digest, _)| digest)
 }
 
 /// Render the configured final-monitor result on the same admitted scope frame and within the
@@ -2353,15 +2360,55 @@ pub fn surveillance_present_controls_with_final_monitor(
     markers: &[oa_display::core::alert_markers::FinalMonitorMarker],
     degraded: bool,
 ) -> Result<[u8; 32], String> {
-    surveillance_present_controls_inner(s, interaction, console, Some((markers, degraded)))
+    surveillance_present_controls_inner(
+        s,
+        interaction,
+        console,
+        Some((
+            markers,
+            degraded,
+            oa_display::core::alert_markers::MAX_ALERT_MARKERS,
+        )),
+    )
+    .map(|(digest, _)| digest)
+}
+
+pub(crate) fn surveillance_present_controls_with_final_monitor_budget(
+    s: &mut Surveillance,
+    interaction: &oa_display::interaction::InteractionState,
+    console: &str,
+    markers: &[oa_display::core::alert_markers::FinalMonitorMarker],
+    degraded: bool,
+    marker_budget: usize,
+) -> Result<([u8; 32], oa_display::core::alert_markers::MarkerStats), String> {
+    let (digest, stats) = surveillance_present_controls_inner(
+        s,
+        interaction,
+        console,
+        Some((markers, degraded, marker_budget)),
+    )?;
+    Ok((
+        digest,
+        stats.ok_or("final-monitor presentation statistics are unavailable")?,
+    ))
 }
 
 fn surveillance_present_controls_inner(
     s: &mut Surveillance,
     interaction: &oa_display::interaction::InteractionState,
     console: &str,
-    final_monitor: Option<(&[oa_display::core::alert_markers::FinalMonitorMarker], bool)>,
-) -> Result<[u8; 32], String> {
+    final_monitor: Option<(
+        &[oa_display::core::alert_markers::FinalMonitorMarker],
+        bool,
+        usize,
+    )>,
+) -> Result<
+    (
+        [u8; 32],
+        Option<oa_display::core::alert_markers::MarkerStats>,
+    ),
+    String,
+> {
     if !s.profile.render_scope {
         return Err("analysis-only profile does not produce a rendered control frame".into());
     }
@@ -2441,19 +2488,24 @@ fn surveillance_present_controls_inner(
         )
         .map_err(err)?;
     }
-    if let Some((markers, degraded)) = final_monitor {
-        oa_display::core::alert_markers::append_final_monitor_frame(
-            &mut s.scope.list,
-            &s.scope.view.proj,
-            markers,
-            degraded,
+    let final_monitor_stats = if let Some((markers, degraded, marker_budget)) = final_monitor {
+        Some(
+            oa_display::core::alert_markers::append_final_monitor_frame_with_budget(
+                &mut s.scope.list,
+                &s.scope.view.proj,
+                markers,
+                degraded,
+                marker_budget,
+            )
+            .map_err(err)?,
         )
-        .map_err(err)?;
-    }
+    } else {
+        None
+    };
     replay_raster(&mut s.scope).map_err(err)?;
     let digest = frame_digest(&s.scope.spec, &s.scope.buf).map_err(err)?;
     s.failed = false;
-    Ok(digest)
+    Ok((digest, final_monitor_stats))
 }
 
 fn capture_overlay_base(list: &DisplayList) -> Result<OverlayBase, String> {

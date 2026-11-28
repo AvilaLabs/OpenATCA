@@ -28,7 +28,7 @@ const MAX_SNAPSHOT_BYTES: usize = 64 * 1024 * 1024;
 // Debug executables include symbols; hash them incrementally rather than retaining the image.
 const MAX_EXECUTABLE_BYTES: usize = 256 * 1024 * 1024;
 const MAX_FRAME_REPORT_BYTES: usize = 512 * 1024;
-const RECORDED_HOUR_FRAME_COLUMNS: &str = "sequence\treceipt_ns\tsource_min_ns\tsource_max_ns\tinput_events\tsurveillance_events\tflight_events\troute_events\tweather_events\tadaptation_events\ttracks\ttracked_flight_rows\tcorrelated_flights\tknown_flight_views\tca_open\tca_closed\tmsaw_open\tmsaw_closed\tmsaw_episode_onsets\tstep_ns\trender_ns\tframe_sha256\tmsaw_markers\tavailable_flight_views_for_runtime_centre\tpositive_address_claims_for_runtime_centre\tmatched_observed_tracks\tunmatched_observed_tracks\tambiguous_observed_tracks\trefused_observed_track_lookups\ttargets_under_banner\tsafety_banner_hidden\tsafety_text_clipped\tdrawn_tracks\tfull_blocks\taltitude_only_blocks\tsymbol_only_targets\n";
+const RECORDED_HOUR_FRAME_COLUMNS: &str = "sequence\treceipt_ns\tsource_min_ns\tsource_max_ns\tinput_events\tsurveillance_events\tflight_events\troute_events\tweather_events\tadaptation_events\ttracks\ttracked_flight_rows\tcorrelated_flights\tknown_flight_views\tca_open\tca_closed\tmsaw_open\tmsaw_closed\tmsaw_episode_onsets\tstep_ns\trender_ns\tframe_sha256\tmsaw_markers\tavailable_flight_views_for_runtime_centre\tpositive_address_claims_for_runtime_centre\tmatched_observed_tracks\tunmatched_observed_tracks\tambiguous_observed_tracks\trefused_observed_track_lookups\ttargets_under_banner\tsafety_banner_hidden\tsafety_text_clipped\tdrawn_tracks\tfull_blocks\taltitude_only_blocks\tsymbol_only_targets\tmsaw_markers_omitted\tfinal_markers_omitted\n";
 pub const RECORDED_HOUR_FRAMES: usize = 3_600;
 const RECORDED_HOUR_NS: i64 = RECORDED_HOUR_FRAMES as i64 * crate::surveillance::SECOND_NS;
 const WARMUP_MAX_NS: i64 = crate::recordings_cli::RECORDED_HOUR_MAX_WARMUP_NS;
@@ -645,7 +645,7 @@ fn recorded_hour_frame_row(
             .map_or_else(|| "UNAVAILABLE".to_owned(), |stats| read(stats).to_string())
     };
     let row = format!(
-        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
         frame.sequence,
         batch.receipt_ns,
         source_min,
@@ -689,6 +689,14 @@ fn recorded_hour_frame_row(
         traffic_value(|stats| stats.full_blocks),
         traffic_value(|stats| stats.altitude_only_blocks),
         traffic_value(|stats| stats.symbol_only_targets),
+        frame
+            .surveillance
+            .msaw_markers
+            .map_or(0, |stats| stats.omitted),
+        frame
+            .final_monitor
+            .display_stats
+            .map_or(0, |stats| stats.omitted),
     );
     (
         row,
@@ -704,7 +712,7 @@ fn recorded_hour_frame_row(
 }
 
 fn recorded_hour_compact_frame_report(row: &str) -> Result<String, String> {
-    const FIELDS: [(&str, usize); 34] = [
+    const FIELDS: [(&str, usize); 36] = [
         ("sequence", 0),
         ("receipt_ns", 1),
         ("source_min_ns", 2),
@@ -739,6 +747,8 @@ fn recorded_hour_compact_frame_report(row: &str) -> Result<String, String> {
         ("full_blocks", 33),
         ("altitude_only_blocks", 34),
         ("symbol_only_targets", 35),
+        ("msaw_markers_omitted", 36),
+        ("final_markers_omitted", 37),
     ];
     let values = row.trim_end_matches('\n').split('\t').collect::<Vec<_>>();
     let mut report = String::from("OA_REGIONAL_FRAME_COMPACT\t1\n");
@@ -2322,6 +2332,22 @@ mod recorded_hour_tests {
             assert!(report.contains(&format!("{name}\t{count}\n")));
         }
         assert!(report.contains("targets_under_banner\t0\n"));
+        let mut overflow_frame = frame.clone();
+        overflow_frame.surveillance.msaw_markers =
+            Some(oa_display::core::alert_markers::MarkerStats {
+                omitted: 3,
+                ..oa_display::core::alert_markers::MarkerStats::default()
+            });
+        overflow_frame.final_monitor.display_stats =
+            Some(oa_display::core::alert_markers::MarkerStats {
+                omitted: 2,
+                ..oa_display::core::alert_markers::MarkerStats::default()
+            });
+        let (overflow_row, _) = recorded_hour_frame_row(&overflow_frame, &batch, 0, 0, &raster_sha);
+        let overflow_report = recorded_hour_compact_frame_report(&overflow_row)
+            .expect("compact report retains both family omission counts");
+        assert!(overflow_report.contains("msaw_markers_omitted\t3\n"));
+        assert!(overflow_report.contains("final_markers_omitted\t2\n"));
         let mut no_safety_frame = frame;
         no_safety_frame.surveillance.safety_stats = None;
         no_safety_frame.surveillance.traffic_stats = None;
