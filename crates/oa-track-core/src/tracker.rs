@@ -2362,7 +2362,7 @@ pub fn tracker_advance(t: &mut Tracker, now_ns: i64, out: &mut TrackOutput) {
 /// a row unless `now_ns` is the tracker's already-advanced, non-grid clock. A refused call does
 /// not change source time or reacquisition state; refusal accounting may still be updated.
 pub fn tracker_snapshot_at(t: &mut Tracker, now_ns: i64, out: &mut TrackOutput) -> bool {
-    if now_ns != t.clock_ns || now_ns.rem_euclid(t.cfg.tick_ns) == 0 {
+    if now_ns != t.clock_ns || i64::rem_euclid(now_ns, t.cfg.tick_ns) == 0 {
         return false;
     }
     if !check_advance_time(t, now_ns) {
