@@ -9,7 +9,8 @@
 use oa_display::core::alert_markers::*;
 use oa_display::list::{list_new, DisplayError, DisplayList, ListCaps};
 use oa_display::palette;
-use oa_display::project::{project, projection_new, Projection};
+use oa_display::project::{project, projection_new, unproject, Projection};
+use oa_display::raster::{frame_len, rasterize, FrameSpec};
 
 const CENTRE: (i32, i32) = (419_786_000, -879_048_000);
 
@@ -39,12 +40,12 @@ fn unknown_marker(address: u32, state: MarkerState) -> AlertMarker {
     }
 }
 
-fn final_marker(address: u32, severity: u8) -> FinalMonitorMarker {
+fn final_marker(address: u32, severity: FinalMonitorSeverity) -> FinalMonitorMarker {
     FinalMonitorMarker {
         address,
         lat_e7: CENTRE.0,
         lon_e7: CENTRE.1,
-        severity,
+        severity: severity as u8,
         position_known: 1,
         reserved: [0; 2],
     }
@@ -281,11 +282,85 @@ fn view_and_header_width_are_checked_before_writing() {
     assert!(append_alert_markers(&mut list, &projection(500, 160), &markers).is_ok());
 }
 
+// REQ: OA-DSP-077
+#[test]
+fn edge_warning_is_counted_and_rasterized_when_its_halo_is_clipped() {
+    let p = projection(800, 160);
+    let (lat_e7, lon_e7) = unproject(&p, 8 * 16, 300 * 16).unwrap();
+    let point = project(&p, lat_e7, lon_e7).unwrap();
+    assert!(point.0 >= 0 && point.0 < 16 * 16);
+    assert!(point.1 >= 160 * 16 && point.1 < 600 * 16);
+
+    let markers = [marker(1, MarkerState::Warning, lat_e7, lon_e7)];
+    let mut with_warning = list_for(markers.len());
+    let stats = append_alert_markers(&mut with_warning, &p, &markers).unwrap();
+    assert_eq!(stats.warning, 1);
+    assert_eq!(stats.drawn, 1);
+    assert_eq!(stats.off_map, 0);
+    assert!(texts(&with_warning)
+        .last()
+        .is_some_and(|header| header.contains("WARNING 1") && header.contains("OFF 0")));
+
+    let mut without_warning = list_for(0);
+    append_alert_markers(&mut without_warning, &p, &[]).unwrap();
+    let spec = FrameSpec {
+        width: 800,
+        height: 600,
+        stride: 800 * 4,
+    };
+    let mut warning_pixels = vec![0; frame_len(&spec)];
+    let mut empty_pixels = vec![0; frame_len(&spec)];
+    rasterize(&with_warning, &spec, &mut warning_pixels).unwrap();
+    rasterize(&without_warning, &spec, &mut empty_pixels).unwrap();
+
+    let mut changed_edge_pixels = 0usize;
+    for y in (point.1 / 16 - 20).max(160)..=(point.1 / 16 + 20).min(599) {
+        for x in 0..24 {
+            let offset = (y as usize * spec.stride as usize) + (x as usize * 4);
+            if warning_pixels.get(offset..offset + 4) != empty_pixels.get(offset..offset + 4) {
+                changed_edge_pixels += 1;
+            }
+        }
+    }
+    assert!(changed_edge_pixels > 0);
+}
+
+// REQ: OA-DSP-077
+#[test]
+fn header_width_refusal_is_atomic_and_wider_view_preserves_the_complete_marker_layer() {
+    let markers: Vec<_> = (1..=MAX_ALERT_MARKERS as u32)
+        .map(|address| marker(address, MarkerState::Warning, CENTRE.0, CENTRE.1))
+        .collect();
+    let mut narrow_list = list_for(markers.len());
+    let before = narrow_list.clone();
+    assert!(matches!(
+        append_alert_markers(&mut narrow_list, &projection(500, 160), &markers),
+        Err(DisplayError::BadView(_))
+    ));
+    assert_eq!(narrow_list, before);
+
+    let mut list = list_for(markers.len());
+    let stats = append_alert_markers(&mut list, &projection(800, 160), &markers).unwrap();
+    assert_eq!(stats.warning as usize, MAX_ALERT_MARKERS);
+    assert_eq!(stats.drawn as usize, MAX_ALERT_MARKERS);
+    assert_eq!(
+        list.circles.x.len(),
+        MAX_ALERT_MARKERS * ALERT_CIRCLES_PER_MARKER
+    );
+    assert_eq!(list.texts.x.len(), MAX_ALERT_MARKERS + ALERT_HEADER_TEXTS);
+    assert!(texts(&list)
+        .last()
+        .is_some_and(|header| header.contains("WARNING 128") && header.ends_with("UNLOCATED 0")));
+}
+
 // REQ: OA-RWY-015
 #[test]
 fn final_monitor_hook_renders_caution_warning_and_degraded_status() {
     let p = projection(800, 160);
-    let markers = [final_marker(1, 0), final_marker(2, 1)];
+    let markers = [
+        final_marker(1, FinalMonitorSeverity::Caution),
+        final_marker(2, FinalMonitorSeverity::Warning),
+    ];
     let mut list = list_for(markers.len());
     let stats = append_final_monitor_frame(&mut list, &p, &markers, true).unwrap();
     assert_eq!(stats.caution, 1);
@@ -296,7 +371,7 @@ fn final_monitor_hook_renders_caution_warning_and_degraded_status() {
     assert_eq!(labels.get(1).map(String::as_str), Some("W"));
     assert_eq!(
         labels.get(2).map(String::as_str),
-        Some("FINAL DEGRADED WARNING 1 CAUTION 1 OFF 0 UNLOCATED 0")
+        Some("FINAL DEGRADED WARNING 1 CAUTION 1 PROTECTION LOST 0 OFF 0 UNLOCATED 0")
     );
 
     let mut fresh = list_for(markers.len());
@@ -308,13 +383,112 @@ fn final_monitor_hook_renders_caution_warning_and_degraded_status() {
 
 // REQ: OA-RWY-015
 #[test]
+fn maximum_final_degraded_header_fits_the_shared_reservation() {
+    let p = projection(800, 160);
+    let markers: Vec<_> = (0..MAX_ALERT_MARKERS)
+        .map(|index| {
+            let severity = if index < 100 {
+                FinalMonitorSeverity::Caution
+            } else if index < 114 {
+                FinalMonitorSeverity::Warning
+            } else {
+                FinalMonitorSeverity::ProtectionLost
+            };
+            if index < 100 {
+                FinalMonitorMarker {
+                    address: u32::try_from(index + 1).unwrap(),
+                    lat_e7: CENTRE.0,
+                    lon_e7: -870_000_000,
+                    severity: severity as u8,
+                    position_known: 1,
+                    reserved: [0; 2],
+                }
+            } else {
+                FinalMonitorMarker {
+                    address: u32::try_from(index + 1).unwrap(),
+                    lat_e7: NO_POSITION_E7,
+                    lon_e7: NO_POSITION_E7,
+                    severity: severity as u8,
+                    position_known: 0,
+                    reserved: [0; 2],
+                }
+            }
+        })
+        .collect();
+    let mut list = list_for(markers.len());
+    let stats = append_final_monitor_frame(&mut list, &p, &markers, true).unwrap();
+    assert_eq!(stats.caution, 100);
+    assert_eq!(stats.warning, 14);
+    assert_eq!(stats.protection_lost, 14);
+    assert_eq!(stats.off_map, 100);
+    assert_eq!(stats.unlocated, 28);
+    assert!(list.text.len() <= ALERT_HEADER_TEXT_BYTES);
+    let rendered_text = texts(&list);
+    let header = rendered_text.last().unwrap();
+    assert!(header.contains("CAUTION 100"));
+    assert!(header.contains("WARNING 14"));
+    assert!(header.contains("PROTECTION LOST 14"));
+    assert!(header.contains("OFF 100"));
+    assert!(header.contains("UNLOCATED 28"));
+}
+
+// REQ: OA-RWY-015
+#[test]
+fn final_monitor_protection_lost_is_typed_counted_and_rasterized_at_the_edge() {
+    let p = projection(800, 160);
+    let (lat_e7, lon_e7) = unproject(&p, 8 * 16, 300 * 16).unwrap();
+    let point = project(&p, lat_e7, lon_e7).unwrap();
+    let lost = [FinalMonitorMarker {
+        address: 7,
+        lat_e7,
+        lon_e7,
+        severity: FinalMonitorSeverity::ProtectionLost as u8,
+        position_known: 1,
+        reserved: [0; 2],
+    }];
+    let mut with_lost = list_for(lost.len());
+    let stats = append_final_monitor_frame(&mut with_lost, &p, &lost, false).unwrap();
+    assert_eq!(stats.protection_lost, 1);
+    assert_eq!(stats.drawn, 1);
+    assert_eq!(stats.off_map, 0);
+    let rendered_text = texts(&with_lost);
+    assert_eq!(rendered_text.first().map(String::as_str), Some("L"));
+    assert!(rendered_text
+        .last()
+        .is_some_and(|header| header.contains("PROTECTION LOST 1")));
+
+    let mut without_lost = list_for(0);
+    append_final_monitor_frame(&mut without_lost, &p, &[], false).unwrap();
+    let spec = FrameSpec {
+        width: 800,
+        height: 600,
+        stride: 800 * 4,
+    };
+    let mut lost_pixels = vec![0; frame_len(&spec)];
+    let mut clear_pixels = vec![0; frame_len(&spec)];
+    rasterize(&with_lost, &spec, &mut lost_pixels).unwrap();
+    rasterize(&without_lost, &spec, &mut clear_pixels).unwrap();
+    let mut changed_edge_pixels = 0usize;
+    for y in (point.1 / 16 - 20).max(160)..=(point.1 / 16 + 20).min(599) {
+        for x in 0..24 {
+            let offset = (y as usize * spec.stride as usize) + (x as usize * 4);
+            if lost_pixels.get(offset..offset + 4) != clear_pixels.get(offset..offset + 4) {
+                changed_edge_pixels += 1;
+            }
+        }
+    }
+    assert!(changed_edge_pixels > 0);
+}
+
+// REQ: OA-RWY-015
+#[test]
 fn final_monitor_invalid_packets_and_capacity_refuse_atomically() {
     let p = projection(800, 160);
-    let valid = final_marker(1, 1);
+    let valid = final_marker(1, FinalMonitorSeverity::Warning);
     let mut list = list_for(2);
     for invalid in [
         FinalMonitorMarker {
-            severity: 2,
+            severity: u8::MAX,
             ..valid
         },
         FinalMonitorMarker {

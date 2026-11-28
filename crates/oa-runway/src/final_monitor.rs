@@ -4,7 +4,7 @@
 //! The shell supplies built runway geometry or caller-sourced outer fixes and tracker predictions.
 //! No raw plots, clock, files, display types, or allocation enter this core.
 
-use crate::plane::Local;
+use crate::plane::{self, Geo, Local};
 use crate::runway::{EndName, Runway};
 
 pub const FT_TO_M: f64 = 0.3048;
@@ -31,6 +31,10 @@ const MAX_NTZ_HALF_WIDTH_M: f64 = 3_048.0;
 const MAX_TRACK_SPEED_MPS: f64 = 4_088.0 * 0.514_444_444_444;
 // Prediction positions and the runway origin share the same bounded 20 km local frame.
 const MAX_TRACK_R95_M: f64 = 20_000.0;
+// The tracker plane rounds geographic coordinates to E-7 degrees; 1.5 m is the plane's stated
+// maximum distance error across its supported extent. This conservative sum is the permitted
+// discrepancy between an independently projected geographic position and the supplied local one.
+const PROJECTION_CONSISTENCY_TOLERANCE_M: f64 = plane::PLANE_ERROR_BOUND_M + 0.01;
 
 /// Cold adaptation values; defaults are a development profile, not universal minima.
 // A7.2: cold struct, size guard waived
@@ -75,6 +79,9 @@ pub struct FinalPairId {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FinalPair {
     pub id: FinalPairId,
+    /// Set by runway-derived adaptation. Direct endpoint-only geometry has no checked geographic
+    /// frame and therefore cannot perform the input-coordinate consistency check.
+    pub projection_origin: Option<Geo>,
     pub origin: Local,
     pub axis_east: f64,
     pub axis_north: f64,
@@ -82,6 +89,10 @@ pub struct FinalPair {
     pub normal_north: f64,
     pub course_length_m: f64,
     pub ntz_half_width_m: f64,
+    /// Largest R95 that leaves the adaptation-derived runway-to-NTZ clearance after the stated
+    /// local-plane error guard. Larger values make the monitor unavailable rather than widen the
+    /// warning region across an aircraft on its own runway centerline.
+    pub max_r95_m: f64,
     pub lookahead_ns: u64,
     pub update_ns: u64,
 }
@@ -157,6 +168,10 @@ pub fn prepare_centerline_pair(
     extension_m: f64,
     config: FinalMonitorConfig,
 ) -> Result<FinalPair, PrepareError> {
+    if first.runway.plane_origin != second.runway.plane_origin {
+        return Err(PrepareError::BadEndpoint);
+    }
+    let projection_origin = first.runway.plane_origin;
     let first =
         centerline_final_from_runway(first.runway_id, first.runway, first.end_name, extension_m)?;
     let second = centerline_final_from_runway(
@@ -165,7 +180,9 @@ pub fn prepare_centerline_pair(
         second.end_name,
         extension_m,
     )?;
-    prepare_pair(first, second, config)
+    let mut pair = prepare_pair(first, second, config)?;
+    pair.projection_origin = Some(projection_origin);
+    Ok(pair)
 }
 
 fn finite_point(p: Local) -> bool {
@@ -242,7 +259,13 @@ pub fn prepare_pair(
         return Err(PrepareError::TooClose);
     }
     let ntz_half_width_m = config.ntz_width_ft * FT_TO_M * 0.5;
-    if ntz_half_width_m * 2.0 >= oa_math::min_f64(sep_outer.abs(), sep_threshold.abs()) {
+    let minimum_separation = oa_math::min_f64(sep_outer.abs(), sep_threshold.abs());
+    if ntz_half_width_m * 2.0 >= minimum_separation {
+        return Err(PrepareError::ZoneConsumesSeparation);
+    }
+    let usable_clearance_m = minimum_separation * 0.5 - ntz_half_width_m;
+    let max_r95_m = usable_clearance_m - plane::PLANE_ERROR_BOUND_M - 0.01;
+    if !max_r95_m.is_finite() || max_r95_m < 0.0 {
         return Err(PrepareError::ZoneConsumesSeparation);
     }
     let origin = Local {
@@ -268,6 +291,7 @@ pub fn prepare_pair(
             second_runway_id: second.runway_id,
             second_end_name: second.end_name,
         },
+        projection_origin: None,
         origin,
         axis_east,
         axis_north,
@@ -275,6 +299,7 @@ pub fn prepare_pair(
         normal_north,
         course_length_m,
         ntz_half_width_m,
+        max_r95_m,
         lookahead_ns: config.lookahead_ns,
         update_ns: config.update_ns,
     })
@@ -320,6 +345,8 @@ pub enum UpdateError {
     BadInput,
     Capacity,
     ClockRegression,
+    UnusableUncertainty,
+    CoordinateMismatch,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -329,22 +356,49 @@ pub struct UpdateResult {
     pub alerts: u16,
     pub degraded: bool,
     pub due: bool,
+    /// Elapsed time since the previous due evaluation. This is evaluation, not input, cadence.
+    pub observed_interval_ns: u64,
+    /// Time since the prior valid input frame, including frames that were not due for evaluation.
+    pub observed_input_interval_ns: u64,
+    /// Age of the oldest selected prediction source at this input frame.
+    pub prediction_age_ns: u64,
+    /// Whether the input-frame receipt gap exceeded the safety freshness bound.
+    pub input_cadence_degraded: bool,
+    /// Whether the selected predictions were older than the freshness limit.
+    pub prediction_stale: bool,
 }
 
-const _: () = assert!(core::mem::size_of::<UpdateResult>() == 6);
+// A7.1: report evaluation cadence separately from valid input cadence and prediction age.
+const _: () = assert!(core::mem::size_of::<UpdateResult>() == 40);
 
 /// Timing state is shell-owned in use; the transition is pure in explicit timestamps.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FinalMonitorState {
-    pub last_update_ns: u64,
+    /// Receipt time of the last valid input frame, even if it was not due for evaluation.
+    pub last_input_frame_ns: u64,
+    /// Receipt time of the last due evaluation attempt.
+    pub last_evaluation_ns: u64,
+    /// Bit 0 marks an input-frame time; bit 1 marks an evaluation time.
+    pub clock_flags: u8,
+    /// Reserved bytes are zero and retained for deterministic C layout.
+    pub reserved: [u8; 7],
 }
 
-const _: () = assert!(core::mem::size_of::<FinalMonitorState>() == 8);
+const _: () = assert!(core::mem::size_of::<FinalMonitorState>() == 24);
+
+const HAS_INPUT_FRAME_TIME: u8 = 1 << 0;
+const HAS_EVALUATION_TIME: u8 = 1 << 1;
+const KNOWN_CLOCK_FLAGS: u8 = HAS_INPUT_FRAME_TIME | HAS_EVALUATION_TIME;
 
 impl FinalMonitorState {
     pub const fn new() -> Self {
-        Self { last_update_ns: 0 }
+        Self {
+            last_input_frame_ns: 0,
+            last_evaluation_ns: 0,
+            clock_flags: 0,
+            reserved: [0; 7],
+        }
     }
 }
 
@@ -366,32 +420,19 @@ fn valid_tracks(t: &PredictedTracks<'_>) -> bool {
         && t.lon_e7.len() == n
 }
 
-/// Evaluate one pair on a due tracker-prediction update. Input addresses must be sorted, unique,
-/// and nonzero. At most 256 rows are accepted; validation, candidate evaluation and emission are
-/// linear, with no allocation and at most one output row per input. Capacity for all possible rows
-/// is checked before any output write. Unknown, malformed, or numerically unbounded predictions
-/// refuse the whole call; no partial output. A non-due call leaves state and output unchanged.
-pub fn update(
-    pair: FinalPair,
-    state: &mut FinalMonitorState,
-    now_ns: u64,
-    prediction_report_ns: u64,
-    tracks: PredictedTracks<'_>,
-    output: FinalAlertBuffer<'_>,
-) -> Result<UpdateResult, UpdateError> {
-    let n = tracks.addresses.len();
-    if n > MAX_TRACKS {
-        return Err(UpdateError::Capacity);
-    }
-    if !valid_tracks(&tracks)
-        || output.addresses.len() != output.pair_ids.len()
-        || output.addresses.len() != output.severity.len()
-        || output.addresses.len() != output.lat_e7.len()
-        || output.addresses.len() != output.lon_e7.len()
-        || output.addresses.len() != output.seconds_to_entry_milli.len()
-    {
-        return Err(UpdateError::BadInput);
-    }
+// A7.2: stack-only validated timing values for one monitor call; size guard waived.
+#[derive(Clone, Copy)]
+struct ValidatedUpdateTiming {
+    track_count: usize,
+    observed_interval_ns: u64,
+    observed_input_interval_ns: u64,
+    prediction_age_ns: u64,
+    due: bool,
+    input_cadence_degraded: bool,
+    prediction_stale: bool,
+}
+
+fn validated_projection_plane(pair: FinalPair) -> Result<Option<plane::Plane>, UpdateError> {
     if pair.id.first_runway_id == 0
         || pair.id.second_runway_id == 0
         || pair.id.first_runway_id == pair.id.second_runway_id
@@ -408,6 +449,8 @@ pub fn update(
         || !(1.0..=MAX_COURSE_LENGTH_M).contains(&pair.course_length_m)
         || !pair.ntz_half_width_m.is_finite()
         || !(f64::MIN_POSITIVE..=MAX_NTZ_HALF_WIDTH_M).contains(&pair.ntz_half_width_m)
+        || !pair.max_r95_m.is_finite()
+        || !(0.0..=MAX_TRACK_R95_M).contains(&pair.max_r95_m)
         || !(1..=MAX_LOOKAHEAD_NS).contains(&pair.lookahead_ns)
         || !(1..=MAX_UPDATE_NS).contains(&pair.update_ns)
     {
@@ -423,14 +466,21 @@ pub fn update(
     {
         return Err(UpdateError::BadInput);
     }
+    pair.projection_origin
+        .map(|origin| plane::plane_new(origin.lat_deg, origin.lon_deg).ok_or(UpdateError::BadInput))
+        .transpose()
+}
+
+fn validate_track_values(
+    pair: FinalPair,
+    projection_plane: Option<plane::Plane>,
+    tracks: &PredictedTracks<'_>,
+) -> Result<(), UpdateError> {
     if tracks.addresses.windows(2).any(|w| {
         w.first()
             .zip(w.get(1))
             .is_some_and(|(a, b)| *a == 0 || *a >= *b)
-    }) {
-        return Err(UpdateError::BadInput);
-    }
-    if tracks
+    }) || tracks
         .addresses
         .first()
         .is_some_and(|address| *address == 0)
@@ -462,24 +512,93 @@ pub fn update(
         {
             return Err(UpdateError::BadInput);
         }
+        if *r95 > pair.max_r95_m {
+            return Err(UpdateError::UnusableUncertainty);
+        }
+        if let Some(projection_plane) = projection_plane {
+            let Some(projected) = plane::to_local(
+                &projection_plane,
+                Geo {
+                    lat_deg: f64::from(*lat) / 10_000_000.0,
+                    lon_deg: f64::from(*lon) / 10_000_000.0,
+                },
+            ) else {
+                return Err(UpdateError::CoordinateMismatch);
+            };
+            if oa_math::hypot(projected.east_m - *east, projected.north_m - *north)
+                > PROJECTION_CONSISTENCY_TOLERANCE_M
+            {
+                return Err(UpdateError::CoordinateMismatch);
+            }
+        }
         if oa_math::hypot(*vx, *vy) > MAX_TRACK_SPEED_MPS {
             return Err(UpdateError::BadInput);
         }
     }
-    if now_ns < state.last_update_ns || now_ns < prediction_report_ns {
+    Ok(())
+}
+
+fn validate_update_inputs(
+    pair: FinalPair,
+    state: &FinalMonitorState,
+    now_ns: u64,
+    prediction_report_ns: u64,
+    tracks: &PredictedTracks<'_>,
+) -> Result<ValidatedUpdateTiming, UpdateError> {
+    let n = tracks.addresses.len();
+    if n > MAX_TRACKS {
+        return Err(UpdateError::Capacity);
+    }
+    if !valid_tracks(tracks) {
+        return Err(UpdateError::BadInput);
+    }
+    if state.clock_flags & !KNOWN_CLOCK_FLAGS != 0
+        || state.reserved != [0; 7]
+        || (state.clock_flags & HAS_EVALUATION_TIME != 0
+            && (state.clock_flags & HAS_INPUT_FRAME_TIME == 0
+                || state.last_evaluation_ns > state.last_input_frame_ns))
+    {
+        return Err(UpdateError::BadInput);
+    }
+    let projection_plane = validated_projection_plane(pair)?;
+    validate_track_values(pair, projection_plane, tracks)?;
+    let has_input_frame = state.clock_flags & HAS_INPUT_FRAME_TIME != 0;
+    let has_evaluation = state.clock_flags & HAS_EVALUATION_TIME != 0;
+    if (has_input_frame && now_ns < state.last_input_frame_ns)
+        || (has_evaluation && now_ns < state.last_evaluation_ns)
+        || now_ns < prediction_report_ns
+    {
         return Err(UpdateError::ClockRegression);
     }
-    let due =
-        state.last_update_ns == 0 || now_ns.saturating_sub(state.last_update_ns) >= pair.update_ns;
-    let degraded = now_ns.saturating_sub(prediction_report_ns) >= DEGRADED_AFTER_NS;
-    if !due {
-        return Ok(UpdateResult {
-            examined: 0,
-            alerts: 0,
-            degraded,
-            due: false,
-        });
-    }
+    let observed_interval_ns = if has_evaluation {
+        now_ns - state.last_evaluation_ns
+    } else {
+        0
+    };
+    let observed_input_interval_ns = if has_input_frame {
+        now_ns - state.last_input_frame_ns
+    } else {
+        0
+    };
+    let due = !has_evaluation || observed_interval_ns >= pair.update_ns;
+    let prediction_age_ns = now_ns.saturating_sub(prediction_report_ns);
+    Ok(ValidatedUpdateTiming {
+        track_count: n,
+        observed_interval_ns,
+        observed_input_interval_ns,
+        prediction_age_ns,
+        due,
+        input_cadence_degraded: has_input_frame && observed_input_interval_ns > DEGRADED_AFTER_NS,
+        prediction_stale: prediction_age_ns > DEGRADED_AFTER_NS,
+    })
+}
+
+fn emit_candidates(
+    pair: FinalPair,
+    tracks: PredictedTracks<'_>,
+    output: FinalAlertBuffer<'_>,
+) -> Result<u16, UpdateError> {
+    let n = tracks.addresses.len();
     if output.addresses.len() < n {
         return Err(UpdateError::Capacity);
     }
@@ -581,13 +700,76 @@ pub fn update(
         *out_time = candidate.seconds_to_entry_milli;
         count += 1;
     }
-    state.last_update_ns = now_ns;
-    Ok(UpdateResult {
-        examined: n as u16,
-        alerts: count as u16,
-        degraded,
-        due: true,
-    })
+    Ok(count as u16)
+}
+
+fn result_from_timing(
+    timing: ValidatedUpdateTiming,
+    due: bool,
+    examined: u16,
+    alerts: u16,
+) -> UpdateResult {
+    UpdateResult {
+        examined,
+        alerts,
+        degraded: timing.input_cadence_degraded || timing.prediction_stale,
+        due,
+        observed_interval_ns: timing.observed_interval_ns,
+        observed_input_interval_ns: timing.observed_input_interval_ns,
+        prediction_age_ns: timing.prediction_age_ns,
+        input_cadence_degraded: timing.input_cadence_degraded,
+        prediction_stale: timing.prediction_stale,
+    }
+}
+
+fn record_input_frame(state: &mut FinalMonitorState, now_ns: u64) {
+    state.last_input_frame_ns = now_ns;
+    state.clock_flags |= HAS_INPUT_FRAME_TIME;
+}
+
+fn record_evaluation(state: &mut FinalMonitorState, now_ns: u64) {
+    state.last_evaluation_ns = now_ns;
+    state.clock_flags |= HAS_EVALUATION_TIME;
+}
+
+fn valid_output_shape(output: &FinalAlertBuffer<'_>) -> bool {
+    output.addresses.len() == output.pair_ids.len()
+        && output.addresses.len() == output.severity.len()
+        && output.addresses.len() == output.lat_e7.len()
+        && output.addresses.len() == output.lon_e7.len()
+        && output.addresses.len() == output.seconds_to_entry_milli.len()
+}
+
+/// Evaluate one pair when due. Valid input-frame receipt cadence and prediction age determine
+/// freshness; the separate due-evaluation interval is reported but does not stand in for either.
+/// Input addresses must be sorted, unique and nonzero. At most 256 rows are accepted, with no
+/// allocation and capacity checked before any output write. Invalid input or capacity refusal
+/// leaves both clocks and output unchanged; a valid non-due frame advances only its receipt clock.
+pub fn update(
+    pair: FinalPair,
+    state: &mut FinalMonitorState,
+    now_ns: u64,
+    prediction_report_ns: u64,
+    tracks: PredictedTracks<'_>,
+    output: FinalAlertBuffer<'_>,
+) -> Result<UpdateResult, UpdateError> {
+    if !valid_output_shape(&output) {
+        return Err(UpdateError::BadInput);
+    }
+    let timing = validate_update_inputs(pair, state, now_ns, prediction_report_ns, &tracks)?;
+    let degraded = timing.input_cadence_degraded || timing.prediction_stale;
+    if !timing.due || degraded {
+        record_input_frame(state, now_ns);
+        if timing.due {
+            record_evaluation(state, now_ns);
+        }
+        return Ok(result_from_timing(timing, timing.due, 0, 0));
+    }
+    let examined = u16::try_from(timing.track_count).map_err(|_| UpdateError::Capacity)?;
+    let alerts = emit_candidates(pair, tracks, output)?;
+    record_input_frame(state, now_ns);
+    record_evaluation(state, now_ns);
+    Ok(result_from_timing(timing, true, examined, alerts))
 }
 
 // A7.1: one transient fixed-width result per accepted track; no heap growth.
@@ -688,6 +870,17 @@ mod tests {
         (plane, runway_27r, runway_27l)
     }
 
+    #[derive(Clone, Copy)]
+    struct TestTrack {
+        now: u64,
+        report: u64,
+        east: f64,
+        north: f64,
+        vx: f64,
+        vy: f64,
+        r95: f64,
+    }
+
     fn evaluate(
         state: &mut FinalMonitorState,
         now: u64,
@@ -697,12 +890,33 @@ mod tests {
         vx: f64,
         vy: f64,
     ) -> (UpdateResult, Option<FinalSeverity>) {
+        evaluate_for(
+            pair(),
+            state,
+            TestTrack {
+                now,
+                report,
+                east,
+                north,
+                vx,
+                vy,
+                r95: 0.0,
+            },
+        )
+        .unwrap_or_else(|_| panic!("well-formed prediction was refused"))
+    }
+
+    fn evaluate_for(
+        pair: FinalPair,
+        state: &mut FinalMonitorState,
+        track: TestTrack,
+    ) -> Result<(UpdateResult, Option<FinalSeverity>), UpdateError> {
         let addresses = [1234];
-        let east_m = [east];
-        let north_m = [north];
-        let velocity_east_mps = [vx];
-        let velocity_north_mps = [vy];
-        let r95_m = [0.0];
+        let east_m = [track.east];
+        let north_m = [track.north];
+        let velocity_east_mps = [track.vx];
+        let velocity_north_mps = [track.vy];
+        let r95_m = [track.r95];
         let lat_e7 = [100];
         let lon_e7 = [200];
         let mut out_addr = [0];
@@ -717,10 +931,10 @@ mod tests {
         let mut out_lon = [0];
         let mut out_time = [0];
         let result = update(
-            pair(),
+            pair,
             state,
-            now,
-            report,
+            track.now,
+            track.report,
             PredictedTracks {
                 addresses: &addresses,
                 east_m: &east_m,
@@ -740,14 +954,11 @@ mod tests {
                 seconds_to_entry_milli: &mut out_time,
             },
         );
-        let result = match result {
-            Ok(result) => result,
-            Err(_) => panic!("well-formed prediction was refused"),
-        };
-        (
+        let result = result?;
+        Ok((
             result,
             out_severity.first().copied().filter(|_| result.alerts > 0),
-        )
+        ))
     }
 
     fn assert_bad_input_is_atomic(pair: FinalPair, vx: f64, vy: f64, r95: f64, north: f64) {
@@ -760,7 +971,10 @@ mod tests {
         let lat_e7 = [100];
         let lon_e7 = [200];
         let mut state = FinalMonitorState {
-            last_update_ns: 100,
+            last_input_frame_ns: 100,
+            last_evaluation_ns: 100,
+            clock_flags: HAS_INPUT_FRAME_TIME | HAS_EVALUATION_TIME,
+            reserved: [0; 7],
         };
         let mut out_addr = [77];
         let sentinel_pair = FinalPairId {
@@ -799,7 +1013,8 @@ mod tests {
             },
         );
         assert_eq!(result, Err(UpdateError::BadInput));
-        assert_eq!(state.last_update_ns, 100);
+        assert_eq!(state.last_input_frame_ns, 100);
+        assert_eq!(state.last_evaluation_ns, 100);
         assert_eq!(out_addr, [77]);
         assert_eq!(out_pair, [sentinel_pair]);
         assert_eq!(out_severity, [FinalSeverity::Warning]);
@@ -908,32 +1123,369 @@ mod tests {
     #[test]
     fn thirty_degree_blunder_caution_within_prediction() {
         let mut state = FinalMonitorState::new();
-        let (result, severity) = evaluate(&mut state, 1_000, 1_000, 0.0, -550.0, 86.6, 50.0);
+        let (result, severity) = evaluate(&mut state, 1_000, 1_000, 0.0, -545.0, 86.6, 50.0);
         assert_eq!(result.alerts, 1);
         assert_eq!(severity, Some(FinalSeverity::Caution));
 
-        // At 50 m/s lateral speed, this predicted trajectory enters the 306.3 m half-width
-        // after about 4.9 s. Feed the corresponding modeled sample on the next due update.
+        // Mutation killed: treat an exact 4.8 s source interval as stale or over cadence.
+        // The closer starting point puts the modeled sample inside the zone at the 4.8 s boundary.
         let (crossing, severity) = evaluate(
+            &mut state,
+            4_800_001_000,
+            4_800_001_000,
+            86.6 * 4.8,
+            -545.0 + 50.0 * 4.8,
+            86.6,
+            50.0,
+        );
+        assert!(!crossing.degraded);
+        assert_eq!(crossing.observed_input_interval_ns, DEGRADED_AFTER_NS);
+        assert_eq!(crossing.alerts, 1);
+        assert_eq!(severity, Some(FinalSeverity::Warning));
+    }
+
+    // REQ: OA-RWY-015, OA-RWY-016, OA-RWY-017
+    #[test]
+    fn five_second_input_gap_suppresses_geometrically_inside_warning() {
+        // Mutation killed: publish a warning from a trajectory after a >4.8 s input gap.
+        let mut state = FinalMonitorState::new();
+        let (first, severity) = evaluate(&mut state, 1_000, 1_000, 0.0, -545.0, 86.6, 50.0);
+        assert!(!first.degraded);
+        assert_eq!(severity, Some(FinalSeverity::Caution));
+
+        let (late, severity) = evaluate(
             &mut state,
             5_000_001_000,
             5_000_001_000,
             86.6 * 5.0,
-            -550.0 + 50.0 * 5.0,
+            -545.0 + 50.0 * 5.0,
             86.6,
             50.0,
         );
-        assert_eq!(crossing.alerts, 1);
-        assert_eq!(severity, Some(FinalSeverity::Warning));
+        assert!(late.due);
+        assert!(late.input_cadence_degraded);
+        assert!(!late.prediction_stale);
+        assert_eq!(late.observed_input_interval_ns, 5_000_000_000);
+        assert_eq!(late.alerts, 0);
+        assert_eq!(severity, None);
     }
 
     // REQ: OA-RWY-017
     #[test]
     fn stale_prediction_sets_degraded() {
         let mut state = FinalMonitorState::new();
-        let (result, _) = evaluate(&mut state, 4_800_001_000, 1_000, 0.0, -550.0, 100.0, 0.0);
+        let (result, severity) = evaluate(&mut state, 4_800_001_001, 1_000, 0.0, 0.0, 0.0, 0.0);
         assert!(result.degraded);
         assert!(result.due);
+        assert_eq!(result.alerts, 0);
+        assert_eq!(severity, None);
+    }
+
+    // REQ: OA-RWY-015, OA-RWY-017
+    #[test]
+    fn prediction_at_exact_freshness_limit_is_accepted_but_one_nanosecond_later_is_not() {
+        let mut at_limit = FinalMonitorState::new();
+        let (result, severity) = evaluate(&mut at_limit, 4_800_001_000, 1_000, 0.0, 0.0, 0.0, 0.0);
+        assert!(!result.degraded);
+        assert_eq!(result.alerts, 1);
+        assert_eq!(severity, Some(FinalSeverity::Warning));
+
+        let mut past_limit = FinalMonitorState::new();
+        let (result, severity) =
+            evaluate(&mut past_limit, 4_800_001_001, 1_000, 0.0, 0.0, 0.0, 0.0);
+        assert!(result.degraded);
+        assert_eq!(result.alerts, 0);
+        assert_eq!(severity, None);
+    }
+
+    // REQ: OA-RWY-015, OA-RWY-016
+    #[test]
+    fn uncertainty_wider_than_adaptation_clearance_refuses_before_warning() {
+        let pair = pair();
+        assert!(pair.max_r95_m > 0.0);
+        let mut state = FinalMonitorState::new();
+        let result = evaluate_for(
+            pair,
+            &mut state,
+            TestTrack {
+                now: 1_000,
+                report: 1_000,
+                east: 0.0,
+                north: 0.0,
+                vx: 0.0,
+                vy: 0.0,
+                r95: pair.max_r95_m + 0.01,
+            },
+        );
+        assert_eq!(result, Err(UpdateError::UnusableUncertainty));
+    }
+
+    // REQ: OA-RWY-015, OA-RWY-016
+    #[test]
+    fn a_one_hertz_caller_reports_its_actual_two_second_monitor_interval() {
+        let mut configured = pair();
+        configured.update_ns = 1_200_000_000;
+        let mut state = FinalMonitorState::new();
+        let (first, _) = evaluate_for(
+            configured,
+            &mut state,
+            TestTrack {
+                now: 1_000_000_000,
+                report: 1_000_000_000,
+                east: 0.0,
+                north: -550.0,
+                vx: 0.0,
+                vy: 0.0,
+                r95: 0.0,
+            },
+        )
+        .unwrap();
+        assert_eq!(first.observed_interval_ns, 0);
+        let (second, _) = evaluate_for(
+            configured,
+            &mut state,
+            TestTrack {
+                now: 2_000_000_000,
+                report: 2_000_000_000,
+                east: 0.0,
+                north: -550.0,
+                vx: 0.0,
+                vy: 0.0,
+                r95: 0.0,
+            },
+        )
+        .unwrap();
+        assert!(!second.due);
+        let (third, _) = evaluate_for(
+            configured,
+            &mut state,
+            TestTrack {
+                now: 3_000_000_000,
+                report: 3_000_000_000,
+                east: 0.0,
+                north: -550.0,
+                vx: 0.0,
+                vy: 0.0,
+                r95: 0.0,
+            },
+        )
+        .unwrap();
+        assert!(third.due);
+        assert_eq!(third.observed_interval_ns, 2_000_000_000);
+        assert_eq!(third.observed_input_interval_ns, 1_000_000_000);
+        assert!(
+            !third.degraded,
+            "fresh one-second input frames are not stale"
+        );
+    }
+
+    // REQ: OA-RWY-015, OA-RWY-017
+    #[test]
+    fn input_receipt_cadence_is_independent_from_evaluation_and_source_age() {
+        // Mutation killed: reuse the last due-evaluation timestamp as the input receipt clock.
+        let mut configured = pair();
+        configured.update_ns = 4_800_000_000;
+        let mut state = FinalMonitorState::new();
+        for now in [1_000_000_000, 5_800_000_000, 10_600_000_000, 15_400_000_000] {
+            let (result, _) = evaluate_for(
+                configured,
+                &mut state,
+                TestTrack {
+                    now,
+                    report: now,
+                    east: 0.0,
+                    north: -550.0,
+                    vx: 0.0,
+                    vy: 0.0,
+                    r95: 0.0,
+                },
+            )
+            .expect("exact-period input frame accepted");
+            assert!(!result.degraded);
+            assert_eq!(result.prediction_age_ns, 0);
+            if result.observed_input_interval_ns != 0 {
+                assert_eq!(result.observed_input_interval_ns, 4_800_000_000);
+                assert_eq!(result.observed_interval_ns, 4_800_000_000);
+            }
+        }
+
+        let (late_fresh, _) = evaluate_for(
+            configured,
+            &mut state,
+            TestTrack {
+                now: 20_201_000_000,
+                report: 20_201_000_000,
+                east: 0.0,
+                north: -550.0,
+                vx: 0.0,
+                vy: 0.0,
+                r95: 0.0,
+            },
+        )
+        .expect("fresh prediction with late frame remains an explicit result");
+        assert!(late_fresh.input_cadence_degraded);
+        assert!(!late_fresh.prediction_stale);
+        assert_eq!(late_fresh.observed_input_interval_ns, 4_801_000_000);
+        assert_eq!(late_fresh.prediction_age_ns, 0);
+
+        let (at_age_limit, _) = evaluate_for(
+            configured,
+            &mut state,
+            TestTrack {
+                now: 25_001_000_000,
+                report: 20_201_000_000,
+                east: 0.0,
+                north: -550.0,
+                vx: 0.0,
+                vy: 0.0,
+                r95: 0.0,
+            },
+        )
+        .expect("prediction exactly at freshness limit remains accepted");
+        assert!(!at_age_limit.prediction_stale);
+        assert!(!at_age_limit.input_cadence_degraded);
+        assert_eq!(at_age_limit.prediction_age_ns, 4_800_000_000);
+
+        let (old_source, _) = evaluate_for(
+            configured,
+            &mut state,
+            TestTrack {
+                now: 25_002_000_000,
+                report: 20_201_000_000,
+                east: 0.0,
+                north: -550.0,
+                vx: 0.0,
+                vy: 0.0,
+                r95: 0.0,
+            },
+        )
+        .expect("old source is reported as stale independently");
+        assert!(!old_source.input_cadence_degraded);
+        assert!(old_source.prediction_stale);
+        assert_eq!(old_source.prediction_age_ns, 4_801_000_000);
+    }
+
+    // REQ: OA-RWY-015, OA-RWY-017
+    #[test]
+    fn regressing_input_time_cannot_advance_either_clock_or_output() {
+        // Mutation killed: advance a clock before validating frame-time monotonicity.
+        let mut state = FinalMonitorState {
+            last_input_frame_ns: 5_000_000_000,
+            last_evaluation_ns: 3_000_000_000,
+            clock_flags: HAS_INPUT_FRAME_TIME | HAS_EVALUATION_TIME,
+            reserved: [0; 7],
+        };
+        let original_state = state;
+        let addresses = [1234];
+        let east = [0.0];
+        let north = [-550.0];
+        let velocity_east = [0.0];
+        let velocity_north = [0.0];
+        let r95 = [0.0];
+        let lat = [100];
+        let lon = [200];
+        let mut output_addresses = [77];
+        let mut pair_ids = [pair().id];
+        let mut severity = [FinalSeverity::Warning];
+        let mut output_lat = [303];
+        let mut output_lon = [404];
+        let mut entry_time = [505];
+        let result = update(
+            pair(),
+            &mut state,
+            4_000_000_000,
+            4_000_000_000,
+            PredictedTracks {
+                addresses: &addresses,
+                east_m: &east,
+                north_m: &north,
+                velocity_east_mps: &velocity_east,
+                velocity_north_mps: &velocity_north,
+                r95_m: &r95,
+                lat_e7: &lat,
+                lon_e7: &lon,
+            },
+            FinalAlertBuffer {
+                addresses: &mut output_addresses,
+                pair_ids: &mut pair_ids,
+                severity: &mut severity,
+                lat_e7: &mut output_lat,
+                lon_e7: &mut output_lon,
+                seconds_to_entry_milli: &mut entry_time,
+            },
+        );
+        assert_eq!(result, Err(UpdateError::ClockRegression));
+        assert_eq!(state, original_state);
+        assert_eq!(output_addresses, [77]);
+        assert_eq!(severity, [FinalSeverity::Warning]);
+        assert_eq!(output_lat, [303]);
+        assert_eq!(output_lon, [404]);
+        assert_eq!(entry_time, [505]);
+    }
+
+    // REQ: OA-RWY-016
+    #[test]
+    fn runway_derived_pair_refuses_inconsistent_geographic_and_local_positions() {
+        let (plane, first, second) = kord_parallel_runways();
+        let pair = prepare_centerline_pair(
+            RunwayFinalSelection {
+                runway_id: 27_001,
+                runway: &first,
+                end_name: *b"27R",
+            },
+            RunwayFinalSelection {
+                runway_id: 27_002,
+                runway: &second,
+                end_name: *b"27L",
+            },
+            DEFAULT_CENTERLINE_EXTENSION_M,
+            DEFAULT_CONFIG,
+        )
+        .expect("pinned runway pair");
+        let geo = Geo {
+            lat_deg: 41.990,
+            lon_deg: -87.910,
+        };
+        let local = crate::plane::to_local(&plane, geo).expect("point inside runway plane");
+        let addresses = [1234];
+        let east_m = [local.east_m + 20.0];
+        let north_m = [local.north_m];
+        let velocity_east_mps = [0.0];
+        let velocity_north_mps = [0.0];
+        let r95_m = [0.0];
+        let lat_e7 = [(geo.lat_deg * 10_000_000.0) as i32];
+        let lon_e7 = [(geo.lon_deg * 10_000_000.0) as i32];
+        let mut out_addr = [0];
+        let mut out_pair = [pair.id];
+        let mut out_severity = [FinalSeverity::Caution];
+        let mut out_lat = [0];
+        let mut out_lon = [0];
+        let mut out_time = [0];
+        let result = update(
+            pair,
+            &mut FinalMonitorState::new(),
+            1_000_000_000,
+            1_000_000_000,
+            PredictedTracks {
+                addresses: &addresses,
+                east_m: &east_m,
+                north_m: &north_m,
+                velocity_east_mps: &velocity_east_mps,
+                velocity_north_mps: &velocity_north_mps,
+                r95_m: &r95_m,
+                lat_e7: &lat_e7,
+                lon_e7: &lon_e7,
+            },
+            FinalAlertBuffer {
+                addresses: &mut out_addr,
+                pair_ids: &mut out_pair,
+                severity: &mut out_severity,
+                lat_e7: &mut out_lat,
+                lon_e7: &mut out_lon,
+                seconds_to_entry_milli: &mut out_time,
+            },
+        );
+        assert_eq!(result, Err(UpdateError::CoordinateMismatch));
     }
 
     // REQ: OA-RWY-018
@@ -993,6 +1545,17 @@ mod tests {
         assert_bad_input_is_atomic(pair(), 100.0, 50.0, f64::MAX, -550.0);
     }
 
+    // REQ: OA-RWY-016
+    #[test]
+    fn nonfinite_pair_uncertainty_limit_refuses_atomically_at_update() {
+        // Mutation killed: omit max_r95_m validation so NaN/Infinity disable the clearance cap.
+        for invalid_limit in [f64::NAN, f64::INFINITY] {
+            let mut invalid_pair = pair();
+            invalid_pair.max_r95_m = invalid_limit;
+            assert_bad_input_is_atomic(invalid_pair, 0.0, 0.0, 0.0, 0.0);
+        }
+    }
+
     // REQ: OA-RWY-015, OA-RWY-016
     #[test]
     fn excessive_lookahead_cannot_saturate_a_caller_visible_entry_time() {
@@ -1007,7 +1570,10 @@ mod tests {
     #[test]
     fn track_and_output_caps_refuse_atomically() {
         let mut state = FinalMonitorState {
-            last_update_ns: 100,
+            last_input_frame_ns: 100,
+            last_evaluation_ns: 100,
+            clock_flags: HAS_INPUT_FRAME_TIME | HAS_EVALUATION_TIME,
+            reserved: [0; 7],
         };
         let addresses = [1, 2];
         let east_m = [0.0, 0.0];
@@ -1054,7 +1620,8 @@ mod tests {
             },
         );
         assert_eq!(result, Err(UpdateError::Capacity));
-        assert_eq!(state.last_update_ns, 100);
+        assert_eq!(state.last_input_frame_ns, 100);
+        assert_eq!(state.last_evaluation_ns, 100);
         assert_eq!(out_addr, [77]);
         assert_eq!(out_pair, [sentinel_pair]);
         assert_eq!(out_severity, [FinalSeverity::Warning]);
@@ -1092,7 +1659,8 @@ mod tests {
             },
         );
         assert_eq!(result, Err(UpdateError::Capacity));
-        assert_eq!(state.last_update_ns, 100);
+        assert_eq!(state.last_input_frame_ns, 100);
+        assert_eq!(state.last_evaluation_ns, 100);
         assert_eq!(out_addr, [77]);
         assert_eq!(out_pair, [sentinel_pair]);
         assert_eq!(out_severity, [FinalSeverity::Warning]);

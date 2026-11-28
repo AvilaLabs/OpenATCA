@@ -8,7 +8,9 @@
 
 use oa_geo::{wgs84, LatLon};
 use oa_runway::occupy::{frame_coords, is_occupied, occupies, Occupancy};
-use oa_runway::plane::{plane_new, to_local, Geo, Local, Plane, EXTENT_M, PLANE_ERROR_BOUND_M};
+use oa_runway::plane::{
+    plane_new, to_local, true_velocity_to_local, Geo, Local, Plane, EXTENT_M, PLANE_ERROR_BOUND_M,
+};
 use oa_runway::runway::*;
 
 fn g(lat: f64, lon: f64) -> Geo {
@@ -492,6 +494,45 @@ fn plane_new_refuses_what_it_cannot_represent() {
     assert!(near(l.east_m, 0.1 * 68_500.0, 100.0));
 }
 
+// REQ: OA-RWY-016
+#[test]
+fn true_velocity_maps_to_the_airport_plane_differential_at_a_displaced_point() {
+    // Mutation killed: pass true east/north components directly to airport-plane axis math.
+    let origin = LatLon::new(42.0, -88.0).unwrap();
+    let point = wgs84().direct(origin, 71.0, 14_000.0).unwrap().position;
+    let geo = g(point.lat(), point.lon());
+    let plane = plane_new(origin.lat(), origin.lon()).unwrap();
+    let velocity_east_mps = 127.0;
+    let velocity_north_mps = -31.0;
+    let mapped =
+        true_velocity_to_local(&plane, geo, velocity_east_mps, velocity_north_mps).unwrap();
+
+    let speed = oa_math::hypot(velocity_east_mps, velocity_north_mps);
+    let azimuth_deg = velocity_east_mps.atan2(velocity_north_mps).to_degrees();
+    let elapsed_s = 0.2;
+    let geodesic = wgs84();
+    let ahead = geodesic
+        .direct(point, azimuth_deg, speed * elapsed_s)
+        .unwrap()
+        .position;
+    let behind = geodesic
+        .direct(point, azimuth_deg, -speed * elapsed_s)
+        .unwrap()
+        .position;
+    let ahead_local = to_local(&plane, g(ahead.lat(), ahead.lon())).unwrap();
+    let behind_local = to_local(&plane, g(behind.lat(), behind.lon())).unwrap();
+    let finite_difference = Local {
+        east_m: (ahead_local.east_m - behind_local.east_m) / (2.0 * elapsed_s),
+        north_m: (ahead_local.north_m - behind_local.north_m) / (2.0 * elapsed_s),
+    };
+    assert!(
+        oa_math::hypot(
+            mapped.east_m - finite_difference.east_m,
+            mapped.north_m - finite_difference.north_m
+        ) < 0.01
+    );
+}
+
 // REQ: OA-RWY-001
 #[test]
 fn plane_error_against_geodesic_is_within_the_stated_bound() {
@@ -886,6 +927,19 @@ fn at(rw: &Runway, along: f64, across: f64) -> Local {
 fn mdw_runway() -> Runway {
     let (plane, input) = mdw();
     build_runway(&plane, &input).unwrap()
+}
+
+// REQ: OA-RWY-016
+#[test]
+fn built_runway_retains_its_projection_origin_for_final_monitoring() {
+    // Mutation killed: omit or substitute the builder's plane origin in the runway value.
+    let (plane, input) = mdw();
+    let expected_origin = oa_runway::plane::plane_origin(&plane);
+    let runway = build_runway(&plane, &input).unwrap();
+    assert_eq!(
+        runway.plane_origin, expected_origin,
+        "the final-monitor consumer must use the exact plane that built runway coordinates"
+    );
 }
 
 #[test]

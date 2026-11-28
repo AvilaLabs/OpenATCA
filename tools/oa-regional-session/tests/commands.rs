@@ -10,6 +10,7 @@ const SECOND: i64 = 1_000_000_000;
 const FLIGHT: u128 = 0x1234;
 const ADDRESS: u32 = 0xabc101;
 const PLAN: &str = "PLAN00000001";
+const CALLSIGN: &str = "N123AB";
 
 fn row(
     receipt: i64,
@@ -24,7 +25,7 @@ fn row(
 }
 
 fn position(receipt: i64, sequence: u64) -> oa_regional_session::NormalizedEvent {
-    parse_event_line(&format!("v1\t{receipt}\t{receipt}\t{sequence}\tSURVEILLANCE\t{FLIGHT:032X}\t{ADDRESS:06X}\tZAU1\tPOS\t410000000\t-870000000\t10000\t0\t0\t0"))
+    parse_event_line(&format!("v1\t{receipt}\t{receipt}\t{sequence}\tSURVEILLANCE\t00000000000000000000000000000000\t{ADDRESS:06X}\tZAU1\tPOS\t410000000\t-870000000\t10000\t0\t0\t0\tCALLSIGN\t{CALLSIGN}"))
         .expect("valid position")
 }
 
@@ -73,7 +74,15 @@ fn ready(with_owner: bool) -> (RegionalRuntime, RegionalFrame) {
         &ReceiptBatch {
             receipt_ns: 2 * SECOND,
             source_clock_regressions: 0,
-            events: vec![position(2 * SECOND, 4)],
+            events: vec![
+                position(2 * SECOND, 4),
+                row(
+                    2 * SECOND,
+                    2 * SECOND,
+                    4,
+                    &format!("FLIGHT\tIDENTITY_PARTIAL\t{CALLSIGN}\t-\t-"),
+                ),
+            ],
         },
     )
     .expect("confirmed frame");

@@ -494,7 +494,17 @@ fn every_layer_can_be_switched_off_and_the_legend_says_so() {
             "airports" => assert_eq!(st.airports, 0),
             "fixes" => assert_eq!(st.fixes, 0),
             "labels" => assert_eq!(st.labels, 0),
-            "rings" => assert_eq!(st.rings, 0),
+            "rings" => {
+                assert_eq!(st.rings, 0);
+                let range_legend = texts(&l)
+                    .into_iter()
+                    .find(|line| line.contains(" RANGE "))
+                    .expect("range legend remains visible");
+                assert!(
+                    !range_legend.contains(" RINGS "),
+                    "disabled ring layer must not advertise ring spacing: {range_legend}"
+                );
+            }
             other => panic!("{other}"),
         }
     }

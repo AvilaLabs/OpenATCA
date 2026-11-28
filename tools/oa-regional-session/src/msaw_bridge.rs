@@ -161,8 +161,7 @@ fn assemble(
             "MSAW regional cycle capacity is outside the configured session envelope".into(),
         );
     }
-    if settings.msaw.max_tracks < max_rows
-        || settings.msaw.max_tracks > MAX_REGIONAL_MSAW_CORE_TRACKS
+    if settings.msaw.max_tracks > MAX_REGIONAL_MSAW_CORE_TRACKS
         || settings.msaw.max_open > MAX_REGIONAL_MSAW_OPEN
         || settings.msaw.track_budget > MAX_REGIONAL_MSAW_ROWS
         || settings.msaw.samples > MAX_REGIONAL_MSAW_SAMPLES
@@ -479,6 +478,9 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
     use super::*;
 
+    const LEGACY_MAX_ROWS: usize = 32;
+    const LEGACY_CORE_TRACKS: usize = 16;
+
     fn track(alt_ft: f32, vrate_fpm: f32) -> MsawTrack {
         MsawTrack {
             lat_deg: 41.0,
@@ -608,6 +610,7 @@ mod tests {
                     east_mmps: 0,
                     north_mmps: 0,
                     vertical_rate_fpm: Some(-600),
+                    track_callsign: None,
                 },
             }],
         }
@@ -641,6 +644,65 @@ mod tests {
         (data, root)
     }
 
+    fn legacy_row_capacity_data() -> (RegionalData, PathBuf) {
+        let (mut data, root) = development_provider_data();
+        data.settings.msaw.max_tracks = LEGACY_CORE_TRACKS;
+        data.settings.msaw.max_open = LEGACY_MAX_ROWS;
+        data.settings.msaw.track_budget = LEGACY_MAX_ROWS;
+        (data, root)
+    }
+
+    // Mutation killed: reject the previously valid shared bridge configuration when its input
+    // row allowance is larger than the core's independently bounded tracker table.
+    // REQ: OA-REG-011
+    #[test]
+    fn legacy_bridge_accepts_row_capacity_larger_than_core_track_capacity() {
+        let (data, root) = legacy_row_capacity_data();
+        let mut service = regional_msaw_new(data, LEGACY_MAX_ROWS).unwrap();
+        let tracks: Vec<_> = (0..LEGACY_CORE_TRACKS + 1)
+            .map(|index| {
+                let mut row = track(1500.0, -600.0);
+                row.addr = 0xabc101 + u32::try_from(index).unwrap();
+                row
+            })
+            .collect();
+        let mut states = oa_safety::net::state_table_new(10_000_000_000, 0).unwrap();
+        let mut inhibits = oa_safety::inhibit::inhibits_new();
+        let frame = regional_msaw_cycle(
+            &mut service,
+            2_000_000_000,
+            &tracks,
+            &mut states,
+            &mut inhibits,
+        )
+        .unwrap();
+
+        assert_eq!(frame.submitted_rows, tracks.len());
+        let stats = frame.stats.unwrap();
+        assert_eq!(
+            stats.rows_over_capacity,
+            u64::try_from(tracks.len().saturating_sub(LEGACY_CORE_TRACKS)).unwrap()
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    // REQ: OA-REG-011
+    #[test]
+    fn bridge_still_rejects_row_and_core_capacities_over_their_envelopes() {
+        assert!(regional_msaw_synthetic_for_profile(
+            MAX_REGIONAL_MSAW_ROWS + 1,
+            crate::surveillance::MAX_FRAMES
+        )
+        .is_err());
+
+        let (mut data, root) = development_provider_data();
+        data.settings.msaw.max_tracks = MAX_REGIONAL_MSAW_CORE_TRACKS + 1;
+        data.settings.msaw.max_open = LEGACY_MAX_ROWS;
+        data.settings.msaw.track_budget = LEGACY_MAX_ROWS;
+        assert!(regional_msaw_new(data, LEGACY_MAX_ROWS).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     fn bulk_receipt(second: i64, count: u32) -> crate::ReceiptBatch {
         let receipt_ns = second * 1_000_000_000;
         let events = (0..count)
@@ -663,6 +725,7 @@ mod tests {
                     east_mmps: 0,
                     north_mmps: 0,
                     vertical_rate_fpm: Some(0),
+                    track_callsign: None,
                 },
             })
             .collect();

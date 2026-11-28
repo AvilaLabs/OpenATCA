@@ -427,6 +427,26 @@ pub struct TrafficStyle {
     pub reacquired_s: u16,
 }
 
+/// Text retained in a regional traffic block after its current flight-view correlation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TrafficBlockDetail {
+    /// A same-frame, unambiguous current ZAU FlightView is available.
+    Full,
+    /// The altitude is known, but no unambiguous current FlightView is available.
+    AltitudeOnly,
+    /// Neither a permitted full FlightView nor a usable altitude is available.
+    SymbolOnly,
+}
+
+/// Bounded per-address presentation policy. Entries are strictly increasing by `address`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TrafficBlockPolicy {
+    pub address: u32,
+    pub detail: TrafficBlockDetail,
+    /// Exact current FlightView callsign for Full mode; None for fallback modes.
+    pub flight_callsign: Option<[u8; 8]>,
+}
+
 /// One minute of leader, five history dots, a reacquired mark for ten seconds.
 pub const DEFAULT_STYLE: TrafficStyle = TrafficStyle {
     leader_min: 1.0,
@@ -445,6 +465,12 @@ impl Default for TrafficStyle {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TrafficStats {
     pub drawn: u32,
+    /// Targets whose complete data block was allowed by the caller's current-view policy.
+    pub full_blocks: u32,
+    /// Targets shown with only their known altitude.
+    pub altitude_only_blocks: u32,
+    /// Targets with a symbol but no text block because altitude and current FlightView were absent.
+    pub symbol_only_targets: u32,
     /// Targets whose position is placed but off the map area or under the legend strip. Not a
     /// loss: a scope's edge.
     pub off_screen: u32,
@@ -880,6 +906,177 @@ fn mode_a_text(b: &mut TextBuf, code: u16, age_s: u32, state: u8) {
     }
 }
 
+fn validate_block_policy(
+    set: &TargetSet,
+    policy: Option<&[TrafficBlockPolicy]>,
+) -> Result<(), DisplayError> {
+    let Some(policy) = policy else { return Ok(()) };
+    if policy.len() > MAX_TARGETS
+        || policy.windows(2).any(|pair| {
+            pair.first()
+                .zip(pair.get(1))
+                .is_some_and(|(left, right)| left.address >= right.address)
+        })
+    {
+        return Err(DisplayError::BadView(
+            "traffic block policy is not strictly address-sorted",
+        ));
+    }
+    for (index, &address) in set.addr.iter().enumerate() {
+        let Some(entry) = policy
+            .binary_search_by_key(&address, |entry| entry.address)
+            .ok()
+            .and_then(|position| policy.get(position))
+        else {
+            return Err(DisplayError::BadView("traffic block policy omits a target"));
+        };
+        let altitude = set.alt_ft.get(index).copied().ok_or(DisplayError::BadView(
+            "traffic altitude column is shorter than the address column",
+        ))?;
+        match entry.detail {
+            TrafficBlockDetail::Full if entry.flight_callsign.is_some() => {}
+            TrafficBlockDetail::AltitudeOnly
+                if altitude != NO_ALT && entry.flight_callsign.is_none() => {}
+            TrafficBlockDetail::SymbolOnly
+                if altitude == NO_ALT && entry.flight_callsign.is_none() => {}
+            TrafficBlockDetail::AltitudeOnly | TrafficBlockDetail::SymbolOnly => {
+                return Err(DisplayError::BadView(
+                    "traffic block detail disagrees with the altitude sentinel",
+                ));
+            }
+            TrafficBlockDetail::Full => {
+                return Err(DisplayError::BadView(
+                    "full traffic block has no current flight callsign binding",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn draw_data_block(
+    list: &mut DisplayList,
+    center: (i32, i32),
+    target: Scalars,
+    detail: TrafficBlockDetail,
+    reacquired: bool,
+    no_circle: bool,
+    stats: &mut TrafficStats,
+) -> Result<(), DisplayError> {
+    if detail == TrafficBlockDetail::SymbolOnly {
+        return Ok(());
+    }
+    let mut at = add(center, px(BLOCK_DX), px(BLOCK_DY));
+    let mut text = text_new();
+    if detail == TrafficBlockDetail::Full {
+        ident_text(
+            &mut text,
+            &target.callsign,
+            target.addr,
+            target.flags & T_CS_CONFLICT != 0,
+        );
+        block_line(list, &mut at, &text, stats)?;
+        text_clear(&mut text);
+    }
+    if alt_text(&mut text, target.alt) {
+        stats.alt_display_clamped = stats.alt_display_clamped.saturating_add(1);
+    }
+    if detail == TrafficBlockDetail::Full {
+        text_push_char(&mut text, b' ');
+        speed_text(&mut text, target.gs);
+    }
+    block_line(list, &mut at, &text, stats)?;
+    if detail == TrafficBlockDetail::Full {
+        text_clear(&mut text);
+        mode_a_text(
+            &mut text,
+            target.ident,
+            target.ident_age_s,
+            target.ident_state,
+        );
+        block_line(list, &mut at, &text, stats)?;
+        text_clear(&mut text);
+        tags_text(&mut text, target.flags, reacquired, no_circle);
+        block_line(list, &mut at, &text, stats)?;
+    }
+    Ok(())
+}
+
+fn draw_target_markers(
+    list: &mut DisplayList,
+    proj: &Projection,
+    ellipsoid: &Ellipsoid,
+    center: (i32, i32),
+    target: Scalars,
+    style: &TrafficStyle,
+    stats: &mut TrafficStats,
+) -> Result<bool, DisplayError> {
+    let coast = target.flags & T_COAST != 0;
+    let uncertain = target.flags & T_UNCERTAIN != 0;
+    let reacquired = target.reacq_age != NO_REACQ && target.reacq_age < style.reacquired_s;
+    let at = LatLon::new(f64::from(target.lat) * 1e-7, f64::from(target.lon) * 1e-7).ok();
+    let half = if uncertain {
+        diamond(list, center, DIAMOND_HALF)?;
+        DIAMOND_HALF
+    } else {
+        square(list, center, SQUARE_HALF)?;
+        SQUARE_HALF
+    };
+    if coast {
+        push_line(
+            list,
+            add(center, -px(half), -px(half)),
+            add(center, px(half), px(half)),
+            palette::TARGET,
+            LAYER_SYMBOL,
+        )?;
+        push_line(
+            list,
+            add(center, -px(half), px(half)),
+            add(center, px(half), -px(half)),
+            palette::TARGET,
+            LAYER_SYMBOL,
+        )?;
+        stats.coasting = stats.coasting.saturating_add(1);
+    } else {
+        push_rect(
+            list,
+            add(center, -8, -8),
+            add(center, 8, 8),
+            palette::TARGET,
+            LAYER_SYMBOL,
+        )?;
+    }
+    let mut no_circle = false;
+    if uncertain {
+        stats.uncertain = stats.uncertain.saturating_add(1);
+        if target.r95.is_finite() && target.r95 > 0.0 {
+            match at.and_then(|position| {
+                true_radius16(proj, ellipsoid, center, position, f64::from(target.r95))
+            }) {
+                Some((radius, clamped)) => {
+                    stats.circle_radius_clamped = stats
+                        .circle_radius_clamped
+                        .saturating_add(u32::from(clamped));
+                    push_circle(list, center, radius, palette::TARGET, LAYER_SYMBOL)?;
+                }
+                None => {
+                    stats.circle_failed = stats.circle_failed.saturating_add(1);
+                    no_circle = true;
+                }
+            }
+        } else {
+            stats.r95_unknown = stats.r95_unknown.saturating_add(1);
+            no_circle = true;
+        }
+    }
+    if reacquired {
+        push_circle(list, center, px(REACQ_RADIUS), palette::ALERT, LAYER_SYMBOL)?;
+        stats.reacquired = stats.reacquired.saturating_add(1);
+    }
+    Ok(no_circle)
+}
+
 /// Appends the traffic of `set` to `l` (it does not clear the list). `ell` is the WGS-84
 /// ellipsoid, built once by the caller. Targets are drawn in set order. On an error the list is
 /// left faulted and will not be drawn. Allocates nothing.
@@ -890,7 +1087,23 @@ pub fn build_traffic(
     set: &TargetSet,
     st: &TrafficStyle,
 ) -> Result<TrafficStats, DisplayError> {
+    build_traffic_with_policy(l, proj, ell, set, st, None)
+}
+
+/// Appends traffic with an optional current-frame block policy. `None` preserves the generic
+/// renderer's historic full-block behavior. A supplied policy must be strictly address-sorted,
+/// unique, and cover every target in `set`; altitude-only and symbol-only modes must agree with
+/// the target's actual altitude sentinel.
+pub fn build_traffic_with_policy(
+    l: &mut DisplayList,
+    proj: &Projection,
+    ell: &Ellipsoid,
+    set: &TargetSet,
+    st: &TrafficStyle,
+    policy: Option<&[TrafficBlockPolicy]>,
+) -> Result<TrafficStats, DisplayError> {
     style_check(st)?;
+    validate_block_policy(set, policy)?;
     let mut stats = TrafficStats {
         refused: set.refused_full,
         malformed: set.refused_malformed,
@@ -898,7 +1111,7 @@ pub fn build_traffic(
     };
     let mut tb = text_new();
     for i in 0..set.lat_e7.len() {
-        let Some(t) = scalars_at(set, i) else {
+        let Some(mut t) = scalars_at(set, i) else {
             stats.inconsistent += 1;
             continue;
         };
@@ -917,8 +1130,6 @@ pub fn build_traffic(
                 continue;
             }
         };
-        let coast = t.flags & T_COAST != 0;
-        let uncertain = t.flags & T_UNCERTAIN != 0;
         let conflict = t.flags & T_CS_CONFLICT != 0;
         let reacq = t.reacq_age != NO_REACQ && t.reacq_age < st.reacquired_s;
         let at = LatLon::new(f64::from(t.lat) * 1e-7, f64::from(t.lon) * 1e-7).ok();
@@ -955,84 +1166,38 @@ pub fn build_traffic(
             Leader::Absent => {}
         }
 
-        // The position symbol.
-        let half = if uncertain {
-            diamond(l, c, DIAMOND_HALF)?;
-            DIAMOND_HALF
-        } else {
-            square(l, c, SQUARE_HALF)?;
-            SQUARE_HALF
-        };
-        if coast {
-            push_line(
-                l,
-                add(c, -px(half), -px(half)),
-                add(c, px(half), px(half)),
-                palette::TARGET,
-                LAYER_SYMBOL,
-            )?;
-            push_line(
-                l,
-                add(c, -px(half), px(half)),
-                add(c, px(half), -px(half)),
-                palette::TARGET,
-                LAYER_SYMBOL,
-            )?;
-            stats.coasting += 1;
-        } else {
-            push_rect(
-                l,
-                add(c, -8, -8),
-                add(c, 8, 8),
-                palette::TARGET,
-                LAYER_SYMBOL,
-            )?;
+        // The symbol and all safety-relevant markers remain independent of plan correlation.
+        let no_circle = draw_target_markers(l, proj, ell, c, t, st, &mut stats)?;
+
+        let detail = policy
+            .and_then(|entries| {
+                entries
+                    .binary_search_by_key(&t.addr, |entry| entry.address)
+                    .ok()
+                    .and_then(|index| entries.get(index))
+            })
+            .map_or(TrafficBlockDetail::Full, |entry| entry.detail);
+        if let Some(callsign) = policy
+            .and_then(|entries| {
+                entries
+                    .binary_search_by_key(&t.addr, |entry| entry.address)
+                    .ok()
+                    .and_then(|index| entries.get(index))
+            })
+            .and_then(|entry| entry.flight_callsign)
+        {
+            t.callsign = callsign;
         }
-        // An uncertain target without its circle says so on the data block (`R95?`), whether
-        // the radius was unknown or the circle could not be placed.
-        let mut no_circle = false;
-        if uncertain {
-            stats.uncertain += 1;
-            if t.r95.is_finite() && t.r95 > 0.0 {
-                let r = at.and_then(|a| true_radius16(proj, ell, c, a, f64::from(t.r95)));
-                match r {
-                    Some((r, clamped)) => {
-                        stats.circle_radius_clamped += u32::from(clamped);
-                        push_circle(l, c, r, palette::TARGET, LAYER_SYMBOL)?;
-                    }
-                    None => {
-                        stats.circle_failed += 1;
-                        no_circle = true;
-                    }
-                }
-            } else {
-                stats.r95_unknown += 1;
-                no_circle = true;
+        draw_data_block(l, c, t, detail, reacq, no_circle, &mut stats)?;
+        match detail {
+            TrafficBlockDetail::Full => stats.full_blocks = stats.full_blocks.saturating_add(1),
+            TrafficBlockDetail::AltitudeOnly => {
+                stats.altitude_only_blocks = stats.altitude_only_blocks.saturating_add(1)
+            }
+            TrafficBlockDetail::SymbolOnly => {
+                stats.symbol_only_targets = stats.symbol_only_targets.saturating_add(1)
             }
         }
-        if reacq {
-            push_circle(l, c, px(REACQ_RADIUS), palette::ALERT, LAYER_SYMBOL)?;
-            stats.reacquired += 1;
-        }
-
-        // The data block, at a fixed offset (LS-401: no overlap avoidance yet).
-        let mut at_b = add(c, px(BLOCK_DX), px(BLOCK_DY));
-        text_clear(&mut tb);
-        ident_text(&mut tb, &t.callsign, t.addr, conflict);
-        block_line(l, &mut at_b, &tb, &mut stats)?;
-        text_clear(&mut tb);
-        if alt_text(&mut tb, t.alt) {
-            stats.alt_display_clamped += 1;
-        }
-        text_push_char(&mut tb, b' ');
-        speed_text(&mut tb, t.gs);
-        block_line(l, &mut at_b, &tb, &mut stats)?;
-        text_clear(&mut tb);
-        mode_a_text(&mut tb, t.ident, t.ident_age_s, t.ident_state);
-        block_line(l, &mut at_b, &tb, &mut stats)?;
-        text_clear(&mut tb);
-        tags_text(&mut tb, t.flags, reacq, no_circle);
-        block_line(l, &mut at_b, &tb, &mut stats)?;
         if conflict {
             stats.cs_conflict += 1;
         }

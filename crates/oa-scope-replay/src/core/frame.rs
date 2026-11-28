@@ -22,7 +22,7 @@ use oa_display::core::ownership::{
 use oa_display::core::palette;
 use oa_display::core::raster::{frame_len, rasterize, FrameSpec, RenderError};
 use oa_display::core::safety::{
-    build_safety, safety_caps, FeedStatus, SafetyScene, LAYER_BANNER, LAYER_BANNER_BG,
+    build_safety, safety_caps, FeedStatus, SafetyScene, SafetyStats, LAYER_BANNER, LAYER_BANNER_BG,
 };
 use oa_display::core::scene::{
     build_scene, scene_caps, scene_index, scratch_for, view_new_with_top_inset, SceneIndex,
@@ -30,8 +30,9 @@ use oa_display::core::scene::{
 };
 use oa_display::core::text::{text_clipped, text_new, text_push_dec, text_push_str, text_str};
 use oa_display::core::traffic::{
-    build_traffic, caps_add, targets_clear, targets_malformed, targets_new, targets_refused,
-    traffic_caps, TargetSet, TrafficStats, TrafficStyle, LAYER_BLOCK, MAX_TARGET_SYMBOL_RADIUS_PX,
+    build_traffic, build_traffic_with_policy, caps_add, targets_clear, targets_malformed,
+    targets_new, targets_refused, traffic_caps, TargetSet, TrafficBlockPolicy, TrafficStats,
+    TrafficStyle, LAYER_BLOCK, MAX_TARGET_SYMBOL_RADIUS_PX,
 };
 use oa_safety::inhibit::InhibitTable;
 use oa_safety::net::StateTable;
@@ -142,6 +143,11 @@ pub struct ReplaySafety<'a> {
     /// Time of the newest accepted track update, not merely the newest emitted row.
     pub newest_track_ns: Option<i64>,
     pub frozen_limit_ns: i64,
+    /// Use the compact safety status header only when the caller owns that reserved band.
+    /// Defaults false at every existing caller; regional presentation is the sole opt-in.
+    pub use_reserved_status_header: bool,
+    /// Optional regional per-target detail policy derived from the same frame's flight views.
+    pub traffic_block_policies: Option<&'a [TrafficBlockPolicy]>,
 }
 
 /// What one frame build drew and left out. A7.2: cold struct (one per frame).
@@ -158,6 +164,9 @@ pub struct FrameInfo {
     pub stamp_clipped: bool,
     /// A supplied ownership line was valid but did not fit this projection, so it was omitted.
     pub ownership_clipped: bool,
+    /// Exact safety-layer presentation accounting when the caller supplied safety telemetry.
+    /// `None` means no safety layer was composed; it is not a zero-valued healthy result.
+    pub safety_stats: Option<SafetyStats>,
 }
 
 /// Allocates every table for the model and the configuration.
@@ -395,6 +404,7 @@ pub(crate) fn replay_build_raw_with_source_stale(
                 malformed: targets_malformed(&r.set),
                 stamp_clipped: text_clipped(&status) || text_clipped(&banner),
                 ownership_clipped: false,
+                safety_stats: None,
             },
             raw,
         ))
@@ -436,8 +446,19 @@ pub fn replay_build_with_overlays(
     targets_clear(&mut r.set);
     let convert = targets_at(store, calls, t_ns, &r.cfg.convert, &r.view.proj, &mut r.set);
     let scene = build_scene(&mut r.list, &r.model, &r.index, &r.view, &mut r.scratch)?;
-    let traffic = build_traffic(&mut r.list, &r.view.proj, &r.ell, &r.set, &r.cfg.style)?;
-    if let Some(s) = safety {
+    let traffic = if let Some(policy) = safety.and_then(|s| s.traffic_block_policies) {
+        build_traffic_with_policy(
+            &mut r.list,
+            &r.view.proj,
+            &r.ell,
+            &r.set,
+            &r.cfg.style,
+            Some(policy),
+        )?
+    } else {
+        build_traffic(&mut r.list, &r.view.proj, &r.ell, &r.set, &r.cfg.style)?
+    };
+    let safety_stats = if let Some(s) = safety {
         let scene = SafetyScene {
             states: s.states,
             inhibits: s.inhibits,
@@ -447,8 +468,18 @@ pub fn replay_build_with_overlays(
             frozen_limit_ns: s.frozen_limit_ns,
             targets: &r.set,
         };
-        build_safety(&mut r.list, &r.view.proj, &scene)?;
-    }
+        if s.use_reserved_status_header {
+            Some(oa_display::core::safety::build_safety_in_reserved_header(
+                &mut r.list,
+                &r.view.proj,
+                &scene,
+            )?)
+        } else {
+            Some(build_safety(&mut r.list, &r.view.proj, &scene)?)
+        }
+    } else {
+        None
+    };
     let ownership_clipped = if let Some(status) = ownership {
         if ownership_status_fits(&r.view.proj, status)? {
             build_ownership_status(&mut r.list, &r.view.proj, status)?;
@@ -495,6 +526,7 @@ pub fn replay_build_with_overlays(
         malformed: targets_malformed(&r.set),
         stamp_clipped: text_clipped(&tb),
         ownership_clipped,
+        safety_stats,
     })
 }
 

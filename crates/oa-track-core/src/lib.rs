@@ -34,7 +34,7 @@ pub use tracker::{
     tracker_is_confirmed, tracker_live, tracker_live_iter, tracker_log, tracker_moves_active,
     tracker_new, tracker_newest_update_ns, tracker_note_radar_disagreement, tracker_predict,
     tracker_predict_checked, tracker_predict_for_association, tracker_set_expected_interval,
-    tracker_stats, tracker_update, AltitudeForecast, Tracker,
+    tracker_snapshot_at, tracker_stats, tracker_update, AltitudeForecast, Tracker,
 };
 pub use types::{
     check_config, log_new, output_clear, output_len, output_new, output_push, to_e7, Measurement,

@@ -417,12 +417,9 @@ fn recorded_hour_flight_batch_limit_is_explicit_and_legacy_stays_at_256() {
         .copied()
         .collect::<Vec<_>>();
     let mut recorded_hour_258 = driver(4, 8, 8);
-    let applied_258 = flight_apply_batch_with_limit(
-        &mut recorded_hour_258,
-        &beyond_legacy,
-        recorded_hour_limit,
-    )
-    .expect("recorded-hour consumer accepts events beyond the ordinary cap");
+    let applied_258 =
+        flight_apply_batch_with_limit(&mut recorded_hour_258, &beyond_legacy, recorded_hour_limit)
+            .expect("recorded-hour consumer accepts events beyond the ordinary cap");
     assert_eq!(applied_258.len(), beyond_legacy_len);
 
     let mut recorded_hour = driver(4, 8, 8);
@@ -437,11 +434,7 @@ fn recorded_hour_flight_batch_limit_is_explicit_and_legacy_stays_at_256() {
 
     let mut over_cap = driver(4, 8, 8);
     assert_eq!(
-        flight_apply_batch_with_limit(
-            &mut over_cap,
-            &events,
-            RECORDED_HOUR_FIXTURE_LIMIT,
-        ),
+        flight_apply_batch_with_limit(&mut over_cap, &events, RECORDED_HOUR_FIXTURE_LIMIT,),
         Err(FlightDriverError::ReceiptBatchTooLarge)
     );
     assert_eq!(flight_driver_report(&over_cap).flights, 0);
@@ -666,6 +659,7 @@ fn identity_binding_requires_an_explicit_flight_operation_and_source_precision_i
             east_mmps: 0,
             north_mmps: 0,
             vertical_rate_fpm: None,
+            track_callsign: None,
         },
     };
     assert!(

@@ -57,6 +57,7 @@ fn batch(receipt_s: i64, source_times_s: &[i64], altitudes_ft: &[Option<i32>]) -
                 east_mmps: 0,
                 north_mmps: 0,
                 vertical_rate_fpm: Some(0),
+                track_callsign: None,
             },
         })
         .collect();

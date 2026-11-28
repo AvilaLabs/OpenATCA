@@ -7,7 +7,7 @@ use oa_runway::final_monitor::{
     FinalSeverity, PredictedTracks, RunwayFinalSelection, UpdateError,
     DEFAULT_CENTERLINE_EXTENSION_M, DEFAULT_CONFIG, DEGRADED_AFTER_NS,
 };
-use oa_runway::plane::{plane_new, to_local, Geo};
+use oa_runway::plane::{plane_new, to_local, Geo, Local};
 use oa_runway::runway::{build_runway, DeclaredFt, EndInput, Runway, RunwayInput};
 use oa_sensorsim::plots::{plots_len, plots_row};
 use oa_sensorsim::profile::{RadarProfile, EARTH_K_STANDARD, MODE_S_ATC302};
@@ -22,6 +22,12 @@ use oa_track::{
 const EPOCH_NS: i64 = 1_700_000_000_000_000_000;
 const DEFAULT_SENSOR_PERIOD_NS: i64 = 1_200_000_000;
 const TERMINAL_SENSOR_PERIOD_NS: i64 = 4_800_000_000;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ScanTimingFixture {
+    BeamCrossing,
+    ExactRadial,
+}
 
 fn end(name: &'static str, alignment: f64, lat: f64, lon: f64) -> EndInput<'static> {
     EndInput {
@@ -89,17 +95,35 @@ fn kord_pair(
     (plane, r27r, r27l, pair)
 }
 
-fn synthetic_truth(pair: oa_runway::final_monitor::FinalPair) -> oa_truth::Truth {
+fn synthetic_truth(
+    pair: oa_runway::final_monitor::FinalPair,
+    timing: ScanTimingFixture,
+) -> oa_truth::Truth {
     let reference = oa_geo::aeqd::frame_new(41.97694027, -87.90814972);
-    let along = -3_500.0;
     let cross = -(pair.ntz_half_width_m + 500.0);
+    let (along, cross, heading, speed_mps) = match timing {
+        ScanTimingFixture::BeamCrossing => (
+            -3_500.0,
+            cross,
+            (pair.axis_east * 0.866_025_403_784_438_6 + pair.normal_east * 0.5)
+                .atan2(pair.axis_north * 0.866_025_403_784_438_6 + pair.normal_north * 0.5)
+                .to_degrees()
+                .rem_euclid(360.0),
+            130.0,
+        ),
+        ScanTimingFixture::ExactRadial => (
+            0.0,
+            cross,
+            pair.normal_east
+                .atan2(pair.normal_north)
+                .to_degrees()
+                .rem_euclid(360.0),
+            50.0,
+        ),
+    };
     let east = pair.origin.east_m + pair.axis_east * along + pair.normal_east * cross;
     let north = pair.origin.north_m + pair.axis_north * along + pair.normal_north * cross;
     let (lat, lon) = oa_geo::aeqd::unproject(&reference, east, north).expect("synthetic start");
-    let heading = (pair.axis_east * 0.866_025_403_784_438_6 + pair.normal_east * 0.5)
-        .atan2(pair.axis_north * 0.866_025_403_784_438_6 + pair.normal_north * 0.5)
-        .to_degrees()
-        .rem_euclid(360.0);
     build_synthetic_truth(
         lat,
         lon,
@@ -110,7 +134,7 @@ fn synthetic_truth(pair: oa_runway::final_monitor::FinalPair) -> oa_truth::Truth
             x0: 0.0,
             y0: 0.0,
             heading_deg: heading,
-            speed_mps: 130.0,
+            speed_mps,
             alt_ft: 3_000.0,
             segs: vec![Seg {
                 dur_s: 60.0,
@@ -124,13 +148,30 @@ fn synthetic_truth(pair: oa_runway::final_monitor::FinalPair) -> oa_truth::Truth
 
 // Shared implementation exercised by both named sensor-cadence tests below.
 // HAZARD: HZ-CA-001, HZ-NET-STATE-001
-fn run_blunder_pipeline(sensor_period_ns: i64, monitor_update_ns: u64, minimum_reports: usize) {
+fn run_blunder_pipeline(
+    sensor_period_ns: i64,
+    monitor_update_ns: u64,
+    minimum_reports: usize,
+    timing: ScanTimingFixture,
+) {
     let config = FinalMonitorConfig {
         update_ns: monitor_update_ns,
         ..DEFAULT_CONFIG
     };
-    let (plane, _r27r, _r27l, pair) = kord_pair(config);
-    let truth = synthetic_truth(pair);
+    let (plane, _r27r, _r27l, mut pair) = kord_pair(config);
+    if timing == ScanTimingFixture::ExactRadial {
+        // Place the final zone north of the sensor and make the flight course radial from it.
+        // This preserves real simulated timestamps while producing one report each revolution.
+        pair.origin = Local {
+            east_m: 0.0,
+            north_m: 10_000.0,
+        };
+        pair.axis_east = 1.0;
+        pair.axis_north = 0.0;
+        pair.normal_east = 0.0;
+        pair.normal_north = 1.0;
+    }
+    let truth = synthetic_truth(pair, timing);
     // Keep this deterministic scenario focused on pipeline timing, not detection-probability
     // luck. Geometry/noise remain the named Mode S profile; the explicit synthetic run sets
     // detection to 1 and false/split rates to zero so the test has no silently lost target work.
@@ -148,7 +189,11 @@ fn run_blunder_pipeline(sensor_period_ns: i64, monitor_update_ns: u64, minimum_r
         lon_deg: -87.90814972,
         height_m: 207.264,
         rotation_period_s: sensor_period_ns as f64 / 1_000_000_000.0,
-        initial_az_deg: 0.0,
+        // Avoid solving a fixed radial bearing at the revolution boundary.
+        initial_az_deg: match timing {
+            ScanTimingFixture::BeamCrossing => 0.0,
+            ScanTimingFixture::ExactRadial => 15.0,
+        },
         epoch_ns: EPOCH_NS,
         coverage_range_m: 60.0 * 1_852.0,
         earth_k: EARTH_K_STANDARD,
@@ -160,16 +205,26 @@ fn run_blunder_pipeline(sensor_period_ns: i64, monitor_update_ns: u64, minimum_r
         sac: 1,
         sic: 1,
     };
+    let revolutions = 60_000_000_000_i64 / sensor_period_ns;
+    let simulation_duration_ns = revolutions
+        .checked_mul(sensor_period_ns)
+        .expect("bounded synthetic simulation duration");
+    let simulation_end_ns = EPOCH_NS
+        .checked_add(simulation_duration_ns)
+        .expect("bounded synthetic simulation end");
     let (simulated, sim_stats) = simulate_radar(
         &truth,
         &simulated_site,
         0xA2_2026,
         EPOCH_NS,
-        EPOCH_NS + 60_000_000_000,
+        simulation_end_ns,
     )
     .expect("bounded synthetic radar scans");
     assert_eq!(sim_stats.aircraft, 1);
-    assert!(sim_stats.missed == 0 && sim_stats.unsolved == 0 && sim_stats.no_truth == 0);
+    assert!(
+        sim_stats.missed == 0 && sim_stats.unsolved == 0 && sim_stats.no_truth == 0,
+        "simulator did not produce a complete set of true plots: timing={timing:?}, window=[{EPOCH_NS},{simulation_end_ns}) duration_ns={simulation_duration_ns} revolutions={revolutions}, stats={sim_stats:?}"
+    );
     let sensor_site = RadarSite {
         lat_deg: simulated_site.lat_deg,
         lon_deg: simulated_site.lon_deg,
@@ -219,6 +274,7 @@ fn run_blunder_pipeline(sensor_period_ns: i64, monitor_update_ns: u64, minimum_r
     let mut unprojectable_tracker_rows = 0u64;
     let mut monitor_calls = 0u64;
     let mut monitor_due_updates = 0u64;
+    let mut monitor_degraded_due_updates = 0u64;
     let mut monitor_not_due_updates = 0u64;
     let mut monitor_examined_rows = 0u64;
     let mut monitor_alert_rows = 0u64;
@@ -226,6 +282,8 @@ fn run_blunder_pipeline(sensor_period_ns: i64, monitor_update_ns: u64, minimum_r
     let mut monitor_capacity_refusals = 0u64;
     let mut monitor_clock_refusals = 0u64;
     let mut monitor_degraded_updates = 0u64;
+    let mut monitor_expected_degraded_updates = 0u64;
+    let mut previous_monitor_input_ns = None;
     for plot_ix in 0..plots_len(&simulated) {
         let Some(plot) = plots_row(&simulated, plot_ix) else {
             malformed_plot_rows += 1;
@@ -305,6 +363,8 @@ fn run_blunder_pipeline(sensor_period_ns: i64, monitor_update_ns: u64, minimum_r
         let lats = [output.lat_e7[i]];
         let lons = [output.lon_e7[i]];
         let report_ns = u64::try_from(measurement.toa_ns).expect("nonnegative sensor time");
+        let expected_degraded = previous_monitor_input_ns
+            .is_some_and(|previous| report_ns.saturating_sub(previous) > DEGRADED_AFTER_NS);
         let result = update(
             pair,
             &mut monitor,
@@ -343,11 +403,18 @@ fn run_blunder_pipeline(sensor_period_ns: i64, monitor_update_ns: u64, minimum_r
                 monitor_clock_refusals += 1;
                 continue;
             }
+            Err(UpdateError::UnusableUncertainty | UpdateError::CoordinateMismatch) => {
+                monitor_bad_input_refusals += 1;
+                continue;
+            }
         };
         monitor_calls += 1;
         if result.due {
             monitor_due_updates += 1;
             monitor_examined_rows += u64::from(result.examined);
+            if result.degraded {
+                monitor_degraded_due_updates += 1;
+            }
         } else {
             monitor_not_due_updates += 1;
         }
@@ -355,6 +422,14 @@ fn run_blunder_pipeline(sensor_period_ns: i64, monitor_update_ns: u64, minimum_r
         if result.degraded {
             monitor_degraded_updates += 1;
         }
+        if expected_degraded {
+            monitor_expected_degraded_updates += 1;
+        }
+        assert_eq!(
+            result.degraded, expected_degraded,
+            "degraded status follows the actual interval between monitor inputs"
+        );
+        previous_monitor_input_ns = Some(report_ns);
         assert!(
             result.alerts <= 1,
             "one predicted track fits the alert buffer"
@@ -392,10 +467,16 @@ fn run_blunder_pipeline(sensor_period_ns: i64, monitor_update_ns: u64, minimum_r
     assert_eq!(monitor_bad_input_refusals, 0);
     assert_eq!(monitor_capacity_refusals, 0);
     assert_eq!(monitor_clock_refusals, 0);
-    assert_eq!(monitor_degraded_updates, 0);
+    assert_eq!(monitor_degraded_updates, monitor_expected_degraded_updates);
     assert_eq!(monitor_calls, monitor_due_updates + monitor_not_due_updates);
     assert!(monitor_due_updates > 0);
-    assert_eq!(monitor_examined_rows, monitor_due_updates);
+    // Mutation killed: degraded due frames must not be counted as examined track rows.
+    assert_eq!(
+        monitor_examined_rows,
+        monitor_due_updates
+            .checked_sub(monitor_degraded_due_updates)
+            .expect("degraded due updates cannot exceed due updates")
+    );
     assert!(monitor_alert_rows > 0);
     assert!(!report_times.is_empty());
     let cadence_tolerance_ns = 200_000_000;
@@ -406,6 +487,15 @@ fn run_blunder_pipeline(sensor_period_ns: i64, monitor_update_ns: u64, minimum_r
         }),
         "beam-crossing timestamps, not tracker ticks, define report cadence"
     );
+    if timing == ScanTimingFixture::ExactRadial {
+        assert!(report_times.iter().all(|&dt| dt == sensor_period_ns));
+        assert_eq!(monitor_degraded_updates, 0);
+    } else if sensor_period_ns == TERMINAL_SENSOR_PERIOD_NS {
+        assert!(report_times
+            .iter()
+            .any(|&dt| { u64::try_from(dt).is_ok_and(|gap| gap > DEGRADED_AFTER_NS) }));
+        assert!(monitor_expected_degraded_updates > 0);
+    }
     let tracker_stats = oa_track::tracker_stats(&tracker);
     assert_eq!(tracker_stats.refused.iter().sum::<u64>(), 0);
     assert_eq!(tracker_stats.capacity_refused, 0);
@@ -414,14 +504,27 @@ fn run_blunder_pipeline(sensor_period_ns: i64, monitor_update_ns: u64, minimum_r
         caution_at.is_some(),
         "the real tracker output should predict NTZ entry"
     );
-    assert!(
-        warning_at.is_some(),
-        "the real tracker output should later enter the NTZ"
-    );
-    assert!(
-        caution_at < warning_at,
-        "the track should progress from caution to warning"
-    );
+    if timing == ScanTimingFixture::BeamCrossing && sensor_period_ns == TERMINAL_SENSOR_PERIOD_NS {
+        // Mutation killed: do not publish a warning using state whose later sensor updates were
+        // correctly withheld as cadence-degraded.
+        assert!(
+            warning_at.is_none(),
+            "jittered reports must not produce a stale warning: simulator={sim_stats:?}, plots={true_plots}, degraded={monitor_degraded_updates}, expected_degraded={monitor_expected_degraded_updates}, examined={monitor_examined_rows}, alerts={monitor_alert_rows}, caution_at={caution_at:?}, warning_at={warning_at:?}, tracker_stats={:?}",
+            oa_track::tracker_stats(&tracker)
+        );
+        assert!(monitor_degraded_updates > 0);
+        assert_eq!(monitor_degraded_updates, monitor_expected_degraded_updates);
+    } else {
+        assert!(
+            warning_at.is_some(),
+            "the real tracker output should later enter the NTZ: timing={timing:?}, simulator={sim_stats:?}, plots={true_plots}, conversion_refusals={conversion_refusals}, empty_outputs={empty_confirmed_tracker_outputs}, missing_addresses={missing_tracker_addresses}, unprojectable_rows={unprojectable_tracker_rows}, monitor_calls={monitor_calls}, due={monitor_due_updates}, not_due={monitor_not_due_updates}, degraded={monitor_degraded_updates}, expected_degraded={monitor_expected_degraded_updates}, examined={monitor_examined_rows}, alerts={monitor_alert_rows}, bad_input={monitor_bad_input_refusals}, capacity_refusals={monitor_capacity_refusals}, clock_refusals={monitor_clock_refusals}, tracker_stats={:?}, caution_at={caution_at:?}, warning_at={warning_at:?}",
+            oa_track::tracker_stats(&tracker)
+        );
+        assert!(
+            caution_at < warning_at,
+            "the track should progress from caution to warning"
+        );
+    }
 }
 
 // REQ: OA-RWY-015, OA-RWY-016
@@ -431,16 +534,30 @@ fn synthetic_1_2s_reports_track_a_blunder_from_caution_to_warning() {
         DEFAULT_SENSOR_PERIOD_NS,
         DEFAULT_SENSOR_PERIOD_NS as u64,
         30,
+        ScanTimingFixture::BeamCrossing,
     );
 }
 
 // REQ: OA-RWY-015, OA-RWY-016, OA-RWY-017
 #[test]
-fn synthetic_4_8s_reports_track_a_blunder_without_false_degraded_status() {
+fn jittered_4_8s_beam_reports_degrade_only_after_an_actual_over_limit_gap() {
     assert_eq!(DEGRADED_AFTER_NS, TERMINAL_SENSOR_PERIOD_NS as u64);
     run_blunder_pipeline(
         TERMINAL_SENSOR_PERIOD_NS,
         TERMINAL_SENSOR_PERIOD_NS as u64,
         10,
+        ScanTimingFixture::BeamCrossing,
+    );
+}
+
+// REQ: OA-RWY-015, OA-RWY-016, OA-RWY-017
+#[test]
+fn exact_4_8s_radial_reports_track_a_blunder_without_degradation() {
+    assert_eq!(DEGRADED_AFTER_NS, TERMINAL_SENSOR_PERIOD_NS as u64);
+    run_blunder_pipeline(
+        TERMINAL_SENSOR_PERIOD_NS,
+        TERMINAL_SENSOR_PERIOD_NS as u64,
+        10,
+        ScanTimingFixture::ExactRadial,
     );
 }

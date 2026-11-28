@@ -374,6 +374,8 @@ fn acknowledge(worker: &mut Worker, generation: u64, sequence: u64) {
     assert_eq!(worker.receive(), format!("ACKED\t{generation}\t{sequence}"));
 }
 
+// Mutation killed: removing co-timed source identity/callsign evidence leaves no trajectory rows
+// in recovered replay frames, while the retained-prefix hash and process-death comparisons remain.
 // REQ: OA-REG-010
 #[test]
 fn integrated_runtime_recomputes_retained_prefix_across_process_death() {

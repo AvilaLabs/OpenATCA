@@ -841,8 +841,8 @@ struct RecordedFrameAdapter<'a> {
     adsb_centre: [u8; 4],
     next_surveillance_sequence: u64,
     next_flight_sequence: u64,
-    parser: Parser,
-    sfdps_decoder: Decoder,
+    parser: Option<Parser>,
+    sfdps_decoder: Option<Decoder>,
     quarantine_queue: QuarantineQueue,
     conversion_started: Instant,
     receipt_group_limit: usize,
@@ -872,24 +872,14 @@ impl<'a> RecordedFrameAdapter<'a> {
         out.provenance
             .try_reserve_exact(max_events.min(4096))
             .map_err(|_| AdapterError::AllocationRefused)?;
-        let parser = Parser::new(XmlLimits {
-            max_input_bytes: oa_feed::MAX_PAYLOAD,
-            max_elements: 262_144,
-            max_attributes: 524_288,
-            max_text_nodes: 262_144,
-            ..XmlLimits::default()
-        })
-        .map_err(|_| AdapterError::UnsupportedEvent)?;
-        let mut fixm_limits = FixmLimits::new(oa_sealed::sealed_drop_window());
-        fixm_limits.max_elements = 262_144;
         Ok(Self {
             out,
             max_events,
             adsb_centre,
             next_surveillance_sequence: sequence_starts[0],
             next_flight_sequence: sequence_starts[1],
-            parser,
-            sfdps_decoder: Decoder::new(fixm_limits),
+            parser: None,
+            sfdps_decoder: None,
             quarantine_queue: queue_new(),
             conversion_started: Instant::now(),
             receipt_group_limit,
@@ -1032,6 +1022,7 @@ impl<'a> RecordedFrameAdapter<'a> {
                 result
             }
             RecordingSource::Sfdps => {
+                self.initialize_sfdps_state()?;
                 self.out.counts.frames_sfdps = self.out.counts.frames_sfdps.saturating_add(1);
                 let mut quarantine = std::mem::take(&mut self.out.quarantine);
                 let result = adapt_sfdps_frame(
@@ -1039,8 +1030,10 @@ impl<'a> RecordedFrameAdapter<'a> {
                     issue_receipt_ns,
                     self.max_events,
                     &mut self.next_flight_sequence,
-                    &mut self.parser,
-                    &mut self.sfdps_decoder,
+                    self.parser.as_mut().ok_or(AdapterError::UnsupportedEvent)?,
+                    self.sfdps_decoder
+                        .as_mut()
+                        .ok_or(AdapterError::UnsupportedEvent)?,
                     &mut self.quarantine_queue,
                     &mut quarantine,
                     self.conversion_started,
@@ -1051,6 +1044,27 @@ impl<'a> RecordedFrameAdapter<'a> {
                 result
             }
         }
+    }
+
+    fn initialize_sfdps_state(&mut self) -> Result<(), AdapterError> {
+        if self.parser.is_none() {
+            self.parser = Some(
+                Parser::new(XmlLimits {
+                    max_input_bytes: oa_feed::MAX_PAYLOAD,
+                    max_elements: 262_144,
+                    max_attributes: 524_288,
+                    max_text_nodes: 262_144,
+                    ..XmlLimits::default()
+                })
+                .map_err(|_| AdapterError::UnsupportedEvent)?,
+            );
+        }
+        if self.sfdps_decoder.is_none() {
+            let mut fixm_limits = FixmLimits::new(oa_sealed::sealed_drop_window());
+            fixm_limits.max_elements = 262_144;
+            self.sfdps_decoder = Some(Decoder::new(fixm_limits));
+        }
+        Ok(())
     }
 
     fn finish(mut self) -> Result<RecordedAdaptation, AdapterError> {
@@ -1267,7 +1281,7 @@ pub(crate) fn adapt_ordered_adsb_row(
     let mut adapted = adapt_recorded_frames_with_sequence_starts_and_quality_limit(
         &[frame],
         input_counts,
-        context.max_events,
+        context.max_events.min(1),
         context.centre,
         context.sequence_starts,
         context.receipt_group_limit,
@@ -1703,7 +1717,12 @@ fn adapt_adsb_frame(
             .counts
             .adsb_unknown_gufi_positions
             .saturating_add(adapted.counts.unknown_identity);
-        if let Some(event) = adapted.events.into_iter().next() {
+        if let Some(event) = adapted
+            .events
+            .into_iter()
+            .next()
+            .map(|event| attach_adsb_callsign(event, source_row.callsign))
+        {
             let next = next_sequence
                 .checked_add(1)
                 .ok_or(AdapterError::CountOverflow)?;
@@ -2870,6 +2889,7 @@ pub fn adapt_positions(
                 east_mmps: row.east_mmps,
                 north_mmps: row.north_mmps,
                 vertical_rate_fpm: row.vertical_rate_fpm,
+                track_callsign: None,
             },
         });
         counts.emitted += 1;
@@ -2889,6 +2909,7 @@ pub fn serialize_positions(events: &[NormalizedEvent]) -> Result<String, Adapter
             east_mmps,
             north_mmps,
             vertical_rate_fpm,
+            track_callsign,
         } = event.kind
         else {
             return Err(AdapterError::UnsupportedEvent);
@@ -2900,9 +2921,16 @@ pub fn serialize_positions(events: &[NormalizedEvent]) -> Result<String, Adapter
             return Err(AdapterError::InvalidCentre);
         }
         use core::fmt::Write;
+        let callsign_suffix = match track_callsign {
+            Some(callsign) if normalized_adsb_callsign(callsign) == Some(callsign) => {
+                format!("\tCALLSIGN\t{}", ascii_trimmed(&callsign)?)
+            }
+            Some(_) => return Err(AdapterError::InvalidField),
+            None => String::new(),
+        };
         writeln!(
             out,
-            "v1\t{}\t{}\t{}\tSURVEILLANCE\t{:032X}\t{:06X}\t{}\tPOS\t{}\t{}\t{}\t{}\t{}\t{}",
+            "v1\t{}\t{}\t{}\tSURVEILLANCE\t{:032X}\t{:06X}\t{}\tPOS\t{}\t{}\t{}\t{}\t{}\t{}{}",
             event.receipt_ns,
             event.source_ns,
             event.sequence,
@@ -2914,7 +2942,8 @@ pub fn serialize_positions(events: &[NormalizedEvent]) -> Result<String, Adapter
             altitude_ft.map_or_else(|| "-".to_owned(), |v| v.to_string()),
             east_mmps,
             north_mmps,
-            vertical_rate_fpm.map_or_else(|| "-".to_owned(), |v| v.to_string())
+            vertical_rate_fpm.map_or_else(|| "-".to_owned(), |v| v.to_string()),
+            callsign_suffix
         )
         .map_err(|_| AdapterError::CountOverflow)?;
     }
@@ -2924,171 +2953,185 @@ pub fn serialize_positions(events: &[NormalizedEvent]) -> Result<String, Adapter
 /// Serializes the complete subset emitted by the recording adapter as the established OA-RS v1
 /// protocol. A row that cannot be represented within 768 bytes refuses the serialization whole.
 pub fn serialize_recorded_events(events: &[NormalizedEvent]) -> Result<String, AdapterError> {
-    use crate::input::{FlightOperation, HandoffOperation, MAX_EVENT_LINE_BYTES};
-    use core::fmt::Write;
     let mut out = String::from("OA-RS\t1\n");
     for event in events {
-        let (source_name, kind) = match event.source {
-            SourceKind::Surveillance => ("SURVEILLANCE", "POS"),
-            SourceKind::Flight => ("FLIGHT", "FLIGHT"),
-            _ => return Err(AdapterError::UnsupportedEvent),
-        };
-        if !crate::input::is_valid_centre_code(&event.centre)
-            || event.identity.aircraft_address > 0x01ff_ffff
-        {
-            return Err(AdapterError::InvalidCentre);
-        }
-        let centre_text = ascii_trimmed(&event.centre)?;
-        write!(
-            out,
-            "v1\t{}\t{}\t{}\t{}\t{:032X}\t{:06X}\t{}\t{}",
-            event.receipt_ns,
-            event.source_ns,
-            event.sequence,
-            source_name,
-            event.identity.flight_gufi,
-            event.identity.aircraft_address,
-            centre_text,
-            kind
-        )
-        .map_err(|_| AdapterError::CountOverflow)?;
-        match event.kind {
-            EventKind::Position {
-                latitude_e7,
-                longitude_e7,
-                altitude_ft,
-                east_mmps,
-                north_mmps,
-                vertical_rate_fpm,
-            } => {
-                if event.source != SourceKind::Surveillance {
-                    return Err(AdapterError::UnsupportedEvent);
-                }
-                write!(
-                    out,
-                    "\t{}\t{}\t{}\t{}\t{}\t{}",
-                    latitude_e7,
-                    longitude_e7,
-                    altitude_ft.map_or_else(|| "-".to_owned(), |v| v.to_string()),
-                    east_mmps,
-                    north_mmps,
-                    vertical_rate_fpm.map_or_else(|| "-".to_owned(), |v| v.to_string())
-                )
-                .map_err(|_| AdapterError::CountOverflow)?;
-            }
-            EventKind::Flight(op) if event.source == SourceKind::Flight => {
-                match op {
-                    FlightOperation::SetPlanByKey { .. }
-                    | FlightOperation::CancelPlanByKey { .. }
-                    | FlightOperation::SetOwnerByKey { .. } => {
-                        // The normalized recording format carries GUFI only. A full key cannot
-                        // be serialized without changing the format, so refuse rather than drop it.
-                        return Err(AdapterError::UnsupportedEvent);
-                    }
-                    FlightOperation::SetPlan { plan_id, status } => {
-                        if !valid_padded_code(&plan_id) {
-                            return Err(AdapterError::InvalidField);
-                        }
-                        write!(out, "\tPLAN\t{}\t{}", ascii_trimmed(&plan_id)?, status)
-                    }
-                    FlightOperation::Depart => write!(out, "\tDEPART"),
-                    FlightOperation::Complete => write!(out, "\tCOMPLETE"),
-                    FlightOperation::Cancel => write!(out, "\tCANCEL"),
-                    FlightOperation::Drop => write!(out, "\tDROP"),
-                    FlightOperation::AssignAltitude { altitude_ft } => {
-                        write!(out, "\tASSIGNED\t{altitude_ft}")
-                    }
-                    FlightOperation::ClearAssignedAltitude => write!(out, "\tUNASSIGNED"),
-                    FlightOperation::SetInterimAltitude { altitude_ft } => write!(
-                        out,
-                        "\tINTERIM\t{}",
-                        altitude_ft.map_or_else(|| "-".to_owned(), |v| v.to_string())
-                    ),
-                    FlightOperation::SetOwner { unit } => {
-                        write!(out, "\tOWNER\t{}", ascii_trimmed(&unit)?)
-                    }
-                    FlightOperation::SetOwnerParts {
-                        unit_code,
-                        sector_code,
-                    } => {
-                        if !valid_padded_unit_code(&unit_code)
-                            || (sector_code != [0; 4] && !valid_padded_code(&sector_code))
-                        {
-                            return Err(AdapterError::InvalidField);
-                        }
-                        let sector = if sector_code == [0; 4] {
-                            "-".to_owned()
-                        } else {
-                            ascii_trimmed(&sector_code)?
-                        };
-                        write!(
-                            out,
-                            "\tOWNER_PARTS\t{}\t{}",
-                            ascii_trimmed(&unit_code)?,
-                            sector
-                        )
-                    }
-                    FlightOperation::SetAddress => write!(out, "\tADDRESS"),
-                    FlightOperation::SetIdentity {
-                        callsign,
-                        departure,
-                        arrival,
-                    } => {
-                        if callsign == [0; 8] && departure == [0; 12] && arrival == [0; 12] {
-                            return Err(AdapterError::InvalidField);
-                        }
-                        let operation =
-                            if callsign == [0; 8] || departure == [0; 12] || arrival == [0; 12] {
-                                "IDENTITY_PARTIAL"
-                            } else {
-                                "IDENTITY"
-                            };
-                        write!(
-                            out,
-                            "\t{operation}\t{}\t{}\t{}",
-                            ascii_optional_trimmed(&callsign)?,
-                            ascii_optional_trimmed(&departure)?,
-                            ascii_optional_trimmed(&arrival)?
-                        )
-                    }
-                    FlightOperation::Handoff { operation, unit } => {
-                        let name = match operation {
-                            HandoffOperation::Update => "HO_UPDATE",
-                            HandoffOperation::Offer => "HO_OFFER",
-                            HandoffOperation::Accept => "HO_ACCEPT",
-                            HandoffOperation::Take => "HO_TAKE",
-                            HandoffOperation::Retract => "HO_RETRACT",
-                            HandoffOperation::Fail => "HO_FAIL",
-                        };
-                        write!(out, "\t{name}\t{}", ascii_trimmed(&unit)?)
-                    }
-                    FlightOperation::HandoffByKey { .. } => {
-                        // The normalized text format has only GUFI identity; serializing a
-                        // full-key NAM event would silently lose its identity, so refuse it.
-                        return Err(AdapterError::UnsupportedEvent);
-                    }
-                }
-                .map_err(|_| AdapterError::CountOverflow)?;
-            }
-            _ => return Err(AdapterError::UnsupportedEvent),
-        }
-        if let Some(source_message_id) = event.source_message_id {
-            if event.source != SourceKind::Flight {
-                return Err(AdapterError::UnsupportedEvent);
-            }
-            write!(out, "\tSRCMSG\t{source_message_id}")
-                .map_err(|_| AdapterError::CountOverflow)?;
-        }
-        if out
-            .len()
-            .saturating_sub(out.rfind('\n').map_or(0, |i| i + 1))
-            > MAX_EVENT_LINE_BYTES
-        {
-            return Err(AdapterError::RowTooLong);
-        }
-        out.push('\n');
+        append_recorded_event_row(&mut out, event)?;
     }
     Ok(out)
+}
+
+fn serialize_recorded_event_row(event: &NormalizedEvent) -> Result<String, AdapterError> {
+    use crate::input::MAX_EVENT_LINE_BYTES;
+    use core::fmt::Write;
+    let (source_name, kind) = match event.source {
+        SourceKind::Surveillance => ("SURVEILLANCE", "POS"),
+        SourceKind::Flight => ("FLIGHT", "FLIGHT"),
+        _ => return Err(AdapterError::UnsupportedEvent),
+    };
+    if !crate::input::is_valid_centre_code(&event.centre)
+        || event.identity.aircraft_address > 0x01ff_ffff
+    {
+        return Err(AdapterError::InvalidCentre);
+    }
+    let mut row = String::new();
+    write!(
+        row,
+        "v1\t{}\t{}\t{}\t{}\t{:032X}\t{:06X}\t{}\t{}",
+        event.receipt_ns,
+        event.source_ns,
+        event.sequence,
+        source_name,
+        event.identity.flight_gufi,
+        event.identity.aircraft_address,
+        ascii_trimmed(&event.centre)?,
+        kind
+    )
+    .map_err(|_| AdapterError::CountOverflow)?;
+    append_recorded_event_payload(&mut row, event)?;
+    if row.len() > MAX_EVENT_LINE_BYTES {
+        return Err(AdapterError::RowTooLong);
+    }
+    row.push('\n');
+    Ok(row)
+}
+
+fn append_recorded_event_payload(
+    out: &mut String,
+    event: &NormalizedEvent,
+) -> Result<(), AdapterError> {
+    use crate::input::{FlightOperation, HandoffOperation};
+    use core::fmt::Write;
+    match event.kind {
+        EventKind::Position {
+            latitude_e7,
+            longitude_e7,
+            altitude_ft,
+            east_mmps,
+            north_mmps,
+            vertical_rate_fpm,
+            track_callsign,
+        } => {
+            if event.source != SourceKind::Surveillance {
+                return Err(AdapterError::UnsupportedEvent);
+            }
+            write!(
+                out,
+                "\t{}\t{}\t{}\t{}\t{}\t{}",
+                latitude_e7,
+                longitude_e7,
+                altitude_ft.map_or_else(|| "-".to_owned(), |v| v.to_string()),
+                east_mmps,
+                north_mmps,
+                vertical_rate_fpm.map_or_else(|| "-".to_owned(), |v| v.to_string())
+            )
+            .map_err(|_| AdapterError::CountOverflow)?;
+            if let Some(callsign) = track_callsign {
+                if normalized_adsb_callsign(callsign) != Some(callsign) {
+                    return Err(AdapterError::InvalidField);
+                }
+                write!(out, "\tCALLSIGN\t{}", ascii_trimmed(&callsign)?)
+                    .map_err(|_| AdapterError::CountOverflow)?;
+            }
+        }
+        EventKind::Flight(op) if event.source == SourceKind::Flight => {
+            match op {
+                FlightOperation::SetPlanByKey { .. }
+                | FlightOperation::CancelPlanByKey { .. }
+                | FlightOperation::SetOwnerByKey { .. } => {
+                    return Err(AdapterError::UnsupportedEvent);
+                }
+                FlightOperation::SetPlan { plan_id, status } => {
+                    if !valid_padded_code(&plan_id) {
+                        return Err(AdapterError::InvalidField);
+                    }
+                    write!(out, "\tPLAN\t{}\t{}", ascii_trimmed(&plan_id)?, status)
+                }
+                FlightOperation::Depart => write!(out, "\tDEPART"),
+                FlightOperation::Complete => write!(out, "\tCOMPLETE"),
+                FlightOperation::Cancel => write!(out, "\tCANCEL"),
+                FlightOperation::Drop => write!(out, "\tDROP"),
+                FlightOperation::AssignAltitude { altitude_ft } => {
+                    write!(out, "\tASSIGNED\t{altitude_ft}")
+                }
+                FlightOperation::ClearAssignedAltitude => write!(out, "\tUNASSIGNED"),
+                FlightOperation::SetInterimAltitude { altitude_ft } => write!(
+                    out,
+                    "\tINTERIM\t{}",
+                    altitude_ft.map_or_else(|| "-".to_owned(), |v| v.to_string())
+                ),
+                FlightOperation::SetOwner { unit } => {
+                    write!(out, "\tOWNER\t{}", ascii_trimmed(&unit)?)
+                }
+                FlightOperation::SetOwnerParts {
+                    unit_code,
+                    sector_code,
+                } => {
+                    if !valid_padded_unit_code(&unit_code)
+                        || (sector_code != [0; 4] && !valid_padded_code(&sector_code))
+                    {
+                        return Err(AdapterError::InvalidField);
+                    }
+                    let sector = if sector_code == [0; 4] {
+                        "-".to_owned()
+                    } else {
+                        ascii_trimmed(&sector_code)?
+                    };
+                    write!(
+                        out,
+                        "\tOWNER_PARTS\t{}\t{}",
+                        ascii_trimmed(&unit_code)?,
+                        sector
+                    )
+                }
+                FlightOperation::SetAddress => write!(out, "\tADDRESS"),
+                FlightOperation::SetIdentity {
+                    callsign,
+                    departure,
+                    arrival,
+                } => {
+                    if callsign == [0; 8] && departure == [0; 12] && arrival == [0; 12] {
+                        return Err(AdapterError::InvalidField);
+                    }
+                    let operation =
+                        if callsign == [0; 8] || departure == [0; 12] || arrival == [0; 12] {
+                            "IDENTITY_PARTIAL"
+                        } else {
+                            "IDENTITY"
+                        };
+                    write!(
+                        out,
+                        "\t{operation}\t{}\t{}\t{}",
+                        ascii_optional_trimmed(&callsign)?,
+                        ascii_optional_trimmed(&departure)?,
+                        ascii_optional_trimmed(&arrival)?
+                    )
+                }
+                FlightOperation::Handoff { operation, unit } => {
+                    let name = match operation {
+                        HandoffOperation::Update => "HO_UPDATE",
+                        HandoffOperation::Offer => "HO_OFFER",
+                        HandoffOperation::Accept => "HO_ACCEPT",
+                        HandoffOperation::Take => "HO_TAKE",
+                        HandoffOperation::Retract => "HO_RETRACT",
+                        HandoffOperation::Fail => "HO_FAIL",
+                    };
+                    write!(out, "\t{name}\t{}", ascii_trimmed(&unit)?)
+                }
+                FlightOperation::HandoffByKey { .. } => {
+                    return Err(AdapterError::UnsupportedEvent);
+                }
+            }
+            .map_err(|_| AdapterError::CountOverflow)?;
+        }
+        _ => return Err(AdapterError::UnsupportedEvent),
+    }
+    if let Some(source_message_id) = event.source_message_id {
+        if event.source != SourceKind::Flight {
+            return Err(AdapterError::UnsupportedEvent);
+        }
+        write!(out, "\tSRCMSG\t{source_message_id}").map_err(|_| AdapterError::CountOverflow)?;
+    }
+    Ok(())
 }
 
 /// Append one established OA-RS event row without its file header. The caller must bound the
@@ -3097,14 +3140,10 @@ pub(crate) fn append_recorded_event_row(
     out: &mut String,
     event: &NormalizedEvent,
 ) -> Result<(), AdapterError> {
-    let serialized = serialize_recorded_events(core::slice::from_ref(event))?;
-    let newline = serialized.find('\n').ok_or(AdapterError::InvalidField)?;
-    let row = serialized
-        .get(newline + 1..)
-        .ok_or(AdapterError::InvalidField)?;
+    let row = serialize_recorded_event_row(event)?;
     out.try_reserve(row.len())
         .map_err(|_| AdapterError::AllocationRefused)?;
-    out.push_str(row);
+    out.push_str(&row);
     Ok(())
 }
 
@@ -3236,6 +3275,36 @@ fn ascii_optional_trimmed<const N: usize>(bytes: &[u8; N]) -> Result<String, Ada
     } else {
         ascii_trimmed(bytes)
     }
+}
+
+fn normalized_adsb_callsign(source: [u8; 8]) -> Option<[u8; 8]> {
+    if !source.is_ascii() {
+        return None;
+    }
+    let end = source
+        .iter()
+        .position(|byte| *byte == b' ' || *byte == 0)
+        .unwrap_or(source.len());
+    let prefix = source.get(..end)?;
+    if prefix.is_empty()
+        || !prefix.iter().all(u8::is_ascii_alphanumeric)
+        || source
+            .get(end..)?
+            .iter()
+            .any(|byte| *byte != b' ' && *byte != 0)
+    {
+        return None;
+    }
+    let mut normalized = [0; 8];
+    normalized.get_mut(..end)?.copy_from_slice(prefix);
+    Some(normalized)
+}
+
+fn attach_adsb_callsign(mut event: NormalizedEvent, source: [u8; 8]) -> NormalizedEvent {
+    if let EventKind::Position { track_callsign, .. } = &mut event.kind {
+        *track_callsign = normalized_adsb_callsign(source);
+    }
+    event
 }
 
 fn ascii_trimmed(bytes: &[u8]) -> Result<String, AdapterError> {
@@ -3393,6 +3462,22 @@ mod tests {
             north_mmps: -456,
             vertical_rate_fpm: Some(0),
         }
+    }
+
+    #[test]
+    fn one_row_adapter_does_not_initialize_sfdps_state() {
+        // Mutation killed: allocate the SFDPS XML parser and decoder for an ADS-B-only row.
+        let mut quality_cache = oa_track::adsb::AdsbQualityCache::default();
+        let adapter = RecordedFrameAdapter::new(
+            RecordingCounts::default(),
+            1,
+            *b"ZAU1",
+            [0, 0],
+            crate::session::RECORDED_HOUR_MAX_EVENTS_PER_RECEIPT,
+            &mut quality_cache,
+        )
+        .unwrap();
+        assert!(adapter.parser.is_none() && adapter.sfdps_decoder.is_none());
     }
 
     #[test]
@@ -3961,6 +4046,7 @@ mod tests {
         let base_ns = 1_893_456_780_000_000_000i64;
         let reports = [
             oa_adsb::Row {
+                callsign: *b"LATE123 ",
                 time_ns: base_ns + 900_000_000,
                 icao: 0xABCDEF,
                 lat_e7: 419_000_000,
@@ -3978,6 +4064,7 @@ mod tests {
                 ..oa_adsb::ROW_EMPTY
             },
             oa_adsb::Row {
+                callsign: *b"EARLY12 ",
                 time_ns: base_ns + 100_000_000,
                 icao: 0x123456,
                 lat_e7: 420_000_000,
@@ -4054,6 +4141,30 @@ mod tests {
         assert_eq!(got.counts.adsb_rows_order_refused, 0);
         assert_eq!(got.counts.invalid_position_rows, 0);
         assert_eq!(got.counts.events_emitted, 2);
+        let EventKind::Position {
+            track_callsign: early_callsign,
+            ..
+        } = got.events[0].kind
+        else {
+            panic!("ADS-B adapter emitted a non-position event");
+        };
+        let EventKind::Position {
+            track_callsign: late_callsign,
+            ..
+        } = got.events[1].kind
+        else {
+            panic!("ADS-B adapter emitted a non-position event");
+        };
+        assert_eq!(early_callsign, Some(*b"EARLY12\0"));
+        assert_eq!(late_callsign, Some(*b"LATE123\0"));
+        let serialized = serialize_recorded_events(&got.events).unwrap();
+        let reparsed = serialized
+            .split_terminator('\n')
+            .skip(1)
+            .map(crate::input::parse_event_line)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(reparsed, got.events);
         assert!(got.quarantine.is_empty());
     }
 
@@ -4263,6 +4374,7 @@ mod tests {
                 east_mmps: 3,
                 north_mmps: 4,
                 vertical_rate_fpm: None,
+                track_callsign: None,
             },
             SourceKind::Flight => EventKind::Flight(crate::input::FlightOperation::SetOwner {
                 unit: *b"SECTOR1\0",

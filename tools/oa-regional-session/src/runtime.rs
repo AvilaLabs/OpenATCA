@@ -4,7 +4,8 @@
 use crate::commands;
 use crate::flight::{
     self, FlightApplyOutcome, FlightDriver, FlightDriverConfig, FlightDriverReport,
-    FlightViewStatus, SharedFlightView, MAX_DRIVER_FLIGHTS, MAX_DRIVER_LOG_ENTRIES,
+    FlightViewResult, FlightViewStatus, SharedFlightView, MAX_DRIVER_FLIGHTS,
+    MAX_DRIVER_LOG_ENTRIES,
 };
 use crate::nam_flight::{self, NamFlightContext, NamFlightResult, NamFlightRuntime};
 use crate::route::{self, RouteStore};
@@ -23,6 +24,7 @@ use oa_quarantine::{
     InputOutcome, InputSource, QuarantineEvent, QuarantineQueue, ReasonFlags, SourceStats,
     REASON_INPUT_INVALID, REASON_RESOURCE_LIMIT, REASON_SURVEILLANCE_INVALID,
 };
+use oa_runway::final_monitor as final_monitor_core;
 use std::fmt::Write as _;
 use std::path::Path;
 use std::time::Instant;
@@ -81,6 +83,241 @@ pub struct RegionalAutomationStatus {
     pub fusion_off: bool,
 }
 
+/// Caller-provided runtime configuration for one explicitly selected parallel runway pair.
+/// These values are not implied by the adaptation snapshot or authenticated by its manifest.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RuntimeFinalMonitorConfig {
+    pub pair: final_monitor_core::FinalPair,
+    pub assignments: Vec<FinalApproachAssignment>,
+}
+
+/// Full flight identity and selected runway end supplied by an authorized runtime caller.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FinalApproachAssignment {
+    pub flight: oa_flight::FlightKey,
+    pub runway_id: u32,
+    pub end_name: [u8; 3],
+}
+
+const MAX_FINAL_APPROACH_ASSIGNMENTS: usize = final_monitor_core::MAX_TRACKS;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FinalMonitorStatus {
+    NotConfigured,
+    Available,
+    Degraded(FinalMonitorDegradation),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FinalMonitorDegradation {
+    MissingAssignedTrack,
+    UnusableUncertainty,
+    StalePrediction,
+    InputCadence,
+    StalePredictionAndInputCadence,
+    InvalidPrediction,
+    CoreRefusal,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RegionalFinalMonitorAlert {
+    pub address: u32,
+    pub pair_id: final_monitor_core::FinalPairId,
+    pub assigned_runway_id: u32,
+    pub severity: final_monitor_core::FinalSeverity,
+    pub lat_e7: i32,
+    pub lon_e7: i32,
+    pub seconds_to_entry_milli: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RegionalFinalMonitorTiming {
+    pub observed_input_interval_ns: u64,
+    pub observed_evaluation_interval_ns: u64,
+    pub prediction_age_ns: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RegionalFinalMonitorFrame {
+    pub status: FinalMonitorStatus,
+    pub alerts: Vec<RegionalFinalMonitorAlert>,
+    pub timing: Option<RegionalFinalMonitorTiming>,
+}
+
+struct ConfiguredFinalMonitor {
+    pair: final_monitor_core::FinalPair,
+    assignments: Vec<FinalApproachAssignment>,
+    state: final_monitor_core::FinalMonitorState,
+    latest_alerts: Vec<RegionalFinalMonitorAlert>,
+}
+
+#[derive(Clone, Copy)]
+struct FinalMonitorTrack {
+    address: u32,
+    assigned_runway_id: u32,
+    east_m: f64,
+    north_m: f64,
+    velocity_east_mps: f64,
+    velocity_north_mps: f64,
+    r95_m: f64,
+    lat_e7: i32,
+    lon_e7: i32,
+    newest_source_ns: i64,
+}
+
+struct FinalMonitorBuffers {
+    addresses: Vec<u32>,
+    pair_ids: Vec<final_monitor_core::FinalPairId>,
+    severity: Vec<final_monitor_core::FinalSeverity>,
+    lat_e7: Vec<i32>,
+    lon_e7: Vec<i32>,
+    seconds_to_entry_milli: Vec<u32>,
+}
+
+#[derive(Clone, Copy)]
+struct CurrentFlightView {
+    address: u32,
+    result: FlightViewResult,
+    view: Option<SharedFlightView>,
+    identity_corroborated: bool,
+}
+
+#[derive(Clone, Copy)]
+struct KnownFlight {
+    key: oa_flight::FlightKey,
+    last_consumed_receipt_ns: Option<i64>,
+}
+
+#[derive(Clone, Copy)]
+struct FlightFreshness {
+    last_receipt_ns: Option<i64>,
+    now_ns: i64,
+    drop_after_ns: i64,
+    cutoff_ms: i64,
+}
+
+fn traffic_detail_for_current_view(
+    track: &crate::surveillance::ObservedTrack,
+    result: FlightViewResult,
+    view: Option<SharedFlightView>,
+    runtime_centre: [u8; 4],
+    identity_corroborated: bool,
+) -> oa_display::core::traffic::TrafficBlockDetail {
+    use oa_display::core::traffic::TrafficBlockDetail;
+
+    if result.status != FlightViewStatus::Found {
+        return if track.altitude_ft == i32::MIN {
+            TrafficBlockDetail::SymbolOnly
+        } else {
+            TrafficBlockDetail::AltitudeOnly
+        };
+    }
+    if !identity_corroborated || view.is_none() {
+        return if track.altitude_ft == i32::MIN {
+            TrafficBlockDetail::SymbolOnly
+        } else {
+            TrafficBlockDetail::AltitudeOnly
+        };
+    }
+    if runtime_centre == *b"ZAU\0"
+        && view.is_some_and(|row| {
+            matches!(
+                row.plan_state,
+                oa_flight::ST_ACTIVE | oa_flight::ST_DEPARTED
+            )
+        })
+    {
+        TrafficBlockDetail::Full
+    } else if track.altitude_ft == i32::MIN {
+        TrafficBlockDetail::SymbolOnly
+    } else {
+        TrafficBlockDetail::AltitudeOnly
+    }
+}
+
+fn flight_identity_corroborates(
+    track: &crate::surveillance::ObservedTrack,
+    observation: Option<crate::surveillance::TrackCallsignEvidence>,
+    view: &SharedFlightView,
+    runtime_centre: [u8; 4],
+    freshness: FlightFreshness,
+) -> bool {
+    let Some(observation) = observation else {
+        return false;
+    };
+    // Callsign is tied to the exact accepted track observation. Flight-message receipt time is a
+    // separate freshness witness; identity change stamps do not refresh when a message is
+    // successfully consumed without changing the identity fields.
+    observation.source_ns == track.newest_source_ns
+        && callsigns_equal(&observation.callsign, &view.callsign)
+        && view.gufi != 0
+        && view.address == track.address
+        && view.centre == runtime_centre
+        && matches!(
+            view.plan_state,
+            oa_flight::ST_ACTIVE | oa_flight::ST_DEPARTED
+        )
+        && flight_message_is_fresh(
+            freshness.last_receipt_ns,
+            freshness.now_ns,
+            freshness.drop_after_ns,
+        )
+        && flight::flight_view_as_of(view, freshness.cutoff_ms).is_ok()
+}
+
+fn flight_message_is_fresh(last_receipt_ns: Option<i64>, now_ns: i64, drop_after_ns: i64) -> bool {
+    if now_ns < 0 || drop_after_ns < 0 {
+        return false;
+    }
+    last_receipt_ns.is_some_and(|last| {
+        last >= 0
+            && last <= now_ns
+            && now_ns
+                .checked_sub(last)
+                .is_some_and(|age| age <= drop_after_ns)
+    })
+}
+
+fn known_flight_receipt(
+    flights: &[KnownFlight],
+    view: &SharedFlightView,
+) -> Result<Option<i64>, String> {
+    let Some(key) = flight_key_from_view(view) else {
+        return Ok(None);
+    };
+    let Ok(index) = flight_key_search(flights, key)? else {
+        return Ok(None);
+    };
+    flights
+        .get(index)
+        .map(|known| known.last_consumed_receipt_ns)
+        .ok_or_else(|| "flight liveness ledger index invariant".into())
+}
+
+fn callsigns_equal(left: &[u8; 8], right: &[u8; 8]) -> bool {
+    fn body(value: &[u8; 8]) -> Option<&[u8]> {
+        if !value.is_ascii() {
+            return None;
+        }
+        let end = value
+            .iter()
+            .position(|byte| *byte == 0 || *byte == b' ')
+            .unwrap_or(value.len());
+        let prefix = value.get(..end)?;
+        if prefix.is_empty()
+            || !prefix.iter().all(u8::is_ascii_alphanumeric)
+            || value
+                .get(end..)?
+                .iter()
+                .any(|byte| *byte != 0 && *byte != b' ')
+        {
+            return None;
+        }
+        Some(prefix)
+    }
+    body(left).zip(body(right)).is_some_and(|(a, b)| a == b)
+}
+
 // A7.2: cold subsystem composition. All core memory belongs to its originating subsystem.
 pub struct RegionalRuntime {
     model: Model,
@@ -103,7 +340,8 @@ pub struct RegionalRuntime {
     profile: RegionalRunProfile,
     selected_mode: RegionalAutomationMode,
     last_automation: RegionalAutomationStatus,
-    known_flights: Vec<oa_flight::FlightKey>,
+    known_flights: Vec<KnownFlight>,
+    final_monitor: Option<ConfiguredFinalMonitor>,
 }
 
 /// Versioned capacities for a single offline replay. Defaults reproduce the historic small
@@ -142,6 +380,11 @@ impl RegionalRunProfile {
                 max_presentation_updates: 0,
                 render_scope: false,
                 tracker_timing: surveillance::TrackerTimingProfile::DefaultV1,
+                frame_width: surveillance::FRAME_WIDTH,
+                frame_height: surveillance::FRAME_HEIGHT,
+                map_layers: oa_display::core::scene::layers_all(),
+                ifr_airports_only: false,
+                fixes_to_view_range: false,
             },
             max_flights: 8192,
             max_route_revisions: route::MAX_ROUTE_REVISIONS,
@@ -267,7 +510,7 @@ fn automation_status_label(status: RegionalAutomationStatus) -> &'static str {
     }
 }
 
-fn automation_console_text(console: &str, status: RegionalAutomationStatus) -> String {
+pub(crate) fn automation_console_text(console: &str, status: RegionalAutomationStatus) -> String {
     let mut text = String::with_capacity(192);
     if !console.is_empty() {
         text.push_str(console);
@@ -295,6 +538,8 @@ pub struct RegionalFrame {
     pub sequence: u64,
     pub input: FrameEvidence,
     pub surveillance: SurveillanceFrame,
+    /// Parallel-runway monitor output; NotConfigured is distinct from an empty healthy result.
+    pub final_monitor: RegionalFinalMonitorFrame,
     pub automation: RegionalAutomationStatus,
     pub flight_operations: Vec<FlightApplyOutcome>,
     pub flights: Vec<FlightEvidence>,
@@ -320,8 +565,8 @@ pub struct RegionalFrame {
     pub quarantine: RuntimeQuarantineReport,
 }
 
-/// Aggregate of full-key flight views available for this runtime centre and address joins for
-/// observed tracks. It contains no per-flight identifiers.
+/// Aggregate of full-key flight views and co-timed callsign-corroborated track joins for this
+/// runtime centre. It contains no per-flight identifiers.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct FlightCorrelationSummary {
     pub available_flight_views_for_runtime_centre: u32,
@@ -423,7 +668,7 @@ fn event_flight_key(event: &crate::input::NormalizedEvent) -> Option<oa_flight::
 }
 
 fn flight_key_search(
-    keys: &[oa_flight::FlightKey],
+    keys: &[KnownFlight],
     key: oa_flight::FlightKey,
 ) -> Result<Result<usize, usize>, String> {
     if keys.len() > flight::MAX_OFFLINE_DRIVER_FLIGHTS {
@@ -444,11 +689,11 @@ fn flight_key_search(
             .copied()
             .ok_or("flight-key binary-search index invariant")?;
         match (
-            current.kind,
-            current.gufi,
-            current.callsign,
-            current.dep,
-            current.arr,
+            current.key.kind,
+            current.key.gufi,
+            current.key.callsign,
+            current.key.dep,
+            current.key.arr,
         )
             .cmp(&(key.kind, key.gufi, key.callsign, key.dep, key.arr))
         {
@@ -481,20 +726,21 @@ fn reclaim_retired_flight_keys(runtime: &mut RegionalRuntime, now_ms: i64) -> Re
         if read >= MAX_FLIGHT_KEY_RECLAIM_WORK {
             return Err("flight-key retirement work budget exceeded".into());
         }
-        let key = runtime
+        let known = runtime
             .known_flights
             .get(read)
             .copied()
             .ok_or("flight-key retirement index invariant")?;
-        let retired = flight::flight_driver_remove_retired(&mut runtime.flights, &key, now_ms)
-            .map_err(|error| format!("flight-key retirement receipt: {error}"))?;
-        if retired.is_none() && flight::flight_driver_has_key(&runtime.flights, key) {
+        let retired =
+            flight::flight_driver_remove_retired(&mut runtime.flights, &known.key, now_ms)
+                .map_err(|error| format!("flight-key retirement receipt: {error}"))?;
+        if retired.is_none() && flight::flight_driver_has_key(&runtime.flights, known.key) {
             if write != read {
                 let dest = runtime
                     .known_flights
                     .get_mut(write)
                     .ok_or("flight-key retirement destination invariant")?;
-                *dest = key;
+                *dest = known;
             }
             write = write
                 .checked_add(1)
@@ -532,18 +778,46 @@ fn preflight_flight_key(
 fn commit_flight_key(
     runtime: &mut RegionalRuntime,
     pending: Option<(oa_flight::FlightKey, usize)>,
+    event: &crate::input::NormalizedEvent,
     outcome: flight::FlightApplyOutcome,
-) {
-    let Some((key, insert_at)) = pending else {
-        return;
+) -> Result<(), String> {
+    let Some(key) = event_flight_key(event) else {
+        return Ok(());
     };
-    if !matches!(
-        outcome.operation,
-        Some(oa_flight::Outcome::Applied | oa_flight::Outcome::Unchanged)
-    ) {
-        return;
+    if outcome.adapter_refusal.is_some()
+        || !matches!(
+            outcome.operation,
+            Some(oa_flight::Outcome::Applied | oa_flight::Outcome::Unchanged)
+        )
+    {
+        return Ok(());
     }
-    runtime.known_flights.insert(insert_at, key);
+    match pending {
+        Some((pending_key, insert_at)) if pending_key == key => {
+            runtime.known_flights.insert(
+                insert_at,
+                KnownFlight {
+                    key,
+                    last_consumed_receipt_ns: Some(event.receipt_ns),
+                },
+            );
+        }
+        Some(_) => return Err("flight-key reservation does not match committed event".into()),
+        None => {
+            let index = match flight_key_search(&runtime.known_flights, key)? {
+                Ok(index) => index,
+                Err(_) => {
+                    return Err("successful flight event missing from bounded key ledger".into());
+                }
+            };
+            let known = runtime
+                .known_flights
+                .get_mut(index)
+                .ok_or("successful flight key ledger index invariant")?;
+            known.last_consumed_receipt_ns = Some(event.receipt_ns);
+        }
+    }
+    Ok(())
 }
 
 fn runtime_item_outcome(
@@ -738,6 +1012,402 @@ pub fn regional_new_from_issued_package(
         cfg,
         profile,
         oa_audit_core::genesis(),
+    )
+}
+
+/// Construct from the independently verified adaptation model plus a separate runtime-supplied
+/// final-monitor configuration. The monitor config is caller-provided and is not part of the
+/// issued package manifest or its authentication boundary.
+pub fn regional_new_from_issued_package_with_runtime_final_monitor(
+    package: VerifiedPackage,
+    centre: [u8; 4],
+    cfg: SurveillanceConfig,
+    profile: RegionalRunProfile,
+    monitor: RuntimeFinalMonitorConfig,
+) -> Result<RegionalRuntime, String> {
+    let mut runtime = regional_new_from_issued_package(package, centre, cfg, profile)?;
+    runtime.final_monitor = Some(configure_final_monitor(monitor)?);
+    Ok(runtime)
+}
+
+/// Construct an analysis runtime with caller-supplied final-monitor geometry and explicit
+/// full-key runway assignments. The config is not claimed to be issued or facility-authenticated.
+pub fn regional_new_with_runtime_final_monitor(
+    model: Model,
+    snapshot_sha256: [u8; 32],
+    centre: [u8; 4],
+    cfg: SurveillanceConfig,
+    profile: RegionalRunProfile,
+    monitor: RuntimeFinalMonitorConfig,
+) -> Result<RegionalRuntime, String> {
+    let mut runtime = regional_new_with_profile(model, snapshot_sha256, centre, cfg, profile)?;
+    runtime.final_monitor = Some(configure_final_monitor(monitor)?);
+    Ok(runtime)
+}
+
+fn configure_final_monitor(
+    monitor: RuntimeFinalMonitorConfig,
+) -> Result<ConfiguredFinalMonitor, String> {
+    if monitor.assignments.is_empty() || monitor.assignments.len() > MAX_FINAL_APPROACH_ASSIGNMENTS
+    {
+        return Err("final-monitor assignment count is outside the fixed bound".into());
+    }
+    let mut validation_state = final_monitor_core::FinalMonitorState::new();
+    let empty: [u32; 0] = [];
+    let empty_f64: [f64; 0] = [];
+    let empty_i32: [i32; 0] = [];
+    let mut empty_pair_ids: [final_monitor_core::FinalPairId; 0] = [];
+    let mut empty_severity: [final_monitor_core::FinalSeverity; 0] = [];
+    let mut empty_u32: [u32; 0] = [];
+    final_monitor_core::update(
+        monitor.pair,
+        &mut validation_state,
+        1,
+        1,
+        final_monitor_core::PredictedTracks {
+            addresses: &empty,
+            east_m: &empty_f64,
+            north_m: &empty_f64,
+            velocity_east_mps: &empty_f64,
+            velocity_north_mps: &empty_f64,
+            r95_m: &empty_f64,
+            lat_e7: &empty_i32,
+            lon_e7: &empty_i32,
+        },
+        final_monitor_core::FinalAlertBuffer {
+            addresses: &mut [],
+            pair_ids: &mut empty_pair_ids,
+            severity: &mut empty_severity,
+            lat_e7: &mut [],
+            lon_e7: &mut [],
+            seconds_to_entry_milli: &mut empty_u32,
+        },
+    )
+    .map_err(|error| format!("final-monitor pair refused: {error:?}"))?;
+    let pair_id = monitor.pair.id;
+    for (index, assignment) in monitor.assignments.iter().enumerate() {
+        let valid_end = (assignment.runway_id == pair_id.first_runway_id
+            && assignment.end_name == pair_id.first_end_name)
+            || (assignment.runway_id == pair_id.second_runway_id
+                && assignment.end_name == pair_id.second_end_name);
+        if !valid_end || !valid_flight_key(assignment.flight) {
+            return Err(
+                "final-monitor assignment does not name a pair end and full flight key".into(),
+            );
+        }
+        if monitor
+            .assignments
+            .get(..index)
+            .is_some_and(|prior| prior.iter().any(|row| row.flight == assignment.flight))
+        {
+            return Err("duplicate full flight key in final-monitor assignments".into());
+        }
+    }
+    Ok(ConfiguredFinalMonitor {
+        pair: monitor.pair,
+        assignments: monitor.assignments,
+        state: final_monitor_core::FinalMonitorState::new(),
+        latest_alerts: Vec::with_capacity(MAX_FINAL_APPROACH_ASSIGNMENTS),
+    })
+}
+
+fn valid_flight_key(key: oa_flight::FlightKey) -> bool {
+    match key.kind {
+        oa_flight::KEY_GUFI => {
+            key.gufi != 0 && key.callsign == [0; 8] && key.dep == [0; 12] && key.arr == [0; 12]
+        }
+        oa_flight::KEY_TFMS => {
+            key.gufi == 0
+                && key.callsign.iter().any(|byte| *byte != 0)
+                && key.dep.iter().any(|byte| *byte != 0)
+                && key.arr.iter().any(|byte| *byte != 0)
+        }
+        _ => false,
+    }
+}
+
+fn flight_key_from_view(view: &SharedFlightView) -> Option<oa_flight::FlightKey> {
+    if view.gufi != 0 {
+        return Some(oa_flight::key_gufi(view.gufi));
+    }
+    let key = oa_flight::key_tfms(view.callsign, view.departure, view.arrival);
+    valid_flight_key(key).then_some(key)
+}
+
+fn prepare_final_monitor_tracks(
+    monitor: &ConfiguredFinalMonitor,
+    frame: &SurveillanceFrame,
+    flight_data: &[SharedFlightView],
+    unavailable_flight_data: u32,
+) -> Result<Vec<FinalMonitorTrack>, FinalMonitorDegradation> {
+    if unavailable_flight_data != 0 {
+        return Err(FinalMonitorDegradation::MissingAssignedTrack);
+    }
+    let origin = monitor
+        .pair
+        .projection_origin
+        .ok_or(FinalMonitorDegradation::InvalidPrediction)?;
+    let plane = oa_runway::plane::plane_new(origin.lat_deg, origin.lon_deg)
+        .ok_or(FinalMonitorDegradation::InvalidPrediction)?;
+    let mut tracks = Vec::with_capacity(monitor.assignments.len());
+    for view in flight_data {
+        if view.plan_state != oa_flight::ST_ACTIVE {
+            continue;
+        }
+        let Some(key) = flight_key_from_view(view) else {
+            continue;
+        };
+        let Some(assignment) = monitor.assignments.iter().find(|row| row.flight == key) else {
+            continue;
+        };
+        if tracks.len() >= monitor.assignments.len() {
+            return Err(FinalMonitorDegradation::InvalidPrediction);
+        }
+        let mut matching_tracks = frame
+            .tracks
+            .iter()
+            .filter(|track| track.address == view.address);
+        let Some(track) = matching_tracks.next() else {
+            return Err(FinalMonitorDegradation::MissingAssignedTrack);
+        };
+        if matching_tracks.next().is_some() || track.address == 0 || track.newest_source_ns < 0 {
+            return Err(FinalMonitorDegradation::InvalidPrediction);
+        }
+        let geo = oa_runway::plane::Geo {
+            lat_deg: f64::from(track.lat_e7) / 10_000_000.0,
+            lon_deg: f64::from(track.lon_e7) / 10_000_000.0,
+        };
+        let local = oa_runway::plane::to_local(&plane, geo)
+            .ok_or(FinalMonitorDegradation::InvalidPrediction)?;
+        let local_velocity = oa_runway::plane::true_velocity_to_local(
+            &plane,
+            geo,
+            f64::from(track.east_mmps) / 1000.0,
+            f64::from(track.north_mmps) / 1000.0,
+        )
+        .ok_or(FinalMonitorDegradation::InvalidPrediction)?;
+        tracks.push(FinalMonitorTrack {
+            address: track.address,
+            assigned_runway_id: assignment.runway_id,
+            east_m: local.east_m,
+            north_m: local.north_m,
+            velocity_east_mps: local_velocity.east_m,
+            velocity_north_mps: local_velocity.north_m,
+            r95_m: f64::from(track.r95_mm) / 1000.0,
+            lat_e7: track.lat_e7,
+            lon_e7: track.lon_e7,
+            newest_source_ns: track.newest_source_ns,
+        });
+    }
+    if tracks.len() != monitor.assignments.len() {
+        return Err(FinalMonitorDegradation::MissingAssignedTrack);
+    }
+    tracks.sort_by_key(|track| track.address);
+    if tracks.windows(2).any(|rows| {
+        rows.first()
+            .zip(rows.get(1))
+            .is_some_and(|(left, right)| left.address == right.address)
+    }) {
+        return Err(FinalMonitorDegradation::InvalidPrediction);
+    }
+    Ok(tracks)
+}
+
+fn evaluate_final_monitor(
+    monitor: &mut ConfiguredFinalMonitor,
+    tracks: &[FinalMonitorTrack],
+    now_ns: u64,
+    prediction_report_ns: u64,
+) -> Result<(final_monitor_core::UpdateResult, FinalMonitorBuffers), final_monitor_core::UpdateError>
+{
+    let addresses: Vec<u32> = tracks.iter().map(|track| track.address).collect();
+    let east_m: Vec<f64> = tracks.iter().map(|track| track.east_m).collect();
+    let north_m: Vec<f64> = tracks.iter().map(|track| track.north_m).collect();
+    let velocity_east_mps: Vec<f64> = tracks.iter().map(|track| track.velocity_east_mps).collect();
+    let velocity_north_mps: Vec<f64> = tracks
+        .iter()
+        .map(|track| track.velocity_north_mps)
+        .collect();
+    let r95_m: Vec<f64> = tracks.iter().map(|track| track.r95_m).collect();
+    let lat_e7: Vec<i32> = tracks.iter().map(|track| track.lat_e7).collect();
+    let lon_e7: Vec<i32> = tracks.iter().map(|track| track.lon_e7).collect();
+    let mut output = FinalMonitorBuffers {
+        addresses: vec![0; tracks.len()],
+        pair_ids: vec![monitor.pair.id; tracks.len()],
+        severity: vec![final_monitor_core::FinalSeverity::Caution; tracks.len()],
+        lat_e7: vec![0; tracks.len()],
+        lon_e7: vec![0; tracks.len()],
+        seconds_to_entry_milli: vec![0; tracks.len()],
+    };
+    let result = final_monitor_core::update(
+        monitor.pair,
+        &mut monitor.state,
+        now_ns,
+        prediction_report_ns,
+        final_monitor_core::PredictedTracks {
+            addresses: &addresses,
+            east_m: &east_m,
+            north_m: &north_m,
+            velocity_east_mps: &velocity_east_mps,
+            velocity_north_mps: &velocity_north_mps,
+            r95_m: &r95_m,
+            lat_e7: &lat_e7,
+            lon_e7: &lon_e7,
+        },
+        final_monitor_core::FinalAlertBuffer {
+            addresses: &mut output.addresses,
+            pair_ids: &mut output.pair_ids,
+            severity: &mut output.severity,
+            lat_e7: &mut output.lat_e7,
+            lon_e7: &mut output.lon_e7,
+            seconds_to_entry_milli: &mut output.seconds_to_entry_milli,
+        },
+    )?;
+    Ok((result, output))
+}
+
+fn regional_alert_from_buffers(
+    index: usize,
+    tracks: &[FinalMonitorTrack],
+    output: &FinalMonitorBuffers,
+) -> Option<RegionalFinalMonitorAlert> {
+    let address = output.addresses.get(index).copied()?;
+    let pair_id = output.pair_ids.get(index).copied()?;
+    let severity = output.severity.get(index).copied()?;
+    let lat_e7 = output.lat_e7.get(index).copied()?;
+    let lon_e7 = output.lon_e7.get(index).copied()?;
+    let seconds_to_entry_milli = output.seconds_to_entry_milli.get(index).copied()?;
+    let assigned_runway_id = tracks
+        .iter()
+        .find(|track| track.address == address)?
+        .assigned_runway_id;
+    Some(RegionalFinalMonitorAlert {
+        address,
+        pair_id,
+        assigned_runway_id,
+        severity,
+        lat_e7,
+        lon_e7,
+        seconds_to_entry_milli,
+    })
+}
+
+fn regional_final_monitor_frame(
+    status: FinalMonitorStatus,
+    alerts: Vec<RegionalFinalMonitorAlert>,
+    timing: Option<RegionalFinalMonitorTiming>,
+) -> RegionalFinalMonitorFrame {
+    RegionalFinalMonitorFrame {
+        status,
+        alerts,
+        timing,
+    }
+}
+
+fn regional_final_monitor_timing(
+    result: final_monitor_core::UpdateResult,
+) -> RegionalFinalMonitorTiming {
+    RegionalFinalMonitorTiming {
+        observed_input_interval_ns: result.observed_input_interval_ns,
+        observed_evaluation_interval_ns: result.observed_interval_ns,
+        prediction_age_ns: result.prediction_age_ns,
+    }
+}
+
+fn final_monitor_degradation(result: final_monitor_core::UpdateResult) -> FinalMonitorDegradation {
+    match (result.input_cadence_degraded, result.prediction_stale) {
+        (true, true) => FinalMonitorDegradation::StalePredictionAndInputCadence,
+        (true, false) => FinalMonitorDegradation::InputCadence,
+        (false, true) => FinalMonitorDegradation::StalePrediction,
+        (false, false) => FinalMonitorDegradation::CoreRefusal,
+    }
+}
+
+fn configured_final_monitor_frame(
+    monitor: Option<&mut ConfiguredFinalMonitor>,
+    frame: &SurveillanceFrame,
+    flight_data: &[SharedFlightView],
+    unavailable_flight_data: u32,
+) -> RegionalFinalMonitorFrame {
+    let Some(monitor) = monitor else {
+        return regional_final_monitor_frame(FinalMonitorStatus::NotConfigured, Vec::new(), None);
+    };
+    let tracks =
+        match prepare_final_monitor_tracks(monitor, frame, flight_data, unavailable_flight_data) {
+            Ok(tracks) => tracks,
+            Err(reason) => {
+                monitor.latest_alerts.clear();
+                return regional_final_monitor_frame(
+                    FinalMonitorStatus::Degraded(reason),
+                    Vec::new(),
+                    None,
+                );
+            }
+        };
+    let now_ns = match u64::try_from(frame.time_ns) {
+        Ok(value) => value,
+        Err(_) => {
+            monitor.latest_alerts.clear();
+            return regional_final_monitor_frame(
+                FinalMonitorStatus::Degraded(FinalMonitorDegradation::InvalidPrediction),
+                Vec::new(),
+                None,
+            );
+        }
+    };
+    let prediction_report_ns = tracks
+        .iter()
+        .map(|track| track.newest_source_ns)
+        .min()
+        .and_then(|value| u64::try_from(value).ok())
+        .unwrap_or(now_ns);
+    let (result, output) =
+        match evaluate_final_monitor(monitor, &tracks, now_ns, prediction_report_ns) {
+            Ok(result) => result,
+            Err(final_monitor_core::UpdateError::UnusableUncertainty) => {
+                monitor.latest_alerts.clear();
+                return regional_final_monitor_frame(
+                    FinalMonitorStatus::Degraded(FinalMonitorDegradation::UnusableUncertainty),
+                    Vec::new(),
+                    None,
+                );
+            }
+            Err(_) => {
+                monitor.latest_alerts.clear();
+                return regional_final_monitor_frame(
+                    FinalMonitorStatus::Degraded(FinalMonitorDegradation::CoreRefusal),
+                    Vec::new(),
+                    None,
+                );
+            }
+        };
+    let timing = Some(regional_final_monitor_timing(result));
+    if result.degraded {
+        monitor.latest_alerts.clear();
+        return regional_final_monitor_frame(
+            FinalMonitorStatus::Degraded(final_monitor_degradation(result)),
+            Vec::new(),
+            timing,
+        );
+    }
+    if result.due {
+        monitor.latest_alerts.clear();
+        for index in 0..usize::from(result.alerts) {
+            let Some(alert) = regional_alert_from_buffers(index, &tracks, &output) else {
+                monitor.latest_alerts.clear();
+                return regional_final_monitor_frame(
+                    FinalMonitorStatus::Degraded(FinalMonitorDegradation::CoreRefusal),
+                    Vec::new(),
+                    timing,
+                );
+            };
+            monitor.latest_alerts.push(alert);
+        }
+    }
+    regional_final_monitor_frame(
+        FinalMonitorStatus::Available,
+        monitor.latest_alerts.clone(),
+        timing,
     )
 }
 
@@ -1131,6 +1801,7 @@ fn regional_new_with_source_identity_and_checkpoint(
             fusion_off: true,
         },
         known_flights: Vec::with_capacity(profile.max_flights),
+        final_monitor: None,
     })
 }
 
@@ -1194,7 +1865,11 @@ fn execute(
     quarantine_records
         .try_reserve_exact(batch.events.len())
         .map_err(|_| "runtime quarantine output allocation refused")?;
-    surveillance::surveillance_begin(&mut runtime.surveillance, batch.receipt_ns)?;
+    if runtime.final_monitor.is_some() {
+        surveillance::surveillance_begin_for_monitor(&mut runtime.surveillance, batch.receipt_ns)?;
+    } else {
+        surveillance::surveillance_begin(&mut runtime.surveillance, batch.receipt_ns)?;
+    }
     let mut order_cursor = flight::flight_order_cursor(&runtime.flights);
     let mut flight_operations = Vec::with_capacity(batch.events.len());
     let mut controller_dispatches = Vec::with_capacity(batch.events.len());
@@ -1330,7 +2005,7 @@ fn execute(
         )?;
         let flight_outcome = flight::flight_apply_event(&mut runtime.flights, event)
             .map_err(|error| format!("accepted flight commit invariant: {error:?}"))?;
-        commit_flight_key(runtime, pending_flight_key, flight_outcome);
+        commit_flight_key(runtime, pending_flight_key, event, flight_outcome)?;
         flight_operations.push(flight_outcome);
         route::route_commit_stage(&mut runtime.routes, route_stage);
         surveillance::surveillance_event(&mut runtime.surveillance, event)
@@ -1339,7 +2014,19 @@ fn execute(
     }
     // Flight ownership presentation currently requires an explicitly selected flight. Per-flight
     // snapshots below preserve every owner; no arbitrary 'first' flight is promoted to selection.
-    let current_feeds = surveillance::feed_statuses(&runtime.surveillance, batch.receipt_ns)?;
+    let configured_track_period = runtime
+        .final_monitor
+        .as_ref()
+        .map_or(surveillance::SECOND_NS as u64, |monitor| {
+            monitor.pair.update_ns
+        });
+    let track_health_period_ns = i64::try_from(configured_track_period)
+        .map_err(|_| "configured track health period exceeds the supported time range")?;
+    let current_feeds = surveillance::feed_statuses_with_track_period(
+        &runtime.surveillance,
+        batch.receipt_ns,
+        track_health_period_ns,
+    )?;
     let automation = automation_status(runtime.selected_mode, &current_feeds);
     runtime.last_automation = automation;
     let unavailable_reason = match automation.degradation {
@@ -1354,31 +2041,94 @@ fn execute(
         }
         AutomationDegradation::None => None,
     };
-    let mut surveillance = surveillance::surveillance_finish_with_visibility(
-        &mut runtime.surveillance,
-        None,
-        automation.effective == EffectiveAutomationMode::Surveillance,
-        unavailable_reason,
-    )?;
-    if runtime.profile.surveillance.render_scope {
-        surveillance.frame_sha256 = surveillance::surveillance_present_controls(
+    let flight_cutoff_ms = route::receipt_cutoff_ms(batch.receipt_ns)?;
+    let (mut surveillance, current_flight_views) = {
+        let mut views = Vec::with_capacity(runtime.profile.max_flights);
+        let mut current_flight_views = Vec::with_capacity(runtime.profile.surveillance.max_tracks);
+        let runtime_centre = runtime.centre;
+        let flight_driver = &mut runtime.flights;
+        let known_flights = &runtime.known_flights;
+        let flight_liveness_now_ns = batch.receipt_ns;
+        let track_drop_after_ns = surveillance::tracker_drop_after_ns(&runtime.surveillance);
+        let mut select_traffic_detail =
+            |observed: &surveillance::ObservedTrack,
+             observation: Option<surveillance::TrackCallsignEvidence>|
+             -> Result<oa_display::core::traffic::TrafficBlockPolicy, String> {
+                let result = flight::flight_views_for_address(
+                    flight_driver,
+                    observed.address,
+                    runtime_centre,
+                    flight_cutoff_ms,
+                    &mut views,
+                );
+                let candidate = (result.status == FlightViewStatus::Found)
+                    .then(|| views.first().copied())
+                    .flatten();
+                let last_flight_receipt = candidate
+                    .map(|view| known_flight_receipt(known_flights, &view))
+                    .transpose()?
+                    .flatten();
+                let identity_corroborated = candidate.is_some_and(|view| {
+                    result.claimants == 1
+                        && result.views_written == 1
+                        && flight_identity_corroborates(
+                            observed,
+                            observation,
+                            &view,
+                            runtime_centre,
+                            FlightFreshness {
+                                last_receipt_ns: last_flight_receipt,
+                                now_ns: flight_liveness_now_ns,
+                                drop_after_ns: track_drop_after_ns,
+                                cutoff_ms: flight_cutoff_ms,
+                            },
+                        )
+                });
+                let view = candidate.filter(|_| identity_corroborated);
+                let detail = traffic_detail_for_current_view(
+                    observed,
+                    result,
+                    candidate,
+                    runtime_centre,
+                    identity_corroborated,
+                );
+                current_flight_views.push(CurrentFlightView {
+                    address: observed.address,
+                    result,
+                    view,
+                    identity_corroborated,
+                });
+                Ok(oa_display::core::traffic::TrafficBlockPolicy {
+                    address: observed.address,
+                    detail,
+                    flight_callsign: (detail
+                        == oa_display::core::traffic::TrafficBlockDetail::Full)
+                        .then(|| view.map(|row| row.callsign))
+                        .flatten(),
+                })
+            };
+        let surveillance = surveillance::surveillance_finish_with_traffic_policy_and_track_period(
             &mut runtime.surveillance,
-            &runtime.interaction,
-            &automation_console_text(&runtime.console_text, automation),
+            None,
+            automation.effective == EffectiveAutomationMode::Surveillance,
+            unavailable_reason,
+            &mut select_traffic_detail,
+            track_health_period_ns,
         )?;
-    }
+        (surveillance, current_flight_views)
+    };
     runtime.frame_sequence = next_frame_sequence;
+    if surveillance.tracks.len() != current_flight_views.len() {
+        return Err("exported tracks and cached flight views are not aligned".into());
+    }
     let mut flights = Vec::with_capacity(runtime.profile.surveillance.max_tracks);
-    let mut views = Vec::with_capacity(runtime.profile.max_flights);
     let mut flight_correlation = FlightCorrelationSummary::default();
-    for observed in &surveillance.tracks {
-        let result = flight::flight_views_for_address(
-            &mut runtime.flights,
-            observed.address,
-            runtime.centre,
-            batch.receipt_ns / 1_000_000,
-            &mut views,
-        );
+    for (index, observed) in surveillance.tracks.iter().enumerate() {
+        let current = current_flight_views
+            .get(index)
+            .filter(|row| row.address == observed.address)
+            .ok_or("traffic and flight-view rows are not aligned")?;
+        let result = current.result;
         let mut row = FlightEvidence {
             address: observed.address,
             claimants: result.claimants,
@@ -1393,9 +2143,14 @@ fn execute(
             refusal: String::new(),
         };
         match result.status {
-            FlightViewStatus::Found => {
+            FlightViewStatus::Found if current.identity_corroborated => {
                 flight_correlation.matched_observed_tracks =
                     flight_correlation.matched_observed_tracks.saturating_add(1);
+            }
+            FlightViewStatus::Found => {
+                flight_correlation.unmatched_observed_tracks = flight_correlation
+                    .unmatched_observed_tracks
+                    .saturating_add(1);
             }
             FlightViewStatus::AmbiguousAddress => {
                 flight_correlation.ambiguous_observed_tracks = flight_correlation
@@ -1415,7 +2170,9 @@ fn execute(
         }
         if result.status != FlightViewStatus::Found {
             row.refusal = format!("flight view: {:?}", result.status);
-        } else if let Some(view) = views.first() {
+        } else if !current.identity_corroborated {
+            row.refusal = "address candidate lacks co-timed callsign corroboration".into();
+        } else if let Some(view) = current.view.as_ref() {
             row.view = Some(*view);
             if view.plan_state != oa_flight::ST_ACTIVE && view.plan_state != oa_flight::ST_DEPARTED
             {
@@ -1495,17 +2252,16 @@ fn execute(
         runtime.profile.max_flights,
     )?;
     runtime.observed.clone_from(&surveillance.tracks);
-    let flight_cutoff_ms = route::receipt_cutoff_ms(batch.receipt_ns)?;
     if runtime.known_flights.len() > MAX_FLIGHT_DATA_VIEW_WORK {
         return Err("flight-data view work budget exceeded before frame assembly".into());
     }
     let mut flight_data = Vec::with_capacity(runtime.known_flights.len());
     let mut flight_data_as_of = Vec::with_capacity(runtime.known_flights.len());
     let mut flight_data_unavailable = 0u32;
-    for key in &runtime.known_flights {
+    for known in &runtime.known_flights {
         match flight::flight_view_for_key(
             &mut runtime.flights,
-            *key,
+            known.key,
             runtime.centre,
             flight_cutoff_ms,
         ) {
@@ -1535,10 +2291,60 @@ fn execute(
     flight_correlation.positive_address_claims_for_runtime_centre =
         u32::try_from(flight_data.iter().filter(|view| view.address > 0).count())
             .unwrap_or(u32::MAX);
+    let monitor_flight_data: Vec<_> = flights
+        .iter()
+        .filter_map(|flight| flight.view)
+        .filter(|view| {
+            matches!(
+                view.plan_state,
+                oa_flight::ST_ACTIVE | oa_flight::ST_DEPARTED
+            )
+        })
+        .collect();
+    let final_monitor = configured_final_monitor_frame(
+        runtime.final_monitor.as_mut(),
+        &surveillance,
+        &monitor_flight_data,
+        flight_data_unavailable,
+    );
+    if runtime.profile.surveillance.render_scope {
+        let console = automation_console_text(&runtime.console_text, automation);
+        if final_monitor.status == FinalMonitorStatus::NotConfigured {
+            surveillance.frame_sha256 = surveillance::surveillance_present_controls(
+                &mut runtime.surveillance,
+                &runtime.interaction,
+                &console,
+            )?;
+        } else {
+            let markers: Vec<_> = final_monitor
+                .alerts
+                .iter()
+                .map(
+                    |alert| oa_display::core::alert_markers::FinalMonitorMarker {
+                        address: alert.address,
+                        lat_e7: alert.lat_e7,
+                        lon_e7: alert.lon_e7,
+                        severity: alert.severity as u8,
+                        position_known: 1,
+                        reserved: [0; 2],
+                    },
+                )
+                .collect();
+            surveillance.frame_sha256 =
+                surveillance::surveillance_present_controls_with_final_monitor(
+                    &mut runtime.surveillance,
+                    &runtime.interaction,
+                    &console,
+                    &markers,
+                    final_monitor.status != FinalMonitorStatus::Available,
+                )?;
+        }
+    }
     Ok(RegionalFrame {
         sequence: runtime.frame_sequence,
         input,
         surveillance,
+        final_monitor,
         automation,
         flight_operations,
         flights,
@@ -1624,6 +2430,15 @@ pub fn regional_pixels(runtime: &RegionalRuntime) -> Result<&[u8], String> {
         return Err("no publishable frame after session failure".into());
     }
     surveillance::surveillance_pixels(&runtime.surveillance)
+}
+
+pub fn regional_frame_spec(
+    runtime: &RegionalRuntime,
+) -> Result<oa_display::raster::FrameSpec, String> {
+    if runtime.failed {
+        return Err("no publishable frame geometry after session failure".into());
+    }
+    surveillance::surveillance_frame_spec(&runtime.surveillance)
 }
 
 /// Explicit current-view selection. Ordinary refusal clears selection and is rendered; it
@@ -1986,11 +2801,19 @@ mod transaction_tests {
     }
 
     fn runtime_with_model(model: Model) -> RegionalRuntime {
+        runtime_with_model_and_centre(model, *b"ZAU1")
+    }
+
+    fn runtime_with_centre(centre: [u8; 4]) -> RegionalRuntime {
+        runtime_with_model_and_centre(synthetic_model().unwrap(), centre)
+    }
+
+    fn runtime_with_model_and_centre(model: Model, centre: [u8; 4]) -> RegionalRuntime {
         let snapshot = oa_airspace::core::snapshot::encode(&model).unwrap();
         regional_new(
             model,
             oa_sha256::sha256(&snapshot),
-            *b"ZAU1",
+            centre,
             SurveillanceConfig {
                 centre_lat_e7: 410_000_000,
                 centre_lon_e7: -870_000_000,
@@ -2083,6 +2906,7 @@ mod transaction_tests {
     fn observed_address_frame(
         engine: &mut RegionalRuntime,
         address: u32,
+        centre: [u8; 4],
         receipt_ns: i64,
     ) -> RegionalFrame {
         let events = [receipt_ns - surveillance::SECOND_NS, receipt_ns]
@@ -2098,7 +2922,7 @@ mod transaction_tests {
                     flight_gufi: 0,
                     aircraft_address: address,
                 },
-                centre: *b"ZAU1",
+                centre,
                 kind: EventKind::Position {
                     latitude_e7: 410_000_000,
                     longitude_e7: -870_000_000,
@@ -2106,6 +2930,7 @@ mod transaction_tests {
                     east_mmps: 0,
                     north_mmps: 0,
                     vertical_rate_fpm: None,
+                    track_callsign: None,
                 },
             })
             .collect();
@@ -2118,6 +2943,95 @@ mod transaction_tests {
             },
         )
         .unwrap()
+    }
+
+    fn co_timed_identity_frame(
+        engine: &mut RegionalRuntime,
+        address: u32,
+        receipt_ns: i64,
+        track_callsign: Option<&str>,
+        flight_identity: Option<(&str, i64)>,
+    ) -> RegionalFrame {
+        co_timed_frame_with_plan_refusal(
+            engine,
+            address,
+            receipt_ns,
+            track_callsign,
+            flight_identity,
+            None,
+            false,
+        )
+    }
+
+    fn co_timed_frame_with_plan_refusal(
+        engine: &mut RegionalRuntime,
+        address: u32,
+        receipt_ns: i64,
+        track_callsign: Option<&str>,
+        flight_identity: Option<(&str, i64)>,
+        refused_plan_source_ns: Option<i64>,
+        complete_flight: bool,
+    ) -> RegionalFrame {
+        assert_eq!(
+            engine.known_flights.len(),
+            1,
+            "identity fixture must seed exactly one full flight key"
+        );
+        let known_flight = engine
+            .known_flights
+            .first()
+            .expect("identity fixture checked for one full flight key");
+        let gufi = known_flight.key.gufi;
+        assert_ne!(gufi, 0, "identity fixture requires a GUFI-backed full key");
+        let mut events = Vec::with_capacity(5);
+        for (sequence, source_ns) in [receipt_ns - surveillance::SECOND_NS, receipt_ns]
+            .into_iter()
+            .enumerate()
+        {
+            let line = if let Some(callsign) = track_callsign {
+                format!(
+                    "v1\t{receipt_ns}\t{source_ns}\t{}\tSURVEILLANCE\t00000000000000000000000000000000\t{address:06x}\tZAU\tPOS\t410000000\t-870000000\t10000\t0\t0\t0\tCALLSIGN\t{callsign}",
+                    sequence + 1
+                )
+            } else {
+                format!(
+                    "v1\t{receipt_ns}\t{source_ns}\t{}\tSURVEILLANCE\t00000000000000000000000000000000\t{address:06x}\tZAU\tPOS\t410000000\t-870000000\t10000\t0\t0\t0",
+                    sequence + 1
+                )
+            };
+            events.push(parse_event_line(&line).expect("parse source callsign position"));
+        }
+        if let Some((flight_callsign, identity_source_ns)) = flight_identity {
+            let identity = format!(
+                "v1\t{receipt_ns}\t{identity_source_ns}\t3\tFLIGHT\t{gufi:032x}\t{address:06x}\tZAU\tFLIGHT\tIDENTITY_PARTIAL\t{flight_callsign}\t-\t-"
+            );
+            events.push(parse_event_line(&identity).expect("parse flight identity update"));
+        }
+        if let Some(source_ns) = refused_plan_source_ns {
+            let refused_plan = format!(
+                "v1\t{receipt_ns}\t{source_ns}\t4\tFLIGHT\t{gufi:032x}\t{address:06x}\tZAU\tFLIGHT\tPLAN\tPLAN00000001\t1"
+            );
+            events.push(parse_event_line(&refused_plan).expect("parse refused plan transition"));
+        }
+        if complete_flight {
+            let complete = format!(
+                "v1\t{receipt_ns}\t{receipt_ns}\t5\tFLIGHT\t{gufi:032x}\t{address:06x}\tZAU\tFLIGHT\tCOMPLETE"
+            );
+            events.push(parse_event_line(&complete).expect("parse flight completion"));
+        }
+        let route = format!(
+            "v1\t{receipt_ns}\t{receipt_ns}\t1\tROUTE\t{gufi:032x}\t{address:06x}\tZAU\tFILED_ROUTE\tPLAN00000001\tFIXB\tFIX:FIXA:K1:1:- FIX:FIXB:K1:1:-"
+        );
+        events.push(parse_event_line(&route).expect("parse synthetic route for identity gate"));
+        regional_step(
+            engine,
+            &ReceiptBatch {
+                receipt_ns,
+                source_clock_regressions: 0,
+                events,
+            },
+        )
+        .expect("run co-timed identity frame through presenter")
     }
 
     #[test]
@@ -2152,7 +3066,15 @@ mod transaction_tests {
         assert_eq!(flight::flight_driver_report(&engine.flights).flights, 1);
         assert_eq!(engine.known_flights.len(), 1);
         assert_eq!(frame.quarantine.records.len(), 1);
-        assert_eq!(frame.quarantine.records[0].item_index, 0);
+        assert_eq!(
+            frame
+                .quarantine
+                .records
+                .first()
+                .expect("one quarantine record was asserted above")
+                .item_index,
+            0
+        );
         assert_eq!(
             flight::flight_driver_report(&engine.flights).operations,
             1,
@@ -2161,11 +3083,11 @@ mod transaction_tests {
         assert!(engine
             .known_flights
             .iter()
-            .any(|key| key.gufi == first.identity.flight_gufi));
+            .any(|known| known.key.gufi == first.identity.flight_gufi));
         assert!(!engine
             .known_flights
             .iter()
-            .any(|key| key.gufi == second.identity.flight_gufi));
+            .any(|known| known.key.gufi == second.identity.flight_gufi));
         assert_eq!(
             flight::flight_driver_report(&engine.flights).retirements_consumed,
             0
@@ -2196,11 +3118,11 @@ mod transaction_tests {
         assert!(engine
             .known_flights
             .iter()
-            .any(|key| key.gufi == second.identity.flight_gufi));
+            .any(|known| known.key.gufi == second.identity.flight_gufi));
         assert!(!engine
             .known_flights
             .iter()
-            .any(|key| key.gufi == first.identity.flight_gufi));
+            .any(|known| known.key.gufi == first.identity.flight_gufi));
     }
 
     #[test]
@@ -2231,7 +3153,7 @@ mod transaction_tests {
         assert!(engine
             .known_flights
             .iter()
-            .any(|key| key.gufi == first.identity.flight_gufi));
+            .any(|known| known.key.gufi == first.identity.flight_gufi));
 
         let (second, _) = step_event_line(
             &mut engine,
@@ -2243,7 +3165,7 @@ mod transaction_tests {
         assert!(engine
             .known_flights
             .iter()
-            .any(|key| key.gufi == second.identity.flight_gufi));
+            .any(|known| known.key.gufi == second.identity.flight_gufi));
     }
 
     #[test]
@@ -2296,11 +3218,11 @@ mod transaction_tests {
         assert!(engine
             .known_flights
             .iter()
-            .any(|key| key.gufi == second.identity.flight_gufi));
+            .any(|known| known.key.gufi == second.identity.flight_gufi));
         assert!(!engine
             .known_flights
             .iter()
-            .any(|key| key.gufi == first.identity.flight_gufi));
+            .any(|known| known.key.gufi == first.identity.flight_gufi));
     }
 
     // REQ: OA-REG-018
@@ -2438,7 +3360,7 @@ mod transaction_tests {
         let mut matched = runtime();
         let claims = [(gufi_a, address, *b"ZAU1")];
         seeded_claim_frame(&mut matched, &claims, receipt);
-        let matched_frame = observed_address_frame(&mut matched, address, next_receipt);
+        let matched_frame = observed_address_frame(&mut matched, address, *b"ZAU1", next_receipt);
         assert_eq!(
             matched_frame
                 .flight_correlation
@@ -2452,15 +3374,29 @@ mod transaction_tests {
             claims.len() as u32
         );
         assert_eq!(
-            matched_frame.flight_correlation.matched_observed_tracks,
+            matched_frame.flight_correlation.matched_observed_tracks, 0,
+            "address alone is not a co-timed identity corroboration"
+        );
+        assert_eq!(
+            matched_frame.flight_correlation.unmatched_observed_tracks,
             matched_frame.surveillance.tracks.len() as u32
         );
         assert!(!matched_frame.surveillance.tracks.is_empty());
+        let traffic = matched_frame
+            .surveillance
+            .traffic_stats
+            .expect("scope frame exposes aggregate block-policy accounting");
+        assert_eq!(
+            traffic.full_blocks, 0,
+            "legacy ZAU1 is not an alias for native ZAU"
+        );
+        assert!(traffic.altitude_only_blocks > 0);
 
         let mut wrong_address = runtime();
         let claims = [(gufi_a, address + 1, *b"ZAU1")];
         seeded_claim_frame(&mut wrong_address, &claims, receipt);
-        let unmatched_frame = observed_address_frame(&mut wrong_address, address, next_receipt);
+        let unmatched_frame =
+            observed_address_frame(&mut wrong_address, address, *b"ZAU1", next_receipt);
         assert_eq!(
             unmatched_frame.flight_correlation.unmatched_observed_tracks,
             unmatched_frame.surveillance.tracks.len() as u32
@@ -2469,11 +3405,21 @@ mod transaction_tests {
             unmatched_frame.flight_correlation.matched_observed_tracks,
             0
         );
+        assert_eq!(
+            unmatched_frame
+                .surveillance
+                .traffic_stats
+                .expect("scope frame exposes aggregate block-policy accounting")
+                .full_blocks,
+            0,
+            "wrong-address views cannot authorize complete blocks"
+        );
 
         let mut ambiguous = runtime();
         let claims = [(gufi_a, address, *b"ZAU1"), (gufi_b, address, *b"ZAU1")];
         seeded_claim_frame(&mut ambiguous, &claims, receipt);
-        let ambiguous_frame = observed_address_frame(&mut ambiguous, address, next_receipt);
+        let ambiguous_frame =
+            observed_address_frame(&mut ambiguous, address, *b"ZAU1", next_receipt);
         assert_eq!(
             ambiguous_frame
                 .flight_correlation
@@ -2488,11 +3434,21 @@ mod transaction_tests {
             ambiguous_frame.flight_correlation.matched_observed_tracks,
             0
         );
+        assert_eq!(
+            ambiguous_frame
+                .surveillance
+                .traffic_stats
+                .expect("scope frame exposes aggregate block-policy accounting")
+                .full_blocks,
+            0,
+            "ambiguous address claims cannot authorize complete blocks"
+        );
 
         let mut wrong_centre = runtime();
         let claims = [(gufi_a, address, *b"KXYZ")];
         seeded_claim_frame(&mut wrong_centre, &claims, receipt);
-        let centre_frame = observed_address_frame(&mut wrong_centre, address, next_receipt);
+        let centre_frame =
+            observed_address_frame(&mut wrong_centre, address, *b"ZAU1", next_receipt);
         assert_eq!(centre_frame.flight_data_unavailable, claims.len() as u32);
         assert_eq!(
             centre_frame
@@ -2501,6 +3457,360 @@ mod transaction_tests {
             0
         );
         assert_eq!(centre_frame.flight_correlation.unmatched_observed_tracks, 1);
+        assert_eq!(
+            centre_frame
+                .surveillance
+                .traffic_stats
+                .expect("scope frame exposes aggregate block-policy accounting")
+                .full_blocks,
+            0,
+            "wrong-centre views cannot authorize complete blocks"
+        );
+    }
+
+    // Kills per-frame evidence clearing and verifies receipt freshness through a coasted track,
+    // successful unchanged message, refused message, exact expiry boundary, and the next stale frame.
+    // REQ: OA-REG-002
+    #[test]
+    fn flight_identity_liveness_survives_coast_and_expires_after_refusal() {
+        let base = 1_800_000_000_000_000_000i64;
+        let first_identity_receipt = base + surveillance::SECOND_NS;
+        let address = 0x00ab_cdef;
+        let claims = [(
+            0x1000_0000_0000_0000_0000_0000_0000_0001,
+            address,
+            *b"ZAU\0",
+        )];
+        let mut positive = runtime_with_centre(*b"ZAU\0");
+        seeded_claim_frame(&mut positive, &claims, base);
+        let matched = co_timed_identity_frame(
+            &mut positive,
+            address,
+            first_identity_receipt,
+            Some("N123AB"),
+            Some(("N123AB", first_identity_receipt)),
+        );
+        assert_eq!(matched.flight_correlation.matched_observed_tracks, 1);
+        assert!(matched
+            .flights
+            .first()
+            .is_some_and(|row| row.view.is_some() && row.trajectory.is_some()));
+        assert!(matched
+            .controller_views
+            .first()
+            .is_some_and(|row| row.identity_present == 1));
+        assert!(matched
+            .surveillance
+            .traffic_stats
+            .is_some_and(|stats| stats.full_blocks > 0));
+
+        let coast_receipt = first_identity_receipt + surveillance::SECOND_NS;
+        let coast = regional_step(
+            &mut positive,
+            &ReceiptBatch {
+                receipt_ns: coast_receipt,
+                source_clock_regressions: 0,
+                events: Vec::new(),
+            },
+        )
+        .expect("command-only frame completes with the retained accepted observation");
+        assert_eq!(coast.flight_correlation.matched_observed_tracks, 1);
+        assert!(coast
+            .surveillance
+            .traffic_stats
+            .is_some_and(|stats| stats.full_blocks > 0));
+
+        let unchanged_receipt = coast_receipt + surveillance::SECOND_NS;
+        let unchanged_before = flight::flight_driver_report(&positive.flights).unchanged;
+        let refreshed = co_timed_identity_frame(
+            &mut positive,
+            address,
+            unchanged_receipt,
+            Some("N123AB"),
+            Some(("N123AB", unchanged_receipt)),
+        );
+        assert!(flight::flight_driver_report(&positive.flights).unchanged > unchanged_before);
+        assert_eq!(refreshed.flight_correlation.matched_observed_tracks, 1);
+        assert!(refreshed
+            .surveillance
+            .traffic_stats
+            .is_some_and(|stats| stats.full_blocks > 0));
+
+        let boundary_receipt = unchanged_receipt + 60 * surveillance::SECOND_NS;
+        let boundary = co_timed_frame_with_plan_refusal(
+            &mut positive,
+            address,
+            boundary_receipt,
+            Some("N123AB"),
+            None,
+            Some(first_identity_receipt),
+            false,
+        );
+        assert!(boundary
+            .flight_operations
+            .iter()
+            .any(|outcome| matches!(outcome.operation, Some(oa_flight::Outcome::Refused(_)))));
+        assert_eq!(boundary.flight_correlation.matched_observed_tracks, 1);
+        assert!(boundary
+            .surveillance
+            .traffic_stats
+            .is_some_and(|stats| stats.full_blocks > 0));
+
+        let stale_receipt = boundary_receipt + surveillance::SECOND_NS;
+        let stale =
+            co_timed_identity_frame(&mut positive, address, stale_receipt, Some("N123AB"), None);
+        assert_eq!(stale.flight_correlation.matched_observed_tracks, 0);
+        assert_eq!(stale.flight_correlation.unmatched_observed_tracks, 1);
+        assert!(stale
+            .flights
+            .first()
+            .is_some_and(|row| row.view.is_none() && row.trajectory.is_none()));
+        assert!(stale
+            .controller_views
+            .first()
+            .is_some_and(|row| row.identity_present == 0));
+        assert!(stale
+            .surveillance
+            .traffic_stats
+            .is_some_and(|stats| stats.full_blocks == 0));
+    }
+
+    // Kills mismatched-call-sign authority and verifies missing-call-sign and terminal views stay advisory.
+    // REQ: OA-REG-002
+    #[test]
+    fn flight_identity_requires_co_timed_observation_callsign_at_consumers() {
+        let base = 1_800_000_000_000_000_000i64;
+        let first_identity_receipt = base + surveillance::SECOND_NS;
+        let unchanged_receipt = base + 2 * surveillance::SECOND_NS;
+        let address = 0x00ab_cdef;
+        let claims = [(
+            0x1000_0000_0000_0000_0000_0000_0000_0001,
+            address,
+            *b"ZAU\0",
+        )];
+
+        let mut mismatch = runtime_with_centre(*b"ZAU\0");
+        seeded_claim_frame(&mut mismatch, &claims, base);
+        let frame = co_timed_identity_frame(
+            &mut mismatch,
+            address,
+            first_identity_receipt,
+            Some("N123AB"),
+            Some(("N999ZZ", first_identity_receipt)),
+        );
+        assert_eq!(frame.flight_correlation.unmatched_observed_tracks, 1);
+        assert!(frame
+            .flights
+            .first()
+            .is_some_and(|row| row.view.is_none() && row.trajectory.is_none()));
+        assert!(frame
+            .controller_views
+            .first()
+            .is_some_and(|row| row.identity_present == 0));
+        assert!(frame
+            .surveillance
+            .traffic_stats
+            .is_some_and(|stats| stats.full_blocks == 0));
+
+        let mut missing_callsign = runtime_with_centre(*b"ZAU\0");
+        seeded_claim_frame(&mut missing_callsign, &claims, base);
+        co_timed_identity_frame(
+            &mut missing_callsign,
+            address,
+            first_identity_receipt,
+            Some("N123AB"),
+            Some(("N123AB", first_identity_receipt)),
+        );
+        let missing = co_timed_identity_frame(
+            &mut missing_callsign,
+            address,
+            unchanged_receipt,
+            None,
+            None,
+        );
+        assert_eq!(missing.flight_correlation.matched_observed_tracks, 0);
+        assert!(missing
+            .controller_views
+            .first()
+            .is_some_and(|row| row.identity_present == 0));
+        assert!(missing
+            .surveillance
+            .traffic_stats
+            .is_some_and(|stats| stats.full_blocks == 0));
+
+        let mut terminal = runtime_with_centre(*b"ZAU\0");
+        seeded_claim_frame(&mut terminal, &claims, base);
+        co_timed_identity_frame(
+            &mut terminal,
+            address,
+            first_identity_receipt,
+            Some("N123AB"),
+            Some(("N123AB", first_identity_receipt)),
+        );
+        let completed = co_timed_frame_with_plan_refusal(
+            &mut terminal,
+            address,
+            unchanged_receipt,
+            Some("N123AB"),
+            None,
+            None,
+            true,
+        );
+        assert!(completed
+            .flight_operations
+            .iter()
+            .any(|outcome| matches!(outcome.operation, Some(oa_flight::Outcome::Applied))));
+        assert!(!completed
+            .controller_views
+            .iter()
+            .any(|row| row.identity_present == 1));
+        assert!(completed
+            .surveillance
+            .traffic_stats
+            .is_some_and(|stats| stats.full_blocks == 0));
+    }
+
+    // Kills the source-row callsign drop between ADS-B adaptation, normalized reparse, runtime
+    // correlation, and the full traffic presenter block.
+    // REQ: OA-REG-002
+    #[test]
+    fn adsb_source_callsign_reaches_co_timed_runtime_presenter() {
+        let base = 1_800_000_000_000_000_000i64;
+        let first_time = base + surveillance::SECOND_NS;
+        let second_time = first_time + surveillance::SECOND_NS;
+        let address = 0x00ab_cdef;
+        let gufi = 0x1000_0000_0000_0000_0000_0000_0000_0001u128;
+        let centre = *b"ZAU\0";
+        let mut reports = oa_adsb::Reports::default();
+        for time_ns in [first_time, second_time] {
+            oa_adsb::reports_push(
+                &mut reports,
+                &oa_adsb::Row {
+                    callsign: *b"N123AB  ",
+                    time_ns,
+                    icao: address,
+                    lat_e7: 410_000_000,
+                    lon_e7: -870_000_000,
+                    baro_alt_ft: 10_000,
+                    gs_dkt: 1_000,
+                    track_ddeg: 900,
+                    vrate_fpm: 0,
+                    nic: 8,
+                    nac_p: 9,
+                    nac_v: 2,
+                    sil: 3,
+                    version: 2,
+                    source: 0,
+                    ..oa_adsb::ROW_EMPTY
+                },
+            );
+        }
+        let mut payload = Vec::new();
+        oa_adsb::encode_payload(&mut payload, &reports, 0, 2).unwrap();
+        let input = crate::recordings_reader::RecordedFrame {
+            source: crate::recordings_reader::RecordingSource::Adsb,
+            stream_index: 0,
+            receipt_ns: first_time,
+            sequence: 1,
+            jms_timestamp_ms: first_time / 1_000_000,
+            mono_ns: None,
+            oaf_flags: oa_feed::FLAG_BYTES,
+            byte_offset: 0,
+            skipped_before: 0,
+            kind: oa_feed::Kind::Message,
+            payload,
+        };
+        let converted = crate::recordings::adapt_recorded_frames(
+            core::slice::from_ref(&input),
+            crate::recordings_reader::RecordingCounts {
+                total_decoded_bytes: u64::try_from(input.payload.len()).unwrap(),
+                ..crate::recordings_reader::RecordingCounts::default()
+            },
+            8,
+            centre,
+        )
+        .unwrap();
+        let normalized = crate::recordings::serialize_recorded_events(&converted.events).unwrap();
+        let positions = normalized
+            .split_terminator('\n')
+            .skip(1)
+            .map(parse_event_line)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(positions.len(), 2);
+        assert!(positions.iter().all(|event| matches!(
+            event.kind,
+            EventKind::Position { track_callsign: Some(callsign), .. }
+                if callsign == *b"N123AB\0\0"
+        )));
+
+        let mut engine = runtime_with_centre(centre);
+        let claims = [(gufi, address, centre)];
+        seeded_claim_frame(&mut engine, &claims, base);
+        let first = positions.first().copied().unwrap();
+        regional_step(
+            &mut engine,
+            &ReceiptBatch {
+                receipt_ns: first.receipt_ns,
+                source_clock_regressions: 0,
+                events: vec![first],
+            },
+        )
+        .unwrap();
+        let second = positions.get(1).copied().unwrap();
+        let identity = parse_event_line(&format!(
+            "v1\t{second_time}\t{second_time}\t3\tFLIGHT\t{gufi:032x}\t{address:06x}\tZAU\tFLIGHT\tIDENTITY_PARTIAL\tN123AB\t-\t-"
+        ))
+        .unwrap();
+        let route = parse_event_line(&format!(
+            "v1\t{second_time}\t{second_time}\t1\tROUTE\t{gufi:032x}\t{address:06x}\tZAU\tFILED_ROUTE\tPLAN00000001\tFIXB\tFIX:FIXA:K1:1:- FIX:FIXB:K1:1:-"
+        ))
+        .unwrap();
+        let output = regional_step(
+            &mut engine,
+            &ReceiptBatch {
+                receipt_ns: second.receipt_ns,
+                source_clock_regressions: 0,
+                events: vec![second, identity, route],
+            },
+        )
+        .unwrap();
+        assert!(output
+            .flights
+            .first()
+            .is_some_and(|row| { row.view.is_some() && row.trajectory.is_some() }));
+        assert!(output
+            .controller_views
+            .first()
+            .is_some_and(|view| view.identity_present == 1));
+        assert!(output
+            .surveillance
+            .traffic_stats
+            .is_some_and(|stats| stats.full_blocks > 0));
+    }
+
+    #[test]
+    fn native_three_character_zau_centre_allows_exact_current_view_block() {
+        let receipt = 1_800_000_000_000_000_000i64;
+        let address = 0x00ab_cdef;
+        let gufi = 0x1000_0000_0000_0000_0000_0000_0000_0001;
+        let centre = *b"ZAU\0";
+        let mut engine = runtime_with_centre(centre);
+        seeded_claim_frame(&mut engine, &[(gufi, address, centre)], receipt);
+        let frame = co_timed_identity_frame(
+            &mut engine,
+            address,
+            receipt + surveillance::SECOND_NS,
+            Some("N123AB"),
+            Some(("N123AB", receipt + surveillance::SECOND_NS)),
+        );
+        assert_eq!(frame.flight_correlation.matched_observed_tracks, 1);
+        let traffic = frame
+            .surveillance
+            .traffic_stats
+            .expect("regional raster carries traffic block accounting");
+        assert_eq!(traffic.full_blocks, 1);
+        assert_eq!(traffic.altitude_only_blocks, 0);
     }
 
     #[test]
@@ -2603,6 +3913,7 @@ mod transaction_tests {
                         east_mmps: 0,
                         north_mmps: 0,
                         vertical_rate_fpm: None,
+                        track_callsign: None,
                     },
                 })
                 .collect(),
@@ -2615,6 +3926,10 @@ mod transaction_tests {
             RegionalRunProfile::recorded_peak_rendered(),
         )
         .unwrap();
+        assert_eq!(
+            surveillance::tracker_drop_after_ns(&legacy.surveillance),
+            oa_track::DEFAULT_CONFIG.drop_after_ns
+        );
         assert!(regional_step(&mut legacy, &batch).is_err());
 
         let mut hour = regional_new_with_profile(
@@ -2625,6 +3940,10 @@ mod transaction_tests {
             RegionalRunProfile::recorded_hour_rendered(),
         )
         .unwrap();
+        assert_eq!(
+            surveillance::tracker_drop_after_ns(&hour.surveillance),
+            oa_track::DEFAULT_CONFIG.drop_after_ns
+        );
         let frame = regional_step(&mut hour, &batch).unwrap();
         assert_eq!(
             frame.input.input_events as usize,
@@ -2836,5 +4155,479 @@ mod transaction_tests {
                 .gufi,
             gufi.to_be_bytes()
         );
+    }
+
+    const EXACT_FINAL_MONITOR_PERIOD_NS: i64 = 4_800_000_000;
+
+    const OVER_FINAL_MONITOR_PERIOD_NS: i64 = 4_801_000_000;
+
+    fn final_monitor_config(max_r95_m: f64) -> RuntimeFinalMonitorConfig {
+        RuntimeFinalMonitorConfig {
+            pair: final_monitor_core::FinalPair {
+                id: final_monitor_core::FinalPairId {
+                    first_runway_id: 27_001,
+                    first_end_name: *b"27R",
+                    second_runway_id: 27_002,
+                    second_end_name: *b"27L",
+                },
+                projection_origin: Some(oa_runway::plane::Geo {
+                    lat_deg: 41.0,
+                    lon_deg: -87.0,
+                }),
+                origin: oa_runway::plane::Local {
+                    east_m: 0.0,
+                    north_m: 0.0,
+                },
+                axis_east: 1.0,
+                axis_north: 0.0,
+                normal_east: 0.0,
+                normal_north: 1.0,
+                course_length_m: 10_000.0,
+                ntz_half_width_m: 10.0,
+                max_r95_m,
+                lookahead_ns: 60_000_000_000,
+                update_ns: EXACT_FINAL_MONITOR_PERIOD_NS as u64,
+            },
+            assignments: vec![FinalApproachAssignment {
+                flight: oa_flight::key_gufi(1),
+                runway_id: 27_001,
+                end_name: *b"27R",
+            }],
+        }
+    }
+
+    fn configured_runtime(max_r95_m: f64) -> RegionalRuntime {
+        let model = synthetic_model().unwrap();
+        let snapshot = oa_airspace::core::snapshot::encode(&model).unwrap();
+        regional_new_with_runtime_final_monitor(
+            model,
+            oa_sha256::sha256(&snapshot),
+            *b"ZAU1",
+            SurveillanceConfig {
+                centre_lat_e7: 410_000_000,
+                centre_lon_e7: -870_000_000,
+                range_nm: 180.0,
+            },
+            DEFAULT_REGIONAL_RUN_PROFILE,
+            final_monitor_config(max_r95_m),
+        )
+        .unwrap()
+    }
+
+    fn final_monitor_batch(
+        receipt_ns: i64,
+        source_ns: i64,
+        latitude_e7: i32,
+        north_mmps: i32,
+        include_flight_setup: bool,
+    ) -> ReceiptBatch {
+        let mut events = vec![parse_event_line(&format!(
+            "v1\t{receipt_ns}\t{source_ns}\t1\tSURVEILLANCE\t00000000000000000000000000000000\t000abc\tZAU1\tPOS\t{latitude_e7}\t-870000000\t10000\t0\t{north_mmps}\t0\tCALLSIGN\tN123AB"
+        )).unwrap()];
+        if include_flight_setup {
+            events.push(parse_event_line(&format!(
+                "v1\t{receipt_ns}\t{receipt_ns}\t1\tFLIGHT\t{:032x}\t000abc\tZAU1\tFLIGHT\tPLAN\tPLAN00000001\t2",
+                1_u128
+            )).unwrap());
+            events.push(
+                parse_event_line(&format!(
+                "v1\t{receipt_ns}\t{receipt_ns}\t2\tFLIGHT\t{:032x}\t000abc\tZAU1\tFLIGHT\tADDRESS",
+                1_u128
+            ))
+                .unwrap(),
+            );
+            events.push(parse_event_line(&format!(
+                "v1\t{receipt_ns}\t{receipt_ns}\t3\tFLIGHT\t{:032x}\t000abc\tZAU1\tFLIGHT\tIDENTITY_PARTIAL\tN123AB\t-\t-",
+                1_u128
+            )).unwrap());
+        }
+        ReceiptBatch {
+            receipt_ns,
+            source_clock_regressions: 0,
+            events,
+        }
+    }
+
+    fn seed_confirmed_final_monitor_track(
+        runtime: &mut RegionalRuntime,
+        latitude_e7: i32,
+        north_mmps: i32,
+    ) -> RegionalFrame {
+        seed_confirmed_final_monitor_track_from(runtime, latitude_e7, north_mmps, 1_000_000_000)
+    }
+
+    fn seed_confirmed_final_monitor_track_from(
+        runtime: &mut RegionalRuntime,
+        latitude_e7: i32,
+        north_mmps: i32,
+        first_scan_ns: i64,
+    ) -> RegionalFrame {
+        let mut latest = None;
+        for scan in 0_i64..4 {
+            let time_ns = first_scan_ns + scan * 1_000_000_000;
+            latest = Some(
+                regional_step(
+                    runtime,
+                    &final_monitor_batch(time_ns, time_ns, latitude_e7, north_mmps, scan == 0),
+                )
+                .unwrap(),
+            );
+        }
+        latest.expect("four synthetic scans produce a final frame")
+    }
+
+    // REQ: OA-RWY-015
+    #[test]
+    fn configured_runtime_runs_caution_on_exact_4_8_second_source_period() {
+        // Mutation killed: configured runtime ignores the explicit flight-key assignment and emits no caution.
+        // Mutation killed: measure input cadence from the last evaluation, making 4.0→8.8 look like 6.8 s.
+        let mut runtime = configured_runtime(100.0);
+        let first = seed_confirmed_final_monitor_track(&mut runtime, 410_009_000, -10_000);
+        assert_eq!(
+            first.final_monitor.status,
+            FinalMonitorStatus::Available,
+            "flight-data={:?} unavailable={} tracks={:?} ops={:?} quarantine={:?} feeds={:?} tracker={:?}",
+            first.flight_data,
+            first.flight_data_unavailable,
+            first.surveillance.tracks,
+            first.flight_operations,
+            first.quarantine.records,
+            first.surveillance.feeds,
+            first.surveillance.tracker_stats
+        );
+        assert!(first
+            .final_monitor
+            .alerts
+            .iter()
+            .any(|alert| { alert.severity == final_monitor_core::FinalSeverity::Caution }));
+
+        let last_input_ns = runtime
+            .final_monitor
+            .as_ref()
+            .expect("explicit monitor config remains attached")
+            .state
+            .last_input_frame_ns;
+        assert!(
+            last_input_ns <= u64::try_from(first.surveillance.time_ns).unwrap(),
+            "the monitor clock cannot be ahead of the latest processed frame"
+        );
+        let monitor_state = runtime.final_monitor.as_ref().unwrap().state;
+        assert_eq!(monitor_state.last_input_frame_ns, 4_000_000_000);
+        assert_eq!(monitor_state.last_evaluation_ns, 2_000_000_000);
+        let next_scan_ns =
+            i64::try_from(last_input_ns + EXACT_FINAL_MONITOR_PERIOD_NS as u64).unwrap();
+        assert_eq!(
+            runtime.final_monitor.as_ref().unwrap().pair.update_ns,
+            EXACT_FINAL_MONITOR_PERIOD_NS as u64
+        );
+        assert_eq!(
+            next_scan_ns as u64 - last_input_ns,
+            EXACT_FINAL_MONITOR_PERIOD_NS as u64,
+            "fixture advances by the exact monitor period"
+        );
+        assert!(first
+            .surveillance
+            .tracks
+            .iter()
+            .all(|track| track.newest_source_ns == first.surveillance.time_ns));
+        let second = regional_step(
+            &mut runtime,
+            &final_monitor_batch(next_scan_ns, next_scan_ns, 410_004_700, -10_000, false),
+        )
+        .unwrap();
+        assert_eq!(
+            second.final_monitor.status,
+            FinalMonitorStatus::Available,
+            "first_frame_time={} first_track_source={:?} previous_update={} actual_interval={} limit={} second_frame_time={} second_track_sources={:?} tracker={:?}",
+            first.surveillance.time_ns,
+            first
+                .surveillance
+                .tracks
+                .iter()
+                .map(|track| track.newest_source_ns)
+                .collect::<Vec<_>>(),
+            last_input_ns,
+            next_scan_ns as u64 - last_input_ns,
+            runtime.final_monitor.as_ref().unwrap().pair.update_ns,
+            second.surveillance.time_ns,
+            second
+                .surveillance
+                .tracks
+                .iter()
+                .map(|track| track.newest_source_ns)
+                .collect::<Vec<_>>(),
+            second.surveillance.tracker_stats
+        );
+        assert_eq!(
+            second
+                .final_monitor
+                .timing
+                .unwrap()
+                .observed_input_interval_ns,
+            EXACT_FINAL_MONITOR_PERIOD_NS as u64
+        );
+        assert_eq!(
+            second
+                .final_monitor
+                .timing
+                .unwrap()
+                .observed_evaluation_interval_ns,
+            6_800_000_000
+        );
+        assert_eq!(second.final_monitor.timing.unwrap().prediction_age_ns, 0);
+        assert!(second
+            .surveillance
+            .tracks
+            .iter()
+            .all(|track| track.newest_source_ns == second.surveillance.time_ns));
+
+        let mut last_exact_scan_ns = next_scan_ns;
+        for scan_index in 1..=3_i64 {
+            last_exact_scan_ns += EXACT_FINAL_MONITOR_PERIOD_NS;
+            let frame = regional_step(
+                &mut runtime,
+                &final_monitor_batch(
+                    last_exact_scan_ns,
+                    last_exact_scan_ns,
+                    410_004_700,
+                    -10_000,
+                    false,
+                ),
+            )
+            .unwrap();
+            assert_eq!(frame.final_monitor.status, FinalMonitorStatus::Available);
+            let timing = frame.final_monitor.timing.unwrap();
+            assert_eq!(
+                timing.observed_input_interval_ns,
+                EXACT_FINAL_MONITOR_PERIOD_NS as u64
+            );
+            assert_eq!(timing.prediction_age_ns, 0);
+            assert_eq!(
+                last_exact_scan_ns - next_scan_ns,
+                scan_index * EXACT_FINAL_MONITOR_PERIOD_NS
+            );
+        }
+
+        let beyond_limit_ns = last_exact_scan_ns + OVER_FINAL_MONITOR_PERIOD_NS;
+        let beyond_limit = regional_step(
+            &mut runtime,
+            &final_monitor_batch(beyond_limit_ns, beyond_limit_ns, 410_000_000, 0, false),
+        )
+        .unwrap();
+        assert_eq!(
+            beyond_limit.final_monitor.status,
+            FinalMonitorStatus::Degraded(FinalMonitorDegradation::InputCadence)
+        );
+        let timing = beyond_limit.final_monitor.timing.unwrap();
+        assert_eq!(
+            timing.observed_input_interval_ns,
+            OVER_FINAL_MONITOR_PERIOD_NS as u64
+        );
+        assert_eq!(timing.prediction_age_ns, 0);
+        assert!(beyond_limit.final_monitor.alerts.is_empty());
+    }
+
+    // Mutation killed: turn a configured assignment with no corroborated flight into an empty,
+    // apparently available monitor update when there are no unavailable-flight rows.
+    // REQ: OA-RWY-015
+    #[test]
+    fn configured_runtime_degrades_when_assignment_has_no_corroborated_flight() {
+        let mut configured = configured_runtime(100.0);
+        let configured_frame = regional_step(
+            &mut configured,
+            &final_monitor_batch(1_000_000_000, 1_000_000_000, 410_000_000, 0, false),
+        )
+        .unwrap();
+        assert!(configured_frame.flight_data.is_empty());
+        assert_eq!(configured_frame.flight_data_unavailable, 0);
+        assert_eq!(
+            configured_frame.final_monitor.status,
+            FinalMonitorStatus::Degraded(FinalMonitorDegradation::MissingAssignedTrack)
+        );
+        assert!(configured_frame.final_monitor.alerts.is_empty());
+
+        let mut plain = runtime();
+        let plain_frame = regional_step(
+            &mut plain,
+            &final_monitor_batch(1_000_000_000, 1_000_000_000, 410_000_000, 0, false),
+        )
+        .unwrap();
+        assert_ne!(
+            configured_frame.surveillance.frame_sha256, plain_frame.surveillance.frame_sha256,
+            "the actual presenter must expose missing-assignment degradation"
+        );
+    }
+
+    // REQ: OA-RWY-015
+    #[test]
+    fn configured_runtime_warning_reaches_frame_and_raster_consumer() {
+        // Mutation killed: final-monitor output is not consumed by the actual scope presenter.
+        let mut configured = configured_runtime(100.0);
+        let frame = seed_confirmed_final_monitor_track(&mut configured, 410_000_000, 0);
+        assert_eq!(frame.final_monitor.status, FinalMonitorStatus::Available);
+        assert!(frame
+            .final_monitor
+            .alerts
+            .iter()
+            .any(|alert| { alert.severity == final_monitor_core::FinalSeverity::Warning }));
+        assert!(!regional_pixels(&configured).unwrap().is_empty());
+
+        let mut plain = runtime();
+        let plain_frame = seed_confirmed_final_monitor_track(&mut plain, 410_000_000, 0);
+        assert_ne!(
+            frame.surveillance.frame_sha256,
+            plain_frame.surveillance.frame_sha256
+        );
+    }
+
+    // REQ: OA-RWY-015
+    #[test]
+    fn configured_runtime_withholds_stale_and_unusable_prediction_alerts() {
+        // Mutation killed: stale data or unusable uncertainty leaves a previously rendered warning active.
+        let mut configured = configured_runtime(100.0);
+        let warning = seed_confirmed_final_monitor_track(&mut configured, 410_000_000, 0);
+        assert!(warning
+            .final_monitor
+            .alerts
+            .iter()
+            .any(|alert| alert.severity == final_monitor_core::FinalSeverity::Warning));
+        let target = warning
+            .surveillance
+            .tracks
+            .iter()
+            .find(|track| {
+                warning
+                    .final_monitor
+                    .alerts
+                    .iter()
+                    .any(|alert| alert.address == track.address)
+            })
+            .expect("warning has a corresponding live track");
+        let target_address = target.address;
+        let last_source_ns = target.newest_source_ns;
+        let stale_frame = regional_step(
+            &mut configured,
+            &ReceiptBatch {
+                receipt_ns: 8_801_000_000,
+                source_clock_regressions: 0,
+                events: Vec::new(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            stale_frame.final_monitor.status,
+            FinalMonitorStatus::Degraded(FinalMonitorDegradation::StalePredictionAndInputCadence)
+        );
+        assert!(stale_frame.final_monitor.alerts.is_empty());
+        assert!(stale_frame
+            .surveillance
+            .tracks
+            .iter()
+            .any(|track| track.address == target_address
+                && track.state_ns == stale_frame.surveillance.time_ns
+                && track.newest_source_ns == last_source_ns));
+        assert_ne!(
+            warning.surveillance.frame_sha256, stale_frame.surveillance.frame_sha256,
+            "the ordinary presenter replaces the prior warning with stale degraded status"
+        );
+
+        let mut wide = configured_runtime(100.0);
+        let wide_warning = seed_confirmed_final_monitor_track(&mut wide, 410_000_000, 0);
+        assert!(wide_warning
+            .final_monitor
+            .alerts
+            .iter()
+            .any(|alert| alert.severity == final_monitor_core::FinalSeverity::Warning));
+        wide.final_monitor.as_mut().unwrap().pair.max_r95_m = 0.01;
+        let wide_frame = regional_step(
+            &mut wide,
+            &final_monitor_batch(8_800_000_000, 8_800_000_000, 410_000_000, 0, false),
+        )
+        .unwrap();
+        assert_eq!(
+            wide_frame.final_monitor.status,
+            FinalMonitorStatus::Degraded(FinalMonitorDegradation::UnusableUncertainty)
+        );
+        assert!(wide_frame.final_monitor.alerts.is_empty());
+        assert_ne!(
+            wide_warning.surveillance.frame_sha256, wide_frame.surveillance.frame_sha256,
+            "the ordinary presenter removes the warning when prediction uncertainty is unusable"
+        );
+        let mut plain = runtime();
+        let plain_frame = seed_confirmed_final_monitor_track(&mut plain, 410_000_000, 0);
+        assert_ne!(
+            wide_frame.surveillance.frame_sha256, plain_frame.surveillance.frame_sha256,
+            "the configured runtime must render a degraded status through its real consumer"
+        );
+    }
+
+    // REQ: OA-RWY-015, OA-RWY-016, OA-RWY-017
+    #[test]
+    fn configured_runtime_clears_stale_warning_and_recovers_on_fresh_source() {
+        // Mutation killed: prediction staleness leaves a prior warning displayed or never recovers.
+        let mut runtime = configured_runtime(100.0);
+        let warning =
+            seed_confirmed_final_monitor_track_from(&mut runtime, 410_000_000, 0, 1_200_000_000);
+        assert!(warning
+            .final_monitor
+            .alerts
+            .iter()
+            .any(|alert| alert.severity == final_monitor_core::FinalSeverity::Warning));
+
+        let near_limit = regional_step(
+            &mut runtime,
+            &final_monitor_batch(9_000_000_000, 4_201_000_000, 410_000_000, 0, false),
+        )
+        .unwrap();
+        assert_eq!(
+            near_limit.final_monitor.status,
+            FinalMonitorStatus::Available
+        );
+        let near_limit_timing = near_limit.final_monitor.timing.unwrap();
+        assert_eq!(
+            near_limit_timing.observed_input_interval_ns,
+            EXACT_FINAL_MONITOR_PERIOD_NS as u64
+        );
+        assert_eq!(near_limit_timing.prediction_age_ns, 4_799_000_000);
+
+        let stale = regional_step(
+            &mut runtime,
+            &final_monitor_batch(14_000_000_000, 8_999_000_000, 410_000_000, 0, false),
+        )
+        .unwrap();
+        assert_eq!(
+            stale.final_monitor.status,
+            FinalMonitorStatus::Degraded(FinalMonitorDegradation::StalePredictionAndInputCadence)
+        );
+        assert!(stale.final_monitor.alerts.is_empty());
+        assert_eq!(
+            stale
+                .final_monitor
+                .timing
+                .unwrap()
+                .observed_input_interval_ns,
+            5_000_000_000,
+            "the consumer reports the actual frame gap alongside stale source age"
+        );
+        assert_ne!(
+            near_limit.surveillance.frame_sha256, stale.surveillance.frame_sha256,
+            "the ordinary presenter removes the stale warning"
+        );
+
+        let recovered = regional_step(
+            &mut runtime,
+            &final_monitor_batch(18_800_000_000, 18_800_000_000, 410_000_000, 0, false),
+        )
+        .unwrap();
+        assert_eq!(
+            recovered.final_monitor.status,
+            FinalMonitorStatus::Available
+        );
+        assert_eq!(recovered.final_monitor.timing.unwrap().prediction_age_ns, 0);
+        assert!(recovered
+            .final_monitor
+            .alerts
+            .iter()
+            .any(|alert| alert.severity == final_monitor_core::FinalSeverity::Warning));
     }
 }

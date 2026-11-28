@@ -12,7 +12,8 @@ use oa_safety::inhibit::inhibits_new;
 use oa_safety::net::state_table_new;
 use oa_scope_replay::adapt::{feed_status_from_health, FeedFreshnessLimits};
 use oa_scope_replay::frame::{
-    replay_build_with_safety, replay_new, replay_raster, ReplayConfig, ReplaySafety,
+    replay_build_with_safety, replay_new, replay_new_with_top_inset, replay_raster, ReplayConfig,
+    ReplaySafety,
 };
 use oa_scope_replay::rows::{Callsigns, RowStore, DEFAULT_CONVERT};
 
@@ -101,6 +102,8 @@ fn render_feed_status(
             feeds: &feeds,
             newest_track_ns,
             frozen_limit_ns: 5 * S,
+            use_reserved_status_header: false,
+            traffic_block_policies: None,
         },
     )
     .expect("synthetic scope frame builds");
@@ -198,6 +201,75 @@ fn status_heartbeat_does_not_refresh_message_age_or_clear_frozen_picture() {
     assert_eq!(disconnected.state, FeedState::Disconnected);
     let texts = render_feed_status(disconnected, now_ns, Some(110 * S));
     assert!(texts.iter().any(|line| line == "FEED ADSB DISCONNECTED"));
+}
+
+#[test]
+fn reserved_status_header_uses_compact_band_only_when_explicitly_enabled() {
+    let mut replay = replay_new_with_top_inset(
+        model(),
+        &ReplayConfig {
+            centre_lat_e7: 419_786_000,
+            centre_lon_e7: -879_048_000,
+            range_nm: 30.0,
+            width: 800,
+            height: 600,
+            max_targets: 4,
+            style: DEFAULT_STYLE,
+            convert: DEFAULT_CONVERT,
+        },
+        160,
+    )
+    .expect("synthetic scope with reserved status band initializes");
+    let states = state_table_new(10 * S, 0).expect("synthetic state table initializes");
+    let inhibits = inhibits_new();
+    let feeds = [FeedStatus {
+        name: FEED_NAME,
+        state: FeedState::Lost { age_ms: 20_000 },
+    }];
+    replay_build_with_safety(
+        &mut replay,
+        &RowStore::default(),
+        &Callsigns::default(),
+        120 * S,
+        "RESERVED STATUS HEADER FIXTURE",
+        &ReplaySafety {
+            states: &states,
+            inhibits: &inhibits,
+            feeds: &feeds,
+            newest_track_ns: None,
+            frozen_limit_ns: 5 * S,
+            use_reserved_status_header: true,
+            traffic_block_policies: None,
+        },
+    )
+    .expect("explicit regional-style header builds");
+
+    let mut status_rows = 0usize;
+    let mut summary_visible = false;
+    for ((&start, &len), &y) in replay
+        .list
+        .texts
+        .start
+        .iter()
+        .zip(&replay.list.texts.len)
+        .zip(&replay.list.texts.y)
+    {
+        let start = usize::try_from(start).expect("text offset fits usize");
+        let len = usize::try_from(len).expect("text length fits usize");
+        let text = replay
+            .list
+            .text
+            .get(start..start + len)
+            .expect("display text span is valid");
+        if text.starts_with("PICTURE ") || text.starts_with("NET ") || text.starts_with("FEED ") {
+            status_rows += 1;
+            assert!((128 * 16..160 * 16).contains(&y));
+        }
+        summary_visible |= text.starts_with('+') && text.contains("MORE STATES NOT SHOWN");
+    }
+    assert!(status_rows > 0);
+    assert!(summary_visible);
+    replay_raster(&mut replay).expect("explicitly placed status frame rasterizes");
 }
 
 #[test]

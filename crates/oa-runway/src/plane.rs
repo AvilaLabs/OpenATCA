@@ -148,3 +148,49 @@ pub fn to_local(p: &Plane, g: Geo) -> Option<Local> {
         north_m: north,
     })
 }
+
+/// Map true east/north ground velocity at `g` to the airport plane's coordinate derivative.
+/// Position and velocity must use the same coordinate frame when an airport-plane axis is applied.
+pub fn true_velocity_to_local(p: &Plane, g: Geo, east_mps: f64, north_mps: f64) -> Option<Local> {
+    let local = to_local(p, g)?;
+    if !east_mps.is_finite() || !north_mps.is_finite() || !(-90.0..=90.0).contains(&g.lat_deg) {
+        return None;
+    }
+    let ellipsoid = wgs84();
+    let a = ellipsoid.equatorial_radius();
+    let flattening = ellipsoid.flattening();
+    let eccentricity_sq = flattening * (2.0 - flattening);
+    let latitude_rad = g.lat_deg.to_radians();
+    let (sin_latitude, cos_latitude) = oa_math::sin_cos(latitude_rad);
+    let denominator = 1.0 - eccentricity_sq * sin_latitude * sin_latitude;
+    if !(denominator.is_finite() && denominator > 0.0 && cos_latitude > 0.0) {
+        return None;
+    }
+    let root = oa_ieee::sqrt(denominator);
+    let prime_vertical = a / root;
+    let meridional = a * (1.0 - eccentricity_sq) / (denominator * root);
+    let radians_per_second_north = north_mps / meridional;
+    let radians_per_second_east = east_mps / (prime_vertical * cos_latitude);
+    let degrees_per_radian = 180.0 / core::f64::consts::PI;
+    let latitude_delta_rad = (g.lat_deg - p.lat0_deg).to_radians();
+    let mut longitude_delta_deg = g.lon_deg - p.lon0_deg;
+    if longitude_delta_deg > 180.0 {
+        longitude_delta_deg -= 360.0;
+    } else if longitude_delta_deg < -180.0 {
+        longitude_delta_deg += 360.0;
+    }
+    let east_factor = 1.0 - p.tan_lat0 * latitude_delta_rad;
+    let east_mps = p.m_per_deg_lon
+        * (radians_per_second_east * degrees_per_radian * east_factor
+            - longitude_delta_deg * p.tan_lat0 * radians_per_second_north);
+    let north_mps = p.m_per_deg_lat * radians_per_second_north * degrees_per_radian
+        + 2.0 * p.half_curv * local.east_m * east_mps;
+    if east_mps.is_finite() && north_mps.is_finite() {
+        Some(Local {
+            east_m: east_mps,
+            north_m: north_mps,
+        })
+    } else {
+        None
+    }
+}

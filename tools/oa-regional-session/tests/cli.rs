@@ -189,6 +189,8 @@ fn explicit_synthetic_msaw_evaluates_warning_and_closes_evidence() {
     fs::remove_dir_all(root).expect("cleanup");
 }
 
+// Mutation killed: removing the source callsign observation or one-time flight identity prevents
+// the CLI consumer from producing the route-backed trajectory evidence asserted below.
 // REQ: OA-REG-004, OA-REG-005, OA-REG-008
 #[test]
 fn full_synthetic_session_has_closed_identical_evidence_and_valid_images() {

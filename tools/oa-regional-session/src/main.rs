@@ -69,6 +69,7 @@ struct ReplayArgs {
     start_ns: Option<i64>,
     end_ns: Option<i64>,
     warmup_start_ns: Option<i64>,
+    review_view: Option<oa_regional_session::cli::RegionalReviewView>,
 }
 
 fn arguments() -> Result<Arguments, CliError> {
@@ -144,7 +145,8 @@ fn arguments() -> Result<Arguments, CliError> {
                 flag @ ("--profile"
                 | "--replay-start-ns"
                 | "--replay-end-ns"
-                | "--replay-warmup-start-ns"),
+                | "--replay-warmup-start-ns"
+                | "--review-view"),
             ) if execute => {
                 parse_replay_option(flag, &mut args, &mut replay)?;
             }
@@ -325,11 +327,12 @@ fn arguments() -> Result<Arguments, CliError> {
     let profile = replay
         .profile
         .unwrap_or(oa_regional_session::cli::RegionalCliProfile::Default);
-    let options = session_options_with_warmup(
+    let options = session_options_with_warmup_and_view(
         profile,
         replay.start_ns,
         replay.end_ns,
         replay.warmup_start_ns,
+        replay.review_view,
     )?;
     Ok(Arguments {
         input,
@@ -379,9 +382,27 @@ fn parse_replay_option(
                     .ok_or(CliError::Usage)?,
             );
         }
+        "--review-view" if replay.review_view.is_none() => {
+            let value = args
+                .next()
+                .and_then(|value| value.into_string().ok())
+                .ok_or(CliError::Usage)?;
+            replay.review_view = Some(parse_review_view(&value)?);
+        }
         _ => return Err(CliError::Usage),
     }
     Ok(())
+}
+
+fn parse_review_view(
+    value: &str,
+) -> Result<oa_regional_session::cli::RegionalReviewView, CliError> {
+    match value {
+        "zau" => Ok(oa_regional_session::cli::RegionalReviewView::ZauOverview),
+        "zau-detailed" => Ok(oa_regional_session::cli::RegionalReviewView::ZauDetailed),
+        "ord" => Ok(oa_regional_session::cli::RegionalReviewView::OrdCentered),
+        _ => Err(CliError::Usage),
+    }
 }
 
 fn parse_cli_profile(
@@ -404,14 +425,25 @@ fn session_options(
     start_ns: Option<i64>,
     end_ns: Option<i64>,
 ) -> Result<oa_regional_session::cli::RegionalSessionOptions, CliError> {
-    session_options_with_warmup(profile, start_ns, end_ns, None)
+    session_options_with_warmup_and_view(profile, start_ns, end_ns, None, None)
 }
 
+#[cfg(test)]
 fn session_options_with_warmup(
     profile: oa_regional_session::cli::RegionalCliProfile,
     start_ns: Option<i64>,
     end_ns: Option<i64>,
     warmup_start_ns: Option<i64>,
+) -> Result<oa_regional_session::cli::RegionalSessionOptions, CliError> {
+    session_options_with_warmup_and_view(profile, start_ns, end_ns, warmup_start_ns, None)
+}
+
+fn session_options_with_warmup_and_view(
+    profile: oa_regional_session::cli::RegionalCliProfile,
+    start_ns: Option<i64>,
+    end_ns: Option<i64>,
+    warmup_start_ns: Option<i64>,
+    review_view: Option<oa_regional_session::cli::RegionalReviewView>,
 ) -> Result<oa_regional_session::cli::RegionalSessionOptions, CliError> {
     let recorded_hour = match (start_ns, end_ns) {
         (None, None) if warmup_start_ns.is_none() => None,
@@ -433,6 +465,7 @@ fn session_options_with_warmup(
     Ok(oa_regional_session::cli::RegionalSessionOptions {
         profile,
         recorded_hour,
+        review_view,
     })
 }
 
@@ -776,7 +809,7 @@ fn run() -> Result<(), CliError> {
 fn main() {
     if let Err(error) = run() {
         let message = match error {
-            CliError::Usage => "usage: oa-regional-session run --input FILE --out NEW_DIR (--snapshot FILE | --synthetic-model | --issued-package DIR --issued-manifest-sha256 PIN --processor-id ID) [--msaw-inputs MANIFEST | --synthetic-msaw] [--performance MANIFEST] [--profile recorded-peak-rendered|recorded-hour-rendered --replay-start-ns NS --replay-end-ns NS [--replay-warmup-start-ns NS]] [--quarantine-release-source flight-data|surveillance --quarantine-release-instance N --quarantine-release-item N --manual-handoff-ref TEXT --audit-registry FILE --audit-registry-sha256 SHA256 --audit-log FILE --audit-count N --audit-tail SHA256 --audit-principal N [--audit-role operate|configure] --audit-time-ns NS]; stage --input FILE --out NEW_DIR".to_owned(),
+            CliError::Usage => "usage: oa-regional-session run --input FILE --out NEW_DIR (--snapshot FILE | --synthetic-model | --issued-package DIR --issued-manifest-sha256 PIN --processor-id ID) [--msaw-inputs MANIFEST | --synthetic-msaw] [--performance MANIFEST] [--profile recorded-peak-rendered|recorded-hour-rendered --replay-start-ns NS --replay-end-ns NS [--replay-warmup-start-ns NS]] [--review-view zau|zau-detailed|ord] [--quarantine-release-source flight-data|surveillance --quarantine-release-instance N --quarantine-release-item N --manual-handoff-ref TEXT --audit-registry FILE --audit-registry-sha256 SHA256 --audit-log FILE --audit-count N --audit-tail SHA256 --audit-principal N [--audit-role operate|configure] --audit-time-ns NS]; stage --input FILE --out NEW_DIR".to_owned(),
             CliError::Io(error) => format!("I/O error: {error}"),
             CliError::InputTooLarge { max_bytes } => format!(
                 "input exceeds the {} MiB profile limit",
@@ -951,6 +984,35 @@ mod tests {
         assert_eq!(replay.warmup_start_ns, Some(warmup_start_ns));
         assert!(super::parse_replay_option(
             "--replay-warmup-start-ns",
+            &mut Vec::<OsString>::new().into_iter(),
+            &mut replay,
+        )
+        .is_err());
+    }
+
+    // Mutation killed: silently mapping unknown review views to a default camera.
+    // REQ: OA-REG-019
+    #[test]
+    fn replay_cli_parser_accepts_only_named_review_view_presets() {
+        let mut replay = super::ReplayArgs::default();
+        let mut view = vec![OsString::from("ord")].into_iter();
+        super::parse_replay_option("--review-view", &mut view, &mut replay)
+            .expect("recognized ORD review preset");
+        assert_eq!(
+            replay.review_view,
+            Some(oa_regional_session::cli::RegionalReviewView::OrdCentered)
+        );
+        let mut detailed = super::ReplayArgs::default();
+        let mut detailed_value = vec![OsString::from("zau-detailed")].into_iter();
+        super::parse_replay_option("--review-view", &mut detailed_value, &mut detailed)
+            .expect("recognized detailed ZAU review preset");
+        assert_eq!(
+            detailed.review_view,
+            Some(oa_regional_session::cli::RegionalReviewView::ZauDetailed)
+        );
+        assert!(super::parse_review_view("unspecified-view").is_err());
+        assert!(super::parse_replay_option(
+            "--review-view",
             &mut Vec::<OsString>::new().into_iter(),
             &mut replay,
         )

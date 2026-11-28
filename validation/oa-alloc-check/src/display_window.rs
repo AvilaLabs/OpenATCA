@@ -601,6 +601,8 @@ pub(super) fn display_window(inject: bool) -> Result<DisplayEvidence, &'static s
         feeds: &feeds,
         newest_track_ns: Some(T0),
         frozen_limit_ns: 5 * S,
+        use_reserved_status_header: false,
+        traffic_block_policies: None,
     };
     let mut frame = TrafficStats::default();
     let mut scene_items = 0u64;

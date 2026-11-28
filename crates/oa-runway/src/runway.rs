@@ -157,6 +157,8 @@ pub struct RunwayEnd {
 #[derive(Debug, Clone, Copy, PartialEq)]
 // A7.2: cold struct, size guard waived
 pub struct Runway {
+    /// Geographic origin of the local plane used to build this runway.
+    pub plane_origin: Geo,
     pub ends: [RunwayEnd; 2],
     /// Published length and width, metres.
     pub length_m: f64,
@@ -503,6 +505,7 @@ pub fn build_runway(plane: &Plane, input: &RunwayInput<'_>) -> Result<Runway, Re
         declared: declared_m(&e.declared),
     };
     let out = Runway {
+        plane_origin: crate::plane::plane_origin(plane),
         ends: [
             make_end(name_a, &ra, &input.a, pa, ta, disp_a),
             make_end(name_b, &rb, &input.b, pb, tb, disp_b),

@@ -159,6 +159,9 @@ pub enum EventKind {
         east_mmps: i32,
         north_mmps: i32,
         vertical_rate_fpm: Option<i32>,
+        /// Optional callsign retained from this exact surveillance source observation.
+        /// Absence is preserved for legacy/manual inputs; this is not an authentication claim.
+        track_callsign: Option<[u8; 8]>,
     },
     Flight(FlightOperation),
     Operator(OperatorCommand),
@@ -358,6 +361,26 @@ fn parse_position(parts: &[&str]) -> Result<EventKind, InputError> {
     if alt.is_some_and(|v| !(-2_000..=100_000).contains(&v)) {
         return Err(InputError::InvalidAltitude);
     }
+    let track_callsign = match parts.len() {
+        15 => None,
+        17 if part(parts, 15)? == "CALLSIGN" => {
+            let value = part(parts, 16)?;
+            if value.is_empty()
+                || value.len() > 8
+                || !value.bytes().all(|byte| byte.is_ascii_alphanumeric())
+            {
+                return Err(InputError::InvalidLabel);
+            }
+            let mut callsign = [0; 8];
+            let bytes = value.as_bytes();
+            callsign
+                .get_mut(..bytes.len())
+                .ok_or(InputError::InvalidLabel)?
+                .copy_from_slice(bytes);
+            Some(callsign)
+        }
+        _ => return Err(InputError::BadFieldCount),
+    };
     Ok(EventKind::Position {
         latitude_e7: lat,
         longitude_e7: lon,
@@ -365,6 +388,7 @@ fn parse_position(parts: &[&str]) -> Result<EventKind, InputError> {
         east_mmps: east,
         north_mmps: north,
         vertical_rate_fpm: vertical,
+        track_callsign,
     })
 }
 
@@ -512,9 +536,9 @@ fn parse_filed_route(parts: &[&str]) -> Result<EventKind, InputError> {
 
 /// Parses one protocol event. The caller checks line length before calling this function.
 ///
-/// Position rows have 15 fields; the event type selects the remaining fields:
+/// Position rows have 15 legacy fields, or 17 fields with a source callsign extension; the event type selects the remaining fields:
 /// `v1<TAB>receipt_ns<TAB>source_ns<TAB>sequence<TAB>source<TAB>gufi_hex<TAB>address_hex<TAB>centre<TAB>kind...`.
-/// Position rows append `lat<TAB>lon<TAB>alt-or--<TAB>east-mmps<TAB>north-mmps<TAB>vertical-rate-or--`;
+/// Position rows append `lat<TAB>lon<TAB>alt-or--<TAB>east-mmps<TAB>north-mmps<TAB>vertical-rate-or--`, then optionally `CALLSIGN<TAB>value`;
 /// flight and route payloads use the field counts checked below.
 pub fn parse_event_line(line: &str) -> Result<NormalizedEvent, InputError> {
     if line.len() > MAX_EVENT_LINE_BYTES {
@@ -587,7 +611,7 @@ pub fn parse_event_line(line: &str) -> Result<NormalizedEvent, InputError> {
         return Err(InputError::InvalidOperation);
     }
     let kind = match kind_name {
-        "POS" if parts.len() == 15 => parse_position(&parts)?,
+        "POS" if parts.len() == 15 || parts.len() == 17 => parse_position(&parts)?,
         "FLIGHT" => parse_flight(&parts)?,
         "COMMAND" if parts.len() == 14 || parts.len() == 15 => {
             use oa_display::interaction::Intent;

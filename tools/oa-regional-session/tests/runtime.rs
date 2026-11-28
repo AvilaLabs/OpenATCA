@@ -400,6 +400,7 @@ fn row(
     .expect("valid synthetic row")
 }
 fn start() -> ReceiptBatch {
+    // Positive joins carry an observed callsign and one co-timed, consumed flight identity message.
     let mut events = vec![
         row(
             SECOND,
@@ -407,7 +408,7 @@ fn start() -> ReceiptBatch {
             "SURVEILLANCE",
             1,
             0xabc101,
-            "POS\t410000000\t-870000000\t10000\t100000\t0\t0",
+            "POS\t410000000\t-870000000\t10000\t100000\t0\t0\tCALLSIGN\tABC101",
         ),
         row(
             SECOND,
@@ -415,18 +416,29 @@ fn start() -> ReceiptBatch {
             "SURVEILLANCE",
             2,
             0xabc102,
-            "POS\t410000000\t-869900000\t10000\t-100000\t0\t0",
+            "POS\t410000000\t-869900000\t10000\t-100000\t0\t0\tCALLSIGN\tABC102",
         ),
     ];
     let mut sequence = 1;
-    for (flight, address, plan) in [(1, 0xabc101, "PLAN00000001"), (2, 0xabc102, "PLAN00000002")] {
-        for body in [
-            format!("FLIGHT\tPLAN\t{plan}\t2"),
-            "FLIGHT\tADDRESS".into(),
-            "FLIGHT\tASSIGNED\t12000".into(),
-            "FLIGHT\tOWNER\tSECTOR1".into(),
-        ] {
+    for (flight, address, plan, callsign) in [
+        (1, 0xabc101, "PLAN00000001", "ABC101"),
+        (2, 0xabc102, "PLAN00000002", "ABC102"),
+    ] {
+        for body in [format!("FLIGHT\tPLAN\t{plan}\t2"), "FLIGHT\tADDRESS".into()] {
             events.push(row(SECOND, sequence, "FLIGHT", flight, address, &body));
+            sequence += 1;
+        }
+        events.push(row(
+            SECOND,
+            sequence,
+            "FLIGHT",
+            flight,
+            address,
+            &format!("FLIGHT\tIDENTITY_PARTIAL\t{callsign}\t-\t-"),
+        ));
+        sequence += 1;
+        for body in ["FLIGHT\tASSIGNED\t12000", "FLIGHT\tOWNER\tSECTOR1"] {
+            events.push(row(SECOND, sequence, "FLIGHT", flight, address, body));
             sequence += 1;
         }
     }
@@ -457,6 +469,23 @@ fn start() -> ReceiptBatch {
         events,
     }
 }
+fn initial_flight_source_rows() -> u64 {
+    u64::try_from(
+        start()
+            .events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event.source,
+                    oa_regional_session::SourceKind::Flight
+                        | oa_regional_session::SourceKind::Route
+                )
+            })
+            .count(),
+    )
+    .expect("bounded synthetic flight and route rows")
+}
+
 fn runtime() -> oa_regional_session::runtime::RegionalRuntime {
     runtime_with_model(synthetic_model().unwrap())
 }
@@ -629,7 +658,7 @@ fn confirmation_batch() -> ReceiptBatch {
                 "SURVEILLANCE",
                 1,
                 0xabc101,
-                "POS\t410000000\t-869988000\t10000\t100000\t0\t0",
+                "POS\t410000000\t-869988000\t10000\t100000\t0\t0\tCALLSIGN\tABC101",
             ),
             row(
                 2 * SECOND,
@@ -637,7 +666,7 @@ fn confirmation_batch() -> ReceiptBatch {
                 "SURVEILLANCE",
                 2,
                 0xabc102,
-                "POS\t410000000\t-869912000\t10000\t-100000\t0\t0",
+                "POS\t410000000\t-869912000\t10000\t-100000\t0\t0\tCALLSIGN\tABC102",
             ),
         ],
     }
@@ -829,7 +858,10 @@ fn la2014_extreme_altitude_survives_malformed_route_quarantine() {
     .expect("later valid route revision should restore availability for its cutoff");
     assert_eq!(later.quarantine.records.len(), 0);
     assert_eq!(later.quarantine.source_stats[0].queued, 1);
-    assert_eq!(later.quarantine.source_stats[0].accepted, 13);
+    assert_eq!(
+        later.quarantine.source_stats[0].accepted,
+        initial_flight_source_rows() + 1
+    );
 }
 
 // REQ: OA-REG-018
@@ -866,7 +898,10 @@ fn nats2023_repeated_local_name_resolves_with_full_region_identity_at_runtime() 
 
     assert_eq!(frame.quarantine.records.len(), 0);
     assert_eq!(frame.input.source_events, [1, 0, 1, 0, 0]);
-    assert_eq!(frame.quarantine.source_stats[0].accepted, 13);
+    assert_eq!(
+        frame.quarantine.source_stats[0].accepted,
+        initial_flight_source_rows() + 1
+    );
     assert_eq!(frame.quarantine.source_stats[0].queued, 0);
     assert_eq!(frame.quarantine.source_stats[1].accepted, 5);
     assert_eq!(frame.quarantine.source_stats[1].queued, 0);
@@ -932,7 +967,10 @@ fn ambiguous_route_is_quarantined_and_following_healthy_item_commits() {
     .expect("a later valid amendment remains acceptable after the fenced refusal");
     assert_eq!(later.quarantine.records.len(), 0);
     assert_eq!(later.quarantine.source_stats[0].queued, 1);
-    assert_eq!(later.quarantine.source_stats[0].accepted, 13);
+    assert_eq!(
+        later.quarantine.source_stats[0].accepted,
+        initial_flight_source_rows() + 1
+    );
 }
 
 // REQ: OA-REG-018
@@ -974,7 +1012,10 @@ fn staged_flight_adapter_refusal_does_not_advance_or_block_following_operation()
         oa_quarantine::REASON_INPUT_INVALID
     );
     assert_eq!(frame.quarantine.source_stats[0].queued, 1);
-    assert_eq!(frame.quarantine.source_stats[0].accepted, 13);
+    assert_eq!(
+        frame.quarantine.source_stats[0].accepted,
+        initial_flight_source_rows() + 1
+    );
     assert_eq!(frame.flight_report.adapter.owner_change_requires_take, 1);
     let flight = frame
         .flights

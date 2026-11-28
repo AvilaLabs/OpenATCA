@@ -166,7 +166,7 @@ pub const LAYER_NAMES: [&str; 9] = [
 ];
 
 /// Every layer on.
-pub fn layers_all() -> Layers {
+pub const fn layers_all() -> Layers {
     Layers {
         own_boundary: true,
         neighbour_boundaries: true,
@@ -1790,9 +1790,12 @@ fn legend(
     )
     .map_err(legend_format_full)?;
     put_nm(&mut t, p.range_nm).map_err(legend_format_full)?;
-    write!(t, " NM  RINGS ").map_err(legend_format_full)?;
-    put_nm(&mut t, ring_step_nm(p)).map_err(legend_format_full)?;
     write!(t, " NM").map_err(legend_format_full)?;
+    if v.layers.rings {
+        write!(t, "  RINGS ").map_err(legend_format_full)?;
+        put_nm(&mut t, ring_step_nm(p)).map_err(legend_format_full)?;
+        write!(t, " NM").map_err(legend_format_full)?;
+    }
     legend_text(l, st, width16, (x, y), palette::TEXT, label_str(&t))?;
     y += pitch;
 

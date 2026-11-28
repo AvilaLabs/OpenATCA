@@ -24,6 +24,8 @@ oa-legacy-traj = { path = "../oa-legacy-traj" }
 oa-ca = { path = "../../crates/oa-ca" }
 # Net availability, input degradation and inhibition state.
 oa-safety = { path = "../../crates/oa-safety" }
+# F1a: the regional shell evaluates caller-supplied final-monitor geometry and predictions through the bounded runway core.
+oa-runway = { path = "../../crates/oa-runway" }
 # Plain scope inputs, ownership display and raster fingerprints.
 oa-display = { path = "../../crates/oa-display" }
 # Existing tracker-to-scope construction and deterministic rendering.
@@ -92,3 +94,7 @@ path = "src/bin/regional-m4-h2-full-day.rs"
 [[bin]]
 name = "oa-regional-console"
 path = "src/bin/regional-console.rs"
+
+[dev-dependencies]
+# F1a: construct the WGS84 ellipsoid for the real traffic-renderer declutter regression.
+oa-geo = { path = "../../crates/oa-geo" }

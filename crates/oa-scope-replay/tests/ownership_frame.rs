@@ -222,6 +222,8 @@ fn ownership_after_timeout_stays_actionable_beside_frozen_and_degraded_warnings(
         feeds: &feeds,
         newest_track_ns: Some(T0),
         frozen_limit_ns: S,
+        use_reserved_status_header: false,
+        traffic_block_policies: None,
     };
     let store = store_of(&output());
     let baseline = replay_build_with_safety(
@@ -415,6 +417,8 @@ fn cold_start_requires_fresh_track_net_and_feed_inputs_independently() {
             feeds: &feeds,
             newest_track_ns: None,
             frozen_limit_ns: 5 * S,
+            use_reserved_status_header: false,
+            traffic_block_policies: None,
         },
     )
     .unwrap();
@@ -443,6 +447,8 @@ fn cold_start_requires_fresh_track_net_and_feed_inputs_independently() {
             feeds: &feeds,
             newest_track_ns: Some(T0),
             frozen_limit_ns: 5 * S,
+            use_reserved_status_header: false,
+            traffic_block_policies: None,
         },
     )
     .unwrap();
@@ -474,6 +480,8 @@ fn cold_start_requires_fresh_track_net_and_feed_inputs_independently() {
             feeds: &feeds,
             newest_track_ns: Some(T0),
             frozen_limit_ns: 5 * S,
+            use_reserved_status_header: false,
+            traffic_block_policies: None,
         },
     )
     .unwrap();

@@ -11,8 +11,8 @@ use oa_legacy_traj::core::trajectory::{
 };
 use oa_regional_session::flight::{EffectiveClearance, SharedAltitude, SharedFlightView};
 use oa_regional_session::route::{
-    canonical_route_digest, clearance_evidence, route_event, route_issue, route_store_new,
-    trajectory_points, RouteStore, MAX_ROUTE_REVISIONS,
+    canonical_route_digest, clearance_evidence, route_commit_stage, route_event, route_issue,
+    route_stage_event, route_store_new, trajectory_points, RouteStore, MAX_ROUTE_REVISIONS,
 };
 use oa_regional_session::surveillance::ObservedTrack;
 use oa_regional_session::{EventKind, Identity, NormalizedEvent, SourceKind};
@@ -21,6 +21,33 @@ const CENTRE: [u8; 4] = *b"ZAU1";
 const ADDRESS: u32 = 0x00ab_cdef;
 const PLAN: [u8; 12] = *b"PLAN00000001";
 const ROUTE_TEXT: &str = "FIX:FIXA:K1:1:- FIX:FIXB:K1:1:-";
+
+// Kills mutation: reject valid trailing-NUL native centre keys before route lookup.
+// REQ: OA-REG-018
+#[test]
+fn native_zau_route_key_reaches_consumer_and_malformed_centres_refuse() {
+    let gufi = 0x1234;
+    let model = oa_regional_session::cli::synthetic_model().expect("synthetic model is valid");
+    let mut store = route_store_new([0xA5; 32]);
+    let mut native = file_route(gufi, PLAN, 1, 1_000, 1_000, ROUTE_TEXT);
+    native.centre = *b"ZAU\0";
+    let stage = route_stage_event(&store, &model, &native)
+        .expect("padded three-letter native centre is a valid full key");
+    route_commit_stage(&mut store, stage);
+    let admitted_revisions = store.revisions.len();
+    assert!(admitted_revisions > 0);
+    assert_eq!(store.revisions[0].evidence.key.centre, native.centre);
+    let mut flight = view(gufi, PLAN);
+    flight.centre = *b"ZAU\0";
+    assert!(route_issue(&store, &flight, &observed(), 10_000_000_000, 1).is_ok());
+
+    for centre in [*b"Z\0AU", [0; 4], *b"ZA!0"] {
+        let mut invalid = file_route(gufi, PLAN, 2, 2_000, 2_000, ROUTE_TEXT);
+        invalid.centre = centre;
+        assert!(route_stage_event(&store, &model, &invalid).is_err());
+        assert_eq!(store.revisions.len(), admitted_revisions);
+    }
+}
 
 fn event(
     gufi: u128,

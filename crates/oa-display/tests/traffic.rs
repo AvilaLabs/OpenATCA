@@ -84,6 +84,95 @@ fn draw(ts: &[Target], style: &TrafficStyle) -> (DisplayList, TrafficStats) {
     (l, st)
 }
 
+#[test]
+fn regional_block_policy_limits_unmatched_detail_without_dropping_symbols() {
+    let p = proj();
+    let mut full = plain(ORD.0, ORD.1);
+    full.addr = 1;
+    full.callsign = callsign("AAL1234");
+    full.alt_ft = 35_000;
+    full.ident = 0o1200;
+    full.ident_age_s = 0;
+    full.ident_state = IDENT_OBSERVED;
+    let mut altitude = plain(ORD.0 + 100_000, ORD.1);
+    altitude.addr = 2;
+    altitude.alt_ft = 27_000;
+    altitude.ident = 0o2345;
+    altitude.ident_age_s = 0;
+    altitude.ident_state = IDENT_OBSERVED;
+    let mut symbol = plain(ORD.0 - 100_000, ORD.1);
+    symbol.addr = 3;
+    let mut set = targets_new(3).unwrap();
+    for target in [full, altitude, symbol] {
+        targets_push(&mut set, &target).unwrap();
+    }
+    let policy = [
+        TrafficBlockPolicy {
+            address: 1,
+            detail: TrafficBlockDetail::Full,
+            flight_callsign: Some(callsign("UAL4321")),
+        },
+        TrafficBlockPolicy {
+            address: 2,
+            detail: TrafficBlockDetail::AltitudeOnly,
+            flight_callsign: None,
+        },
+        TrafficBlockPolicy {
+            address: 3,
+            detail: TrafficBlockDetail::SymbolOnly,
+            flight_callsign: None,
+        },
+    ];
+    let mut list = list_new(traffic_caps(3, &DEFAULT_STYLE).unwrap()).unwrap();
+    let stats = build_traffic_with_policy(
+        &mut list,
+        &p,
+        &oa_geo::wgs84(),
+        &set,
+        &DEFAULT_STYLE,
+        Some(&policy),
+    )
+    .unwrap();
+    let texts = texts_of(&list);
+    assert!(texts.iter().any(|(text, _, _)| text.contains("UAL4321")));
+    assert!(texts.iter().any(|(text, _, _)| text == "270"));
+    assert!(texts.iter().all(|(text, _, _)| text != "270 --"));
+    assert!(texts.iter().all(|(text, _, _)| !text.contains("2345")));
+    assert_eq!(
+        texts
+            .iter()
+            .filter(|(text, _, _)| text.contains("MODE A"))
+            .count(),
+        1
+    );
+    assert_eq!(stats.drawn, 3, "all position symbols remain represented");
+    assert_eq!(
+        (
+            stats.full_blocks,
+            stats.altitude_only_blocks,
+            stats.symbol_only_targets
+        ),
+        (1, 1, 1)
+    );
+}
+
+#[test]
+fn regional_block_policy_refuses_missing_target_entries() {
+    let mut set = targets_new(1).unwrap();
+    targets_push(&mut set, &plain(ORD.0, ORD.1)).unwrap();
+    let mut list = list_new(traffic_caps(1, &DEFAULT_STYLE).unwrap()).unwrap();
+    let err = build_traffic_with_policy(
+        &mut list,
+        &proj(),
+        &oa_geo::wgs84(),
+        &set,
+        &DEFAULT_STYLE,
+        Some(&[]),
+    )
+    .unwrap_err();
+    assert!(matches!(err, DisplayError::BadView(_)));
+}
+
 type Line = ((i32, i32), (i32, i32), u8, u8);
 
 fn lines_of(l: &DisplayList) -> Vec<Line> {

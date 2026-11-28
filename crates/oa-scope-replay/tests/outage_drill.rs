@@ -1614,6 +1614,8 @@ impl Drill {
                 feeds: &self.feeds,
                 newest_track_ns: (newest != i64::MIN).then_some(newest),
                 frozen_limit_ns: 5 * S,
+                use_reserved_status_header: false,
+                traffic_block_policies: None,
             }),
             ownership,
         )

@@ -15,6 +15,9 @@ use oa_regional_session::session::{
 const OBSERVATIONS: usize = 5;
 const SECOND_NS: i64 = 1_000_000_000;
 const ADDRESS: u32 = 0x00ab_cdef;
+const SOURCE_CALLSIGN: [u8; 8] = *b"N123AB  ";
+const NORMALIZED_CALLSIGN: [u8; 8] = *b"N123AB\0\0";
+const MAX_FILTERED_LONGITUDE_ERROR_E7: u32 = 100;
 const SOURCE_LATITUDE_E7: i32 = 419_000_000;
 
 fn scratch_dir() -> PathBuf {
@@ -27,6 +30,7 @@ fn scratch_dir() -> PathBuf {
 
 fn valid_airborne_row(time_ns: i64, longitude_e7: i32) -> oa_adsb::Row {
     oa_adsb::Row {
+        callsign: SOURCE_CALLSIGN,
         time_ns,
         icao: ADDRESS,
         lat_e7: SOURCE_LATITUDE_E7,
@@ -89,6 +93,19 @@ fn write_sfdps_status(path: &Path, timestamp_ns: i64) {
     .expect("encode synthetic SFDPS status frame");
     frame.truncate(frame_len);
     fs::write(path, frame).expect("write synthetic SFDPS OAF stream");
+}
+
+fn track_callsign_at_source_time(
+    events: &[oa_regional_session::NormalizedEvent],
+    source_ns: i64,
+) -> Option<[u8; 8]> {
+    events
+        .iter()
+        .find(|event| event.source_ns == source_ns)
+        .and_then(|event| match &event.kind {
+            oa_regional_session::EventKind::Position { track_callsign, .. } => *track_callsign,
+            _ => None,
+        })
 }
 
 fn synthetic_runtime() -> oa_regional_session::runtime::RegionalRuntime {
@@ -171,6 +188,33 @@ fn recorded_hour_adsb_adapter_roundtrip_reaches_regional_raster() {
     .expect("adapt the synthetic recorded-hour ADS-B stream");
     assert_eq!(converted.window_ns, (base_ns, window_end));
     assert_eq!(converted.summary.normalized_events, OBSERVATIONS as u64);
+    let source_row_time =
+        base_ns + i64::try_from(OBSERVATIONS - 1).expect("bounded fixture") * SECOND_NS;
+    let normalized_events = converted
+        .normalized_tsv
+        .lines()
+        .skip(1)
+        .map(|line| oa_regional_session::parse_event_line(line).expect("reparse normalized row"))
+        .collect::<Vec<_>>();
+    // This independent source-row oracle kills collapsing each normalized position to one value.
+    let normalized_longitudes = normalized_events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            oa_regional_session::EventKind::Position { longitude_e7, .. } => Some(*longitude_e7),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        normalized_longitudes.as_slice(),
+        source_longitudes.as_slice(),
+        "normalized input must retain every source position before tracker filtering"
+    );
+    let track_callsign = track_callsign_at_source_time(&normalized_events, source_row_time);
+    assert_eq!(
+        track_callsign,
+        Some(NORMALIZED_CALLSIGN),
+        "the source-time row must reparse as a callsign-bearing position"
+    );
 
     let mut runtime = synthetic_runtime();
     let frames = apply_normalized_tsv(&mut runtime, &converted.normalized_tsv);
@@ -189,7 +233,11 @@ fn recorded_hour_adsb_adapter_roundtrip_reaches_regional_raster() {
         .last()
         .copied()
         .expect("synthetic reports include a final source position");
-    assert_eq!(last_track.lon_e7, expected_last_longitude);
+    // The small bound allows tracker/geodesy roundtrip error but still kills a fixed filtered longitude.
+    assert!(
+        last_track.lon_e7.abs_diff(expected_last_longitude) <= MAX_FILTERED_LONGITUDE_ERROR_E7,
+        "filtered position stays within the documented geodesy roundtrip tolerance"
+    );
     assert_eq!(last_track.lat_e7, SOURCE_LATITUDE_E7);
     let first_confirmed = frames
         .iter()
@@ -206,8 +254,21 @@ fn recorded_hour_adsb_adapter_roundtrip_reaches_regional_raster() {
         .get(1)
         .copied()
         .expect("synthetic reports include a confirmation position");
-    assert_eq!(first_confirmed.lon_e7, expected_first_confirmed_longitude);
-    assert_ne!(first_confirmed.lon_e7, last_track.lon_e7);
+    assert!(
+        first_confirmed
+            .lon_e7
+            .abs_diff(expected_first_confirmed_longitude)
+            <= MAX_FILTERED_LONGITUDE_ERROR_E7,
+        "first filtered position stays within the documented geodesy roundtrip tolerance"
+    );
+    let expected_source_motion =
+        expected_first_confirmed_longitude.abs_diff(expected_last_longitude);
+    let minimum_filtered_motion =
+        expected_source_motion.saturating_sub(MAX_FILTERED_LONGITUDE_ERROR_E7 * 2);
+    assert!(
+        last_track.lon_e7.abs_diff(first_confirmed.lon_e7) >= minimum_filtered_motion,
+        "filter output must preserve the measured source motion within both endpoint tolerances"
+    );
 
     let rendered = regional_pixels(&runtime).expect("regional pixels are available");
     assert_eq!(rendered.len(), 800 * 600 * 4);

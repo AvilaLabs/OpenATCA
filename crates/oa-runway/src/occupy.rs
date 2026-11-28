@@ -266,6 +266,10 @@ mod proofs {
     /// A runway with every geometry number any `f64`, NaN and infinity included.
     fn any_runway() -> Runway {
         Runway {
+            plane_origin: Geo {
+                lat_deg: kani::any(),
+                lon_deg: kani::any(),
+            },
             ends: [any_end(), any_end()],
             length_m: kani::any(),
             width_m: kani::any(),

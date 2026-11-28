@@ -1760,7 +1760,9 @@ fn record_oversized_receipt_group(
         refused_rows = refused_rows
             .checked_add(1)
             .ok_or("quarantine-row count overflow")?;
-        affected_sources[source_index] = true;
+        *affected_sources
+            .get_mut(source_index)
+            .ok_or("oversized receipt-group source index invariant")? = true;
     }
     for (source_index, affected) in affected_sources.into_iter().enumerate() {
         if affected {
@@ -1962,6 +1964,53 @@ mod tests {
         .ok_or_else(|| std::io::Error::other("synthetic OAF encode failed"))?;
         frame.truncate(encoded);
         file.write_all(&frame)?;
+        Ok(())
+    }
+
+    fn assert_session_receipt_roundtrip(
+        events: &[crate::input::NormalizedEvent],
+        expected: &[(i64, i64, u64)],
+    ) -> Result<(), Box<dyn Error>> {
+        use crate::session::{
+            flush_receipt_group, push_event, session_cursor_new_with_profile_limits,
+        };
+
+        let serialized = crate::recordings::serialize_recorded_events(events).map_err(|error| {
+            std::io::Error::other(format!("serialize normalized rows: {error:?}"))
+        })?;
+        let reparsed: Vec<_> = serialized
+            .lines()
+            .skip(1)
+            .map(crate::input::parse_event_line)
+            .collect::<Result<_, _>>()
+            .map_err(|error| std::io::Error::other(format!("parse normalized row: {error:?}")))?;
+        assert_eq!(reparsed, events);
+        let mut cursor =
+            session_cursor_new_with_profile_limits(16, crate::session::MAX_EVENTS_PER_RECEIPT)
+                .map_err(|error| std::io::Error::other(format!("cursor init: {error:?}")))?;
+        let mut completed = Vec::new();
+        for event in reparsed {
+            if let Some(batch) = push_event(&mut cursor, event).map_err(|error| {
+                std::io::Error::other(format!("session rejected event: {error:?}"))
+            })? {
+                completed.push(batch);
+            }
+        }
+        if let Some(batch) = flush_receipt_group(&mut cursor)
+            .map_err(|error| std::io::Error::other(format!("session flush: {error:?}")))?
+        {
+            completed.push(batch);
+        }
+        let completed_rows: Vec<_> = completed
+            .iter()
+            .flat_map(|batch| {
+                batch
+                    .events
+                    .iter()
+                    .map(|event| (batch.receipt_ns, event.source_ns, event.sequence))
+            })
+            .collect();
+        assert_eq!(completed_rows, expected);
         Ok(())
     }
 
@@ -2208,10 +2257,6 @@ mod tests {
     #[test]
     fn archive_issue_groups_wait_for_global_header_watermark() -> Result<(), Box<dyn Error>> {
         use super::stream_normalized_events;
-        use crate::session::{
-            flush_receipt_group, push_event, session_cursor_new_with_profile_limits,
-            MAX_EVENTS_PER_RECEIPT,
-        };
         use std::fs::OpenOptions;
 
         let path = temporary_path("adsb_issue_watermark")?;
@@ -2256,10 +2301,7 @@ mod tests {
             source: RecordingSource::Adsb,
             path: path.clone(),
         }];
-        let mut cursor = session_cursor_new_with_profile_limits(16, MAX_EVENTS_PER_RECEIPT)
-            .map_err(|error| std::io::Error::other(format!("cursor init: {error:?}")))?;
         let mut observed = Vec::new();
-        let mut completed = Vec::new();
         let result = stream_normalized_events(&inputs, None, *b"ZAU1", |event, provenance| {
             observed.push((
                 event,
@@ -2323,45 +2365,12 @@ mod tests {
                 ),
             ]
         );
-        let serialized =
-            crate::recordings::serialize_recorded_events(&normalized_events).map_err(|error| {
-                std::io::Error::other(format!("serialize normalized rows: {error:?}"))
-            })?;
-        let reparsed: Vec<_> = serialized
-            .lines()
-            .skip(1)
-            .map(crate::input::parse_event_line)
-            .collect::<Result<_, _>>()
-            .map_err(|error| std::io::Error::other(format!("parse normalized row: {error:?}")))?;
-        assert_eq!(reparsed, normalized_events);
-        for event in reparsed {
-            let batch = push_event(&mut cursor, event).map_err(|error| {
-                std::io::Error::other(format!("session rejected event: {error:?}"))
-            })?;
-            if let Some(batch) = batch {
-                completed.push(batch);
-            }
-        }
-        if let Some(batch) = flush_receipt_group(&mut cursor)
-            .map_err(|error| std::io::Error::other(format!("session flush: {error:?}")))?
-        {
-            completed.push(batch);
-        }
-        let completed_rows: Vec<_> = completed
-            .iter()
-            .flat_map(|batch| {
-                batch
-                    .events
-                    .iter()
-                    .map(|event| (batch.receipt_ns, event.source_ns, event.sequence))
-            })
-            .collect();
         let expected_session_rows = [
             (base + 1_000_000_000, base + 100_000_000, 0),
             (base + 2_000_000_000, base + 1_100_000_000, 1),
             (base + 3_000_000_000, base + 2_100_000_000, 2),
         ];
-        assert_eq!(completed_rows, expected_session_rows);
+        assert_session_receipt_roundtrip(&normalized_events, &expected_session_rows)?;
         Ok(())
     }
 
@@ -2431,7 +2440,10 @@ mod tests {
         assert!(events
             .iter()
             .all(|event| event.receipt_ns != base + 2_000_000_000));
-        assert_eq!(events[0].receipt_ns, base + 3_000_000_000);
+        let first_event = events
+            .first()
+            .ok_or_else(|| std::io::Error::other("quality fixture emitted no event"))?;
+        assert_eq!(first_event.receipt_ns, base + 3_000_000_000);
         Ok(())
     }
 
@@ -2628,9 +2640,11 @@ mod tests {
         let summary = summary?;
         assert_eq!(summary.normalized_events, events.len() as u64);
         assert!(!events.is_empty());
-        assert!(events
-            .iter()
-            .all(|event| event.receipt_ns == events[0].receipt_ns));
+        let first_receipt = events
+            .first()
+            .map(|event| event.receipt_ns)
+            .ok_or_else(|| std::io::Error::other("SFDPS fixture emitted no events"))?;
+        assert!(events.iter().all(|event| event.receipt_ns == first_receipt));
 
         let mut groups: Vec<(u64, u64, usize)> = Vec::new();
         for event in &events {
@@ -2649,7 +2663,13 @@ mod tests {
         assert!(groups.iter().all(|(message_id, first_sequence, count)| {
             message_id == first_sequence && *count > 1
         }));
-        assert_ne!(groups[0].0, groups[1].0);
+        let first_group = groups
+            .first()
+            .ok_or_else(|| std::io::Error::other("first SRCMSG group missing"))?;
+        let second_group = groups
+            .get(1)
+            .ok_or_else(|| std::io::Error::other("second SRCMSG group missing"))?;
+        assert_ne!(first_group.0, second_group.0);
 
         let serialized =
             crate::recordings::serialize_recorded_events(&events).map_err(|error| {
@@ -2677,7 +2697,10 @@ mod tests {
             batches.push(batch);
         }
         assert_eq!(batches.len(), 1);
-        assert_eq!(batches[0].events.len(), events.len());
+        let batch = batches
+            .first()
+            .ok_or_else(|| std::io::Error::other("normalized session batch missing"))?;
+        assert_eq!(batch.events.len(), events.len());
 
         let model = crate::cli::synthetic_model()?;
         let snapshot = oa_airspace::core::snapshot::encode(&model)?;
@@ -2692,13 +2715,16 @@ mod tests {
             },
         )
         .map_err(std::io::Error::other)?;
-        let frame = crate::runtime::regional_step(&mut runtime, &batches[0])
-            .map_err(std::io::Error::other)?;
+        let frame =
+            crate::runtime::regional_step(&mut runtime, batch).map_err(std::io::Error::other)?;
         assert_eq!(frame.flight_operations.len(), events.len());
+        let first_event = events
+            .first()
+            .ok_or_else(|| std::io::Error::other("flight fixture emitted no events"))?;
         assert!(frame
             .flight_data
             .iter()
-            .any(|view| view.gufi == events[0].identity.flight_gufi));
+            .any(|view| view.gufi == first_event.identity.flight_gufi));
         Ok(())
     }
 

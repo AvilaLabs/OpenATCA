@@ -340,6 +340,7 @@ mod profile_limit_tests {
                 east_mmps: 0,
                 north_mmps: 0,
                 vertical_rate_fpm: None,
+                track_callsign: None,
             },
         }
     }

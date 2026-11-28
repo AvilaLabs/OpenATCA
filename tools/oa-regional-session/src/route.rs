@@ -389,7 +389,7 @@ pub fn icao_route_revision(
 fn valid_refusal_key(key: t::FlightKey) -> bool {
     key.gufi.iter().any(|&byte| byte != 0)
         && (1..=0x00ff_ffff).contains(&key.aircraft_address)
-        && key.centre.iter().all(u8::is_ascii_alphanumeric)
+        && crate::input::is_valid_centre_code(&key.centre)
         && key.plan_id.iter().any(|&byte| byte != 0)
 }
 

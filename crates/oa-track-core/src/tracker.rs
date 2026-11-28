@@ -719,7 +719,39 @@ fn maybe_confirm(t: &mut Tracker, slot: usize, at_ns: i64) {
     }
 }
 
+#[derive(Clone, Copy)]
+enum EmissionKind {
+    Measurement,
+    Tick,
+    Snapshot,
+}
+
 fn emit(t: &mut Tracker, slot: usize, at_ns: i64, flags: u8, out: &mut TrackOutput) {
+    let kind = if flags & O_TICK != 0 {
+        EmissionKind::Tick
+    } else {
+        EmissionKind::Measurement
+    };
+    emit_kind(t, slot, at_ns, flags, kind, out);
+}
+
+fn emit_snapshot(t: &mut Tracker, slot: usize, at_ns: i64, out: &mut TrackOutput) {
+    let flags = if track_is_coasting(t, slot, at_ns) {
+        O_COAST
+    } else {
+        0
+    };
+    emit_kind(t, slot, at_ns, flags, EmissionKind::Snapshot, out);
+}
+
+fn emit_kind(
+    t: &mut Tracker,
+    slot: usize,
+    at_ns: i64,
+    flags: u8,
+    kind: EmissionKind,
+    out: &mut TrackOutput,
+) {
     t.stats.rows_computed += 1;
     let mut f = col(&t.cur, slot, blank_filter());
     // A position that cannot be represented is never a row, and never a coordinate of 0.
@@ -761,19 +793,25 @@ fn emit(t: &mut Tracker, slot: usize, at_ns: i64, flags: u8, out: &mut TrackOutp
         row.flags |= O_UNCERTAIN;
         t.stats.rows_uncertain += 1;
     }
-    // An update row carries the reacquisition flag once; a tick row after an uncertain one
-    // arms it for the next update row.
-    let armed = if flags & O_TICK == 0 {
-        if f.reacq != 0 {
-            row.flags |= O_REACQUIRED;
+    // Snapshots report current state without consuming reacquisition state. Update rows consume
+    // it once; periodic ticks preserve it and can arm it from uncertainty.
+    match kind {
+        EmissionKind::Measurement => {
+            if f.reacq != 0 {
+                row.flags |= O_REACQUIRED;
+            }
+            f.reacq = u8::from(armed_uncertain);
+            put(&mut t.cur, slot, f);
         }
-        u8::from(armed_uncertain)
-    } else {
-        f.reacq | u8::from(armed_uncertain)
-    };
-    if armed != f.reacq {
-        f.reacq = armed;
-        put(&mut t.cur, slot, f);
+        EmissionKind::Tick => {
+            f.reacq |= u8::from(armed_uncertain);
+            put(&mut t.cur, slot, f);
+        }
+        EmissionKind::Snapshot => {
+            if f.reacq != 0 {
+                row.flags |= O_REACQUIRED;
+            }
+        }
     }
     if row.addr >= RADAR_KEY_BASE {
         row.flags |= O_IDENTITY_UNCONFIRMED;
@@ -782,6 +820,20 @@ fn emit(t: &mut Tracker, slot: usize, at_ns: i64, flags: u8, out: &mut TrackOutp
         row.flags |= O_RADAR_DISAGREES;
     }
     output_push(out, &row);
+}
+
+fn track_is_coasting(t: &Tracker, slot: usize, at_ns: i64) -> bool {
+    let own = col(&t.expected_ns, slot, 0);
+    let limit = if own > 0 {
+        t.cfg.coast_after_intervals.saturating_mul(own)
+    } else {
+        t.cfg
+            .coast_after_intervals
+            .saturating_mul(t.cfg.expected_interval_ns)
+    };
+    at_ns
+        .checked_sub(col(&t.last_ns, slot, 0))
+        .is_none_or(|age| age > limit)
 }
 
 /// Scales the row's position covariance so that its 95% radius is just over `floor_m` if it was
@@ -2227,10 +2279,6 @@ fn emit_ticks(t: &mut Tracker, limit_ns: i64, out: &mut TrackOutput) {
     if t.next_tick_ns == i64::MIN {
         return;
     }
-    let coast_ns = t
-        .cfg
-        .coast_after_intervals
-        .saturating_mul(t.cfg.expected_interval_ns);
     // Past the newest update plus the drop age every track is gone and a tick emits nothing: the
     // ticks after that are jumped over, with one sweep, so a long gap costs no more than the
     // drop age does. The newest update is the kept bound, not a scan of the slots: it can be
@@ -2258,13 +2306,7 @@ fn emit_ticks(t: &mut Tracker, limit_ns: i64, out: &mut TrackOutput) {
                 out.overflow = out.overflow.saturating_add(1);
                 continue;
             }
-            let own = col(&t.expected_ns, slot, 0);
-            let limit = if own > 0 {
-                t.cfg.coast_after_intervals.saturating_mul(own)
-            } else {
-                coast_ns
-            };
-            let coast = tick - col(&t.last_ns, slot, 0) > limit;
+            let coast = track_is_coasting(t, slot, tick);
             emit(t, slot, tick, O_TICK | if coast { O_COAST } else { 0 }, out);
         }
         t.stats.ticks += 1;
@@ -2296,19 +2338,43 @@ pub fn check_advance_time(t: &mut Tracker, now_ns: i64) -> bool {
 }
 
 /// Advances time to `now_ns` without a measurement: emits the ticks up to it and expires old
-/// tracks. Time never goes backwards; an earlier `now_ns` does nothing. The step limit does not
-/// apply here: the caller's clock (the replay clock) has its own confirmed rules.
+/// tracks. An equal-time call drains a tick deferred by a measurement at that exact timestamp;
+/// after that tick is consumed, another equal-time call emits nothing. Time never goes backwards;
+/// an earlier `now_ns` does nothing. The step limit does not apply here: the caller's clock (the
+/// replay clock) has its own confirmed rules.
 pub fn tracker_advance(t: &mut Tracker, now_ns: i64, out: &mut TrackOutput) {
     if !check_advance_time(t, now_ns) {
         return;
     }
-    if now_ns > t.clock_ns {
+    if now_ns >= t.clock_ns {
         if t.next_tick_ns == i64::MIN {
             return;
         }
         emit_ticks(t, now_ns, out);
         t.clock_ns = now_ns;
     }
+}
+
+/// Emits one current-time snapshot of each confirmed live track at a non-grid frame cutoff.
+/// Call after [`tracker_advance`]; snapshots use the same filter, coast, uncertainty, move,
+/// identity and disagreement logic as periodic output, but do not claim `O_TICK` or consume
+/// reacquisition state. The stored measurement time is unchanged. Returns false without emitting
+/// a row unless `now_ns` is the tracker's already-advanced, non-grid clock. A refused call does
+/// not change source time or reacquisition state; refusal accounting may still be updated.
+pub fn tracker_snapshot_at(t: &mut Tracker, now_ns: i64, out: &mut TrackOutput) -> bool {
+    if now_ns != t.clock_ns || now_ns.rem_euclid(t.cfg.tick_ns) == 0 {
+        return false;
+    }
+    if !check_advance_time(t, now_ns) {
+        return false;
+    }
+    sweep(t, now_ns);
+    for slot in 0..t.high {
+        if col(&t.state, slot, FREE) == CONFIRMED {
+            emit_snapshot(t, slot, now_ns, out);
+        }
+    }
+    true
 }
 
 /// Ends the run at `now_ns`: emits the remaining ticks and logs every live track as flushed.
@@ -2464,7 +2530,7 @@ mod tests {
 
     use super::*;
     use crate::params::CONFIRM_POOL;
-    use crate::types::{output_new, DEFAULT_CONFIG, M_ALT_GEOMETRIC, O_HAS_ALT};
+    use crate::types::{output_new, DEFAULT_CONFIG, M_ALT_GEOMETRIC, M_HAS_VEL, O_HAS_ALT};
 
     const S: i64 = NS_PER_S;
     const ADDR: u32 = 0xABC123;
@@ -2607,6 +2673,105 @@ mod tests {
         assert!(t.stats.refiltered > 0);
         assert_eq!(before.len(), 36);
         assert_eq!(before, tracker_buffer_capacities(&t));
+    }
+
+    // Kills mutation: tracker_advance skips the tick deferred at an update's exact timestamp, or
+    // emits that tick more than once when called again at the same time.
+    // REQ: OA-TRK-338
+    #[test]
+    fn equal_time_advance_drains_pending_tick_once() {
+        let c = cfg(1, 0);
+        let mut t = tracker_new(&c).unwrap();
+        let mut out = output_new(c.out_capacity);
+        let boundary = at(0, 0, 100.0);
+
+        tracker_update(&mut t, &boundary, &mut out);
+        crate::types::output_clear(&mut out);
+        tracker_advance(&mut t, boundary.toa_ns - 1, &mut out);
+        assert!(out.t_ns.is_empty(), "earlier time must remain a no-op");
+
+        tracker_advance(&mut t, boundary.toa_ns, &mut out);
+        assert_eq!(out.t_ns.len(), 1);
+        assert_eq!(out.t_ns.first(), Some(&boundary.toa_ns));
+        assert!(out.flags.first().is_some_and(|flags| flags & O_TICK != 0));
+
+        tracker_advance(&mut t, boundary.toa_ns, &mut out);
+        assert_eq!(out.t_ns.len(), 1, "equal-time tick must be idempotent");
+    }
+
+    // Kills mutation: omit a frame-current projection between whole-second tracker ticks, or
+    // advance the source timestamp/reacquisition state to make that projection look fresh.
+    // REQ: OA-TRK-013, OA-TRK-343, OA-TRK-012
+    #[test]
+    fn non_grid_snapshot_projects_current_state_without_refreshing_source_or_reacquisition() {
+        let mut c = cfg(2, 0);
+        c.coast_after_intervals = 1;
+        c.coast_max_r95_m = 1.0;
+        let mut t = tracker_new(&c).unwrap();
+        let mut out = output_new(c.out_capacity);
+        let mut first = at(0, 0, 100.0);
+        first.flags |= M_HAS_VEL;
+        first.ident = 0;
+        first.vel_east_mps = 10.0;
+        first.vel_cov_m2s2 = [1.0, 0.0, 1.0];
+        first.vel_lag_s = 0.0;
+        tracker_update(&mut t, &first, &mut out);
+        let mut second = at(1, 900, 100.0);
+        second.flags |= M_HAS_VEL;
+        second.ident = 0;
+        second.vel_east_mps = 10.0;
+        second.vel_cov_m2s2 = [1.0, 0.0, 1.0];
+        second.vel_lag_s = 0.0;
+        tracker_update(&mut t, &second, &mut out);
+        assert!(tracker_is_confirmed(&t, ADDR));
+        assert!(tracker_set_expected_interval(&mut t, ADDR, S / 10));
+
+        let now_ns = second.toa_ns + 3 * S / 5;
+        tracker_advance(&mut t, now_ns, &mut out);
+        crate::types::output_clear(&mut out);
+        let source_ns = tracker_live_iter(&t)
+            .find(|(address, _)| *address == ADDR)
+            .map(|(_, last_ns)| last_ns)
+            .unwrap();
+        let slot = lookup(&t, ADDR).unwrap();
+        let reacq_before = col(&t.cur, slot, blank_filter()).reacq;
+        assert_eq!(source_ns, second.toa_ns);
+
+        assert!(!tracker_snapshot_at(&mut t, now_ns + S / 10, &mut out));
+        assert!(out.t_ns.is_empty());
+        assert_eq!(
+            tracker_live_iter(&t)
+                .find(|(address, _)| *address == ADDR)
+                .unwrap()
+                .1,
+            source_ns
+        );
+        assert_eq!(col(&t.cur, slot, blank_filter()).reacq, reacq_before);
+
+        assert!(tracker_snapshot_at(&mut t, now_ns, &mut out));
+        let index = out.t_ns.iter().position(|&time| time == now_ns).unwrap();
+        assert_eq!(out.addr.get(index), Some(&ADDR));
+        assert_eq!(out.flags.get(index).copied().unwrap_or(0) & O_TICK, 0);
+        assert_ne!(out.flags.get(index).copied().unwrap_or(0) & O_COAST, 0);
+        assert_ne!(out.flags.get(index).copied().unwrap_or(0) & O_UNCERTAIN, 0);
+        assert_ne!(out.lon_e7.get(index), Some(&second.lon_e7));
+        assert_eq!(out.ident.get(index), Some(&0));
+        assert_eq!(out.ident_ns.get(index), Some(&second.toa_ns));
+        assert_eq!(
+            tracker_live_iter(&t)
+                .find(|(address, _)| *address == ADDR)
+                .unwrap()
+                .1,
+            source_ns
+        );
+        assert_eq!(col(&t.cur, slot, blank_filter()).reacq, reacq_before);
+
+        let mut full = output_new(1);
+        let existing = tracker_predict(&t, ADDR, now_ns).unwrap().0;
+        output_push(&mut full, &existing);
+        assert!(tracker_snapshot_at(&mut t, now_ns, &mut full));
+        assert_eq!(full.overflow, 1);
+        assert_eq!(full.t_ns.len(), 1);
     }
 
     // REQ: OA-TRK-042

@@ -419,6 +419,7 @@ mod recorded_hour_window_tests {
                 east_mmps: 120_000,
                 north_mmps: 50_000,
                 vertical_rate_fpm: None,
+                track_callsign: None,
             },
         };
         let adsb_origin = EventProvenance {

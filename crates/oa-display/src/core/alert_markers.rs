@@ -6,7 +6,9 @@
 //! aircraft address. Validation, view-width checks and list-capacity checks finish before any
 //! display-list mutation. The caller reserves the worst-case table budget with the exported
 //! per-marker and header constants: two circles, one text and one text byte per marker, plus one
-//! header text and 64 header bytes.
+//! header text and 77 header bytes. The fixed labels contribute 65 bytes; five one-digit counts
+//! add five, and the two disjoint count groups add at most seven further digits at the 128-record
+//! cap.
 
 use crate::core::font::{text_width_units, CAP_HEIGHT};
 use crate::core::list::{
@@ -24,7 +26,8 @@ pub const ALERT_CIRCLES_PER_MARKER: usize = 2;
 pub const ALERT_TEXTS_PER_MARKER: usize = 1;
 /// Header reservation independent of its current decimal values.
 pub const ALERT_HEADER_TEXTS: usize = 1;
-pub const ALERT_HEADER_TEXT_BYTES: usize = 64;
+/// Maximum final-degraded header size at the 128-marker count bounds.
+pub const ALERT_HEADER_TEXT_BYTES: usize = 77;
 pub const ALERT_TEXT_BYTES_PER_MARKER: usize = 1;
 
 /// Sentinel used when `position_known` is zero.
@@ -33,10 +36,19 @@ const ALERT_LAYER: u8 = 13;
 const ALERT_TEXT_SIZE: u8 = 10;
 const ALERT_HEADER_X_PX: i32 = 8;
 const ALERT_HEADER_Y_PX: i32 = 112;
+const ALERT_RESERVED_HEADER_INSET_PX: u32 = 176;
+const ALERT_RESERVED_MSAW_HEADER_Y_PX: i32 = 119;
+const ALERT_RESERVED_FINAL_HEADER_Y_PX: i32 = 135;
 const ALERT_OUTER_RADIUS_PX: i32 = 16;
 const ALERT_INNER_RADIUS_PX: i32 = 12;
 const MIN_ALERT_VIEW_WIDTH: u32 = 500;
 const MIN_ALERT_TOP_INSET: u32 = 128;
+
+#[derive(Clone, Copy)]
+enum AlertHeaderSource {
+    Msaw,
+    FinalMonitor { degraded: bool },
+}
 
 const fn px(value: i32) -> i32 {
     value * 16
@@ -81,8 +93,21 @@ pub struct MarkerStats {
 }
 const _: () = assert!(core::mem::size_of::<MarkerStats>() == 16);
 
+type ValidatedMarkerSet = (MarkerStats, [Option<(i32, i32)>; MAX_ALERT_MARKERS]);
+
 fn bad_alert(what: &'static str) -> DisplayError {
     DisplayError::BadView(what)
+}
+
+fn final_monitor_severity(value: u8) -> Result<FinalMonitorSeverity, DisplayError> {
+    match value {
+        0 => Ok(FinalMonitorSeverity::Caution),
+        1 => Ok(FinalMonitorSeverity::Warning),
+        2 => Ok(FinalMonitorSeverity::ProtectionLost),
+        _ => Err(bad_alert(
+            "final monitor severity must be zero, one, or two",
+        )),
+    }
 }
 
 fn ensure_room(
@@ -101,29 +126,38 @@ fn ensure_room(
     }
 }
 
-fn inside_frame(p: &Projection, (x, y): (i32, i32)) -> bool {
+fn position_on_map(p: &Projection, (x, y): (i32, i32)) -> bool {
     let x = i64::from(x);
     let y = i64::from(y);
-    // A partially clipped marker is counted as off-map rather than presenting an incomplete
-    // state symbol. Reserve the whole outer-ring radius even for a caution marker.
-    let margin = i64::from(ALERT_OUTER_RADIUS_PX) * 16;
-    x >= margin
-        && x + margin < i64::from(p.width) * 16
-        && y >= i64::from(p.top_inset) * 16 + margin
-        && y + margin < i64::from(p.height) * 16
+    // Classification follows the supplied position, not whether the full warning halo fits.
+    // The rasterizer clips a marker centered inside the map at the frame edge.
+    x >= 0
+        && x < i64::from(p.width) * 16
+        && y >= i64::from(p.top_inset) * 16
+        && y < i64::from(p.height) * 16
 }
 
 fn increment(counter: &mut u16) {
     *counter = counter.saturating_add(1);
 }
 
-fn header(stats: MarkerStats) -> crate::core::text::TextBuf {
+fn header(stats: MarkerStats, source: AlertHeaderSource) -> crate::core::text::TextBuf {
     let mut text = text_new();
-    text_push_str(&mut text, "MSAW WARNING ");
+    match source {
+        AlertHeaderSource::Msaw => text_push_str(&mut text, "MSAW"),
+        AlertHeaderSource::FinalMonitor { degraded: false } => text_push_str(&mut text, "FINAL"),
+        AlertHeaderSource::FinalMonitor { degraded: true } => {
+            text_push_str(&mut text, "FINAL DEGRADED")
+        }
+    }
+    text_push_str(&mut text, " WARNING ");
     text_push_dec(&mut text, u64::from(stats.warning), 0);
     text_push_str(&mut text, " CAUTION ");
     text_push_dec(&mut text, u64::from(stats.caution), 0);
-    text_push_str(&mut text, " LOST ");
+    match source {
+        AlertHeaderSource::Msaw => text_push_str(&mut text, " LOST "),
+        AlertHeaderSource::FinalMonitor { .. } => text_push_str(&mut text, " PROTECTION LOST "),
+    }
     text_push_dec(&mut text, u64::from(stats.protection_lost), 0);
     text_push_str(&mut text, " OFF ");
     text_push_dec(&mut text, u64::from(stats.off_map), 0);
@@ -132,14 +166,25 @@ fn header(stats: MarkerStats) -> crate::core::text::TextBuf {
     text
 }
 
-/// Plain final-monitor packet: severity 0 caution, 1 warning. Unknown positions use the shared
-/// E7 sentinels; this presentation adapter has no dependency on oa-runway or its decoder.
+/// Final-monitor severity in the presentation packet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum FinalMonitorSeverity {
+    Caution = 0,
+    Warning = 1,
+    ProtectionLost = 2,
+}
+const _: () = assert!(core::mem::size_of::<FinalMonitorSeverity>() == 1);
+
+/// Plain final-monitor packet. Unknown positions use the shared E7 sentinels; this presentation
+/// adapter has no dependency on oa-runway or its decoder.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(C)]
 pub struct FinalMonitorMarker {
     pub address: u32,
     pub lat_e7: i32,
     pub lon_e7: i32,
+    /// Encoded `FinalMonitorSeverity` discriminant; unknown values are refused.
     pub severity: u8,
     pub position_known: u8,
     pub reserved: [u8; 2],
@@ -156,11 +201,12 @@ pub fn append_alert_markers(
     projection: &Projection,
     markers: &[AlertMarker],
 ) -> Result<MarkerStats, DisplayError> {
-    append_alert_markers_titled(list, projection, markers, "MSAW")
+    append_alert_markers_titled(list, projection, markers, AlertHeaderSource::Msaw)
 }
 
 /// Append final-monitor packets using the existing alert marker palette, symbols, and bounded
-/// layout. The packet remains a plain shared value and its severity is validated before drawing.
+/// layout. The packet remains a plain shared value and its closed severity type is mapped before
+/// drawing.
 pub fn append_final_monitor_markers(
     list: &mut DisplayList,
     projection: &Projection,
@@ -192,19 +238,17 @@ pub fn append_final_monitor_frame(
         reserved: [0; 2],
     }; MAX_ALERT_MARKERS];
     for (i, marker) in markers.iter().enumerate() {
-        if marker.severity > 1 {
-            return Err(bad_alert("final monitor severity must be zero or one"));
-        }
+        let severity = final_monitor_severity(marker.severity)?;
         *converted
             .get_mut(i)
             .ok_or_else(|| bad_alert("final monitor conversion index"))? = AlertMarker {
             address: marker.address,
             lat_e7: marker.lat_e7,
             lon_e7: marker.lon_e7,
-            state: if marker.severity == 0 {
-                MarkerState::Caution
-            } else {
-                MarkerState::Warning
+            state: match severity {
+                FinalMonitorSeverity::Caution => MarkerState::Caution,
+                FinalMonitorSeverity::Warning => MarkerState::Warning,
+                FinalMonitorSeverity::ProtectionLost => MarkerState::ProtectionLost,
             },
             position_known: marker.position_known,
             reserved: marker.reserved,
@@ -217,46 +261,19 @@ pub fn append_final_monitor_frame(
         list,
         projection,
         converted,
-        if degraded { "FINAL DEGRADED" } else { "FINAL" },
+        AlertHeaderSource::FinalMonitor { degraded },
     )
 }
 
-fn append_alert_markers_titled(
-    list: &mut DisplayList,
+fn validate_and_project_markers(
     projection: &Projection,
     markers: &[AlertMarker],
-    title: &'static str,
-) -> Result<MarkerStats, DisplayError> {
-    if projection.width < MIN_ALERT_VIEW_WIDTH
-        || projection.top_inset < MIN_ALERT_TOP_INSET
-        || projection.height <= projection.top_inset
-    {
-        return Err(bad_alert(
-            "MSAW markers require width 500 and a 128 px top strip",
-        ));
-    }
-    if list.faulted {
-        return Err(bad_alert("MSAW markers cannot append to a faulted list"));
-    }
-    if markers.len() > MAX_ALERT_MARKERS {
-        return Err(DisplayError::TooLarge {
-            what: "MSAW alert marker records",
-            requested: markers.len() as u128,
-            limit: MAX_ALERT_MARKERS as u128,
-        });
-    }
-
-    // Validate the complete record set and compute every placement before list mutation.
-    let examined = match u16::try_from(markers.len()) {
-        Ok(value) => value,
-        Err(_) => {
-            return Err(DisplayError::TooLarge {
-                what: "MSAW alert marker count",
-                requested: markers.len() as u128,
-                limit: MAX_ALERT_MARKERS as u128,
-            })
-        }
-    };
+) -> Result<ValidatedMarkerSet, DisplayError> {
+    let examined = u16::try_from(markers.len()).map_err(|_| DisplayError::TooLarge {
+        what: "MSAW alert marker count",
+        requested: markers.len() as u128,
+        limit: MAX_ALERT_MARKERS as u128,
+    })?;
     let mut stats = MarkerStats {
         examined,
         ..MarkerStats::default()
@@ -294,7 +311,7 @@ fn append_alert_markers_titled(
                     ));
                 }
                 match project(projection, marker.lat_e7, marker.lon_e7) {
-                    Some(point) if inside_frame(projection, point) => {
+                    Some(point) if position_on_map(projection, point) => {
                         *projected
                             .get_mut(index)
                             .ok_or_else(|| bad_alert("MSAW projection index"))? = Some(point);
@@ -306,27 +323,19 @@ fn append_alert_markers_titled(
             _ => return Err(bad_alert("MSAW position-known flag must be zero or one")),
         }
     }
+    Ok((stats, projected))
+}
 
-    let header_text = if title == "MSAW" {
-        header(stats)
-    } else {
-        let mut text = text_new();
-        text_push_str(&mut text, title);
-        text_push_str(&mut text, " WARNING ");
-        text_push_dec(&mut text, u64::from(stats.warning), 0);
-        text_push_str(&mut text, " CAUTION ");
-        text_push_dec(&mut text, u64::from(stats.caution), 0);
-        text_push_str(&mut text, " OFF ");
-        text_push_dec(&mut text, u64::from(stats.off_map), 0);
-        text_push_str(&mut text, " UNLOCATED ");
-        text_push_dec(&mut text, u64::from(stats.unlocated), 0);
-        text
-    };
-    if crate::core::text::text_clipped(&header_text) {
+fn checked_header(
+    projection: &Projection,
+    stats: MarkerStats,
+    source: AlertHeaderSource,
+) -> Result<crate::core::text::TextBuf, DisplayError> {
+    let text = header(stats, source);
+    if crate::core::text::text_clipped(&text) {
         return Err(bad_alert("MSAW count header exceeds its fixed text buffer"));
     }
-    let header_str = text_str(&header_text);
-    let header_width16 = i64::from(text_width_units(header_str.chars().count()))
+    let width16 = i64::from(text_width_units(text_str(&text).chars().count()))
         .checked_mul(i64::from(ALERT_TEXT_SIZE))
         .and_then(|width| width.checked_mul(16))
         .and_then(|width| width.checked_div(i64::from(CAP_HEIGHT)))
@@ -335,21 +344,32 @@ fn append_alert_markers_titled(
             requested: u128::MAX,
             limit: u128::from(projection.width) * 16,
         })?;
-    if i64::from(ALERT_HEADER_X_PX) * 16 + header_width16 > i64::from(projection.width) * 16 {
+    if i64::from(ALERT_HEADER_X_PX) * 16 + width16 > i64::from(projection.width) * 16 {
         return Err(bad_alert("MSAW count header does not fit the view width"));
     }
+    Ok(text)
+}
 
+fn header_y(projection: &Projection, source: AlertHeaderSource) -> i32 {
+    if projection.top_inset < ALERT_RESERVED_HEADER_INSET_PX {
+        return ALERT_HEADER_Y_PX;
+    }
+    match source {
+        AlertHeaderSource::Msaw => ALERT_RESERVED_MSAW_HEADER_Y_PX,
+        AlertHeaderSource::FinalMonitor { .. } => ALERT_RESERVED_FINAL_HEADER_Y_PX,
+    }
+}
+
+fn reserve_marker_output(list: &DisplayList, marker_count: usize) -> Result<(), DisplayError> {
     let needed_circles =
-        markers
-            .len()
+        marker_count
             .checked_mul(ALERT_CIRCLES_PER_MARKER)
             .ok_or(DisplayError::TooLarge {
                 what: "MSAW circle reservation",
                 requested: u128::MAX,
                 limit: list.caps.circles as u128,
             })?;
-    let needed_texts = markers
-        .len()
+    let needed_texts = marker_count
         .checked_mul(ALERT_TEXTS_PER_MARKER)
         .and_then(|count| count.checked_add(ALERT_HEADER_TEXTS))
         .ok_or(DisplayError::TooLarge {
@@ -357,8 +377,7 @@ fn append_alert_markers_titled(
             requested: u128::MAX,
             limit: list.caps.texts as u128,
         })?;
-    let needed_text_bytes = markers
-        .len()
+    let needed_text_bytes = marker_count
         .checked_mul(ALERT_TEXT_BYTES_PER_MARKER)
         .and_then(|count| count.checked_add(ALERT_HEADER_TEXT_BYTES))
         .ok_or(DisplayError::TooLarge {
@@ -378,22 +397,26 @@ fn append_alert_markers_titled(
         list.text.len(),
         needed_text_bytes,
         list.caps.text_bytes,
-    )?;
+    )
+}
 
+fn append_marker_geometry(
+    list: &mut DisplayList,
+    markers: &[AlertMarker],
+    projected: &[Option<(i32, i32)>; MAX_ALERT_MARKERS],
+) -> Result<(), DisplayError> {
     for (index, marker) in markers.iter().enumerate() {
         let Some(point) = projected.get(index).copied().flatten() else {
             continue;
         };
         match marker.state {
-            MarkerState::Caution => {
-                push_circle(
-                    list,
-                    point,
-                    px(ALERT_INNER_RADIUS_PX),
-                    palette::ALERT,
-                    ALERT_LAYER,
-                )?;
-            }
+            MarkerState::Caution => push_circle(
+                list,
+                point,
+                px(ALERT_INNER_RADIUS_PX),
+                palette::ALERT,
+                ALERT_LAYER,
+            )?,
             MarkerState::Warning | MarkerState::ProtectionLost => {
                 push_circle(
                     list,
@@ -426,14 +449,50 @@ fn append_alert_markers_titled(
             label,
         )?;
     }
+    Ok(())
+}
+
+fn append_alert_markers_titled(
+    list: &mut DisplayList,
+    projection: &Projection,
+    markers: &[AlertMarker],
+    header_source: AlertHeaderSource,
+) -> Result<MarkerStats, DisplayError> {
+    if projection.width < MIN_ALERT_VIEW_WIDTH
+        || projection.top_inset < MIN_ALERT_TOP_INSET
+        || projection.height <= projection.top_inset
+    {
+        return Err(bad_alert(
+            "MSAW markers require width 500 and a 128 px top strip",
+        ));
+    }
+    if list.faulted {
+        return Err(bad_alert("MSAW markers cannot append to a faulted list"));
+    }
+    if markers.len() > MAX_ALERT_MARKERS {
+        return Err(DisplayError::TooLarge {
+            what: "MSAW alert marker records",
+            requested: markers.len() as u128,
+            limit: MAX_ALERT_MARKERS as u128,
+        });
+    }
+    let (stats, projected) = validate_and_project_markers(projection, markers)?;
+    let header_text = checked_header(projection, stats, header_source)?;
+    reserve_marker_output(list, markers.len())?;
+
+    // All input, header and list budgets are checked before the first display-list write.
+    append_marker_geometry(list, markers, &projected)?;
     push_text(
         list,
-        (px(ALERT_HEADER_X_PX), px(ALERT_HEADER_Y_PX)),
+        (
+            px(ALERT_HEADER_X_PX),
+            px(header_y(projection, header_source)),
+        ),
         ALERT_TEXT_SIZE,
         ALIGN_LEFT,
         palette::ALERT,
         15,
-        header_str,
+        text_str(&header_text),
     )?;
     Ok(stats)
 }

@@ -283,6 +283,8 @@ fn address_reuse_cannot_retarget_a_selected_controller_command() {
     );
 }
 
+// Mutation killed: removing the one-time full-key identity or matching observation callsign
+// prevents selection of the owned synthetic flight, so the command journal loses acceptance.
 // REQ: OA-REG-016
 #[test]
 fn fixture_console_journals_fresh_authorized_and_stale_requests() {

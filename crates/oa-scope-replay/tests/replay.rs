@@ -992,6 +992,8 @@ fn safety_overlay_keeps_each_feed_outage_independent_of_track_freshness() {
         feeds: &feeds,
         newest_track_ns: Some(T0),
         frozen_limit_ns: 5 * S,
+        use_reserved_status_header: false,
+        traffic_block_policies: None,
     };
     replay_build_with_safety(
         &mut replay,

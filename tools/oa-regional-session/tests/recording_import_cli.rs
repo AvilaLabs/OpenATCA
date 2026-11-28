@@ -391,7 +391,9 @@ fn window_import_is_half_open_streamed_and_emits_an_hour_envelope() {
     let manifest = fs::read_to_string(imported.join("hour-manifest.tsv")).unwrap();
     assert_eq!(manifest.lines().next(), Some(HOUR_MANIFEST_HEADER));
     // Kills putting the supplied end in the start slot while recomputing a matching bundle hash.
-    assert!(manifest_matches_supplied_window(&manifest, start_ns, end_ns));
+    assert!(manifest_matches_supplied_window(
+        &manifest, start_ns, end_ns
+    ));
     assert!(imported.join(HOUR_COMPLETE_NAME).is_file());
     assert!(!imported.join("COMPLETE").exists());
     let manifest_bytes = fs::read(imported.join("hour-manifest.tsv")).unwrap();

@@ -81,7 +81,7 @@ pub use oa_track_core::{
     measurement_check, r95_m_of, tracker_advance, tracker_config, tracker_counts, tracker_flush,
     tracker_forecast, tracker_live, tracker_live_iter, tracker_log, tracker_moves_active,
     tracker_new, tracker_newest_update_ns, tracker_note_radar_disagreement, tracker_predict,
-    tracker_predict_checked, tracker_set_expected_interval, tracker_stats, tracker_update, Filter,
-    HFilter, HModel, Tracker, VFilter, VModel,
+    tracker_predict_checked, tracker_set_expected_interval, tracker_snapshot_at, tracker_stats,
+    tracker_update, Filter, HFilter, HModel, Tracker, VFilter, VModel,
 };
 pub use output_hash::{output_hash_into, OUTPUT_HASH_TAG};
