@@ -222,15 +222,29 @@ fn header(stats: MarkerStats, source: AlertHeaderSource) -> crate::core::text::T
     text
 }
 
-fn partial_header(source: AlertHeaderSource) -> crate::core::text::TextBuf {
+fn partial_header(
+    source: AlertHeaderSource,
+    has_protection_lost: bool,
+) -> crate::core::text::TextBuf {
     let mut text = text_new();
     match source {
+        AlertHeaderSource::Msaw if has_protection_lost => {
+            text_push_str(&mut text, "MSAW PROTECTION LOST PARTIAL")
+        }
         AlertHeaderSource::Msaw => text_push_str(&mut text, "MSAW PARTIAL"),
         AlertHeaderSource::FinalMonitor { degraded: false } => {
-            text_push_str(&mut text, "FINAL PARTIAL")
+            if has_protection_lost {
+                text_push_str(&mut text, "FINAL PROTECTION LOST PARTIAL")
+            } else {
+                text_push_str(&mut text, "FINAL PARTIAL")
+            }
         }
         AlertHeaderSource::FinalMonitor { degraded: true } => {
-            text_push_str(&mut text, "FINAL DEGRADED PROTECTION LOST PARTIAL")
+            text_push_str(&mut text, "FINAL DEGRADED ");
+            if has_protection_lost {
+                text_push_str(&mut text, "PROTECTION LOST ");
+            }
+            text_push_str(&mut text, "PARTIAL");
         }
     }
     text
@@ -341,9 +355,11 @@ pub fn alert_render_budget(
         minimum_width_px = minimum_width_px.max(required_text_width_px(&heading)?);
         header_bytes = header_bytes.max(text_str(&heading).len());
     }
-    let partial = partial_header(source);
-    minimum_width_px = minimum_width_px.max(required_text_width_px(&partial)?);
-    header_bytes = header_bytes.max(text_str(&partial).len());
+    for has_protection_lost in [false, true] {
+        let partial = partial_header(source, has_protection_lost);
+        minimum_width_px = minimum_width_px.max(required_text_width_px(&partial)?);
+        header_bytes = header_bytes.max(text_str(&partial).len());
+    }
     // The displayed omitted count is exact for every supported target's representable slice size.
     let overflow = overflow_text(source, u64::MAX);
     minimum_width_px = minimum_width_px.max(required_text_width_px(&overflow)?);
@@ -670,7 +686,7 @@ fn checked_header(
     source: AlertHeaderSource,
 ) -> Result<crate::core::text::TextBuf, DisplayError> {
     let text = if stats.omitted > 0 {
-        partial_header(source)
+        partial_header(source, stats.protection_lost > 0)
     } else {
         header(stats, source)
     };

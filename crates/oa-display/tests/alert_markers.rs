@@ -602,6 +602,69 @@ fn family_overflow_draws_allocated_rows_and_reports_omissions_in_reserved_strip(
     );
 }
 
+// Mutation killed: infer protection loss only from degraded mode or only from drawn rows.
+// REQ: OA-RWY-015
+#[test]
+fn overflow_heading_preserves_actual_loss_from_omitted_rows_without_false_loss() {
+    let budget = alert_render_budget(AlertRenderKind::Msaw, 1).unwrap();
+    let view = projection(budget.minimum_width_px, budget.minimum_top_inset_px);
+    let markers = [
+        marker(1, MarkerState::Warning, CENTRE.0, CENTRE.1),
+        unknown_marker(2, MarkerState::ProtectionLost),
+    ];
+    let mut msaw = list_for_render_budget(budget);
+    let stats = append_alert_markers_with_budget(&mut msaw, &view, &markers, 1).unwrap();
+    let rendered = texts(&msaw);
+    assert_eq!(stats.examined, 2);
+    assert_eq!(stats.warning, 1);
+    assert_eq!(stats.protection_lost, 1);
+    assert_eq!(stats.drawn, 1);
+    assert_eq!(stats.omitted, 1);
+    assert!(rendered
+        .iter()
+        .any(|text| text == "MSAW PROTECTION LOST PARTIAL"));
+    assert!(rendered.iter().any(|text| text == "MSAW +1 NOT SHOWN"));
+
+    let final_budget =
+        alert_render_budget(AlertRenderKind::FinalMonitor { degraded: false }, 1).unwrap();
+    let final_view = projection(
+        final_budget.minimum_width_px,
+        final_budget.minimum_top_inset_px,
+    );
+    let loss_tail = [
+        final_marker(1, FinalMonitorSeverity::Warning),
+        final_marker(2, FinalMonitorSeverity::ProtectionLost),
+    ];
+    let mut final_loss = list_for_render_budget(final_budget);
+    let loss_stats =
+        append_final_monitor_frame_with_budget(&mut final_loss, &final_view, &loss_tail, false, 1)
+            .unwrap();
+    let loss_text = texts(&final_loss);
+    assert_eq!(loss_stats.protection_lost, 1);
+    assert_eq!(loss_stats.omitted, 1);
+    assert!(loss_text
+        .iter()
+        .any(|text| text == "FINAL PROTECTION LOST PARTIAL"));
+    assert!(loss_text.iter().any(|text| text == "FINAL +1 NOT SHOWN"));
+
+    let no_loss = [
+        final_marker(1, FinalMonitorSeverity::Warning),
+        final_marker(2, FinalMonitorSeverity::Caution),
+    ];
+    let mut final_clear = list_for_render_budget(final_budget);
+    let clear_stats =
+        append_final_monitor_frame_with_budget(&mut final_clear, &final_view, &no_loss, false, 1)
+            .unwrap();
+    let clear_text = texts(&final_clear);
+    assert_eq!(clear_stats.protection_lost, 0);
+    assert_eq!(clear_stats.omitted, 1);
+    assert!(clear_text.iter().any(|text| text == "FINAL PARTIAL"));
+    assert!(clear_text
+        .iter()
+        .all(|text| !text.contains("PROTECTION LOST")));
+    assert!(clear_text.iter().any(|text| text == "FINAL +1 NOT SHOWN"));
+}
+
 // Mutation killed: keep the 128-row projection scratch limit as an input cap on budgeted APIs.
 // REQ: OA-RWY-015
 #[test]
