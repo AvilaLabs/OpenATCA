@@ -571,8 +571,8 @@ fn family_overflow_draws_allocated_rows_and_reports_omissions_in_reserved_strip(
         final_budget.minimum_top_inset_px,
     );
     let final_markers = [
-        final_marker(1, FinalMonitorSeverity::ProtectionLost),
-        final_marker(2, FinalMonitorSeverity::Warning),
+        final_marker(1, FinalMonitorSeverity::Warning),
+        final_marker(2, FinalMonitorSeverity::Caution),
     ];
     let mut final_list = list_for_render_budget(final_budget);
     let final_stats = append_final_monitor_frame_with_budget(
@@ -586,8 +586,9 @@ fn family_overflow_draws_allocated_rows_and_reports_omissions_in_reserved_strip(
     let final_text = texts(&final_list);
     assert_eq!(final_stats.drawn, 1);
     assert_eq!(final_stats.omitted, 1);
-    assert_eq!(final_stats.protection_lost, 1);
+    assert_eq!(final_stats.protection_lost, 0);
     assert_eq!(final_stats.warning, 1);
+    assert_eq!(final_stats.caution, 1);
     let final_heading_index = final_text
         .iter()
         .position(|text| text == "FINAL DEGRADED PROTECTION LOST PARTIAL")

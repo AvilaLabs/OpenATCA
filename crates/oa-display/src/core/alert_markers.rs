@@ -240,11 +240,7 @@ fn partial_header(
             }
         }
         AlertHeaderSource::FinalMonitor { degraded: true } => {
-            text_push_str(&mut text, "FINAL DEGRADED ");
-            if has_protection_lost {
-                text_push_str(&mut text, "PROTECTION LOST ");
-            }
-            text_push_str(&mut text, "PARTIAL");
+            text_push_str(&mut text, "FINAL DEGRADED PROTECTION LOST PARTIAL");
         }
     }
     text
