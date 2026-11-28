@@ -533,6 +533,60 @@ fn true_velocity_maps_to_the_airport_plane_differential_at_a_displaced_point() {
     );
 }
 
+// REQ: OA-RWY-016
+#[test]
+fn true_velocity_matches_independent_ellipsoid_reference_values() {
+    // Mutation killed: wrong eccentricity sign, meridional/prime-vertical scale, or chain-rule terms.
+    let plane = plane_new(42.0, -88.0).unwrap();
+    let mapped = true_velocity_to_local(&plane, g(42.002, -87.996), 127.0, -31.0).unwrap();
+    assert!(near(mapped.east_m, 127.001_438_803_122_21, 1.0e-7));
+    assert!(near(mapped.north_m, -30.994_045_555_649_42, 1.0e-7));
+}
+
+// REQ: OA-RWY-016
+#[test]
+fn true_velocity_uses_short_longitude_delta_on_both_antimeridian_sides() {
+    // Mutation killed: omit or reverse either longitude wrap correction in the derivative.
+    for (origin_lon, point_lon, east_ref, north_ref) in [
+        (
+            179.99,
+            -179.999,
+            89.993_800_677_249_25,
+            42.013_246_247_565_874,
+        ),
+        (
+            -179.99,
+            179.999,
+            90.006_188_953_602_86,
+            41.986_737_372_805_11,
+        ),
+    ] {
+        let plane = plane_new(50.0, origin_lon).unwrap();
+        let mapped = true_velocity_to_local(&plane, g(50.001, point_lon), 90.0, 42.0).unwrap();
+        assert!(near(mapped.east_m, east_ref, 1.0e-7));
+        assert!(near(mapped.north_m, north_ref, 1.0e-7));
+    }
+}
+
+// REQ: OA-RWY-016
+#[test]
+fn true_velocity_refuses_invalid_values_and_accepts_extent_edge() {
+    // Mutation killed: skip input validation or change the inclusive 20 km plane boundary.
+    let equator = plane_new(0.0, 0.0).unwrap();
+    let boundary_lat = 0.180_873_895_410_076_42; // WGS-84 meridian arc: 20,000 m at latitude 0.
+    assert!(true_velocity_to_local(&equator, g(boundary_lat, 0.0), 0.0, 1.0).is_some());
+    assert!(true_velocity_to_local(&equator, g(boundary_lat + 1.0e-9, 0.0), 0.0, 1.0).is_none());
+    assert!(true_velocity_to_local(&equator, g(0.0, 0.0), f64::NAN, 1.0).is_none());
+    assert!(true_velocity_to_local(&equator, g(0.0, 0.0), 1.0, f64::INFINITY).is_none());
+    assert!(true_velocity_to_local(&equator, g(90.0, 0.0), 1.0, 1.0).is_none());
+    let northern_limit = plane_new(80.0, 0.0).unwrap();
+    let at_origin = true_velocity_to_local(&northern_limit, g(80.0, 0.0), 7.0, -4.0).unwrap();
+    assert!(near(at_origin.east_m, 7.0, 1.0e-12));
+    assert!(near(at_origin.north_m, -4.0, 1.0e-12));
+    let displaced = plane_new(50.0, -88.0).unwrap();
+    assert!(true_velocity_to_local(&displaced, g(50.0, -87.99), f64::MAX, f64::MAX).is_none());
+}
+
 // REQ: OA-RWY-001
 #[test]
 fn plane_error_against_geodesic_is_within_the_stated_bound() {
