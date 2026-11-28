@@ -133,6 +133,7 @@ const SYM: i32 = 4 * 16;
 const MARGIN: i32 = 64 * 16;
 const LABEL_SIZE: u8 = 12;
 const LEGEND_SIZE: u8 = 12;
+const HIDDEN_LEGEND_SIZE: u8 = 9;
 /// Rows reserved beyond the points for fixed furniture (rings, legend, centre mark).
 const FURNITURE: usize = 256;
 
@@ -1657,14 +1658,18 @@ fn labels(
 
 /// Width of a string of `chars` characters at the legend size, 1/16 pixel.
 fn legend_width16(chars: usize) -> i32 {
+    legend_width16_size(chars, LEGEND_SIZE)
+}
+
+fn legend_width16_size(chars: usize, size: u8) -> i32 {
     let units = i64::from(text_width_units(chars));
-    i32::try_from(units * i64::from(LEGEND_SIZE) * 16 / i64::from(CAP_HEIGHT)).unwrap_or(i32::MAX)
+    i32::try_from(units * i64::from(size) * 16 / i64::from(CAP_HEIGHT)).unwrap_or(i32::MAX)
 }
 
 /// The `HIDDEN:` line: every range threshold or layer switch that is hiding something.
 fn hidden_line(v: &View) -> Result<Label, std::fmt::Error> {
     let mut t = label();
-    write!(t, "HIDDEN: ")?;
+    write!(t, "HIDDEN NM:")?;
     let mut n = 0;
     let range = v.proj.range_nm;
     let lay = &v.layers;
@@ -1676,44 +1681,78 @@ fn hidden_line(v: &View) -> Result<Label, std::fmt::Error> {
         if let Some(nm) = nm {
             write!(t, ">")?;
             put_nm(t, nm)?;
-            write!(t, "NM")?;
         }
         n += 1;
         Ok(())
     };
     if lay.fixes && range > v.fix_max_nm {
-        item(&mut t, "FIXES", Some(v.fix_max_nm))?;
+        item(&mut t, "FIX", Some(v.fix_max_nm))?;
     }
     if lay.fixes && range > v.terminal_wpt_max_nm {
-        item(&mut t, "TERMINAL WPTS", Some(v.terminal_wpt_max_nm))?;
+        item(&mut t, "TERM", Some(v.terminal_wpt_max_nm))?;
     }
     if lay.airports && range > v.runway_max_nm {
         item(&mut t, "RWY/LOC", Some(v.runway_max_nm))?;
     }
     if lay.airports && range > v.non_ifr_airport_max_nm {
-        item(&mut t, "NON-IFR APTS", Some(v.non_ifr_airport_max_nm))?;
+        item(&mut t, "NON-IFR", Some(v.non_ifr_airport_max_nm))?;
     }
     if lay.vors && range > v.minor_navaid_max_nm {
         item(&mut t, "NDB/DME/TACAN", Some(v.minor_navaid_max_nm))?;
     }
     if lay.labels && range > v.label_max_nm {
-        item(&mut t, "LABELS", Some(v.label_max_nm))?;
+        item(&mut t, "LABEL", Some(v.label_max_nm))?;
     }
     if lay.labels && range > v.major_label_max_nm {
-        item(&mut t, "VOR/IFR APT LABELS", Some(v.major_label_max_nm))?;
+        item(&mut t, "VOR/IFR LABEL", Some(v.major_label_max_nm))?;
     }
-    for (name, on) in LAYER_NAMES.iter().zip(layers_flags(lay)) {
-        if !on {
-            let mut up = label();
-            for c in name.chars() {
-                write!(up, "{}", c.to_ascii_uppercase())?;
-            }
-            write!(up, " OFF")?;
-            item(&mut t, label_str(&up), None)?;
+    let mut off = label();
+    let mut off_count = 0;
+    let mut off_item = |text: &str| -> std::fmt::Result {
+        if off_count > 0 {
+            write!(off, ", ")?;
+        }
+        write!(off, "{text}")?;
+        off_count += 1;
+        Ok(())
+    };
+    if !lay.own_boundary && !lay.neighbour_boundaries {
+        off_item("BOUNDARIES")?;
+    } else {
+        if !lay.own_boundary {
+            off_item("OWN BOUNDARY")?;
+        }
+        if !lay.neighbour_boundaries {
+            off_item("NEIGHBOUR BOUNDARY")?;
         }
     }
+    if !lay.high_airways && !lay.low_airways {
+        off_item("AIRWAYS")?;
+    } else {
+        if !lay.high_airways {
+            off_item("HIGH AIRWAYS")?;
+        }
+        if !lay.low_airways {
+            off_item("LOW AIRWAYS")?;
+        }
+    }
+    for (enabled, name) in [
+        (lay.vors, "VORS"),
+        (lay.airports, "AIRPORTS"),
+        (lay.fixes, "FIXES"),
+        (lay.labels, "LABELS"),
+        (lay.rings, "RINGS"),
+    ] {
+        if !enabled {
+            off_item(name)?;
+        }
+    }
+    if off_count > 0 {
+        write!(t, ";OFF:{}", label_str(&off))?;
+        n += 1;
+    }
     if n == 0 {
-        write!(t, "NONE")?;
+        write!(t, " NONE")?;
     }
     Ok(t)
 }
@@ -1735,8 +1774,21 @@ fn legend_text(
     colour: u8,
     text: &str,
 ) -> Result<(), DisplayError> {
-    push_text(l, at, LEGEND_SIZE, ALIGN_LEFT, colour, LAYER_LEGEND, text)?;
-    let end = at.0.saturating_add(legend_width16(text.chars().count()));
+    legend_text_size(l, st, width16, at, colour, LEGEND_SIZE, text)
+}
+
+fn legend_text_size(
+    l: &mut DisplayList,
+    st: &mut SceneStats,
+    width16: i32,
+    at: (i32, i32),
+    colour: u8,
+    size: u8,
+    text: &str,
+) -> Result<(), DisplayError> {
+    push_text(l, at, size, ALIGN_LEFT, colour, LAYER_LEGEND, text)?;
+    let end =
+        at.0.saturating_add(legend_width16_size(text.chars().count(), size));
     if end > width16 {
         st.legend_cut += 1;
         // A two-pixel bar the height of the text, inside the last pixels of the screen.
@@ -1744,7 +1796,7 @@ fn legend_text(
         push_line_w(
             l,
             (bx, at.1),
-            (bx, at.1.saturating_add(i32::from(LEGEND_SIZE) * 16)),
+            (bx, at.1.saturating_add(i32::from(size) * 16)),
             palette::TEXT,
             LAYER_LEGEND,
             2,
@@ -1821,7 +1873,15 @@ fn legend(
     y += pitch;
 
     let h = hidden_line(v).map_err(legend_format_full)?;
-    legend_text(l, st, width16, (x, y), palette::TEXT, label_str(&h))?;
+    legend_text_size(
+        l,
+        st,
+        width16,
+        (x, y),
+        palette::TEXT,
+        HIDDEN_LEGEND_SIZE,
+        label_str(&h),
+    )?;
     y += pitch;
 
     let mut nx = x;
@@ -1880,7 +1940,11 @@ mod work_budget_tests {
     }
 
     fn largest_hidden_view() -> View {
-        let mut view = view_new(0, 0, 20_000.0, 1920, 1080).unwrap();
+        largest_hidden_view_at(1920, 1080)
+    }
+
+    fn largest_hidden_view_at(width: u32, height: u32) -> View {
+        let mut view = view_new(0, 0, 20_000.0, width, height).unwrap();
         view.fix_max_nm = 19_999.9;
         view.terminal_wpt_max_nm = 19_999.9;
         view.runway_max_nm = 19_999.9;
@@ -1889,6 +1953,12 @@ mod work_budget_tests {
         view.label_max_nm = 19_999.9;
         view.major_label_max_nm = 19_999.9;
         view
+    }
+
+    fn displayed_text(list: &DisplayList, row: usize) -> Option<&str> {
+        let start = usize::try_from(*list.texts.start.get(row)?).ok()?;
+        let end = start.checked_add(usize::try_from(*list.texts.len.get(row)?).ok()?)?;
+        list.text.get(start..end)
     }
 
     // REQ: OA-DSP-025
@@ -1905,22 +1975,32 @@ mod work_budget_tests {
             assert!(layer_set(&mut view.layers, name, false));
         }
         let text = hidden_line(&view).unwrap();
+        let visible = label_str(&text);
+        let expected_ranges = [
+            view.fix_max_nm,
+            view.terminal_wpt_max_nm,
+            view.runway_max_nm,
+            view.non_ifr_airport_max_nm,
+            view.minor_navaid_max_nm,
+            view.label_max_nm,
+            view.major_label_max_nm,
+        ]
+        .into_iter()
+        .filter(|limit| view.proj.range_nm > *limit)
+        .count();
+        assert_eq!(visible.matches('>').count(), expected_ranges);
+        assert!(visible.contains("OFF:"));
         assert_eq!(
-            label_str(&text),
-            concat!(
-                "HIDDEN: FIXES>19999.9NM, TERMINAL WPTS>19999.9NM, RWY/LOC>19999.9NM, ",
-                "NON-IFR APTS>19999.9NM, NDB/DME/TACAN>19999.9NM, LABELS>19999.9NM, ",
-                "VOR/IFR APT LABELS>19999.9NM, OWN-BOUNDARY OFF, NEIGHBOUR-BOUNDARIES OFF, ",
-                "HIGH-AIRWAYS OFF, LOW-AIRWAYS OFF, RINGS OFF"
-            )
+            visible
+                .split_once("OFF:")
+                .map(|(_, rest)| rest.split(", ").count()),
+            Some(3)
         );
-        assert_eq!(text.len, 254);
     }
 
     // REQ: OA-DSP-025
     #[test]
     fn every_hidden_layer_combination_fits_the_analyzed_stack_budget() {
-        let mut maximum = 0;
         // Nine fixed switches give exactly512 configurations, independent of input size.
         for bits in 0u16..512 {
             let mut view = largest_hidden_view();
@@ -1928,10 +2008,84 @@ mod work_budget_tests {
                 assert!(layer_set(&mut view.layers, name, bits & (1 << bit) != 0));
             }
             let text = hidden_line(&view).unwrap();
-            maximum = maximum.max(text.len);
             assert!(text.len <= LABEL_BYTES);
+            let visible = label_str(&text);
+            let expected_ranges = [
+                (view.layers.fixes, view.fix_max_nm),
+                (view.layers.fixes, view.terminal_wpt_max_nm),
+                (view.layers.airports, view.runway_max_nm),
+                (view.layers.airports, view.non_ifr_airport_max_nm),
+                (view.layers.vors, view.minor_navaid_max_nm),
+                (view.layers.labels, view.label_max_nm),
+                (view.layers.labels, view.major_label_max_nm),
+            ]
+            .into_iter()
+            .filter(|(enabled, limit)| *enabled && view.proj.range_nm > *limit)
+            .count();
+            assert_eq!(visible.matches('>').count(), expected_ranges);
+            let expected_off = usize::from(!view.layers.own_boundary)
+                + usize::from(!view.layers.neighbour_boundaries)
+                - usize::from(!view.layers.own_boundary && !view.layers.neighbour_boundaries)
+                + usize::from(!view.layers.high_airways)
+                + usize::from(!view.layers.low_airways)
+                - usize::from(!view.layers.high_airways && !view.layers.low_airways)
+                + usize::from(!view.layers.vors)
+                + usize::from(!view.layers.airports)
+                + usize::from(!view.layers.fixes)
+                + usize::from(!view.layers.labels)
+                + usize::from(!view.layers.rings);
+            let actual_off = visible
+                .split_once(";OFF:")
+                .map(|(_, items)| items.split(", ").count())
+                .unwrap_or(0);
+            assert_eq!(actual_off, expected_off);
         }
-        assert_eq!(maximum, 254);
+    }
+
+    // Mutation killed: draw full layer names at the standard font size and clip the HIDDEN row.
+    // REQ: OA-DSP-025
+    #[test]
+    fn hidden_legend_text_stays_inside_review_canvas_for_every_layer_selection() {
+        let model = empty_display_model();
+        let mut view = largest_hidden_view_at(1_600, 1_200);
+        let mut list = list_new(ListCaps {
+            lines: 8,
+            rects: 1,
+            circles: 1,
+            polylines: 1,
+            poly_vertices: 8,
+            texts: 16,
+            text_bytes: 1024,
+        })
+        .unwrap();
+        for bits in 0u16..512 {
+            view.layers = layers_all();
+            for (bit, name) in LAYER_NAMES.iter().enumerate() {
+                assert!(layer_set(&mut view.layers, name, bits & (1 << bit) != 0));
+            }
+            list_clear(&mut list);
+            let mut stats = SceneStats::default();
+            legend(&mut list, &model, &view, &mut stats).unwrap();
+            let row = (0..list.texts.start.len())
+                .find(|row| {
+                    displayed_text(&list, *row).is_some_and(|text| text.starts_with("HIDDEN"))
+                })
+                .unwrap();
+            let text = displayed_text(&list, row).unwrap();
+            let bounds = crate::core::font::text_block_bounds_px(
+                (
+                    *list.texts.x.get(row).unwrap(),
+                    *list.texts.y.get(row).unwrap(),
+                ),
+                *list.texts.size.get(row).unwrap(),
+                *list.texts.align.get(row).unwrap(),
+                text.chars().count(),
+                1,
+                u32::from(HIDDEN_LEGEND_SIZE) + 2,
+            );
+            assert!(bounds.x0 >= 0);
+            assert!(bounds.x1 <= i32::try_from(view.proj.width).unwrap());
+        }
     }
 
     // REQ: OA-DSP-054
