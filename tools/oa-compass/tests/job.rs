@@ -51,12 +51,18 @@ fn clip_position(k: i64) -> (i32, i32) {
 
 /// An OAF1 file with one aircraft reporting once a second for `secs` seconds.
 fn write_clip(dir: &Path, secs: i64) -> PathBuf {
+    write_clip_with_period(dir, secs, 1)
+}
+
+/// An OAF1 file with one aircraft reporting every `period_secs` for `reports` reports.
+fn write_clip_with_period(dir: &Path, reports: i64, period_secs: i64) -> PathBuf {
     let mut r = Reports::default();
-    for k in 0..secs {
-        let (la, lo) = clip_position(k);
+    for k in 0..reports {
+        let elapsed_secs = k * period_secs;
+        let (la, lo) = clip_position(elapsed_secs);
         let row = oa_adsb::Row {
             icao: ADDR,
-            time_ns: T0_NS + k * 1_000_000_000,
+            time_ns: T0_NS + elapsed_secs * 1_000_000_000,
             lat_e7: la,
             lon_e7: lo,
             baro_alt_ft: 20_000,
@@ -533,7 +539,12 @@ fn the_updates_mode_writes_update_rows_and_counts_the_rest() {
 #[test]
 fn the_readme_states_the_openatca_rows_mode_prominently_in_both_modes() {
     let work = tmp("modes");
-    let clip = write_clip(&work, 120);
+    let reports = 120_i64;
+    let period_secs = 2_i64;
+    // One-second ticks run from the first report plus one period through the last report time.
+    let expected_updates = u64::try_from(reports - 1).unwrap();
+    let expected_ticks = u64::try_from((reports - 2) * period_secs + 1).unwrap();
+    let clip = write_clip_with_period(&work, reports, period_secs);
     let mut counts = Vec::new();
     for (name, rows, head, other) in [
         (
@@ -559,17 +570,40 @@ fn the_readme_states_the_openatca_rows_mode_prominently_in_both_modes() {
             !r[..r.find("Format:").unwrap()].contains(&format!("OpenATCA ROWS: {other}")),
             "{r}"
         );
-        let n = records_062(&out.join("openatca.ast")).len();
-        assert!(n > 0, "{lines:?}");
+        let n = u64::try_from(records_062(&out.join("openatca.ast")).len()).unwrap();
+        let (expected_exported, expected_export_label, expected_other_label) = match rows {
+            OpenatcaRows::Ticks => (
+                expected_ticks,
+                format!(
+                    "tick rows exported (one per second per confirmed track): {expected_ticks}"
+                ),
+                format!("update rows not exported (--openatca-rows ticks): {expected_updates}"),
+            ),
+            OpenatcaRows::Updates => (
+                expected_updates,
+                format!("update rows exported (--openatca-rows updates): {expected_updates}"),
+                format!("tick rows not exported (--openatca-rows updates): {expected_ticks}"),
+            ),
+        };
+        assert_eq!(n, expected_exported, "{lines:?}");
         counts.push(n);
         let (kept, left) = match rows {
             OpenatcaRows::Ticks => ("tick rows exported", "update rows not exported"),
             OpenatcaRows::Updates => ("update rows exported", "tick rows not exported"),
         };
         assert!(r.contains(kept) && r.contains(left), "{r}");
+        assert!(r.contains(&expected_export_label), "{r}");
+        assert!(r.contains(&expected_other_label), "{r}");
+        assert!(
+            r.contains(&format!(
+                "measurements offered to the tracker: {}",
+                u64::try_from(reports).unwrap()
+            )),
+            "{r}"
+        );
     }
-    // 120 reports are 120 update rows; the ticks are one a second from the first track state.
-    assert_ne!(counts[0], counts[1]);
+    assert!(counts[0] != counts[1]);
+    assert_eq!(counts, [expected_ticks, expected_updates]);
 }
 
 // REQ: OA-CMP-037
