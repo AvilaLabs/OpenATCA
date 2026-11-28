@@ -3782,8 +3782,7 @@ mod tests {
         assert_eq!(initiation, None);
     }
 
-    #[test]
-    fn sfdps_short_codes_lifecycle_and_unknown_owner_reach_the_flight_table() {
+    fn sfdps_short_codes_adaptation() -> (RecordedAdaptation, i64) {
         let xml = br#"<ns5:MessageCollection xmlns:ns5="http://www.faa.aero/nas/3.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><message xsi:type="ns5:FlightMessageType"><flight xsi:type="ns5:NasFlightType" centre="ZXX" source="AH" system="SLC" timestamp="2030-01-02T03:04:05.000Z"><gufi codeSpace="urn:uuid">11111111-2222-3333-4444-555555555555</gufi><flightPlan identifier="FP7"/><flightStatus fdpsFlightStatus="ACTIVE"/><departure><runwayPositionAndTime><runwayTime><actual time="2030-01-02T03:00:00Z"/></runwayTime></runwayPositionAndTime></departure><controllingUnit unitIdentifier="???"/></flight></message><message xsi:type="ns5:FlightMessageType"><flight xsi:type="ns5:NasFlightType" centre="ZXX" source="TH" system="SLC" timestamp="2030-01-02T03:04:06.000Z"><gufi codeSpace="urn:uuid">11111111-2222-3333-4444-555555555555</gufi><flightPlan identifier="FP7"/><flightStatus fdpsFlightStatus="ACTIVE"/><flightIdentification aircraftIdentification="ABC123"/><aircraftDescription aircraftAddress="ABCDEF"/><controllingUnit unitIdentifier="ZXX" sectorIdentifier="03"/></flight></message></ns5:MessageCollection>"#;
         let receipt_ms = oa_fixm::parse_iso_ms(b"2030-01-02T03:04:07.250Z").unwrap();
         let receipt_ns = receipt_ms
@@ -3811,10 +3810,17 @@ mod tests {
             total_decoded_bytes: payload_len,
             ..RecordingCounts::default()
         };
-        let adapted = adapt_recorded_frames(&[frame], counts, 8, *b"ZAU1").unwrap();
+        (
+            adapt_recorded_frames(&[frame], counts, 8, *b"ZAU1").unwrap(),
+            receipt_ns,
+        )
+    }
+
+    #[test]
+    fn sfdps_short_codes_normalization_preserves_receipts_and_message_groups() {
+        let (adapted, receipt_ns) = sfdps_short_codes_adaptation();
         assert_eq!(adapted.counts.sfdps_rows_decoded, 2);
         assert_eq!(adapted.counts.sfdps_rows_refused, 0);
-        assert_eq!(adapted.counts.sfdps_owner_unknown, 1);
         assert!(adapted.counts.sfdps_rows_positive_address > 0);
         assert!(adapted.counts.sfdps_rows_nonempty_callsign > 0);
         assert!(adapted.counts.sfdps_emitted_operations[usize::from(OP_ADDRESS)] > 0);
@@ -3886,6 +3892,17 @@ mod tests {
             reparsed.push(crate::input::parse_event_line(row).unwrap());
         }
         assert_eq!(reparsed, adapted.events);
+    }
+
+    #[test]
+    fn sfdps_short_codes_lifecycle_and_unknown_owner_reach_the_flight_table() {
+        let (adapted, _) = sfdps_short_codes_adaptation();
+        assert_eq!(adapted.counts.sfdps_owner_unknown, 1);
+        let serialized = serialize_recorded_events(&adapted.events).unwrap();
+        let mut reparsed = Vec::new();
+        for row in serialized.split_terminator('\n').skip(1) {
+            reparsed.push(crate::input::parse_event_line(row).unwrap());
+        }
 
         let mut driver = crate::flight::flight_driver_new(crate::flight::FlightDriverConfig {
             flight_capacity: 8,
