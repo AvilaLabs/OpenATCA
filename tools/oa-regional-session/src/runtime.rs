@@ -5017,10 +5017,9 @@ mod transaction_tests {
             .any(|alert| alert.severity == final_monitor_core::FinalSeverity::Warning));
     }
 
-    // Mutation killed: console/select/clear redraws use the ordinary presenter and erase the
-    // cached final-monitor protection-loss state after a completed frame.
+    // Mutation killed: positioned final-monitor circles accumulate on each operator redraw.
     #[test]
-    fn operator_redraws_preserve_final_monitor_protection_loss() {
+    fn operator_redraws_reuse_positioned_warning_overlay() {
         let mut monitored = configured_runtime(100.0);
         let active = seed_confirmed_final_monitor_track(&mut monitored, 410_000_000, 0);
         let mut plain = runtime();
@@ -5037,13 +5036,23 @@ mod transaction_tests {
             "warning marker is positioned on the raster"
         );
 
-        regional_console_overlay(&mut monitored, "operator status")
-            .expect("warning console redraw");
-        regional_console_overlay(&mut plain, "operator status").expect("plain console redraw");
+        let console = "operator status";
+        regional_console_overlay(&mut monitored, console).expect("warning console redraw");
+        regional_console_overlay(&mut plain, console).expect("plain console redraw");
+        let after_console =
+            surveillance::surveillance_overlay_primitive_counts(&monitored.surveillance);
+        let expected_console_bytes = active_counts
+            .text_bytes
+            .checked_add(console.len())
+            .and_then(|bytes| bytes.checked_add(3))
+            .expect("bounded console suffix");
+        assert_eq!(after_console.text_bytes, expected_console_bytes);
+        regional_console_overlay(&mut monitored, console).expect("repeat warning console redraw");
+        regional_console_overlay(&mut plain, console).expect("repeat plain console redraw");
         assert_eq!(
             surveillance::surveillance_overlay_primitive_counts(&monitored.surveillance),
-            active_counts,
-            "warning console redraw rewinds and replaces every overlay primitive"
+            after_console,
+            "repeating the same console replaces all overlay primitives and bytes"
         );
 
         let monitored_target = monitored
@@ -5069,18 +5078,55 @@ mod transaction_tests {
             plain_identity,
         )
         .expect("select the equivalent plain track");
+        let after_selection =
+            surveillance::surveillance_overlay_primitive_counts(&monitored.surveillance);
+        regional_select(
+            &mut monitored,
+            monitored_target.address,
+            monitored_target.generation,
+            monitored_identity,
+        )
+        .expect("repeat warning track selection");
+        regional_select(
+            &mut plain,
+            plain_target.address,
+            plain_target.generation,
+            plain_identity,
+        )
+        .expect("repeat plain track selection");
         assert_eq!(
             surveillance::surveillance_overlay_primitive_counts(&monitored.surveillance),
-            active_counts,
-            "selection redraw does not accumulate circles, lines, or text"
+            after_selection,
+            "repeating selection does not accumulate circles, lines, or text"
         );
         regional_clear_selection(&mut monitored).expect("clear warning selection");
         regional_clear_selection(&mut plain).expect("clear plain selection");
+        let after_clear =
+            surveillance::surveillance_overlay_primitive_counts(&monitored.surveillance);
+        regional_clear_selection(&mut monitored).expect("repeat clear warning selection");
+        regional_clear_selection(&mut plain).expect("repeat clear plain selection");
         assert_eq!(
             surveillance::surveillance_overlay_primitive_counts(&monitored.surveillance),
-            active_counts,
-            "clear-selection redraw preserves the bounded overlay baseline"
+            after_clear,
+            "repeating clear-selection does not accumulate overlay primitives or bytes"
         );
+    }
+
+    // Mutation killed: operator controls erase or replace the cached protection-loss state.
+    #[test]
+    fn protection_loss_status_survives_console_select_and_clear() {
+        let mut monitored = configured_runtime(100.0);
+        let warning = seed_confirmed_final_monitor_track(&mut monitored, 410_000_000, 0);
+        let mut plain = runtime();
+        seed_confirmed_final_monitor_track(&mut plain, 410_000_000, 0);
+        assert!(warning
+            .final_monitor
+            .alerts
+            .iter()
+            .any(|alert| alert.severity == final_monitor_core::FinalSeverity::Warning));
+        let console = "operator status";
+        regional_console_overlay(&mut monitored, console).expect("pre-loss console state");
+        regional_console_overlay(&mut plain, console).expect("pre-loss plain console state");
 
         for runtime in [&mut monitored, &mut plain] {
             let stale = regional_step(
@@ -5100,13 +5146,19 @@ mod transaction_tests {
 
         let stale_counts =
             surveillance::surveillance_overlay_primitive_counts(&monitored.surveillance);
-        let console = "operator status";
         regional_console_overlay(&mut monitored, console).expect("monitored console redraw");
         regional_console_overlay(&mut plain, console).expect("plain console redraw");
         assert_eq!(
             surveillance::surveillance_overlay_primitive_counts(&monitored.surveillance),
             stale_counts,
-            "protection-loss console redraw does not accumulate overlay primitives"
+            "same-console protection-loss redraw replaces every primitive and byte"
+        );
+        regional_console_overlay(&mut monitored, console).expect("repeat loss console redraw");
+        regional_console_overlay(&mut plain, console).expect("repeat plain loss console redraw");
+        assert_eq!(
+            surveillance::surveillance_overlay_primitive_counts(&monitored.surveillance),
+            stale_counts,
+            "repeating protection-loss console redraw does not accumulate bytes"
         );
         assert_ne!(
             oa_sha256::sha256(regional_pixels(&monitored).expect("monitored pixels")),
@@ -5134,10 +5186,26 @@ mod transaction_tests {
             (plain_target.identity_present == 1).then_some(plain_target.identity),
         )
         .expect("select stale plain track");
+        let after_loss_selection =
+            surveillance::surveillance_overlay_primitive_counts(&monitored.surveillance);
+        regional_select(
+            &mut monitored,
+            monitored_target.address,
+            monitored_target.generation,
+            (monitored_target.identity_present == 1).then_some(monitored_target.identity),
+        )
+        .expect("repeat stale monitored selection");
+        regional_select(
+            &mut plain,
+            plain_target.address,
+            plain_target.generation,
+            (plain_target.identity_present == 1).then_some(plain_target.identity),
+        )
+        .expect("repeat stale plain selection");
         assert_eq!(
             surveillance::surveillance_overlay_primitive_counts(&monitored.surveillance),
-            stale_counts,
-            "protection-loss selection redraw replaces the prior marker set"
+            after_loss_selection,
+            "repeating protection-loss selection replaces the prior marker set"
         );
         assert_ne!(
             oa_sha256::sha256(regional_pixels(&monitored).expect("monitored pixels")),
@@ -5147,10 +5215,14 @@ mod transaction_tests {
 
         regional_clear_selection(&mut monitored).expect("monitored clear redraw");
         regional_clear_selection(&mut plain).expect("plain clear redraw");
+        let after_loss_clear =
+            surveillance::surveillance_overlay_primitive_counts(&monitored.surveillance);
+        regional_clear_selection(&mut monitored).expect("repeat monitored clear redraw");
+        regional_clear_selection(&mut plain).expect("repeat plain clear redraw");
         assert_eq!(
             surveillance::surveillance_overlay_primitive_counts(&monitored.surveillance),
-            stale_counts,
-            "protection-loss clear redraw keeps primitive counts stable"
+            after_loss_clear,
+            "repeating protection-loss clear redraw keeps primitive counts stable"
         );
         assert_ne!(
             oa_sha256::sha256(regional_pixels(&monitored).expect("monitored pixels")),
