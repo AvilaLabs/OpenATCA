@@ -131,6 +131,12 @@ struct ValidatedMarkerSet {
     visible_count: usize,
 }
 
+#[derive(Clone, Copy)]
+struct AlertPresentationMode {
+    header_source: AlertHeaderSource,
+    overflow_reserved: bool,
+}
+
 const EMPTY_MARKER: AlertMarker = AlertMarker {
     address: 0,
     lat_e7: NO_POSITION_E7,
@@ -543,8 +549,10 @@ fn append_final_monitor_frame_impl(
         visible,
         validated.stats,
         &validated.projected,
-        source,
-        overflow_reserved,
+        AlertPresentationMode {
+            header_source: source,
+            overflow_reserved,
+        },
     )
 }
 
@@ -850,8 +858,10 @@ fn append_alert_markers_titled(
         drawn_markers,
         validated.stats,
         &validated.projected,
-        header_source,
-        overflow_reserved,
+        AlertPresentationMode {
+            header_source,
+            overflow_reserved,
+        },
     )
 }
 
@@ -861,17 +871,16 @@ fn append_validated_markers(
     drawn_markers: &[AlertMarker],
     stats: MarkerStats,
     projected: &[Option<(i32, i32)>; MAX_ALERT_MARKERS],
-    header_source: AlertHeaderSource,
-    overflow_reserved: bool,
+    mode: AlertPresentationMode,
 ) -> Result<MarkerStats, DisplayError> {
     if list.faulted {
         return Err(bad_alert("alert markers cannot append to a faulted list"));
     }
-    let header_text = checked_header(projection, stats, header_source)?;
-    let overflow = (stats.omitted > 0).then(|| overflow_text(header_source, stats.omitted));
+    let header_text = checked_header(projection, stats, mode.header_source)?;
+    let overflow = (stats.omitted > 0).then(|| overflow_text(mode.header_source, stats.omitted));
     let overflow_bytes = overflow.as_ref().map_or(0, |text| text_str(text).len());
     if let Some(text) = overflow.as_ref() {
-        if !overflow_reserved
+        if !mode.overflow_reserved
             || crate::core::text::text_clipped(text)
             || projection.width < required_text_width_px(text)?
         {
@@ -883,7 +892,7 @@ fn append_validated_markers(
     reserve_marker_output(
         list,
         drawn_markers.len(),
-        header_source,
+        mode.header_source,
         text_str(&header_text).len(),
         overflow_bytes,
     )?;
@@ -894,7 +903,7 @@ fn append_validated_markers(
         list,
         (
             px(ALERT_HEADER_X_PX),
-            px(header_y(projection, header_source)),
+            px(header_y(projection, mode.header_source)),
         ),
         ALERT_TEXT_SIZE,
         ALIGN_LEFT,
@@ -905,7 +914,7 @@ fn append_validated_markers(
     if let Some(text) = overflow.as_ref() {
         push_text(
             list,
-            (px(ALERT_HEADER_X_PX), px(overflow_y(header_source))),
+            (px(ALERT_HEADER_X_PX), px(overflow_y(mode.header_source))),
             ALERT_TEXT_SIZE,
             ALIGN_LEFT,
             palette::ALERT,
