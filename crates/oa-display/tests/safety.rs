@@ -9,7 +9,7 @@
 
 use oa_display::list::*;
 use oa_display::palette as pal;
-use oa_display::project::{projection_new, Projection};
+use oa_display::project::{projection_new, unproject, Projection};
 use oa_display::raster::{frame_digest, frame_len, rasterize, FrameSpec};
 use oa_display::safety::*;
 use oa_display::scene::LEGEND_STRIP_PX;
@@ -96,6 +96,94 @@ fn safety_banner_respects_additional_reserved_operator_header() {
     assert!(list.texts.y.iter().all(|&y| y >= 168 * 16));
 }
 
+// Mutation killed: lower or raise the minimum inset arithmetic, or reject its exact valid edge.
+// REQ: OA-DSP-078
+#[test]
+fn reserved_safety_band_accepts_its_exact_two_row_minimum_only() {
+    let (states, inhibits, _) = well();
+    let feeds = [
+        FeedStatus {
+            name: *b"RADAR1\0\0",
+            state: FeedState::Slow { age_ms: 1_000 },
+        },
+        FeedStatus {
+            name: *b"FLIGHT\0\0",
+            state: FeedState::Lost { age_ms: 2_000 },
+        },
+    ];
+    let context = SafetyScene {
+        states: &states,
+        inhibits: &inhibits,
+        now_ns: NOW,
+        feeds: &feeds,
+        newest_track_ns: Some(NOW - S),
+        frozen_limit_ns: 5 * S,
+        targets: no_targets(),
+    };
+    let mut exact = list_new(safety_caps()).unwrap();
+    let stats = build_safety_in_reserved_header(
+        &mut exact,
+        &projection_new(ORD.0, ORD.1, 20.0, 800, 600, 181).unwrap(),
+        &context,
+    )
+    .unwrap();
+    assert_eq!(stats.banner_lines, 2);
+    assert_eq!(exact.texts.y, [151 * 16, 165 * 16]);
+
+    let mut short = list_new(safety_caps()).unwrap();
+    let before = short.clone();
+    assert!(matches!(
+        build_safety_in_reserved_header(
+            &mut short,
+            &projection_new(ORD.0, ORD.1, 20.0, 800, 600, 180).unwrap(),
+            &context,
+        ),
+        Err(DisplayError::BadView(_))
+    ));
+    assert_eq!(short, before);
+}
+
+// Mutation killed: fail to promote the first actual feed loss ahead of overflowed state lines.
+// REQ: OA-DSP-078
+#[test]
+fn reserved_banner_keeps_first_lost_feed_visible_before_its_overflow_summary() {
+    let (states, inhibits, _) = well();
+    let feeds = [
+        FeedStatus {
+            name: *b"RADAR1\0\0",
+            state: FeedState::Slow { age_ms: 1_000 },
+        },
+        FeedStatus {
+            name: *b"FLIGHT\0\0",
+            state: FeedState::Lost { age_ms: 2_000 },
+        },
+        FeedStatus {
+            name: *b"ROUTE\0\0\0",
+            state: FeedState::Slow { age_ms: 3_000 },
+        },
+    ];
+    let context = scene(&states, &inhibits, &feeds);
+    let mut list = list_new(safety_caps()).unwrap();
+    let stats = build_safety_in_reserved_header(
+        &mut list,
+        &projection_new(ORD.0, ORD.1, 20.0, 800, 600, 224).unwrap(),
+        &context,
+    )
+    .unwrap();
+    assert_eq!(stats.feeds_shown, u32::try_from(feeds.len()).unwrap());
+    assert_eq!(
+        stats.banner_hidden,
+        u32::try_from(feeds.len().saturating_sub(1)).unwrap()
+    );
+    let lines = texts(&list);
+    assert!(lines
+        .first()
+        .is_some_and(|line| line.starts_with("FEED FLIGHT LOST")));
+    assert!(lines
+        .get(1)
+        .is_some_and(|line| { line.starts_with('+') && line.contains("MORE STATES NOT SHOWN") }));
+}
+
 fn texts(l: &DisplayList) -> Vec<String> {
     (0..l.texts.x.len())
         .map(|i| {
@@ -132,6 +220,32 @@ fn target() -> Target {
         trail: [(0, 0); MAX_TRAIL],
         trail_len: 0,
     }
+}
+
+fn draw_msaw_fault_at_screen(screen: (i32, i32)) -> (DisplayList, SafetyStats) {
+    let (mut states, inhibits, feeds) = well();
+    state_report(
+        &mut states,
+        NetId::Msaw,
+        NetReport::Unavailable {
+            reason: Reason::Maintenance,
+        },
+        NOW,
+        NOW,
+    )
+    .unwrap();
+    let projection = proj();
+    let (lat_e7, lon_e7) = unproject(&projection, screen.0 * 16, screen.1 * 16).unwrap();
+    let mut targets = targets_new(1).unwrap();
+    let mut positioned = target();
+    positioned.lat_e7 = lat_e7;
+    positioned.lon_e7 = lon_e7;
+    targets_push(&mut targets, &positioned).unwrap();
+    let mut context = scene(&states, &inhibits, &feeds);
+    context.targets = &targets;
+    let mut list = list_new(safety_caps()).unwrap();
+    let stats = build_safety(&mut list, &projection, &context).unwrap();
+    (list, stats)
 }
 
 // REQ: OA-DSP-060
@@ -686,4 +800,28 @@ fn targets_under_the_opaque_banner_are_counted_on_it() {
     targets_push(&mut empty_set, &target()).unwrap();
     sc.targets = &empty_set;
     assert_eq!(texts(&draw(&sc).0).len(), 1);
+}
+
+// Mutation killed: move or resize the banner box, or omit its prospective counting row.
+// REQ: OA-DSP-071
+#[test]
+fn banner_bounds_count_only_targets_inside_its_full_rendered_box() {
+    for (screen, expected_under) in [
+        ((8, 116), true),
+        ((3, 116), false),
+        ((452, 116), true),
+        ((490, 116), false),
+        ((20, 140), true),
+        ((20, 145), false),
+    ] {
+        let (list, stats) = draw_msaw_fault_at_screen(screen);
+        assert_eq!(stats.targets_under_banner > 0, expected_under, "{screen:?}");
+        assert_eq!(
+            texts(&list)
+                .iter()
+                .any(|line| line.starts_with("TARGETS UNDER BANNER:")),
+            expected_under,
+            "{screen:?}"
+        );
+    }
 }

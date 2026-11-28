@@ -326,7 +326,46 @@ fn view_and_header_width_are_checked_before_writing() {
 
     // The documented minimum width fits this header. Refusing it would turn the
     // stated minimum into a misleading contract.
-    assert!(append_alert_markers(&mut list, &projection(500, 160), &markers).is_ok());
+    assert!(append_alert_markers(&mut list, &projection(500, 128), &markers).is_ok());
+}
+
+// Mutation killed: undercount the alert header width, or reject its first whole-pixel fit.
+// REQ: OA-DSP-077
+#[test]
+fn maximum_count_header_fits_at_its_first_integer_pixel_width_only() {
+    let markers: Vec<_> = (1..=MAX_ALERT_MARKERS as u32)
+        .map(|address| unknown_marker(address, MarkerState::Warning))
+        .collect();
+    let mut exact = list_for(markers.len());
+    append_alert_markers(&mut exact, &projection(535, 160), &markers).unwrap();
+    assert!(texts(&exact)
+        .last()
+        .is_some_and(|header| header.contains("WARNING 128") && header.contains("UNLOCATED 128")));
+
+    let mut one_pixel_narrower = list_for(markers.len());
+    let before = one_pixel_narrower.clone();
+    assert!(matches!(
+        append_alert_markers(&mut one_pixel_narrower, &projection(534, 160), &markers),
+        Err(DisplayError::BadView(_))
+    ));
+    assert_eq!(one_pixel_narrower, before);
+}
+
+// Mutation killed: choose legacy heading placement at the exact reserved-band boundary.
+// REQ: OA-DSP-077
+#[test]
+fn alert_heading_rows_switch_at_the_reserved_band_boundary() {
+    let mut msaw = list_for(0);
+    append_alert_markers(&mut msaw, &projection(800, 176), &[]).unwrap();
+    assert_eq!(msaw.texts.y.first().copied(), Some(119 * 16));
+
+    let mut final_monitor = list_for(0);
+    append_final_monitor_frame(&mut final_monitor, &projection(800, 176), &[], true).unwrap();
+    assert_eq!(final_monitor.texts.y.first().copied(), Some(135 * 16));
+
+    let mut legacy = list_for(0);
+    append_alert_markers(&mut legacy, &projection(800, 175), &[]).unwrap();
+    assert_eq!(legacy.texts.y.first().copied(), Some(112 * 16));
 }
 
 // REQ: OA-DSP-077

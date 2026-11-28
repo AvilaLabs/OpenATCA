@@ -507,3 +507,33 @@ fn append_alert_markers_titled(
     )?;
     Ok(stats)
 }
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
+mod position_boundary_tests {
+    use super::*;
+    use crate::core::project::projection_new;
+
+    // Mutation killed: use closed right or bottom edges, or change the 1/16-pixel map bounds.
+    // REQ: OA-DSP-077
+    #[test]
+    fn marker_centres_use_half_open_map_bounds_in_fixed_point_pixels() {
+        let projection = projection_new(0, 0, 20.0, 800, 600, 160).unwrap();
+        let left = 0;
+        let top = 160 * 16;
+        let right = 800 * 16;
+        let bottom = 600 * 16;
+
+        assert!(position_on_map(&projection, (left, top)));
+        assert!(position_on_map(&projection, (right - 1, bottom - 1)));
+        assert!(!position_on_map(&projection, (left - 1, top)));
+        assert!(!position_on_map(&projection, (right, top)));
+        assert!(!position_on_map(&projection, (left, top - 1)));
+        assert!(!position_on_map(&projection, (left, bottom)));
+    }
+}
