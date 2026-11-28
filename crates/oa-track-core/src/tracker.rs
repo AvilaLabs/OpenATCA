@@ -2778,6 +2778,44 @@ mod tests {
         assert_eq!(full.t_ns.len(), 1);
     }
 
+    // Kills reversing the pending-reacquisition condition in the Snapshot output path.
+    // REQ: OA-TRK-343, OA-TRK-344
+    #[test]
+    fn snapshot_flags_only_a_pending_reacquisition() {
+        let mut uncertain_config = cfg(2, 0);
+        uncertain_config.coast_max_r95_m = 1.0;
+        let mut uncertain = tracker_new(&uncertain_config).unwrap();
+        let mut out = output_new(uncertain_config.out_capacity);
+        tracker_update(&mut uncertain, &at(0, 0, 100.0), &mut out);
+        tracker_update(&mut uncertain, &at(1, 20, 100.0), &mut out);
+        assert!(tracker_is_confirmed(&uncertain, ADDR));
+        crate::types::output_clear(&mut out);
+
+        let snapshot_ns = at(1, 20, 100.0).toa_ns;
+        assert!(tracker_snapshot_at(&mut uncertain, snapshot_ns, &mut out));
+        assert_eq!(out.t_ns.len(), 1);
+        assert_ne!(out.flags[0] & O_REACQUIRED, 0);
+        assert_eq!(out.flags[0] & O_TICK, 0);
+
+        let mut certain_config = cfg(2, 0);
+        certain_config.coast_max_r95_m = 1_000.0;
+        let mut certain = tracker_new(&certain_config).unwrap();
+        let mut certain_out = output_new(certain_config.out_capacity);
+        tracker_update(&mut certain, &at(0, 0, 100.0), &mut certain_out);
+        tracker_update(&mut certain, &at(1, 20, 100.0), &mut certain_out);
+        assert!(tracker_is_confirmed(&certain, ADDR));
+        crate::types::output_clear(&mut certain_out);
+
+        assert!(tracker_snapshot_at(
+            &mut certain,
+            snapshot_ns,
+            &mut certain_out
+        ));
+        assert_eq!(certain_out.t_ns.len(), 1);
+        assert_eq!(certain_out.flags[0] & O_REACQUIRED, 0);
+        assert_eq!(certain_out.flags[0] & O_TICK, 0);
+    }
+
     // REQ: OA-TRK-042
     #[test]
     fn initialized_payload_accounting_scales_without_claiming_heap_bytes() {
@@ -3119,6 +3157,7 @@ mod tests {
         let c = TrackerConfig {
             tick_ns: S,
             drop_after_ns: 200 * S,
+            reacquire_gap_ns: i64::MAX,
             ..cfg(1, 0)
         };
         let mut t = tracker_new(&c).unwrap();
@@ -3156,6 +3195,12 @@ mod tests {
         assert!(first_coast.unwrap() < first_uncertain.unwrap());
         assert_eq!(tracker_stats(&t).rows_uncertain - before, uncertain);
         assert_eq!(tracker_stats(&t).nan_covariance, 0);
+        let slot = lookup(&t, ADDR).expect("coasting track remains live");
+        assert_ne!(
+            col(&t.cur, slot, blank_filter()).reacq,
+            0,
+            "an uncertain tick arms the next measurement even when gap reacquisition is disabled"
+        );
         // The next update is published, and says the track was reacquired.
         crate::types::output_clear(&mut out);
         tracker_update(&mut t, &at(150, 3_000, 100.0), &mut out);
