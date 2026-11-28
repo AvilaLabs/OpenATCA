@@ -7,20 +7,19 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use oa_regional_session::recordings_cli::{
-    convert_recorded_hour_window_scoped, convert_recordings, validate_recorded_hour_window,
-    WindowRecordingCliOutput, MAX_WINDOW_OUTPUT_BYTES,
+    MAX_WINDOW_OUTPUT_BYTES, WindowRecordingCliOutput, convert_recorded_hour_window_scoped,
+    convert_recordings, validate_recorded_hour_window,
 };
 use oa_regional_session::recordings_reader::{
-    RecordingInput, RecordingSource, MAX_RECORDING_FRAMES, MAX_RECORDING_INPUT_BYTES,
-    MAX_RECORDING_STREAMS,
+    MAX_RECORDING_FRAMES, MAX_RECORDING_INPUT_BYTES, MAX_RECORDING_STREAMS, RecordingInput,
+    RecordingSource,
 };
 use oa_regional_session::recordings_stream::{
-    count_sfdps_messages_by_utc_hour, NormalizedStreamSummary, StreamInput, UtcHourMessageCounts,
     MAX_H2_EXPANDED_INPUT_BYTES, MAX_H2_FRAME_WORK_UNITS, MAX_H2_INPUT_FRAMES,
-    MAX_H2_INPUT_STREAMS, MAX_H2_PHYSICAL_INPUT_BYTES,
+    MAX_H2_INPUT_STREAMS, MAX_H2_PHYSICAL_INPUT_BYTES, NormalizedStreamSummary,
 };
 use oa_regional_session::session::{MAX_EVENTS_PER_RECEIPT, MAX_SESSION_EVENTS};
-use oa_regional_session::surveillance::{MAX_FRAMES, MAX_FRAME_GAP_NS};
+use oa_regional_session::surveillance::{MAX_FRAME_GAP_NS, MAX_FRAMES};
 
 const MAX_NORMALIZED_BYTES: usize = 16 * 1024 * 1024;
 const MAX_PROVENANCE_BYTES: usize = 32 * 1024 * 1024;
@@ -29,8 +28,6 @@ const MAX_REPORT_BYTES: usize = 64 * 1024;
 const MAX_MANIFEST_BYTES: usize = 1024 * 1024;
 const MAX_EXECUTABLE_BYTES: u64 = 128 * 1024 * 1024;
 const HASH_CHUNK_BYTES: usize = 64 * 1024;
-const NS_PER_HOUR: i64 = 3_600_000_000_000;
-const MAX_HOUR_COUNT_BYTES: usize = 64 * 1024;
 
 // A7.2: cold shell command-line values, with at most thirty-two source paths.
 struct Arguments {
@@ -39,7 +36,6 @@ struct Arguments {
     output: Option<PathBuf>,
     window: Option<(i64, i64)>,
     flight_centre_scope: Option<[u8; 4]>,
-    count_hours: Option<(i64, PathBuf)>,
 }
 
 fn parse_epoch_ns(value: &std::ffi::OsStr, label: &str) -> Result<i64, String> {
@@ -101,8 +97,6 @@ fn parse_arguments() -> Result<Arguments, String> {
     let mut start = None;
     let mut end = None;
     let mut flight_centre_scope = None;
-    let mut count_day = None;
-    let mut hours_output = None;
     while let Some(flag) = args.next() {
         match flag.to_str() {
             Some("--adsb") | Some("--sfdps") => {
@@ -135,53 +129,12 @@ fn parse_arguments() -> Result<Arguments, String> {
                     "--end",
                 )?);
             }
-            Some("--count-hours") if count_day.is_none() => {
-                count_day = Some(parse_epoch_ns(&args.next().ok_or("missing value after --count-hours")?, "--count-hours")?);
-            }
-            Some("--hours-out") if hours_output.is_none() => {
-                hours_output = Some(PathBuf::from(args.next().ok_or("missing path after --hours-out")?));
-            }
             Some("--out") if output.is_none() => output = Some(PathBuf::from(args.next().ok_or("missing path after --out")?)),
-            _ => return Err("usage: regional-recording-import (--adsb FILE | --sfdps FILE)+ [--start EPOCH_NS --end EPOCH_NS] --centre ARTCC [--flight-centre ARTCC] --out NEW_DIR, or (--adsb FILE | --sfdps FILE)+ --count-hours UTC_DAY_START_NS --hours-out NEW_FILE".into()),
+            _ => return Err("usage: regional-recording-import (--adsb FILE | --sfdps FILE)+ [--start EPOCH_NS --end EPOCH_NS] --centre ARTCC [--flight-centre ARTCC] --out NEW_DIR".into()),
         }
     }
     if inputs.is_empty() {
         return Err("at least one --adsb or --sfdps input is required".into());
-    }
-    if let Some(day_start) = count_day {
-        if start.is_some()
-            || end.is_some()
-            || centre.is_some()
-            || output.is_some()
-            || flight_centre_scope.is_some()
-        {
-            return Err(
-                "--count-hours cannot be combined with --start/--end, --centre, --flight-centre, or --out".into(),
-            );
-        }
-        if !inputs
-            .iter()
-            .any(|input| input.source == RecordingSource::Sfdps)
-        {
-            return Err("--count-hours requires at least one --sfdps input".into());
-        }
-        if inputs.len() > MAX_H2_INPUT_STREAMS {
-            return Err("hour-count input stream limit exceeded".into());
-        }
-        return Ok(Arguments {
-            inputs,
-            centre: None,
-            output: None,
-            window: None,
-            flight_centre_scope: None,
-            count_hours: Some((
-                day_start,
-                hours_output.ok_or("--hours-out is required with --count-hours")?,
-            )),
-        });
-    }
-    if hours_output.is_some() {
-        return Err("--hours-out requires --count-hours".into());
     }
     let window = match (start, end) {
         (Some(start), Some(end)) => Some(validate_window(start, end)?),
@@ -205,115 +158,7 @@ fn parse_arguments() -> Result<Arguments, String> {
         output: Some(output.ok_or("--out is required")?),
         window,
         flight_centre_scope,
-        count_hours: None,
     })
-}
-
-fn stream_inputs(inputs: &[RecordingInput]) -> Result<Vec<StreamInput>, String> {
-    let mut streams = Vec::new();
-    streams
-        .try_reserve_exact(inputs.len())
-        .map_err(|_| "stream input allocation refused")?;
-    for input in inputs {
-        streams.push(StreamInput {
-            source: input.source,
-            path: input.path.clone(),
-        });
-    }
-    Ok(streams)
-}
-
-fn serialize_hour_counts(counts: &UtcHourMessageCounts) -> Result<String, String> {
-    use std::fmt::Write as FmtWrite;
-    let mut output = String::from("OA_SFDPS_UTC_HOUR_COUNTS\t1\n");
-    writeln!(output, "utc_day_start_ns\t{}", counts.utc_day_start_ns)
-        .map_err(|_| "hour-count formatting failed")?;
-    for (hour, count) in counts.sfdps_messages_by_hour.iter().enumerate() {
-        let hour_ns = i64::try_from(hour)
-            .map_err(|_| "hour index overflow")?
-            .checked_mul(NS_PER_HOUR)
-            .ok_or("hour offset overflow")?;
-        let start = counts
-            .utc_day_start_ns
-            .checked_add(hour_ns)
-            .ok_or("hour start overflow")?;
-        let end = start.checked_add(NS_PER_HOUR).ok_or("hour end overflow")?;
-        writeln!(output, "hour\t{hour:02}\t{start}\t{end}\t{count}")
-            .map_err(|_| "hour-count formatting failed")?;
-    }
-    let totals = counts.stream.counts;
-    writeln!(output, "frames\t{}", totals.frames).map_err(|_| "hour-count formatting failed")?;
-    writeln!(output, "messages\t{}", totals.messages)
-        .map_err(|_| "hour-count formatting failed")?;
-    writeln!(
-        output,
-        "outside_window_frames\t{}",
-        totals.outside_window_frames
-    )
-    .map_err(|_| "hour-count formatting failed")?;
-    writeln!(
-        output,
-        "outside_window_messages\t{}",
-        totals.outside_window_messages
-    )
-    .map_err(|_| "hour-count formatting failed")?;
-    writeln!(output, "physical_bytes\t{}", totals.physical_bytes)
-        .map_err(|_| "hour-count formatting failed")?;
-    writeln!(output, "expanded_bytes\t{}", totals.expanded_bytes)
-        .map_err(|_| "hour-count formatting failed")?;
-    writeln!(output, "frame_work_units\t{}", totals.frame_work_units)
-        .map_err(|_| "hour-count formatting failed")?;
-    for stream in &counts.stream.streams {
-        let source = match stream.source {
-            RecordingSource::Adsb => "ADSB",
-            RecordingSource::Sfdps => "SFDPS",
-        };
-        writeln!(
-            output,
-            "stream\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
-            stream.stream_index,
-            source,
-            oa_sha256::to_hex(&stream.sha256),
-            stream.bytes,
-            stream.expanded_bytes,
-            u8::from(stream.gzip),
-            stream.messages,
-            stream
-                .first_frame_receive_ns
-                .map_or_else(|| "-".to_owned(), |v| v.to_string()),
-            stream
-                .last_frame_receive_ns
-                .map_or_else(|| "-".to_owned(), |v| v.to_string()),
-            stream.max_frame_gap_ns
-        )
-        .map_err(|_| "hour-count formatting failed")?;
-    }
-    if output.len() > MAX_HOUR_COUNT_BYTES {
-        return Err("hour-count output exceeds byte limit".into());
-    }
-    Ok(output)
-}
-
-fn run_hour_count(day_start_ns: i64, path: &Path, inputs: &[RecordingInput]) -> Result<(), String> {
-    oa_sealed::refuse(path).map_err(|error| format!("guarded hour-count output: {error}"))?;
-    let streams = stream_inputs(inputs)?;
-    let counts = count_sfdps_messages_by_utc_hour(&streams, day_start_ns)?;
-    let report = serialize_hour_counts(&counts)?;
-    let digest = oa_sha256::sha256(report.as_bytes());
-    write_new(path, report.as_bytes())?;
-    verify_file(path, report.len(), &digest)?;
-    let total = counts
-        .sfdps_messages_by_hour
-        .iter()
-        .try_fold(0u64, |sum, value| sum.checked_add(*value))
-        .ok_or("hour-count total overflow")?;
-    eprintln!(
-        "SFDPS hour counts written: day_start_ns={} messages={} output={}",
-        counts.utc_day_start_ns,
-        total,
-        path.display()
-    );
-    Ok(())
 }
 
 fn digest_file(mut file: File, max_bytes: u64) -> Result<([u8; 32], u64), String> {
@@ -837,9 +682,6 @@ fn create_output_dir(path: &Path) -> Result<(), String> {
 
 fn run() -> Result<(), String> {
     let args = parse_arguments()?;
-    if let Some((day_start_ns, path)) = args.count_hours.as_ref() {
-        return run_hour_count(*day_start_ns, path, &args.inputs);
-    }
     let centre = args.centre.ok_or("--centre is required")?;
     let output_path = args.output.as_ref().ok_or("--out is required")?;
     if let Some(window_ns) = args.window {
