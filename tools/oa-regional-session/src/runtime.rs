@@ -2215,15 +2215,15 @@ mod transaction_tests {
             "v1\t2000000000\t2000000000\t2\tFLIGHT\t00000000000000000000000000000001\tABC101\tZAU1\tFLIGHT\tCOMPLETE",
         );
 
-        // A one-nanosecond off-grid adapter receipt parses as input, then the flight stage
-        // rejects it before capacity cleanup can mutate the terminal flight or consume its
-        // retirement receipt.
+        // The frame receipt remains a whole second, but the source timestamp is one
+        // nanosecond off the flight adapter's millisecond grid. Parsing accepts this input;
+        // flight staging rejects it before terminal cleanup can consume a receipt.
         let (invalid, rejected) = step_event_line(
             &mut engine,
-            "v1\t3000000001\t3000000000\t3\tFLIGHT\t00000000000000000000000000000002\tABC102\tZAU1\tFLIGHT\tPLAN\tPLAN00000002\t2",
+            "v1\t3000000000\t2999999999\t3\tFLIGHT\t00000000000000000000000000000002\tABC102\tZAU1\tFLIGHT\tPLAN\tPLAN00000002\t2",
         );
         assert_eq!(rejected.quarantine.records.len(), 1);
-        assert_ne!(invalid.receipt_ns % 1_000_000, 0);
+        assert_ne!(invalid.source_ns % 1_000_000, 0);
         assert_eq!(
             flight::flight_driver_report(&engine.flights).retirements_consumed,
             0
