@@ -2097,7 +2097,7 @@ mod tests {
         use crate::session::{flush_receipt_group, push_event, session_cursor_new};
 
         let path = temporary_path("sfdps_srcmsg_groups")?;
-        let payload = br#"<ns5:MessageCollection xmlns:ns5="http://www.faa.aero/nas/3.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><message xsi:type="ns5:FlightMessageType"><flight xsi:type="ns5:NasFlightType" centre="ZXX" source="AH" system="SLC" timestamp="2030-01-02T03:04:05.000Z"><gufi codeSpace="urn:uuid">11111111-2222-3333-4444-555555555555</gufi><flightPlan identifier="FP7"/><flightStatus fdpsFlightStatus="ACTIVE"/><departure><runwayPositionAndTime><runwayTime><actual time="2030-01-02T03:00:00Z"/></runwayTime></runwayPositionAndTime></departure><controllingUnit unitIdentifier="???"/></flight></message><message xsi:type="ns5:FlightMessageType"><flight xsi:type="ns5:NasFlightType" centre="ZXX" source="TH" system="SLC" timestamp="2030-01-02T03:04:06.000Z"><gufi codeSpace="urn:uuid">11111111-2222-3333-4444-555555555555</gufi><flightPlan identifier="FP7"/><flightStatus fdpsFlightStatus="ACTIVE"/><flightIdentification aircraftIdentification="ABC123"/><aircraftDescription aircraftAddress="ABCDEF"/><controllingUnit unitIdentifier="ZXX" sectorIdentifier="03"/></flight></message></ns5:MessageCollection>"#;
+        let payload = br#"<ns5:MessageCollection xmlns:ns5="http://www.faa.aero/nas/3.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><message xsi:type="ns5:FlightMessageType"><flight xsi:type="ns5:NasFlightType" centre="ZAU" source="AH" system="SLC" timestamp="2030-01-02T03:04:05.000Z"><gufi codeSpace="urn:uuid">11111111-2222-3333-4444-555555555555</gufi><flightPlan identifier="FP7"/><flightStatus fdpsFlightStatus="ACTIVE"/><departure><runwayPositionAndTime><runwayTime><actual time="2030-01-02T03:00:00Z"/></runwayTime></runwayPositionAndTime></departure><controllingUnit unitIdentifier="???"/></flight></message><message xsi:type="ns5:FlightMessageType"><flight xsi:type="ns5:NasFlightType" centre="ZAU" source="TH" system="SLC" timestamp="2030-01-02T03:04:06.000Z"><gufi codeSpace="urn:uuid">11111111-2222-3333-4444-555555555555</gufi><flightPlan identifier="FP7"/><flightStatus fdpsFlightStatus="ACTIVE"/><flightIdentification aircraftIdentification="ABC123"/><aircraftDescription aircraftAddress="ABCDEF"/><controllingUnit unitIdentifier="ZAU" sectorIdentifier="03"/></flight></message></ns5:MessageCollection>"#;
         let receipt_ms = oa_fixm::parse_iso_ms(b"2030-01-02T03:04:07.250Z")
             .ok_or_else(|| std::io::Error::other("parse fixture receipt"))?;
         let receipt_ns = receipt_ms
@@ -2126,7 +2126,7 @@ mod tests {
             let message_id = event
                 .source_message_id
                 .ok_or_else(|| std::io::Error::other("SFDPS operation lacks SRCMSG"))?;
-            if let Some((current_id, first_sequence, count)) = groups.last_mut() {
+            if let Some((current_id, _first_sequence, count)) = groups.last_mut() {
                 if *current_id == message_id {
                     *count += 1;
                     continue;
@@ -2171,7 +2171,7 @@ mod tests {
         let mut runtime = crate::runtime::regional_new(
             model,
             oa_sha256::sha256(&snapshot),
-            *b"ZAU1",
+            *b"ZAU\0",
             crate::surveillance::SurveillanceConfig {
                 centre_lat_e7: 410_000_000,
                 centre_lon_e7: -870_000_000,
