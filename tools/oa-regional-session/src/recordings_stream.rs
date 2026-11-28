@@ -8,7 +8,7 @@ use crate::recordings_reader::{RecordedFrame, RecordingSource};
 use oa_feed::{FrameError, FrameReader, FrameWorkBudget, FrameWorkStats, Kind, MAX_FRAME_LEN};
 use oa_zip::{GzipReader, InflateLimits};
 use std::cmp::{Ordering, Reverse};
-use std::collections::{BinaryHeap, VecDeque};
+use std::collections::{BinaryHeap, HashMap, VecDeque};
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -23,8 +23,6 @@ pub const MAX_PENDING_FRAME_BYTES_PER_STREAM: usize = 4 * 1024 * 1024;
 /// Recorder-activity reporting threshold, separate from the G3 candidate's 1 s state-age rule.
 pub const H2_RECORDER_ACTIVITY_MAX_GAP_NS: i64 = 60_000_000_000;
 const INPUT_CHUNK_BYTES: usize = 4 * 1024;
-const NS_PER_HOUR: i64 = 3_600_000_000_000;
-const NS_PER_UTC_DAY: i64 = 24 * NS_PER_HOUR;
 type StreamSortKey = (i64, u8, u64, u8, u64);
 type SelectedStream = Option<(usize, StreamSortKey)>;
 
@@ -69,14 +67,6 @@ pub struct StreamDigest {
 pub struct StreamSummary {
     pub counts: StreamCounts,
     pub streams: Vec<StreamDigest>,
-}
-
-/// Source-only SFDPS message-frame counts for one explicit UTC day.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct UtcHourMessageCounts {
-    pub utc_day_start_ns: i64,
-    pub sfdps_messages_by_hour: [u64; 24],
-    pub stream: StreamSummary,
 }
 
 /// Aggregate-only result of adapting OAF input through the existing normalized-event adapter.
@@ -143,6 +133,13 @@ pub(crate) enum NormalizedStreamProfile {
 }
 
 const MAX_PENDING_NORMALIZED_EVENTS: usize = crate::recordings::MAX_ADSB_ROWS_PER_ADAPTATION;
+type AdsbFrameKey = (u8, u64, u64);
+
+#[derive(Clone, Copy)]
+struct PendingAdsbFrameCounts {
+    remaining_rows: usize,
+    candidate_events: u64,
+}
 
 struct PendingNormalizedEvent {
     event: crate::input::NormalizedEvent,
@@ -165,6 +162,14 @@ impl PendingAdsbReport {
             self.row.byte_offset(),
             self.row.source_ordinal(),
             self.arrival_order,
+        )
+    }
+
+    fn frame_key(&self) -> AdsbFrameKey {
+        (
+            self.row.stream_index(),
+            self.row.frame_sequence(),
+            self.row.byte_offset(),
         )
     }
 }
@@ -972,45 +977,6 @@ pub fn stream_oaf_segments_in_window(
     })
 }
 
-/// Count SFDPS Message frames in 24 UTC bins without decoding source payloads. Inputs are still
-/// scanned by the guarded H2 reader, including frames outside the selected UTC day.
-pub fn count_sfdps_messages_by_utc_hour(
-    inputs: &[StreamInput],
-    utc_day_start_ns: i64,
-) -> Result<UtcHourMessageCounts, String> {
-    if utc_day_start_ns < 0 || utc_day_start_ns % NS_PER_UTC_DAY != 0 {
-        return Err("UTC histogram start must be a nonnegative UTC midnight".into());
-    }
-    let utc_day_end_ns = utc_day_start_ns
-        .checked_add(NS_PER_UTC_DAY)
-        .ok_or("UTC histogram day end overflow")?;
-    let mut sfdps_messages_by_hour = [0u64; 24];
-    let stream =
-        stream_oaf_segments_in_window(inputs, Some((utc_day_start_ns, utc_day_end_ns)), |frame| {
-            if frame.source != RecordingSource::Sfdps || frame.kind != Kind::Message {
-                return Ok(());
-            }
-            let elapsed = frame
-                .receipt_ns
-                .checked_sub(utc_day_start_ns)
-                .ok_or("UTC histogram frame offset overflow")?;
-            let hour = usize::try_from(elapsed / NS_PER_HOUR)
-                .map_err(|_| "UTC histogram hour index overflow")?;
-            let count = sfdps_messages_by_hour
-                .get_mut(hour)
-                .ok_or("UTC histogram frame escaped its day window")?;
-            *count = count
-                .checked_add(1)
-                .ok_or("UTC histogram message count overflow")?;
-            Ok(())
-        })?;
-    Ok(UtcHourMessageCounts {
-        utc_day_start_ns,
-        sfdps_messages_by_hour,
-        stream,
-    })
-}
-
 /// Adapt a bounded ordered OAF stream to normalized events without retaining the day. The visitor
 /// receives complete issue-time groups in deterministic source/sequence order. This is suitable
 /// for multiple independent runtime passes: each caller repeats the guarded source read and owns
@@ -1173,6 +1139,7 @@ struct NormalizedStreamState<F> {
     )>,
     pending_heap: BinaryHeap<Reverse<PendingNormalizedEvent>>,
     pending_adsb_rows: BinaryHeap<Reverse<PendingAdsbReport>>,
+    pending_adsb_frames: HashMap<AdsbFrameKey, PendingAdsbFrameCounts>,
     pending_arrival_order: u64,
     pending_adsb_arrival_order: u64,
     normalized_sequences: [u64; 5],
@@ -1210,6 +1177,7 @@ where
             pending_group,
             pending_heap,
             pending_adsb_rows: BinaryHeap::new(),
+            pending_adsb_frames: HashMap::new(),
             pending_arrival_order: 0,
             pending_adsb_arrival_order: 0,
             normalized_sequences: [0; 5],
@@ -1221,13 +1189,61 @@ where
 
     fn process_frame(&mut self, frame: RecordedFrame) -> Result<(), String> {
         let archive_adsb = frame.source == RecordingSource::Adsb && frame.mono_ns.is_none();
-        if archive_adsb {
-            let decoded = crate::recordings::decode_ordered_adsb_frame(&frame)
-                .map_err(|error| format!("ordered ADS-B frame refused: {error:?}"))?;
+        if !archive_adsb {
+            // The merged frame header is still a lower bound on future OAF1 ADS-B headers.
+            // Release older archive rows before a SFDPS/OAF2 frame can mutate shared quality
+            // state or cause normalized receipt groups to flush past them.
+            self.flush_adsb_rows(frame.receipt_ns)?;
+        }
+        let decoded_archive = if archive_adsb {
+            match crate::recordings::decode_ordered_adsb_frame(&frame) {
+                Ok(decoded) => Some(decoded),
+                Err(crate::recordings::AdapterError::ArchiveHeaderLowerBound) => {
+                    return Err("ordered ADS-B frame violates its header lower bound".into());
+                }
+                // Preserve the legacy quarantine path for malformed rows and frames. Only a
+                // validated OAF1 header-bound violation forbids source-time watermarking.
+                Err(crate::recordings::AdapterError::InvalidField) => {
+                    self.flush_adsb_rows(frame.receipt_ns)?;
+                    None
+                }
+                Err(error) => return Err(format!("ordered ADS-B frame refused: {error:?}")),
+            }
+        } else {
+            None
+        };
+        if let Some(decoded) = decoded_archive {
             let dropped = crate::recordings::account_ordered_adsb_drops(&decoded)
                 .map_err(|error| format!("ADS-B drop accounting refused: {error:?}"))?;
             let (declared_rows, _, _, rows) = decoded.into_parts();
             self.accumulate_ordered_adsb_frame(&dropped, declared_rows)?;
+            if !rows.is_empty() {
+                let pending_rows = self
+                    .pending_adsb_rows
+                    .len()
+                    .checked_add(rows.len())
+                    .ok_or("ADS-B report watermark queue size overflow")?;
+                if pending_rows > MAX_PENDING_NORMALIZED_EVENTS {
+                    return Err("ADS-B report watermark queue capacity exceeded".into());
+                }
+                self.pending_adsb_frames
+                    .try_reserve(1)
+                    .map_err(|_| "ADS-B frame-counter allocation refused")?;
+                let key = (frame.stream_index, frame.sequence, frame.byte_offset);
+                if self
+                    .pending_adsb_frames
+                    .insert(
+                        key,
+                        PendingAdsbFrameCounts {
+                            remaining_rows: rows.len(),
+                            candidate_events: 0,
+                        },
+                    )
+                    .is_some()
+                {
+                    return Err("duplicate ADS-B frame accounting identity".into());
+                }
+            }
             for row in rows {
                 if self.pending_adsb_rows.len() >= MAX_PENDING_NORMALIZED_EVENTS {
                     return Err("ADS-B report watermark queue capacity exceeded".into());
@@ -1249,6 +1265,12 @@ where
             input_counts.total_decoded_bytes = u64::try_from(frame.payload.len())
                 .map_err(|_| "message payload byte count overflow")?;
             input_counts.total_bytes = input_counts.total_decoded_bytes;
+            let mut isolated_archive_cache = oa_track::adsb::AdsbQualityCache::default();
+            let quality_cache = if archive_adsb {
+                &mut isolated_archive_cache
+            } else {
+                &mut self.quality_cache
+            };
             let adapted =
                 crate::recordings::adapt_recorded_frames_with_sequence_starts_and_quality_limit(
                     std::slice::from_ref(&frame),
@@ -1257,7 +1279,7 @@ where
                     self.centre,
                     self.sequence_starts,
                     self.receipt_group_limit,
-                    &mut self.quality_cache,
+                    quality_cache,
                 )
                 .map_err(|error| format!("normalized adapter refused message: {error:?}"))?;
             let source_index = match frame.source {
@@ -1267,8 +1289,6 @@ where
             self.accumulate_adaptation(source_index, &adapted)?;
             self.queue_adapted_events(&frame, adapted.events.into_iter().zip(adapted.provenance))?;
         }
-        // Only OAF1 ADS-B headers are lower bounds for their source report times. SFDPS
-        // receipts and OAF2 ADS-B receipts must not advance this independent watermark.
         if archive_adsb {
             self.flush_adsb_rows(frame.receipt_ns)?;
         }
@@ -1306,12 +1326,38 @@ where
     fn accumulate_ordered_adsb_row(
         &mut self,
         adapted: &crate::recordings::RecordedAdaptation,
+        frame_key: AdsbFrameKey,
     ) -> Result<(), String> {
         let mut adapter_counts = adapted.counts;
         adapter_counts.adsb_rows_in = 0;
         adapter_counts.adsb_rows_dropped = 0;
         adapter_counts.adsb_source_time_regressions = 0;
-        self.accumulate_adaptation_counts(0, adapted, adapter_counts, false)
+        self.accumulate_adaptation_counts(0, adapted, adapter_counts, false)?;
+        let frame_counts = self
+            .pending_adsb_frames
+            .get_mut(&frame_key)
+            .ok_or("ADS-B frame counter invariant")?;
+        frame_counts.candidate_events = frame_counts
+            .candidate_events
+            .checked_add(adapter_counts.candidate_events_before_receipt_filter)
+            .ok_or("ADS-B frame candidate count overflow")?;
+        frame_counts.remaining_rows = frame_counts
+            .remaining_rows
+            .checked_sub(1)
+            .ok_or("ADS-B frame remaining-row underflow")?;
+        if frame_counts.remaining_rows == 0 {
+            let candidate_events = frame_counts.candidate_events;
+            self.pending_adsb_frames.remove(&frame_key);
+            let source_counts = self
+                .counts
+                .source_counts
+                .get_mut(0)
+                .ok_or("ADS-B source index invariant")?;
+            source_counts.max_candidate_events_per_frame = source_counts
+                .max_candidate_events_per_frame
+                .max(candidate_events);
+        }
+        Ok(())
     }
 
     fn accumulate_adaptation_counts(
@@ -1520,6 +1566,7 @@ where
                 .pending_adsb_rows
                 .pop()
                 .ok_or("ADS-B report watermark queue lost its head")?;
+            let frame_key = pending.frame_key();
             let adapted = crate::recordings::adapt_ordered_adsb_row(
                 crate::recordings::OrderedAdsbRowContext {
                     row: pending.row,
@@ -1531,25 +1578,35 @@ where
                 },
             )
             .map_err(|error| format!("ordered ADS-B row refused: {error:?}"))?;
-            self.accumulate_ordered_adsb_row(&adapted)?;
+            self.accumulate_ordered_adsb_row(&adapted, frame_key)?;
             self.queue_ordered_adsb_events(adapted.events.into_iter().zip(adapted.provenance))?;
         }
         Ok(())
     }
 
     fn flush_to(&mut self, watermark_ns: i64) -> Result<(), String> {
+        let pending_heap = &mut self.pending_heap;
+        let pending_group = &mut self.pending_group;
+        let normalized_sequences = &mut self.normalized_sequences;
+        let visit = &mut self.visit;
+        let counts = &mut self.counts;
+        let mut refuse_group = |group| record_oversized_receipt_group(counts, group);
         flush_watermarked_groups(
-            &mut self.pending_heap,
+            pending_heap,
             watermark_ns,
             self.receipt_group_limit,
-            &mut self.pending_group,
-            &mut self.normalized_sequences,
-            &mut self.visit,
+            pending_group,
+            normalized_sequences,
+            visit,
+            &mut refuse_group,
         )
     }
 
     fn finish(mut self, recording: StreamSummary) -> Result<NormalizedStreamSummary, String> {
         self.flush_adsb_rows(i64::MAX)?;
+        if !self.pending_adsb_rows.is_empty() || !self.pending_adsb_frames.is_empty() {
+            return Err("ADS-B report watermark state was not fully drained".into());
+        }
         self.flush_to(i64::MAX)?;
         Ok(NormalizedStreamSummary {
             recording,
@@ -1630,6 +1687,12 @@ fn flush_watermarked_groups(
         crate::input::NormalizedEvent,
         crate::recordings::EventProvenance,
     ) -> Result<(), String>,
+    refuse_oversized_group: &mut impl FnMut(
+        &[(
+            crate::input::NormalizedEvent,
+            crate::recordings::EventProvenance,
+        )],
+    ) -> Result<(), String>,
 ) -> Result<(), String> {
     while heap
         .peek()
@@ -1644,9 +1707,6 @@ fn flush_watermarked_groups(
             .peek()
             .is_some_and(|Reverse(next)| next.event.receipt_ns == receipt_ns)
         {
-            if group.len() >= receipt_group_limit {
-                return Err("normalized issue-time group exceeds selected profile capacity".into());
-            }
             group
                 .try_reserve(1)
                 .map_err(|_| "normalized event group allocation refused")?;
@@ -1655,17 +1715,81 @@ fn flush_watermarked_groups(
                 .ok_or("normalized watermark queue lost an event")?;
             group.push((entry.event, entry.provenance));
         }
-        flush_normalized_group(group, normalized_sequences, visit)?;
+        if group.len() > receipt_group_limit {
+            refuse_oversized_group(group)?;
+            group.clear();
+        } else {
+            flush_normalized_group(group, normalized_sequences, visit)?;
+        }
     }
+    Ok(())
+}
+
+fn record_oversized_receipt_group(
+    counts: &mut NormalizedAdapterCounts,
+    group: &[(
+        crate::input::NormalizedEvent,
+        crate::recordings::EventProvenance,
+    )],
+) -> Result<(), String> {
+    let resource_reason = usize::try_from(oa_quarantine::REASON_RESOURCE_LIMIT.trailing_zeros())
+        .map_err(|_| "resource-limit reason index overflow")?;
+    let mut affected_sources = [false; 2];
+    let mut refused_rows = 0u64;
+    for (event, _) in group {
+        let source_index = match event.source {
+            crate::input::SourceKind::Surveillance => 0,
+            crate::input::SourceKind::Flight
+            | crate::input::SourceKind::Route
+            | crate::input::SourceKind::Weather
+            | crate::input::SourceKind::Adaptation => 1,
+        };
+        let source = counts
+            .source_counts
+            .get_mut(source_index)
+            .ok_or("normalized source index invariant")?;
+        source.quarantine_rows = source
+            .quarantine_rows
+            .checked_add(1)
+            .ok_or("source quarantine-row count overflow")?;
+        source.receipt_group_events_refused = source
+            .receipt_group_events_refused
+            .checked_add(1)
+            .ok_or("source refused-event count overflow")?;
+        let reason_count = source
+            .quarantine_reason_counts
+            .get_mut(resource_reason)
+            .ok_or("resource-limit reason index outside fixed counters")?;
+        *reason_count = reason_count
+            .checked_add(1)
+            .ok_or("source quarantine reason count overflow")?;
+        refused_rows = refused_rows
+            .checked_add(1)
+            .ok_or("quarantine-row count overflow")?;
+        affected_sources[source_index] = true;
+    }
+    for (source_index, affected) in affected_sources.into_iter().enumerate() {
+        if affected {
+            let source = counts
+                .source_counts
+                .get_mut(source_index)
+                .ok_or("normalized source index invariant")?;
+            source.receipt_groups_over_capacity = source
+                .receipt_groups_over_capacity
+                .checked_add(1)
+                .ok_or("source oversized-group count overflow")?;
+        }
+    }
+    counts.quarantine_rows = counts
+        .quarantine_rows
+        .checked_add(refused_rows)
+        .ok_or("quarantine-row count overflow")?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        count_sfdps_messages_by_utc_hour, stream_oaf_segments, stream_oaf_segments_in_window,
-        RecordingSource, StreamInput, NS_PER_HOUR, NS_PER_UTC_DAY,
-    };
+    use super::{stream_oaf_segments, stream_oaf_segments_in_window, RecordingSource, StreamInput};
     use std::error::Error;
     use std::fs::{self, OpenOptions};
     use std::io::Write;
@@ -1961,104 +2085,6 @@ mod tests {
         assert_eq!(adsb_digest.first_frame_receive_ns, Some(start));
         assert_eq!(adsb_digest.last_frame_receive_ns, Some(end - 1_000_000_000));
         assert!(stream_oaf_segments_in_window(&input, Some((end, start)), |_| Ok(())).is_err());
-        Ok(())
-    }
-
-    // REQ: OA-MIG-415
-    #[test]
-    fn sfdps_hour_histogram_counts_only_message_frames_inside_explicit_utc_day(
-    ) -> Result<(), Box<dyn Error>> {
-        let utc_day_start_ns = NS_PER_UTC_DAY * 20_000;
-        let utc_day_end_ns = utc_day_start_ns + NS_PER_UTC_DAY;
-        let sfdps_messages = [
-            utc_day_start_ns + NS_PER_HOUR,
-            utc_day_start_ns + NS_PER_HOUR + 1,
-            utc_day_start_ns + 23 * NS_PER_HOUR,
-            utc_day_end_ns,
-        ];
-        let sfdps_path = temporary_path("hour_histogram_sfdps")?;
-        let adsb_path = temporary_path("hour_histogram_adsb")?;
-        write_kind_frames(
-            &sfdps_path,
-            &[
-                (oa_feed::Kind::Message, utc_day_start_ns - 1),
-                (oa_feed::Kind::Message, sfdps_messages[0]),
-                (oa_feed::Kind::Message, sfdps_messages[1]),
-                (oa_feed::Kind::Status, utc_day_start_ns + 2 * NS_PER_HOUR),
-                (oa_feed::Kind::Message, sfdps_messages[2]),
-                (oa_feed::Kind::Message, sfdps_messages[3]),
-            ],
-        )?;
-        write_frames(&adsb_path, &[utc_day_start_ns + NS_PER_HOUR])?;
-        let inputs = [
-            StreamInput {
-                source: RecordingSource::Sfdps,
-                path: sfdps_path.clone(),
-            },
-            StreamInput {
-                source: RecordingSource::Adsb,
-                path: adsb_path.clone(),
-            },
-        ];
-
-        let result = count_sfdps_messages_by_utc_hour(&inputs, utc_day_start_ns);
-        let invalid_day_start = count_sfdps_messages_by_utc_hour(&inputs, utc_day_start_ns + 1);
-        let _ = fs::remove_file(&sfdps_path);
-        let _ = fs::remove_file(&adsb_path);
-        let result = result?;
-
-        let mut expected = [0u64; 24];
-        for receipt_ns in sfdps_messages
-            .into_iter()
-            .filter(|time| *time >= utc_day_start_ns && *time < utc_day_end_ns)
-        {
-            let hour = usize::try_from((receipt_ns - utc_day_start_ns) / NS_PER_HOUR)?;
-            let count = expected.get_mut(hour).ok_or("fixture hour is in range")?;
-            *count += 1;
-        }
-        // Mutation killed: counting non-Message frames or letting either UTC-day boundary in.
-        assert_eq!(result.sfdps_messages_by_hour, expected);
-        assert_eq!(result.utc_day_start_ns, utc_day_start_ns);
-        assert_eq!(result.stream.streams.len(), inputs.len());
-        for (index, digest) in result.stream.streams.iter().enumerate() {
-            let input = inputs.get(index).ok_or("stream digest order is bounded")?;
-            assert_eq!(usize::from(digest.stream_index), index);
-            assert_eq!(digest.source, input.source);
-            assert_eq!(digest.expanded_bytes, digest.bytes);
-            assert!(!digest.gzip);
-        }
-        // Mutation killed: accepting a non-midnight histogram origin.
-        assert!(invalid_day_start.is_err());
-        Ok(())
-    }
-
-    // REQ: OA-MIG-415
-    #[test]
-    fn sfdps_hour_histogram_keeps_the_sealed_receipt_guard() -> Result<(), Box<dyn Error>> {
-        let sealed_day_start_ns = 1_795_132_800_000_000_000i64;
-        let sfdps_path = temporary_path("hour_histogram_sealed_sfdps")?;
-        let adsb_path = temporary_path("hour_histogram_sealed_adsb")?;
-        write_kind_frames(
-            &sfdps_path,
-            &[(oa_feed::Kind::Message, sealed_day_start_ns + NS_PER_HOUR)],
-        )?;
-        write_frames(&adsb_path, &[sealed_day_start_ns - 1])?;
-        let inputs = [
-            StreamInput {
-                source: RecordingSource::Sfdps,
-                path: sfdps_path.clone(),
-            },
-            StreamInput {
-                source: RecordingSource::Adsb,
-                path: adsb_path.clone(),
-            },
-        ];
-
-        let result = count_sfdps_messages_by_utc_hour(&inputs, sealed_day_start_ns);
-        let _ = fs::remove_file(&sfdps_path);
-        let _ = fs::remove_file(&adsb_path);
-        // Mutation killed: bypassing the sealed-receipt guard on the histogram reader.
-        assert!(result.is_err());
         Ok(())
     }
 
@@ -2416,6 +2442,165 @@ mod tests {
     }
 
     #[test]
+    fn archive_report_at_max_timestamp_is_not_silently_left_pending() -> Result<(), Box<dyn Error>>
+    {
+        use super::stream_normalized_events;
+        use std::fs::OpenOptions;
+
+        let path = temporary_path("adsb_max_source_time")?;
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)?;
+        let row = oa_adsb::Row {
+            time_ns: i64::MAX,
+            icao: 0xABCDEF,
+            lat_e7: 419_000_000,
+            lon_e7: -873_000_000,
+            baro_alt_ft: 35_000,
+            gs_dkt: 4_500,
+            track_ddeg: 900,
+            vrate_fpm: 0,
+            nic: 8,
+            nac_p: 9,
+            nac_v: 2,
+            sil: 3,
+            version: 2,
+            source: 0,
+            ..oa_adsb::ROW_EMPTY
+        };
+        write_adsb_row(&mut file, 1, &row)?;
+        file.sync_all()?;
+        drop(file);
+        let inputs = [StreamInput {
+            source: RecordingSource::Adsb,
+            path: path.clone(),
+        }];
+        let mut visited = false;
+        let result = stream_normalized_events(&inputs, None, *b"ZAU1", |_, _| {
+            visited = true;
+            Ok(())
+        });
+        let _ = fs::remove_file(&path);
+        assert!(result.is_err());
+        assert!(!visited);
+        Ok(())
+    }
+
+    #[test]
+    fn global_mixed_source_watermark_keeps_same_cutoff_events_together(
+    ) -> Result<(), Box<dyn Error>> {
+        use super::stream_normalized_events;
+        use crate::session::{flush_receipt_group, push_event, session_cursor_new};
+        use std::fs::OpenOptions;
+
+        let adsb_path = temporary_path("mixed_source_adsb_watermark")?;
+        let sfdps_first_path = temporary_path("mixed_source_sfdps_first")?;
+        let sfdps_second_path = temporary_path("mixed_source_sfdps_second")?;
+        let base = 1_893_553_445_000_000_000i64;
+        let first = oa_adsb::Row {
+            time_ns: base + 100_000_000,
+            icao: 0xABCDEF,
+            lat_e7: 419_000_000,
+            lon_e7: -873_000_000,
+            baro_alt_ft: 35_000,
+            gs_dkt: 4_500,
+            track_ddeg: 900,
+            vrate_fpm: 0,
+            nic: 8,
+            nac_p: 9,
+            nac_v: 2,
+            sil: 3,
+            version: 2,
+            source: 0,
+            ..oa_adsb::ROW_EMPTY
+        };
+        let same_cutoff = oa_adsb::Row {
+            time_ns: base + 1_100_000_000,
+            ..first
+        };
+        let later = oa_adsb::Row {
+            time_ns: base + 2_100_000_000,
+            ..first
+        };
+        let mut adsb = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&adsb_path)?;
+        write_adsb_rows(&mut adsb, 1, &[&first, &same_cutoff])?;
+        write_adsb_row(&mut adsb, 2, &later)?;
+        adsb.sync_all()?;
+        drop(adsb);
+
+        let payload_at = |timestamp: &str| {
+            format!(
+                r#"<ns5:MessageCollection xmlns:ns5="http://www.faa.aero/nas/3.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><message xsi:type="ns5:FlightMessageType"><flight xsi:type="ns5:NasFlightType" centre="ZAU" source="TH" system="SLC" timestamp="{timestamp}"><gufi codeSpace="urn:uuid">11111111-2222-3333-4444-555555555555</gufi><flightPlan identifier="FP7"/><flightStatus fdpsFlightStatus="ACTIVE"/><flightIdentification aircraftIdentification="ABC123"/><aircraftDescription aircraftAddress="ABCDEF"/><controllingUnit unitIdentifier="ZAU" sectorIdentifier="03"/></flight></message></ns5:MessageCollection>"#
+            )
+            .into_bytes()
+        };
+        write_payload_frame(
+            &sfdps_first_path,
+            oa_feed::Kind::Message,
+            1,
+            base + 1_500_000_000,
+            &payload_at("2030-01-02T03:04:06.500Z"),
+        )?;
+        write_payload_frame(
+            &sfdps_second_path,
+            oa_feed::Kind::Message,
+            1,
+            base + 2_010_000_000,
+            &payload_at("2030-01-02T03:04:06.750Z"),
+        )?;
+        let inputs = [
+            StreamInput {
+                source: RecordingSource::Adsb,
+                path: adsb_path.clone(),
+            },
+            StreamInput {
+                source: RecordingSource::Sfdps,
+                path: sfdps_first_path.clone(),
+            },
+            StreamInput {
+                source: RecordingSource::Sfdps,
+                path: sfdps_second_path.clone(),
+            },
+        ];
+        let mut cursor = session_cursor_new(64)
+            .map_err(|error| std::io::Error::other(format!("cursor init: {error:?}")))?;
+        let mut completed = Vec::new();
+        let result = stream_normalized_events(&inputs, None, *b"ZAU1", |event, _| {
+            if let Some(batch) = push_event(&mut cursor, event)
+                .map_err(|error| format!("session rejected mixed-source order: {error:?}"))?
+            {
+                completed.push(batch);
+            }
+            Ok(())
+        });
+        let _ = fs::remove_file(&adsb_path);
+        let _ = fs::remove_file(&sfdps_first_path);
+        let _ = fs::remove_file(&sfdps_second_path);
+        result?;
+        if let Some(batch) = flush_receipt_group(&mut cursor)
+            .map_err(|error| std::io::Error::other(format!("session flush: {error:?}")))?
+        {
+            completed.push(batch);
+        }
+        assert!(completed.iter().any(|batch| {
+            batch.receipt_ns == base + 2_000_000_000
+                && batch
+                    .events
+                    .iter()
+                    .any(|event| event.source == crate::input::SourceKind::Surveillance)
+                && batch
+                    .events
+                    .iter()
+                    .any(|event| event.source == crate::input::SourceKind::Flight)
+        }));
+        Ok(())
+    }
+
+    #[test]
     fn same_cutoff_sfdps_messages_keep_srcmsg_groups_through_runtime() -> Result<(), Box<dyn Error>>
     {
         use super::stream_normalized_events;
@@ -2553,6 +2738,14 @@ mod tests {
         assert_eq!(adsb.receipt_groups_over_capacity, 1);
         assert_eq!(
             adsb.receipt_group_events_refused,
+            adsb.candidate_events_before_receipt_filter
+        );
+        assert_eq!(
+            summary.quarantine_rows,
+            adsb.candidate_events_before_receipt_filter
+        );
+        assert_eq!(
+            adsb.quarantine_rows,
             adsb.candidate_events_before_receipt_filter
         );
         assert_eq!(visited, 0);
