@@ -904,10 +904,10 @@ impl<'a> RecordedFrameAdapter<'a> {
     fn quarantine_frame(
         &mut self,
         frame: &RecordedFrame,
-        reason: ReasonFlags,
+        reason: u16,
         observed: u32,
         frame_started: Instant,
-    ) -> Result<(), AdapterError> {
+    ) -> Result<bool, AdapterError> {
         quarantine_item(
             &mut self.quarantine_queue,
             &mut self.out.quarantine,
