@@ -340,7 +340,7 @@ pub struct RecordedAdaptation {
 
 /// One validated archive row with the original frame provenance needed for a later source-time
 /// adaptation. Fields are private so the streaming caller cannot fabricate a row/frame pairing.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct DecodedAdsbRow {
     row: oa_adsb::Row,
     source_ordinal: usize,
@@ -388,7 +388,7 @@ impl DecodedAdsbRow {
 
 /// Bounded decoded rows from one OAF message. Dropped source ordinals remain available for the
 /// stream's existing row-level diagnostics.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct DecodedAdsbFrameRows {
     frame: DecodedAdsbFrameMetadata,
     declared_rows: usize,
