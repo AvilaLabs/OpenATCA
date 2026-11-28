@@ -4646,6 +4646,119 @@ mod transaction_tests {
         }
     }
 
+    fn assert_runtime_status_layout(
+        runtime: &RegionalRuntime,
+        console: &str,
+        degraded: bool,
+        expected_safety_rows: usize,
+    ) {
+        let rows = surveillance::surveillance_text_rows(&runtime.surveillance)
+            .expect("runtime renderer text rows");
+        assert_eq!(
+            runtime.last_automation.effective,
+            EffectiveAutomationMode::Surveillance,
+            "synthetic TRACK source remains available during this presentation test"
+        );
+        let mode_text = format!("{console} | MODE SURVEILLANCE | FUSION OFF");
+        let expected_mode_lines: Vec<String> = mode_text
+            .as_bytes()
+            .chunks(64)
+            .map(|line| {
+                std::str::from_utf8(line)
+                    .expect("mode text is ASCII")
+                    .to_owned()
+            })
+            .collect();
+        assert_eq!(
+            expected_mode_lines.len(),
+            3,
+            "128-byte console uses three rows"
+        );
+        let mut mode_bounds = Vec::with_capacity(expected_mode_lines.len());
+        for expected in &expected_mode_lines {
+            let found: Vec<_> = rows.iter().filter(|row| row.text == *expected).collect();
+            assert_eq!(
+                found.len(),
+                1,
+                "every console/mode row appears exactly once"
+            );
+            mode_bounds.push(found.first().expect("one operator row").bounds);
+        }
+        let final_rows: Vec<_> = rows
+            .iter()
+            .filter(|row| row.text.starts_with("FINAL") && row.text.contains("PROTECTION LOST"))
+            .collect();
+        assert_eq!(
+            final_rows.len(),
+            1,
+            "final-monitor summary is rendered once"
+        );
+        assert_eq!(
+            final_rows
+                .first()
+                .map(|row| row.text.starts_with("FINAL DEGRADED")),
+            Some(degraded),
+            "runtime status text reflects the completed monitor result"
+        );
+        let msaw_rows: Vec<_> = rows
+            .iter()
+            .filter(|row| row.text.starts_with("MSAW WARNING"))
+            .collect();
+        assert_eq!(
+            msaw_rows.len(),
+            1,
+            "configured MSAW summary is rendered once"
+        );
+        let final_bounds = final_rows.first().expect("one final summary").bounds;
+        let safety_rows: Vec<_> = rows
+            .iter()
+            .filter(|row| {
+                !expected_mode_lines.iter().any(|line| line == &row.text)
+                    && row.bounds.y0 > final_bounds.y0
+                    && row.bounds.y1
+                        < i32::try_from(surveillance::REGIONAL_STATUS_HEADER_INSET_PX)
+                            .expect("small status inset")
+            })
+            .collect();
+        assert_eq!(
+            safety_rows.len(),
+            expected_safety_rows,
+            "all compact safety rows reported by the runtime remain visible"
+        );
+        let mut checked_bounds = mode_bounds;
+        checked_bounds.push(msaw_rows.first().expect("one MSAW summary").bounds);
+        checked_bounds.push(final_bounds);
+        checked_bounds.extend(safety_rows.iter().map(|row| row.bounds));
+        let frame_width =
+            i32::try_from(runtime.profile.surveillance.frame_width).expect("bounded frame width");
+        for (index, bounds) in checked_bounds.iter().enumerate() {
+            assert!(bounds.x0 >= 0 && bounds.y0 >= 0);
+            assert!(bounds.x1 <= frame_width);
+            assert!(
+                bounds.y1
+                    <= i32::try_from(surveillance::REGIONAL_STATUS_HEADER_INSET_PX)
+                        .expect("small status inset"),
+                "status row remains inside the reserved band: {bounds:?}"
+            );
+            for other in checked_bounds.iter().skip(index + 1) {
+                assert_eq!(
+                    status_bounds_overlap(*bounds, *other),
+                    0,
+                    "runtime status text bounds overlap: {bounds:?} / {other:?}"
+                );
+            }
+        }
+    }
+
+    fn status_bounds_overlap(
+        first: oa_display::core::font::TextBounds,
+        second: oa_display::core::font::TextBounds,
+    ) -> i64 {
+        let width = i64::from(first.x1.min(second.x1) - first.x0.max(second.x0)).max(0);
+        let height = i64::from(first.y1.min(second.y1) - first.y0.max(second.y0)).max(0);
+        width * height
+    }
+
     fn seed_confirmed_final_monitor_track(
         runtime: &mut RegionalRuntime,
         latitude_e7: i32,
@@ -5136,62 +5249,67 @@ mod transaction_tests {
         );
     }
 
-    // Mutation killed: operator controls erase or replace the cached protection-loss state.
+    // Mutation killed: the runtime's widest console/status rows clip or overlap alert and safety rows.
     #[test]
-    fn protection_loss_status_survives_console_select_and_clear() {
+    fn runtime_status_layout_handles_maximum_console_before_and_after_loss() {
         let mut monitored = configured_runtime(100.0);
+        regional_enable_synthetic_msaw(&mut monitored).expect("bounded synthetic MSAW service");
         let warning = seed_confirmed_final_monitor_track(&mut monitored, 410_000_000, 0);
-        let mut plain = runtime();
-        seed_confirmed_final_monitor_track(&mut plain, 410_000_000, 0);
+        assert_eq!(warning.final_monitor.status, FinalMonitorStatus::Available);
         assert!(warning
             .final_monitor
             .alerts
             .iter()
             .any(|alert| alert.severity == final_monitor_core::FinalSeverity::Warning));
-        let console = "operator status";
-        regional_console_overlay(&mut monitored, console).expect("pre-loss console state");
-        regional_console_overlay(&mut plain, console).expect("pre-loss plain console state");
+        let console = "C".repeat(128);
+        regional_console_overlay(&mut monitored, &console).expect("pre-loss console state");
+        let warning_safety_rows = usize::try_from(
+            warning
+                .surveillance
+                .safety_stats
+                .expect("warning frame safety summary")
+                .banner_lines,
+        )
+        .expect("bounded safety row count");
+        assert_runtime_status_layout(&monitored, &console, false, warning_safety_rows);
+        let warning_counts =
+            surveillance::surveillance_overlay_primitive_counts(&monitored.surveillance);
+        assert!(
+            warning_counts.circles > 0,
+            "warning has a positioned runtime marker"
+        );
 
-        for runtime in [&mut monitored, &mut plain] {
-            // Seed ends at receipt/source 4 s; this cutoff is 9 s with no newer source time.
-            let stale = regional_step(
-                runtime,
-                &final_monitor_batch(9_000_000_000, 4_000_000_000, 410_000_000, 0, false),
-            )
-            .expect("synthetic stale frame is admitted");
-            if runtime.final_monitor.is_some() {
-                assert_eq!(
-                    stale.final_monitor.status,
-                    FinalMonitorStatus::Degraded(
-                        FinalMonitorDegradation::StalePredictionAndInputCadence
-                    )
-                );
-                let timing = stale.final_monitor.timing.expect("stale evaluation timing");
-                assert_eq!(timing.observed_input_interval_ns, 5_000_000_000);
-                assert_eq!(timing.prediction_age_ns, 5_000_000_000);
-            }
-        }
+        // The seeded data ends at receipt/source 4 s; this cutoff is 9 s with no newer source.
+        let stale = regional_step(
+            &mut monitored,
+            &final_monitor_batch(9_000_000_000, 4_000_000_000, 410_000_000, 0, false),
+        )
+        .expect("synthetic stale frame is admitted");
+        assert_eq!(
+            stale.final_monitor.status,
+            FinalMonitorStatus::Degraded(FinalMonitorDegradation::StalePredictionAndInputCadence)
+        );
+        let timing = stale.final_monitor.timing.expect("stale evaluation timing");
+        assert_eq!(timing.observed_input_interval_ns, 5_000_000_000);
+        assert_eq!(timing.prediction_age_ns, 5_000_000_000);
+        let stale_safety_rows = usize::try_from(
+            stale
+                .surveillance
+                .safety_stats
+                .expect("stale frame safety summary")
+                .banner_lines,
+        )
+        .expect("bounded safety row count");
 
+        regional_console_overlay(&mut monitored, &console).expect("loss console redraw");
+        assert_runtime_status_layout(&monitored, &console, true, stale_safety_rows);
         let stale_counts =
             surveillance::surveillance_overlay_primitive_counts(&monitored.surveillance);
-        regional_console_overlay(&mut monitored, console).expect("monitored console redraw");
-        regional_console_overlay(&mut plain, console).expect("plain console redraw");
+        regional_console_overlay(&mut monitored, &console).expect("repeat loss console redraw");
         assert_eq!(
             surveillance::surveillance_overlay_primitive_counts(&monitored.surveillance),
             stale_counts,
-            "same-console protection-loss redraw replaces every primitive and byte"
-        );
-        regional_console_overlay(&mut monitored, console).expect("repeat loss console redraw");
-        regional_console_overlay(&mut plain, console).expect("repeat plain loss console redraw");
-        assert_eq!(
-            surveillance::surveillance_overlay_primitive_counts(&monitored.surveillance),
-            stale_counts,
-            "repeating protection-loss console redraw does not accumulate bytes"
-        );
-        assert_ne!(
-            oa_sha256::sha256(regional_pixels(&monitored).expect("monitored pixels")),
-            oa_sha256::sha256(regional_pixels(&plain).expect("plain pixels")),
-            "console redraw retains the protection-loss heading"
+            "repeating protection-loss console replaces every primitive and byte"
         );
 
         let monitored_target = monitored
@@ -5199,7 +5317,6 @@ mod transaction_tests {
             .first()
             .copied()
             .expect("stale monitored view");
-        let plain_target = plain.views.first().copied().expect("stale plain view");
         regional_select(
             &mut monitored,
             monitored_target.address,
@@ -5207,13 +5324,7 @@ mod transaction_tests {
             (monitored_target.identity_present == 1).then_some(monitored_target.identity),
         )
         .expect("select stale monitored track");
-        regional_select(
-            &mut plain,
-            plain_target.address,
-            plain_target.generation,
-            (plain_target.identity_present == 1).then_some(plain_target.identity),
-        )
-        .expect("select stale plain track");
+        assert_runtime_status_layout(&monitored, &console, true, stale_safety_rows);
         let after_loss_selection =
             surveillance::surveillance_overlay_primitive_counts(&monitored.surveillance);
         regional_select(
@@ -5223,39 +5334,23 @@ mod transaction_tests {
             (monitored_target.identity_present == 1).then_some(monitored_target.identity),
         )
         .expect("repeat stale monitored selection");
-        regional_select(
-            &mut plain,
-            plain_target.address,
-            plain_target.generation,
-            (plain_target.identity_present == 1).then_some(plain_target.identity),
-        )
-        .expect("repeat stale plain selection");
         assert_eq!(
             surveillance::surveillance_overlay_primitive_counts(&monitored.surveillance),
             after_loss_selection,
             "repeating protection-loss selection replaces the prior marker set"
         );
-        assert_ne!(
-            oa_sha256::sha256(regional_pixels(&monitored).expect("monitored pixels")),
-            oa_sha256::sha256(regional_pixels(&plain).expect("plain pixels")),
-            "selection redraw retains the protection-loss heading"
-        );
+        assert_runtime_status_layout(&monitored, &console, true, stale_safety_rows);
 
         regional_clear_selection(&mut monitored).expect("monitored clear redraw");
-        regional_clear_selection(&mut plain).expect("plain clear redraw");
+        assert_runtime_status_layout(&monitored, &console, true, stale_safety_rows);
         let after_loss_clear =
             surveillance::surveillance_overlay_primitive_counts(&monitored.surveillance);
         regional_clear_selection(&mut monitored).expect("repeat monitored clear redraw");
-        regional_clear_selection(&mut plain).expect("repeat plain clear redraw");
         assert_eq!(
             surveillance::surveillance_overlay_primitive_counts(&monitored.surveillance),
             after_loss_clear,
             "repeating protection-loss clear redraw keeps primitive counts stable"
         );
-        assert_ne!(
-            oa_sha256::sha256(regional_pixels(&monitored).expect("monitored pixels")),
-            oa_sha256::sha256(regional_pixels(&plain).expect("plain pixels")),
-            "clear-selection redraw retains the protection-loss heading"
-        );
+        assert_runtime_status_layout(&monitored, &console, true, stale_safety_rows);
     }
 }

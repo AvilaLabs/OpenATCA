@@ -260,6 +260,13 @@ pub(crate) struct OverlayPrimitiveCounts {
     pub layers_used: u16,
 }
 
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SurveillanceTextRow {
+    pub text: String,
+    pub bounds: TextBounds,
+}
+
 struct PreparedFrameRows {
     snapshot: TrackOutput,
     ca_rows: Vec<CaTrack>,
@@ -2530,6 +2537,42 @@ pub(crate) fn surveillance_overlay_primitive_counts(s: &Surveillance) -> Overlay
         text_bytes: s.scope.list.text.len(),
         layers_used: s.scope.list.layers_used,
     }
+}
+
+#[cfg(test)]
+pub(crate) fn surveillance_text_rows(s: &Surveillance) -> Result<Vec<SurveillanceTextRow>, String> {
+    let list = &s.scope.list;
+    if list.texts.x.len() > 100_000 || !display_list_columns_consistent(list) {
+        return Err("surveillance text table is outside its bounded shape".into());
+    }
+    let mut rows = Vec::with_capacity(list.texts.x.len());
+    for row in 0..list.texts.x.len() {
+        let start = usize::try_from(*list.texts.start.get(row).ok_or("missing text offset")?)
+            .map_err(|_| "text offset is not representable")?;
+        let end = start
+            .checked_add(
+                usize::try_from(*list.texts.len.get(row).ok_or("missing text length")?)
+                    .map_err(|_| "text length is not representable")?,
+            )
+            .ok_or("text span overflow")?;
+        let text = list.text.get(start..end).ok_or("invalid text span")?;
+        let size = *list.texts.size.get(row).ok_or("missing text size")?;
+        rows.push(SurveillanceTextRow {
+            text: text.to_owned(),
+            bounds: font::text_block_bounds_px(
+                (
+                    *list.texts.x.get(row).ok_or("missing text x")?,
+                    *list.texts.y.get(row).ok_or("missing text y")?,
+                ),
+                size,
+                *list.texts.align.get(row).ok_or("missing text alignment")?,
+                text.chars().count(),
+                1,
+                u32::from(size).saturating_add(2),
+            ),
+        });
+    }
+    Ok(rows)
 }
 
 #[cfg(test)]
