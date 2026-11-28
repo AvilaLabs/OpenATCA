@@ -380,8 +380,10 @@ fn malformed_later_batch_event_refuses_before_any_table_mutation() {
 #[test]
 fn recorded_hour_flight_batch_limit_is_explicit_and_legacy_stays_at_256() {
     let gufi = 0x1000_0000_0000_0000_0000_0000_0000_0007;
+    // Independent fixture ceiling: changing the exported consumer constant must fail this test.
+    const RECORDED_HOUR_FIXTURE_LIMIT: usize = 8_192;
     let recorded_hour_limit = oa_regional_session::RECORDED_HOUR_MAX_EVENTS_PER_RECEIPT;
-    let events = (1..=recorded_hour_limit + 1)
+    let events = (1..=RECORDED_HOUR_FIXTURE_LIMIT + 1)
         .map(|sequence| {
             flight_event(
                 gufi,
@@ -398,7 +400,7 @@ fn recorded_hour_flight_batch_limit_is_explicit_and_legacy_stays_at_256() {
 
     let declared_limit_events = events
         .iter()
-        .take(recorded_hour_limit)
+        .take(RECORDED_HOUR_FIXTURE_LIMIT)
         .copied()
         .collect::<Vec<_>>();
     let mut ordinary = driver(4, 8, 8);
@@ -418,7 +420,7 @@ fn recorded_hour_flight_batch_limit_is_explicit_and_legacy_stays_at_256() {
     let applied_258 = flight_apply_batch_with_limit(
         &mut recorded_hour_258,
         &beyond_legacy,
-        oa_regional_session::RECORDED_HOUR_MAX_EVENTS_PER_RECEIPT,
+        recorded_hour_limit,
     )
     .expect("recorded-hour consumer accepts events beyond the ordinary cap");
     assert_eq!(applied_258.len(), beyond_legacy_len);
@@ -427,7 +429,7 @@ fn recorded_hour_flight_batch_limit_is_explicit_and_legacy_stays_at_256() {
     let applied = flight_apply_batch_with_limit(
         &mut recorded_hour,
         &declared_limit_events,
-        oa_regional_session::RECORDED_HOUR_MAX_EVENTS_PER_RECEIPT,
+        recorded_hour_limit,
     )
     .expect("recorded-hour consumer accepts its declared full receipt limit");
     assert_eq!(applied.len(), declared_limit_events.len());
@@ -438,12 +440,11 @@ fn recorded_hour_flight_batch_limit_is_explicit_and_legacy_stays_at_256() {
         flight_apply_batch_with_limit(
             &mut over_cap,
             &events,
-            recorded_hour_limit,
+            RECORDED_HOUR_FIXTURE_LIMIT,
         ),
         Err(FlightDriverError::ReceiptBatchTooLarge)
     );
     assert_eq!(flight_driver_report(&over_cap).flights, 0);
-
 }
 
 // REQ: OA-REG-001
