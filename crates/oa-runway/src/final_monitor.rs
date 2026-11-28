@@ -1923,7 +1923,7 @@ mod tests {
     // Mutation killed: admit a pair whose NTZ leaves zero or negative R95 clearance.
     // REQ: OA-RWY-014, OA-RWY-016
     #[test]
-    fn zero_and_negative_r95_clearance_are_refused() {
+    fn r95_clearance_refuses_nonpositive_and_checks_adjacent_float() {
         let mut config = DEFAULT_CONFIG;
         config.minimum_separation_ft = 1.0;
         for separation in [609.6, 611.0] {
@@ -1931,6 +1931,20 @@ mod tests {
             let result = prepare_pair(input(1, -half), input(2, half), config);
             assert_eq!(result, Err(PrepareError::ZoneConsumesSeparation));
         }
+
+        config.ntz_width_ft = 1.0;
+        let limiting_separation = 3.3248_f64;
+        let half = limiting_separation * 0.5;
+        let at_representable_edge =
+            prepare_pair(input(1, -half), input(2, half), config).expect("tiny positive clearance");
+        assert_eq!(at_representable_edge.max_r95_m, 8.673617379884035e-18);
+
+        let below_edge = f64::from_bits(limiting_separation.to_bits() - 1);
+        let half = below_edge * 0.5;
+        assert_eq!(
+            prepare_pair(input(1, -half), input(2, half), config),
+            Err(PrepareError::ZoneConsumesSeparation)
+        );
     }
 
     // REQ: OA-RWY-015
