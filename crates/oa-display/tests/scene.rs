@@ -508,6 +508,23 @@ fn a_multi_item_hidden_line_keeps_each_disclosure_and_delimiter() {
 
 // REQ: OA-DSP-025
 #[test]
+fn a_single_range_and_disabled_layer_are_both_counted_in_hidden_line() {
+    let m = model(Tail::None);
+    let (list, _, _) = build(&m, 80.0, |view| {
+        view.fix_max_nm = 40.0;
+        view.terminal_wpt_max_nm = 100.0;
+        view.runway_max_nm = 100.0;
+        view.non_ifr_airport_max_nm = 100.0;
+        view.minor_navaid_max_nm = 100.0;
+        view.label_max_nm = 100.0;
+        view.major_label_max_nm = 100.0;
+        assert!(layer_set(&mut view.layers, "own-boundary", false));
+    });
+    assert!(texts(&list).contains(&"HIDDEN NM:FIX>40;OFF:OWN BOUNDARY"));
+}
+
+// REQ: OA-DSP-025
+#[test]
 fn every_layer_can_be_switched_off_and_the_legend_says_so() {
     let m = model(Tail::None);
     let (_, base, _) = build(&m, 50.0, all_open);
@@ -1831,6 +1848,14 @@ fn compact_hidden_legend_uses_nine_pixel_text_and_fits_its_full_line() {
         assert_eq!(list.texts.size[row], 9);
         assert_eq!((list.texts.x[row], list.texts.y[row]), (8 * 16, 44 * 16));
         assert_eq!(stats.legend_cut, expected_cuts);
+        let bars = list
+            .lines
+            .layer
+            .iter()
+            .zip(&list.lines.x0)
+            .filter(|(&layer, &x)| layer == LAYER_LEGEND && x == (width as i32 - 1) * 16)
+            .count();
+        assert_eq!(bars as u32, expected_cuts);
     }
 }
 
