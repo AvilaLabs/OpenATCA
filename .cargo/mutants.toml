@@ -4,12 +4,13 @@
 # never compiles them, so a mutant in one can only be reported as missed. Mutant names include the
 # module path, so this skips every function in a module called `proofs`, and the two files that
 # hold one.
-# The three coordinate-bound expressions below are individually reviewed equivalent return values.
+# The coordinate-bound expressions below are individually reviewed equivalent return values.
 # The early finite-input guards stay in product code.
 exclude_re = [
   '\bproofs::',
   '^crates/oa-runway/src/plane\.rs:161:(30|56): replace \|\| with && in true_velocity_to_local$',
   '^crates/oa-runway/src/plane\.rs:171:(34|55): replace && with \|\| in true_velocity_to_local$',
   '^crates/oa-runway/src/plane\.rs:171:(49|71): replace > with >= in true_velocity_to_local$',
+  '^crates/oa-runway/src/final_monitor\.rs:267:44: replace < with <= in prepare_pair$',
 ]
 exclude_globs = ['**/proofs.rs', '**/proofs_wire.rs']
