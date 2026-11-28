@@ -548,10 +548,10 @@ fn family_overflow_draws_allocated_rows_and_reports_omissions_in_reserved_strip(
     let msaw_text = texts(&msaw);
     assert_eq!(msaw_stats.examined, 2);
     assert_eq!(msaw_stats.drawn, 1);
+    assert_eq!(msaw_stats.warning, 1);
+    assert_eq!(msaw_stats.caution, 1);
     assert_eq!(msaw_stats.omitted, 1);
-    assert!(msaw_text
-        .iter()
-        .any(|text| text.contains("WARNING 1") && text.contains("CAUTION 1")));
+    assert!(msaw_text.iter().any(|text| text == "MSAW PARTIAL"));
     let overflow_index = msaw_text
         .iter()
         .position(|text| text == "MSAW +1 NOT SHOWN")
@@ -587,10 +587,133 @@ fn family_overflow_draws_allocated_rows_and_reports_omissions_in_reserved_strip(
     let final_text = texts(&final_list);
     assert_eq!(final_stats.drawn, 1);
     assert_eq!(final_stats.omitted, 1);
+    assert_eq!(final_stats.protection_lost, 1);
+    assert_eq!(final_stats.warning, 1);
     assert!(final_text
         .iter()
-        .any(|text| text.contains("PROTECTION LOST 1")));
+        .any(|text| text.contains("PROTECTION LOST PARTIAL")));
     assert!(final_text.iter().any(|text| text == "FINAL +1 NOT SHOWN"));
+}
+
+// Mutation killed: keep the 128-row projection scratch limit as an input cap on budgeted APIs.
+// REQ: OA-RWY-015
+#[test]
+fn budgeted_presenters_validate_and_count_the_129th_input_without_drawing_it() {
+    let input_count = MAX_ALERT_MARKERS + 1;
+    let msaw_budget =
+        alert_render_budget(AlertRenderKind::Msaw, input_count, MAX_ALERT_MARKERS).unwrap();
+    let msaw_view = projection(
+        msaw_budget.minimum_width_px,
+        msaw_budget.minimum_top_inset_px,
+    );
+    let msaw_markers: Vec<_> = (1..=u32::try_from(input_count).unwrap())
+        .map(|address| marker(address, MarkerState::Warning, CENTRE.0, CENTRE.1))
+        .collect();
+    let msaw_original = msaw_markers.clone();
+    let mut msaw = list_for_render_budget(msaw_budget);
+    let msaw_stats =
+        append_alert_markers_with_budget(&mut msaw, &msaw_view, &msaw_markers, MAX_ALERT_MARKERS)
+            .unwrap();
+    assert_eq!(msaw_stats.examined, u64::try_from(input_count).unwrap());
+    assert_eq!(msaw_stats.warning, u64::try_from(input_count).unwrap());
+    assert_eq!(msaw_stats.drawn, u64::try_from(MAX_ALERT_MARKERS).unwrap());
+    assert_eq!(msaw_stats.omitted, 1);
+    assert_eq!(
+        msaw.circles.x.len(),
+        MAX_ALERT_MARKERS * ALERT_CIRCLES_PER_MARKER
+    );
+    assert_eq!(msaw_markers, msaw_original);
+    assert!(texts(&msaw).iter().any(|text| text == "MSAW +1 NOT SHOWN"));
+
+    let final_budget = alert_render_budget(
+        AlertRenderKind::FinalMonitor { degraded: true },
+        input_count,
+        MAX_ALERT_MARKERS,
+    )
+    .unwrap();
+    let final_view = projection(
+        final_budget.minimum_width_px,
+        final_budget.minimum_top_inset_px,
+    );
+    let final_markers: Vec<_> = (1..=u32::try_from(input_count).unwrap())
+        .map(|address| final_marker(address, FinalMonitorSeverity::ProtectionLost))
+        .collect();
+    let mut final_list = list_for_render_budget(final_budget);
+    let final_stats = append_final_monitor_frame_with_budget(
+        &mut final_list,
+        &final_view,
+        &final_markers,
+        true,
+        MAX_ALERT_MARKERS,
+    )
+    .unwrap();
+    assert_eq!(final_stats.examined, u64::try_from(input_count).unwrap());
+    assert_eq!(
+        final_stats.protection_lost,
+        u64::try_from(input_count).unwrap()
+    );
+    assert_eq!(final_stats.drawn, u64::try_from(MAX_ALERT_MARKERS).unwrap());
+    assert_eq!(final_stats.omitted, 1);
+    assert_eq!(
+        final_list.circles.x.len(),
+        MAX_ALERT_MARKERS * ALERT_CIRCLES_PER_MARKER
+    );
+    assert!(texts(&final_list)
+        .iter()
+        .any(|text| text == "FINAL +1 NOT SHOWN"));
+    assert!(texts(&final_list)
+        .iter()
+        .any(|text| text.contains("PROTECTION LOST PARTIAL")));
+}
+
+// Mutation killed: stop validating producer rows as soon as the fixed drawing prefix is full.
+// REQ: OA-RWY-015
+#[test]
+fn budgeted_presenters_refuse_invalid_tail_records_before_mutating_the_list() {
+    let input_count = MAX_ALERT_MARKERS + 1;
+    let budget =
+        alert_render_budget(AlertRenderKind::Msaw, input_count, MAX_ALERT_MARKERS).unwrap();
+    let view = projection(budget.minimum_width_px, budget.minimum_top_inset_px);
+    let mut markers: Vec<_> = (1..=u32::try_from(input_count).unwrap())
+        .map(|address| unknown_marker(address, MarkerState::Warning))
+        .collect();
+    let tail = markers.last_mut().unwrap();
+    tail.address = 0;
+    let mut list = list_for_render_budget(budget);
+    let before = list.clone();
+    assert!(matches!(
+        append_alert_markers_with_budget(&mut list, &view, &markers, MAX_ALERT_MARKERS),
+        Err(DisplayError::BadView(_))
+    ));
+    assert_eq!(list, before);
+
+    let final_budget = alert_render_budget(
+        AlertRenderKind::FinalMonitor { degraded: true },
+        input_count,
+        MAX_ALERT_MARKERS,
+    )
+    .unwrap();
+    let final_view = projection(
+        final_budget.minimum_width_px,
+        final_budget.minimum_top_inset_px,
+    );
+    let mut final_markers: Vec<_> = (1..=u32::try_from(input_count).unwrap())
+        .map(|address| final_marker(address, FinalMonitorSeverity::Warning))
+        .collect();
+    final_markers.last_mut().unwrap().severity = u8::MAX;
+    let mut final_list = list_for_render_budget(final_budget);
+    let before_final = final_list.clone();
+    assert!(matches!(
+        append_final_monitor_frame_with_budget(
+            &mut final_list,
+            &final_view,
+            &final_markers,
+            true,
+            MAX_ALERT_MARKERS,
+        ),
+        Err(DisplayError::BadView(_))
+    ));
+    assert_eq!(final_list, before_final);
 }
 
 // Mutation killed: charge the longer final-monitor heading to MSAW or accept a one-byte-short list.
