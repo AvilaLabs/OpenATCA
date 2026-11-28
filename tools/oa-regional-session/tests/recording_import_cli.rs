@@ -62,7 +62,6 @@ fn synthetic_oaf_import_runs_through_tracking_and_stage_contract() {
         .unwrap()
         .checked_add(100_000)
         .unwrap();
-    let issue_ns = receipt_ns.div_euclid(1_000_000_000).checked_add(1).unwrap() * 1_000_000_000;
     write_oaf(
         &sfdps_path,
         oa_feed::Kind::Message as u8,
@@ -151,8 +150,15 @@ fn synthetic_oaf_import_runs_through_tracking_and_stage_contract() {
         .find(|line| line.contains("\tPOS\t"))
         .unwrap();
     let fields = position.split('\t').collect::<Vec<_>>();
-    let issue_text = issue_ns.to_string();
-    assert_eq!(fields.get(1).copied(), Some(issue_text.as_str()));
+    // OAF1 archive rows use their own report clocks, not the container's later receipt.
+    // Kills moving every row to the final frame cutoff, which loses confirmation cadence.
+    let position_cutoffs: Vec<i64> = normalized
+        .lines()
+        .skip(1)
+        .filter(|line| line.contains("\tPOS\t"))
+        .map(|line| line.split('\t').nth(1).unwrap().parse().unwrap())
+        .collect();
+    assert_eq!(position_cutoffs, [base_ns, base_ns + 1_000_000_000]);
     assert_eq!(
         fields.get(5).copied(),
         Some("00000000000000000000000000000000")
