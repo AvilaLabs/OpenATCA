@@ -6,10 +6,18 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-use oa_regional_session::recordings_cli::convert_recordings;
+use oa_regional_session::recordings_cli::{
+    convert_recorded_hour_window_scoped, convert_recordings, validate_recorded_hour_window,
+    WindowRecordingCliOutput, MAX_WINDOW_OUTPUT_BYTES,
+};
 use oa_regional_session::recordings_reader::{
     RecordingInput, RecordingSource, MAX_RECORDING_FRAMES, MAX_RECORDING_INPUT_BYTES,
     MAX_RECORDING_STREAMS,
+};
+use oa_regional_session::recordings_stream::{
+    count_sfdps_messages_by_utc_hour, NormalizedStreamSummary, StreamInput, UtcHourMessageCounts,
+    MAX_H2_EXPANDED_INPUT_BYTES, MAX_H2_FRAME_WORK_UNITS, MAX_H2_INPUT_FRAMES,
+    MAX_H2_INPUT_STREAMS, MAX_H2_PHYSICAL_INPUT_BYTES,
 };
 use oa_regional_session::session::{MAX_EVENTS_PER_RECEIPT, MAX_SESSION_EVENTS};
 use oa_regional_session::surveillance::{MAX_FRAMES, MAX_FRAME_GAP_NS};
@@ -21,51 +29,291 @@ const MAX_REPORT_BYTES: usize = 64 * 1024;
 const MAX_MANIFEST_BYTES: usize = 1024 * 1024;
 const MAX_EXECUTABLE_BYTES: u64 = 128 * 1024 * 1024;
 const HASH_CHUNK_BYTES: usize = 64 * 1024;
+const NS_PER_HOUR: i64 = 3_600_000_000_000;
+const MAX_HOUR_COUNT_BYTES: usize = 64 * 1024;
 
-// A7.2: cold shell command-line values, with at most eight source paths.
+// A7.2: cold shell command-line values, with at most thirty-two source paths.
 struct Arguments {
     inputs: Vec<RecordingInput>,
-    centre: [u8; 4],
-    output: PathBuf,
+    centre: Option<[u8; 4]>,
+    output: Option<PathBuf>,
+    window: Option<(i64, i64)>,
+    flight_centre_scope: Option<[u8; 4]>,
+    count_hours: Option<(i64, PathBuf)>,
+}
+
+fn parse_epoch_ns(value: &std::ffi::OsStr, label: &str) -> Result<i64, String> {
+    let text = value
+        .to_str()
+        .ok_or_else(|| format!("{label} must be ASCII decimal nanoseconds"))?;
+    if text.is_empty() || !text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(format!("{label} must be ASCII decimal nanoseconds"));
+    }
+    text.parse::<i64>()
+        .map_err(|_| format!("{label} exceeds signed nanosecond range"))
+}
+
+fn parse_centre(value: &std::ffi::OsStr, label: &str) -> Result<[u8; 4], String> {
+    let text = value
+        .to_str()
+        .ok_or_else(|| format!("{label} must be UTF-8"))?;
+    let raw = text.as_bytes();
+    if raw.is_empty() || raw.len() > 4 {
+        return Err(format!(
+            "{label} must be one to four ASCII alphanumeric bytes"
+        ));
+    }
+    let mut code = [0u8; 4];
+    code.iter_mut()
+        .zip(raw)
+        .for_each(|(target, source)| *target = *source);
+    if !oa_regional_session::input::is_valid_centre_code(&code) {
+        return Err(format!("{label} code has invalid padding"));
+    }
+    Ok(code)
+}
+
+fn centre_text(code: &[u8; 4]) -> Result<String, String> {
+    if !oa_regional_session::input::is_valid_centre_code(code) {
+        return Err("centre code has invalid padding".into());
+    }
+    let length = code
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(code.len());
+    core::str::from_utf8(code.get(..length).ok_or("centre code bounds")?)
+        .map(str::to_owned)
+        .map_err(|_| "centre code encoding".into())
+}
+
+fn validate_window(start: i64, end: i64) -> Result<(i64, i64), String> {
+    validate_recorded_hour_window(start, end)
 }
 
 fn parse_arguments() -> Result<Arguments, String> {
     let mut args = env::args_os().skip(1);
     let mut inputs = Vec::new();
     inputs
-        .try_reserve_exact(MAX_RECORDING_STREAMS)
+        .try_reserve_exact(MAX_H2_INPUT_STREAMS)
         .map_err(|_| "input list allocation refused")?;
     let mut centre = None;
     let mut output = None;
+    let mut start = None;
+    let mut end = None;
+    let mut flight_centre_scope = None;
+    let mut count_day = None;
+    let mut hours_output = None;
     while let Some(flag) = args.next() {
         match flag.to_str() {
             Some("--adsb") | Some("--sfdps") => {
                 let source = match flag.to_str() { Some("--adsb") => RecordingSource::Adsb, _ => RecordingSource::Sfdps };
                 let path = args.next().map(PathBuf::from).ok_or("missing path after source option")?;
-                if inputs.len() >= MAX_RECORDING_STREAMS { return Err("source stream limit exceeded".into()); }
+                if inputs.len() >= MAX_H2_INPUT_STREAMS { return Err("source stream limit exceeded".into()); }
                 inputs.push(RecordingInput { source, path });
             }
             Some("--centre") if centre.is_none() => {
-                let value = args.next().ok_or("missing value after --centre")?;
-                let text = value.to_str().ok_or("centre must be UTF-8")?;
-                let raw = text.as_bytes();
-                if raw.len() != 4 || !raw.iter().all(u8::is_ascii_alphanumeric) { return Err("centre must be four ASCII alphanumeric bytes".into()); }
-                let mut code = [0u8; 4];
-                code.copy_from_slice(raw);
-                centre = Some(code);
+                centre = Some(parse_centre(
+                    &args.next().ok_or("missing value after --centre")?,
+                    "centre",
+                )?);
+            }
+            Some("--flight-centre") if flight_centre_scope.is_none() => {
+                flight_centre_scope = Some(parse_centre(
+                    &args.next().ok_or("missing value after --flight-centre")?,
+                    "flight centre",
+                )?);
+            }
+            Some("--start") if start.is_none() => {
+                start = Some(parse_epoch_ns(
+                    &args.next().ok_or("missing value after --start")?,
+                    "--start",
+                )?);
+            }
+            Some("--end") if end.is_none() => {
+                end = Some(parse_epoch_ns(
+                    &args.next().ok_or("missing value after --end")?,
+                    "--end",
+                )?);
+            }
+            Some("--count-hours") if count_day.is_none() => {
+                count_day = Some(parse_epoch_ns(&args.next().ok_or("missing value after --count-hours")?, "--count-hours")?);
+            }
+            Some("--hours-out") if hours_output.is_none() => {
+                hours_output = Some(PathBuf::from(args.next().ok_or("missing path after --hours-out")?));
             }
             Some("--out") if output.is_none() => output = Some(PathBuf::from(args.next().ok_or("missing path after --out")?)),
-            _ => return Err("usage: regional-recording-import (--adsb FILE | --sfdps FILE)+ (at most 8 inputs) --centre ZAU1 --out NEW_DIR".into()),
+            _ => return Err("usage: regional-recording-import (--adsb FILE | --sfdps FILE)+ [--start EPOCH_NS --end EPOCH_NS] --centre ARTCC [--flight-centre ARTCC] --out NEW_DIR, or (--adsb FILE | --sfdps FILE)+ --count-hours UTC_DAY_START_NS --hours-out NEW_FILE".into()),
         }
     }
     if inputs.is_empty() {
         return Err("at least one --adsb or --sfdps input is required".into());
     }
+    if let Some(day_start) = count_day {
+        if start.is_some()
+            || end.is_some()
+            || centre.is_some()
+            || output.is_some()
+            || flight_centre_scope.is_some()
+        {
+            return Err(
+                "--count-hours cannot be combined with --start/--end, --centre, --flight-centre, or --out".into(),
+            );
+        }
+        if !inputs
+            .iter()
+            .any(|input| input.source == RecordingSource::Sfdps)
+        {
+            return Err("--count-hours requires at least one --sfdps input".into());
+        }
+        if inputs.len() > MAX_H2_INPUT_STREAMS {
+            return Err("hour-count input stream limit exceeded".into());
+        }
+        return Ok(Arguments {
+            inputs,
+            centre: None,
+            output: None,
+            window: None,
+            flight_centre_scope: None,
+            count_hours: Some((
+                day_start,
+                hours_output.ok_or("--hours-out is required with --count-hours")?,
+            )),
+        });
+    }
+    if hours_output.is_some() {
+        return Err("--hours-out requires --count-hours".into());
+    }
+    let window = match (start, end) {
+        (Some(start), Some(end)) => Some(validate_window(start, end)?),
+        (None, None) => None,
+        _ => return Err("--start and --end must be provided together".into()),
+    };
+    let stream_limit = if window.is_some() {
+        MAX_H2_INPUT_STREAMS
+    } else {
+        MAX_RECORDING_STREAMS
+    };
+    if inputs.len() > stream_limit {
+        return Err("source stream limit exceeded".into());
+    }
+    if window.is_none() && flight_centre_scope.is_some() {
+        return Err("--flight-centre requires an explicit --start/--end window".into());
+    }
     Ok(Arguments {
         inputs,
-        centre: centre.ok_or("--centre is required")?,
-        output: output.ok_or("--out is required")?,
+        centre: Some(centre.ok_or("--centre is required")?),
+        output: Some(output.ok_or("--out is required")?),
+        window,
+        flight_centre_scope,
+        count_hours: None,
     })
+}
+
+fn stream_inputs(inputs: &[RecordingInput]) -> Result<Vec<StreamInput>, String> {
+    let mut streams = Vec::new();
+    streams
+        .try_reserve_exact(inputs.len())
+        .map_err(|_| "stream input allocation refused")?;
+    for input in inputs {
+        streams.push(StreamInput {
+            source: input.source,
+            path: input.path.clone(),
+        });
+    }
+    Ok(streams)
+}
+
+fn serialize_hour_counts(counts: &UtcHourMessageCounts) -> Result<String, String> {
+    use std::fmt::Write as FmtWrite;
+    let mut output = String::from("OA_SFDPS_UTC_HOUR_COUNTS\t1\n");
+    writeln!(output, "utc_day_start_ns\t{}", counts.utc_day_start_ns)
+        .map_err(|_| "hour-count formatting failed")?;
+    for (hour, count) in counts.sfdps_messages_by_hour.iter().enumerate() {
+        let hour_ns = i64::try_from(hour)
+            .map_err(|_| "hour index overflow")?
+            .checked_mul(NS_PER_HOUR)
+            .ok_or("hour offset overflow")?;
+        let start = counts
+            .utc_day_start_ns
+            .checked_add(hour_ns)
+            .ok_or("hour start overflow")?;
+        let end = start.checked_add(NS_PER_HOUR).ok_or("hour end overflow")?;
+        writeln!(output, "hour\t{hour:02}\t{start}\t{end}\t{count}")
+            .map_err(|_| "hour-count formatting failed")?;
+    }
+    let totals = counts.stream.counts;
+    writeln!(output, "frames\t{}", totals.frames).map_err(|_| "hour-count formatting failed")?;
+    writeln!(output, "messages\t{}", totals.messages)
+        .map_err(|_| "hour-count formatting failed")?;
+    writeln!(
+        output,
+        "outside_window_frames\t{}",
+        totals.outside_window_frames
+    )
+    .map_err(|_| "hour-count formatting failed")?;
+    writeln!(
+        output,
+        "outside_window_messages\t{}",
+        totals.outside_window_messages
+    )
+    .map_err(|_| "hour-count formatting failed")?;
+    writeln!(output, "physical_bytes\t{}", totals.physical_bytes)
+        .map_err(|_| "hour-count formatting failed")?;
+    writeln!(output, "expanded_bytes\t{}", totals.expanded_bytes)
+        .map_err(|_| "hour-count formatting failed")?;
+    writeln!(output, "frame_work_units\t{}", totals.frame_work_units)
+        .map_err(|_| "hour-count formatting failed")?;
+    for stream in &counts.stream.streams {
+        let source = match stream.source {
+            RecordingSource::Adsb => "ADSB",
+            RecordingSource::Sfdps => "SFDPS",
+        };
+        writeln!(
+            output,
+            "stream\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            stream.stream_index,
+            source,
+            oa_sha256::to_hex(&stream.sha256),
+            stream.bytes,
+            stream.expanded_bytes,
+            u8::from(stream.gzip),
+            stream.messages,
+            stream
+                .first_frame_receive_ns
+                .map_or_else(|| "-".to_owned(), |v| v.to_string()),
+            stream
+                .last_frame_receive_ns
+                .map_or_else(|| "-".to_owned(), |v| v.to_string()),
+            stream.max_frame_gap_ns
+        )
+        .map_err(|_| "hour-count formatting failed")?;
+    }
+    if output.len() > MAX_HOUR_COUNT_BYTES {
+        return Err("hour-count output exceeds byte limit".into());
+    }
+    Ok(output)
+}
+
+fn run_hour_count(day_start_ns: i64, path: &Path, inputs: &[RecordingInput]) -> Result<(), String> {
+    oa_sealed::refuse(path).map_err(|error| format!("guarded hour-count output: {error}"))?;
+    let streams = stream_inputs(inputs)?;
+    let counts = count_sfdps_messages_by_utc_hour(&streams, day_start_ns)?;
+    let report = serialize_hour_counts(&counts)?;
+    let digest = oa_sha256::sha256(report.as_bytes());
+    write_new(path, report.as_bytes())?;
+    verify_file(path, report.len(), &digest)?;
+    let total = counts
+        .sfdps_messages_by_hour
+        .iter()
+        .try_fold(0u64, |sum, value| sum.checked_add(*value))
+        .ok_or("hour-count total overflow")?;
+    eprintln!(
+        "SFDPS hour counts written: day_start_ns={} messages={} output={}",
+        counts.utc_day_start_ns,
+        total,
+        path.display()
+    );
+    Ok(())
 }
 
 fn digest_file(mut file: File, max_bytes: u64) -> Result<([u8; 32], u64), String> {
@@ -136,6 +384,452 @@ fn verify_file(path: &Path, expected_len: usize, expected_hash: &[u8; 32]) -> Re
     Ok(())
 }
 
+fn append_stream_metadata(
+    output: &mut String,
+    summary: &NormalizedStreamSummary,
+    row_tag: &str,
+) -> Result<(), String> {
+    use std::fmt::Write as FmtWrite;
+    for stream in &summary.recording.streams {
+        let source = match stream.source {
+            RecordingSource::Adsb => "ADSB",
+            RecordingSource::Sfdps => "SFDPS",
+        };
+        writeln!(
+            output,
+            "{row_tag}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            stream.stream_index,
+            source,
+            oa_sha256::to_hex(&stream.sha256),
+            stream.bytes,
+            stream.expanded_bytes,
+            u8::from(stream.gzip),
+            stream.messages,
+            stream
+                .first_frame_receive_ns
+                .map_or_else(|| "-".to_owned(), |v| v.to_string()),
+            stream
+                .last_frame_receive_ns
+                .map_or_else(|| "-".to_owned(), |v| v.to_string()),
+            stream.max_frame_gap_ns
+        )
+        .map_err(|_| "stream metadata formatting failed")?;
+    }
+    Ok(())
+}
+
+fn append_window_source_report(
+    report: &mut String,
+    label: &str,
+    source: &oa_regional_session::recordings_stream::NormalizedInputCounts,
+) -> Result<(), String> {
+    use std::fmt::Write as FmtWrite;
+    writeln!(report, "{label}_message_frames\t{}", source.message_frames)
+        .map_err(|_| "hour report formatting failed")?;
+    writeln!(
+        report,
+        "{label}_candidate_events_before_receipt_filter\t{}",
+        source.candidate_events_before_receipt_filter
+    )
+    .map_err(|_| "hour report formatting failed")?;
+    writeln!(
+        report,
+        "{label}_max_candidate_events_per_frame\t{}",
+        source.max_candidate_events_per_frame
+    )
+    .map_err(|_| "hour report formatting failed")?;
+    writeln!(
+        report,
+        "{label}_receipt_groups_over_capacity\t{}",
+        source.receipt_groups_over_capacity
+    )
+    .map_err(|_| "hour report formatting failed")?;
+    writeln!(
+        report,
+        "{label}_receipt_group_events_refused\t{}",
+        source.receipt_group_events_refused
+    )
+    .map_err(|_| "hour report formatting failed")?;
+    writeln!(
+        report,
+        "{label}_quarantine_rows\t{}",
+        source.quarantine_rows
+    )
+    .map_err(|_| "hour report formatting failed")?;
+    for (index, count) in source.adsb_quality_removed.iter().enumerate() {
+        writeln!(report, "{label}_adsb_quality_removed_{index}\t{count}")
+            .map_err(|_| "hour report formatting failed")?;
+    }
+    for (name, count) in oa_flight::OP_NAMES
+        .iter()
+        .zip(source.sfdps_emitted_operations)
+    {
+        writeln!(report, "{label}_sfdps_emitted_operation_{name}\t{count}")
+            .map_err(|_| "hour report formatting failed")?;
+    }
+    for (name, count) in oa_flight::OP_NAMES
+        .iter()
+        .zip(source.sfdps_unsupported_operations)
+    {
+        writeln!(
+            report,
+            "{label}_sfdps_unsupported_operation_{name}\t{count}"
+        )
+        .map_err(|_| "hour report formatting failed")?;
+    }
+    for (field, value) in [
+        ("adsb_rows_in", source.adsb_rows_in),
+        ("adsb_rows_dropped", source.adsb_rows_dropped),
+        ("adsb_ground_excluded", source.adsb_ground_excluded),
+        (
+            "adsb_unknown_ground_refused",
+            source.adsb_unknown_ground_refused,
+        ),
+        (
+            "adsb_source_time_regressions",
+            source.adsb_source_time_regressions,
+        ),
+        ("adsb_rows_order_refused", source.adsb_rows_order_refused),
+        (
+            "adsb_velocity_unavailable",
+            source.adsb_velocity_unavailable,
+        ),
+        (
+            "adsb_unknown_gufi_positions",
+            source.adsb_unknown_gufi_positions,
+        ),
+        ("invalid_position_rows", source.invalid_position_rows),
+        ("source_after_receipt", source.source_after_receipt),
+        ("sfdps_rows_decoded", source.sfdps_rows_decoded),
+        ("sfdps_rows_refused", source.sfdps_rows_refused),
+        ("sfdps_rows_no_operations", source.sfdps_rows_no_operations),
+        ("sfdps_owner_unknown", source.sfdps_owner_unknown),
+        (
+            "sfdps_rows_positive_address",
+            source.sfdps_rows_positive_address,
+        ),
+        (
+            "sfdps_rows_nonempty_callsign",
+            source.sfdps_rows_nonempty_callsign,
+        ),
+        (
+            "sfdps_operations_unusable",
+            source.sfdps_operations_unusable,
+        ),
+        ("invalid_operation_time", source.invalid_operation_time),
+        (
+            "invalid_operation_identity",
+            source.invalid_operation_identity,
+        ),
+        ("invalid_operation_centre", source.invalid_operation_centre),
+        (
+            "invalid_operation_address",
+            source.invalid_operation_address,
+        ),
+    ] {
+        writeln!(report, "{label}_{field}\t{value}")
+            .map_err(|_| "hour report formatting failed")?;
+    }
+    for (reason_index, count) in source.quarantine_reason_counts.iter().enumerate() {
+        writeln!(report, "{label}_quarantine_reason_{reason_index}\t{count}")
+            .map_err(|_| "hour report formatting failed")?;
+    }
+    Ok(())
+}
+
+fn serialize_window_report(output: &WindowRecordingCliOutput) -> Result<String, String> {
+    use std::fmt::Write as FmtWrite;
+    let summary = &output.summary;
+    let counts = summary.recording.counts;
+    let mut report = String::from("OA_RECORDING_HOUR_COUNTS\t1\n");
+    writeln!(report, "window_start_ns\t{}", output.window_ns.0)
+        .map_err(|_| "hour report formatting failed")?;
+    writeln!(report, "window_end_ns\t{}", output.window_ns.1)
+        .map_err(|_| "hour report formatting failed")?;
+    writeln!(
+        report,
+        "flight_scope_mode\t{}",
+        if output.flight_centre_scope.is_some() {
+            "CENTRE_LOCAL_SFDPS"
+        } else {
+            "ALL_CENTRES"
+        }
+    )
+    .map_err(|_| "hour report formatting failed")?;
+    writeln!(
+        report,
+        "flight_scope_label\t{}",
+        if output.flight_centre_scope.is_some() {
+            "CENTRE_LOCAL_SFDPS_REPLAY_OTHER_CENTRE_COPIES_EXCLUDED"
+        } else {
+            "ALL_CENTRES_SFDPS_REPLAY"
+        }
+    )
+    .map_err(|_| "hour report formatting failed")?;
+    let flight_scope_centre = output
+        .flight_centre_scope
+        .map(|code| centre_text(&code))
+        .transpose()?;
+    writeln!(
+        report,
+        "flight_centre_scope\t{}",
+        flight_scope_centre.as_deref().unwrap_or("-")
+    )
+    .map_err(|_| "hour report formatting failed")?;
+    writeln!(
+        report,
+        "stream_normalized_events\t{}",
+        summary.normalized_events
+    )
+    .map_err(|_| "hour report formatting failed")?;
+    writeln!(
+        report,
+        "excluded_other_centre_events\t{}",
+        output.excluded_other_centre_events
+    )
+    .map_err(|_| "hour report formatting failed")?;
+    writeln!(
+        report,
+        "normalized_events\t{}",
+        output.selected_normalized_events
+    )
+    .map_err(|_| "hour report formatting failed")?;
+    writeln!(report, "quarantine_rows\t{}", summary.quarantine_rows)
+        .map_err(|_| "hour report formatting failed")?;
+    writeln!(
+        report,
+        "manual_handling_required\t{}",
+        summary.manual_handling_required
+    )
+    .map_err(|_| "hour report formatting failed")?;
+    writeln!(report, "unprocessed_frames\t{}", summary.unprocessed_frames)
+        .map_err(|_| "hour report formatting failed")?;
+    for (label, source) in [
+        ("adsb", &summary.source_counts[0]),
+        ("sfdps", &summary.source_counts[1]),
+    ] {
+        append_window_source_report(&mut report, label, source)?;
+    }
+    writeln!(report, "frames\t{}", counts.frames).map_err(|_| "hour report formatting failed")?;
+    writeln!(report, "messages\t{}", counts.messages)
+        .map_err(|_| "hour report formatting failed")?;
+    writeln!(report, "status_frames\t{}", counts.status_frames)
+        .map_err(|_| "hour report formatting failed")?;
+    writeln!(report, "reject_frames\t{}", counts.reject_frames)
+        .map_err(|_| "hour report formatting failed")?;
+    writeln!(
+        report,
+        "outside_window_frames\t{}",
+        counts.outside_window_frames
+    )
+    .map_err(|_| "hour report formatting failed")?;
+    writeln!(
+        report,
+        "outside_window_messages\t{}",
+        counts.outside_window_messages
+    )
+    .map_err(|_| "hour report formatting failed")?;
+    writeln!(
+        report,
+        "outside_window_status_frames\t{}",
+        counts.outside_window_status_frames
+    )
+    .map_err(|_| "hour report formatting failed")?;
+    writeln!(
+        report,
+        "outside_window_reject_frames\t{}",
+        counts.outside_window_reject_frames
+    )
+    .map_err(|_| "hour report formatting failed")?;
+    writeln!(report, "physical_bytes\t{}", counts.physical_bytes)
+        .map_err(|_| "hour report formatting failed")?;
+    writeln!(report, "expanded_bytes\t{}", counts.expanded_bytes)
+        .map_err(|_| "hour report formatting failed")?;
+    writeln!(report, "frame_work_units\t{}", counts.frame_work_units)
+        .map_err(|_| "hour report formatting failed")?;
+    append_stream_metadata(&mut report, summary, "stream")?;
+    if report.len() > MAX_REPORT_BYTES {
+        return Err("hour report exceeds the 64 KiB limit".into());
+    }
+    Ok(report)
+}
+
+fn serialize_window_quarantine(output: &WindowRecordingCliOutput) -> String {
+    format!(
+        "OA-RS-QUARANTINE-AGGREGATE\t1\nwindow_start_ns\t{}\nwindow_end_ns\t{}\nquarantine_rows\t{}\nmanual_handling_required\t{}\nunprocessed_frames\t{}\n",
+        output.window_ns.0,
+        output.window_ns.1,
+        output.summary.quarantine_rows,
+        output.summary.manual_handling_required,
+        output.summary.unprocessed_frames
+    )
+}
+
+struct WindowManifestEvidence {
+    executable_sha: [u8; 32],
+    normalized_hash: [u8; 32],
+    provenance_hash: [u8; 32],
+    quarantine_hash: [u8; 32],
+    report_hash: [u8; 32],
+    report_len: usize,
+    quarantine_len: usize,
+}
+// A7.2: cold manifest input that binds the already-serialized output bytes.
+
+fn serialize_window_manifest(
+    centre: [u8; 4],
+    output: &WindowRecordingCliOutput,
+    evidence: WindowManifestEvidence,
+) -> Result<String, String> {
+    let mut manifest = format!(
+        "OA_RECORDING_HOUR_MANIFEST\t1\nmode\tRECEIVE_WINDOW_STREAMED\ncentre\t{}\nflight_scope_mode\t{}\nflight_scope_label\t{}\nflight_centre_scope\t{}\nstream_normalized_events\t{}\nselected_normalized_events\t{}\nexcluded_other_centre_events\t{}\nwindow_start_ns\t{}\nwindow_end_ns\t{}\nnormalized_bytes\t{}\nnormalized_sha256\t{}\nprovenance_bytes\t{}\nprovenance_sha256\t{}\nquarantine_bytes\t{}\nquarantine_sha256\t{}\nreport_bytes\t{}\nreport_sha256\t{}\nexecutable_sha256\t{}\nphysical_input_cap_bytes\t{}\nexpanded_input_cap_bytes\t{}\nframe_cap\t{}\nstream_cap\t{}\nframe_work_cap\t{}\nnormalized_output_cap_bytes\t{}\nprovenance_output_cap_bytes\t{}\n",
+        core::str::from_utf8(&centre).map_err(|_| "centre encoding")?,
+        if output.flight_centre_scope.is_some() {
+            "CENTRE_LOCAL_SFDPS"
+        } else {
+            "ALL_CENTRES"
+        },
+        if output.flight_centre_scope.is_some() {
+            "CENTRE_LOCAL_SFDPS_REPLAY_OTHER_CENTRE_COPIES_EXCLUDED"
+        } else {
+            "ALL_CENTRES_SFDPS_REPLAY"
+        },
+        output
+            .flight_centre_scope
+            .map(|code| centre_text(&code))
+            .transpose()?
+            .unwrap_or_else(|| "-".to_owned()),
+        output.summary.normalized_events,
+        output.selected_normalized_events,
+        output.excluded_other_centre_events,
+        output.window_ns.0,
+        output.window_ns.1,
+        output.normalized_tsv.len(),
+        oa_sha256::to_hex(&evidence.normalized_hash),
+        output.provenance_tsv.len(),
+        oa_sha256::to_hex(&evidence.provenance_hash),
+        evidence.quarantine_len,
+        oa_sha256::to_hex(&evidence.quarantine_hash),
+        evidence.report_len,
+        oa_sha256::to_hex(&evidence.report_hash),
+        oa_sha256::to_hex(&evidence.executable_sha),
+        MAX_H2_PHYSICAL_INPUT_BYTES,
+        MAX_H2_EXPANDED_INPUT_BYTES,
+        MAX_H2_INPUT_FRAMES,
+        MAX_H2_INPUT_STREAMS,
+        MAX_H2_FRAME_WORK_UNITS,
+        MAX_WINDOW_OUTPUT_BYTES,
+        MAX_WINDOW_OUTPUT_BYTES
+    );
+    append_stream_metadata(&mut manifest, &output.summary, "input_stream")?;
+    if manifest.len() > MAX_MANIFEST_BYTES {
+        return Err("hour manifest exceeds the 1 MiB limit".into());
+    }
+    Ok(manifest)
+}
+
+fn publish_window_bundle(
+    output_dir: &Path,
+    centre: [u8; 4],
+    output: &WindowRecordingCliOutput,
+    executable_sha: [u8; 32],
+) -> Result<(), String> {
+    let quarantine_tsv = serialize_window_quarantine(output);
+    if quarantine_tsv.len() > MAX_QUARANTINE_BYTES {
+        return Err("aggregate quarantine output exceeds byte limit".into());
+    }
+    let report = serialize_window_report(output)?;
+    let normalized_hash = oa_sha256::sha256(output.normalized_tsv.as_bytes());
+    let provenance_hash = oa_sha256::sha256(output.provenance_tsv.as_bytes());
+    let quarantine_hash = oa_sha256::sha256(quarantine_tsv.as_bytes());
+    let report_hash = oa_sha256::sha256(report.as_bytes());
+    let manifest = serialize_window_manifest(
+        centre,
+        output,
+        WindowManifestEvidence {
+            executable_sha,
+            normalized_hash,
+            provenance_hash,
+            quarantine_hash,
+            report_hash,
+            report_len: report.len(),
+            quarantine_len: quarantine_tsv.len(),
+        },
+    )?;
+    let manifest_hash = oa_sha256::sha256(manifest.as_bytes());
+
+    create_output_dir(output_dir)?;
+    let normalized_path = output_dir.join("normalized.tsv");
+    let provenance_path = output_dir.join("provenance.tsv");
+    let quarantine_path = output_dir.join("quarantine.tsv");
+    let report_path = output_dir.join("counts.tsv");
+    let manifest_path = output_dir.join("hour-manifest.tsv");
+    write_new(&normalized_path, output.normalized_tsv.as_bytes())?;
+    write_new(&provenance_path, output.provenance_tsv.as_bytes())?;
+    write_new(&quarantine_path, quarantine_tsv.as_bytes())?;
+    write_new(&report_path, report.as_bytes())?;
+    write_new(&manifest_path, manifest.as_bytes())?;
+    verify_file(
+        &normalized_path,
+        output.normalized_tsv.len(),
+        &normalized_hash,
+    )?;
+    verify_file(
+        &provenance_path,
+        output.provenance_tsv.len(),
+        &provenance_hash,
+    )?;
+    verify_file(&quarantine_path, quarantine_tsv.len(), &quarantine_hash)?;
+    verify_file(&report_path, report.len(), &report_hash)?;
+    verify_file(&manifest_path, manifest.len(), &manifest_hash)?;
+
+    let directory = oa_sealed::open(output_dir)
+        .map_err(|error| format!("open hour output for sync: {error}"))?;
+    directory
+        .sync_all()
+        .map_err(|error| format!("sync hour output directory: {error}"))?;
+    let complete_path = output_dir.join("HOUR_COMPLETE");
+    let complete = format!("{}\n", oa_sha256::to_hex(&manifest_hash));
+    write_new(&complete_path, complete.as_bytes())?;
+    verify_file(
+        &complete_path,
+        complete.len(),
+        &oa_sha256::sha256(complete.as_bytes()),
+    )?;
+    directory
+        .sync_all()
+        .map_err(|error| format!("sync hour completion directory: {error}"))?;
+    Ok(())
+}
+
+fn run_window_import(
+    inputs: &[RecordingInput],
+    centre: [u8; 4],
+    window_ns: (i64, i64),
+    flight_centre_scope: Option<[u8; 4]>,
+    output_dir: &Path,
+) -> Result<(), String> {
+    oa_sealed::refuse(output_dir)
+        .map_err(|error| format!("guarded hour output directory: {error}"))?;
+    let executable_sha = executable_digest()?;
+    let output =
+        convert_recorded_hour_window_scoped(inputs, centre, window_ns, flight_centre_scope)
+            .map_err(|error| format!("window recording conversion: {error:?}"))?;
+    publish_window_bundle(output_dir, centre, &output, executable_sha)?;
+    eprintln!(
+        "window recording import: normalized_events={} selected_events={} excluded_other_centre={} quarantine_rows={} manual_handling={} streams={} frames={} output={}",
+        output.summary.normalized_events,
+        output.selected_normalized_events,
+        output.excluded_other_centre_events,
+        output.summary.quarantine_rows,
+        output.summary.manual_handling_required,
+        output.summary.recording.streams.len(),
+        output.summary.recording.counts.frames,
+        output_dir.display()
+    );
+    Ok(())
+}
+
 fn create_output_dir(path: &Path) -> Result<(), String> {
     oa_sealed::refuse(path).map_err(|error| format!("guarded output directory: {error}"))?;
     fs::create_dir(path).map_err(|error| format!("create new output directory: {error}"))
@@ -143,10 +837,23 @@ fn create_output_dir(path: &Path) -> Result<(), String> {
 
 fn run() -> Result<(), String> {
     let args = parse_arguments()?;
-    oa_sealed::refuse(&args.output)
-        .map_err(|error| format!("guarded output directory: {error}"))?;
+    if let Some((day_start_ns, path)) = args.count_hours.as_ref() {
+        return run_hour_count(*day_start_ns, path, &args.inputs);
+    }
+    let centre = args.centre.ok_or("--centre is required")?;
+    let output_path = args.output.as_ref().ok_or("--out is required")?;
+    if let Some(window_ns) = args.window {
+        return run_window_import(
+            &args.inputs,
+            centre,
+            window_ns,
+            args.flight_centre_scope,
+            output_path,
+        );
+    }
+    oa_sealed::refuse(output_path).map_err(|error| format!("guarded output directory: {error}"))?;
     let executable_sha = executable_digest()?;
-    let output = convert_recordings(&args.inputs, args.centre)
+    let output = convert_recordings(&args.inputs, centre)
         .map_err(|error| format!("recording conversion: {error:?}"))?;
     if output.normalized_tsv.len() > MAX_NORMALIZED_BYTES {
         return Err("normalized TSV exceeds the 16 MiB session input limit".into());
@@ -245,12 +952,30 @@ fn run() -> Result<(), String> {
     let provenance_hash = oa_sha256::sha256(output.provenance_tsv.as_bytes());
     let quarantine_hash = oa_sha256::sha256(output.quarantine_tsv.as_bytes());
     let report_hash = oa_sha256::sha256(report.as_bytes());
-    let mut manifest = format!("OA_RECORDING_IMPORT_MANIFEST\t1\ncentre\t{}\nnormalized_bytes\t{}\nnormalized_sha256\t{}\nprovenance_bytes\t{}\nprovenance_sha256\t{}\nquarantine_bytes\t{}\nquarantine_sha256\t{}\nreport_bytes\t{}\nreport_sha256\t{}\nexecutable_sha256\t{}\nphysical_input_cap_bytes\t{}\nexpanded_input_cap_bytes\t{}\nframe_cap\t{}\nstream_cap\t{}\nnormalized_input_cap_bytes\t{}\nnormalized_event_cap\t{}\nevents_per_receipt_cap\t{}\nruntime_group_cap\t{}\nruntime_gap_cap_ns\t{}\nquarantine_record_cap\t{}\nquarantine_bytes_cap\t{}\n",
-        core::str::from_utf8(&args.centre).map_err(|_| "centre encoding")?, output.normalized_tsv.len(), oa_sha256::to_hex(&normalized_hash),
-        output.provenance_tsv.len(), oa_sha256::to_hex(&provenance_hash), output.quarantine_tsv.len(), oa_sha256::to_hex(&quarantine_hash), report.len(), oa_sha256::to_hex(&report_hash),
-        oa_sha256::to_hex(&executable_sha), MAX_RECORDING_INPUT_BYTES, MAX_RECORDING_INPUT_BYTES, MAX_RECORDING_FRAMES, MAX_RECORDING_STREAMS,
-        MAX_NORMALIZED_BYTES, MAX_SESSION_EVENTS, MAX_EVENTS_PER_RECEIPT, MAX_FRAMES, MAX_FRAME_GAP_NS,
-        oa_regional_session::recordings::MAX_QUARANTINE_RECORDS, MAX_QUARANTINE_BYTES);
+    let mut manifest = format!(
+        "OA_RECORDING_IMPORT_MANIFEST\t1\ncentre\t{}\nnormalized_bytes\t{}\nnormalized_sha256\t{}\nprovenance_bytes\t{}\nprovenance_sha256\t{}\nquarantine_bytes\t{}\nquarantine_sha256\t{}\nreport_bytes\t{}\nreport_sha256\t{}\nexecutable_sha256\t{}\nphysical_input_cap_bytes\t{}\nexpanded_input_cap_bytes\t{}\nframe_cap\t{}\nstream_cap\t{}\nnormalized_input_cap_bytes\t{}\nnormalized_event_cap\t{}\nevents_per_receipt_cap\t{}\nruntime_group_cap\t{}\nruntime_gap_cap_ns\t{}\nquarantine_record_cap\t{}\nquarantine_bytes_cap\t{}\n",
+        core::str::from_utf8(&centre).map_err(|_| "centre encoding")?,
+        output.normalized_tsv.len(),
+        oa_sha256::to_hex(&normalized_hash),
+        output.provenance_tsv.len(),
+        oa_sha256::to_hex(&provenance_hash),
+        output.quarantine_tsv.len(),
+        oa_sha256::to_hex(&quarantine_hash),
+        report.len(),
+        oa_sha256::to_hex(&report_hash),
+        oa_sha256::to_hex(&executable_sha),
+        MAX_RECORDING_INPUT_BYTES,
+        MAX_RECORDING_INPUT_BYTES,
+        MAX_RECORDING_FRAMES,
+        MAX_RECORDING_STREAMS,
+        MAX_NORMALIZED_BYTES,
+        MAX_SESSION_EVENTS,
+        MAX_EVENTS_PER_RECEIPT,
+        MAX_FRAMES,
+        MAX_FRAME_GAP_NS,
+        oa_regional_session::recordings::MAX_QUARANTINE_RECORDS,
+        MAX_QUARANTINE_BYTES
+    );
     for stream in &output.streams {
         let source = match stream.source {
             RecordingSource::Adsb => "ADSB",
@@ -273,12 +998,12 @@ fn run() -> Result<(), String> {
     }
     let manifest_hash = oa_sha256::sha256(manifest.as_bytes());
 
-    create_output_dir(&args.output)?;
-    let normalized_path = args.output.join("normalized.tsv");
-    let provenance_path = args.output.join("provenance.tsv");
-    let quarantine_path = args.output.join("quarantine.tsv");
-    let report_path = args.output.join("counts.tsv");
-    let manifest_path = args.output.join("manifest.tsv");
+    create_output_dir(output_path)?;
+    let normalized_path = output_path.join("normalized.tsv");
+    let provenance_path = output_path.join("provenance.tsv");
+    let quarantine_path = output_path.join("quarantine.tsv");
+    let report_path = output_path.join("counts.tsv");
+    let manifest_path = output_path.join("manifest.tsv");
     write_new(&normalized_path, output.normalized_tsv.as_bytes())?;
     write_new(&provenance_path, output.provenance_tsv.as_bytes())?;
     write_new(&quarantine_path, output.quarantine_tsv.as_bytes())?;
@@ -302,12 +1027,12 @@ fn run() -> Result<(), String> {
     verify_file(&report_path, report.len(), &report_hash)?;
     verify_file(&manifest_path, manifest.len(), &manifest_hash)?;
 
-    let directory = oa_sealed::open(&args.output)
+    let directory = oa_sealed::open(output_path)
         .map_err(|error| format!("open output directory for sync: {error}"))?;
     directory
         .sync_all()
         .map_err(|error| format!("sync output directory: {error}"))?;
-    let complete_path = args.output.join("COMPLETE");
+    let complete_path = output_path.join("COMPLETE");
     let complete = format!("{}\n", oa_sha256::to_hex(&manifest_hash));
     let complete_result = write_new(&complete_path, complete.as_bytes())
         .and_then(|_| {
@@ -335,7 +1060,7 @@ fn run() -> Result<(), String> {
         output.adaptation.quarantine.len(),
         output.streams.len(),
         output.frame_count,
-        args.output.display()
+        output_path.display()
     );
     Ok(())
 }

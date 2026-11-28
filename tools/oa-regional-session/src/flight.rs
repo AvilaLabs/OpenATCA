@@ -6,8 +6,9 @@ use oa_flight::{
     flight_get, flight_is_live, flights_apply, flights_claiming_address, flights_len, flights_new,
     flights_remove, key_gufi, op_new, Alt, Flight, FlightConfig, FlightTable, Outcome, Stamp,
     ALT_NIL, ALT_NONE, ALT_SIMPLE, C_COUNT, HO_NONE, MAX_VIEWS, OP_ADDRESS, OP_ASSIGN, OP_CANCEL,
-    OP_COUNT, OP_HO_ACCEPT, OP_HO_FAIL, OP_HO_INITIATE, OP_HO_RETRACT, OP_HO_TAKE, OP_HO_UPDATE,
-    OP_IDENTITY, OP_INTERIM, OP_OWNER, OP_SET_PLAN, REM_RETIRED, R_COUNT, ST_ACTIVE, ST_PROPOSED,
+    OP_COMPLETE, OP_COUNT, OP_DEPART, OP_DROP, OP_HO_ACCEPT, OP_HO_FAIL, OP_HO_INITIATE,
+    OP_HO_RETRACT, OP_HO_TAKE, OP_HO_UPDATE, OP_IDENTITY, OP_INTERIM, OP_OWNER, OP_SET_PLAN,
+    REM_RETIRED, R_COUNT, ST_ACTIVE, ST_PROPOSED,
 };
 
 use crate::input::{EventKind, FlightOperation, HandoffOperation, NormalizedEvent, SourceKind};
@@ -189,6 +190,15 @@ pub fn flight_stage_adapter_refusal(
         {
             Some(AdapterRefusal::OwnerChangeRequiresTake)
         }
+        FlightOperation::SetOwnerParts {
+            unit_code,
+            sector_code,
+        } if existing.is_some_and(|flight| {
+            flight.owner != [0; 8] && flight.owner != pack_owner_parts(unit_code, sector_code)
+        }) =>
+        {
+            Some(AdapterRefusal::OwnerChangeRequiresTake)
+        }
         FlightOperation::SetOwnerByKey { unit, .. }
             if existing.is_some_and(|flight| flight.owner != [0; 8] && flight.owner != unit) =>
         {
@@ -261,6 +271,17 @@ pub fn flight_stage_adapter_refusal(
         }
         _ => None,
     }
+}
+
+fn pack_owner_parts(unit_code: [u8; 4], sector_code: [u8; 4]) -> [u8; 8] {
+    let mut owner = [0u8; 8];
+    if let Some(prefix) = owner.get_mut(..4) {
+        prefix.copy_from_slice(&unit_code);
+    }
+    if let Some(suffix) = owner.get_mut(4..) {
+        suffix.copy_from_slice(&sector_code);
+    }
+    owner
 }
 
 /// Records a staged adapter refusal without applying an operation or advancing the receipt clock.
@@ -585,6 +606,12 @@ fn validate_flight_event(
     event: &NormalizedEvent,
     prior_receipt_ns: Option<i64>,
 ) -> Result<(), FlightDriverError> {
+    if event
+        .source_message_id
+        .is_some_and(|message_id| event.source != SourceKind::Flight || message_id > event.sequence)
+    {
+        return Err(FlightDriverError::InvalidBatchOrder);
+    }
     if event.source_ns < 0 || event.receipt_ns < 0 || event.source_ns > event.receipt_ns {
         return Err(FlightDriverError::InvalidTimestamp);
     }
@@ -712,6 +739,10 @@ fn flight_apply_validated_event(
         FlightOperation::CancelPlanByKey { plan_id, .. } => {
             (OP_CANCEL, 0, plan_id, None, [0; 8], [0; 8], None, None)
         }
+        FlightOperation::Depart => (OP_DEPART, 0, [0; 12], None, [0; 8], [0; 8], None, None),
+        FlightOperation::Complete => (OP_COMPLETE, 0, [0; 12], None, [0; 8], [0; 8], None, None),
+        FlightOperation::Cancel => (OP_CANCEL, 0, [0; 12], None, [0; 8], [0; 8], None, None),
+        FlightOperation::Drop => (OP_DROP, 0, [0; 12], None, [0; 8], [0; 8], None, None),
         FlightOperation::AssignAltitude { altitude_ft } => (
             OP_ASSIGN,
             0,
@@ -762,6 +793,16 @@ fn flight_apply_validated_event(
             None,
         ),
         FlightOperation::SetOwner { unit } => {
+            if existing.is_some_and(|flight| flight.owner != [0; 8] && flight.owner != unit) {
+                return record_adapter_refusal(driver, AdapterRefusal::OwnerChangeRequiresTake);
+            }
+            (OP_OWNER, 0, [0; 12], None, unit, [0; 8], None, None)
+        }
+        FlightOperation::SetOwnerParts {
+            unit_code,
+            sector_code,
+        } => {
+            let unit = pack_owner_parts(unit_code, sector_code);
             if existing.is_some_and(|flight| flight.owner != [0; 8] && flight.owner != unit) {
                 return record_adapter_refusal(driver, AdapterRefusal::OwnerChangeRequiresTake);
             }
@@ -907,7 +948,7 @@ fn flight_apply_validated_event(
         event.centre,
         source_ms,
         receipt_ms,
-        event.sequence,
+        event.source_message_id.unwrap_or(event.sequence),
     );
     op.state = state;
     op.plan_id = plan_id;
@@ -969,7 +1010,22 @@ pub fn flight_preflight_batch(
     driver: &mut FlightDriver,
     events: &[NormalizedEvent],
 ) -> Result<(), FlightDriverError> {
-    if events.len() > crate::session::MAX_EVENTS_PER_RECEIPT {
+    flight_preflight_batch_with_limit(driver, events, crate::session::MAX_EVENTS_PER_RECEIPT)
+}
+
+/// Validates a closed batch using a profile-selected receipt bound. Legacy callers keep the
+/// ordinary 256-event limit; the recorded-hour profile may explicitly use 8,192.
+pub fn flight_preflight_batch_with_limit(
+    driver: &mut FlightDriver,
+    events: &[NormalizedEvent],
+    max_events_per_receipt: usize,
+) -> Result<(), FlightDriverError> {
+    if !matches!(
+        max_events_per_receipt,
+        crate::session::MAX_EVENTS_PER_RECEIPT
+            | crate::session::RECORDED_HOUR_MAX_EVENTS_PER_RECEIPT
+    ) || events.len() > max_events_per_receipt
+    {
         return Err(FlightDriverError::ReceiptBatchTooLarge);
     }
     let mut prior_receipt_ns = driver.last_receipt_ns;
@@ -1027,7 +1083,16 @@ pub fn flight_apply_batch(
     driver: &mut FlightDriver,
     events: &[NormalizedEvent],
 ) -> Result<Vec<FlightApplyOutcome>, FlightDriverError> {
-    flight_preflight_batch(driver, events)?;
+    flight_apply_batch_with_limit(driver, events, crate::session::MAX_EVENTS_PER_RECEIPT)
+}
+
+/// Applies a fully preflighted batch with an explicit offline profile bound.
+pub fn flight_apply_batch_with_limit(
+    driver: &mut FlightDriver,
+    events: &[NormalizedEvent],
+    max_events_per_receipt: usize,
+) -> Result<Vec<FlightApplyOutcome>, FlightDriverError> {
+    flight_preflight_batch_with_limit(driver, events, max_events_per_receipt)?;
     driver.stats.events_seen = driver
         .stats
         .events_seen

@@ -66,6 +66,10 @@ pub enum FlightOperation {
         plan_id: [u8; 12],
         status: u8,
     },
+    Depart,
+    Complete,
+    Cancel,
+    Drop,
     /// Full-key form used when the source identity is NAM flight-plan identity rather than GUFI.
     SetPlanByKey {
         key: FlightKey,
@@ -85,6 +89,11 @@ pub enum FlightOperation {
     },
     SetOwner {
         unit: [u8; 8],
+    },
+    /// SFDPS controlling-unit code and sector as distinct padded source fields.
+    SetOwnerParts {
+        unit_code: [u8; 4],
+        sector_code: [u8; 4],
     },
     SetOwnerByKey {
         key: FlightKey,
@@ -188,6 +197,9 @@ pub struct NormalizedEvent {
     pub receipt_ns: i64,
     pub source_ns: i64,
     pub sequence: u64,
+    /// Explicit source-message identity for grouped flight operations. `None` preserves legacy
+    /// normalized-event behavior, where each operation sequence is its own message.
+    pub source_message_id: Option<u64>,
     pub source: SourceKind,
     pub identity: Identity,
     pub centre: [u8; 4],
@@ -255,6 +267,50 @@ fn field<const N: usize>(text: &str) -> Result<[u8; N], InputError> {
     Ok(out)
 }
 
+fn alphanumeric_field<const N: usize>(text: &str) -> Result<[u8; N], InputError> {
+    let padded = field::<N>(text)?;
+    if !text.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
+        return Err(InputError::InvalidLabel);
+    }
+    Ok(padded)
+}
+
+fn optional_field<const N: usize>(text: &str) -> Result<[u8; N], InputError> {
+    if text == "-" {
+        Ok([0; N])
+    } else {
+        field::<N>(text)
+    }
+}
+
+fn unit_code_field(text: &str) -> Result<[u8; 4], InputError> {
+    let padded = field::<4>(text)?;
+    if !text
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'?')
+    {
+        return Err(InputError::InvalidLabel);
+    }
+    Ok(padded)
+}
+
+/// Returns whether a centre is a one-to-four byte alphanumeric code with only trailing zero
+/// padding. Three-letter ARTCC codes such as `ZAU` therefore remain the distinct value `ZAU\0`.
+pub fn is_valid_centre_code(centre: &[u8; 4]) -> bool {
+    let mut saw_padding = false;
+    let mut saw_code = false;
+    for byte in centre {
+        if *byte == 0 {
+            saw_padding = true;
+        } else if saw_padding || !byte.is_ascii_alphanumeric() {
+            return false;
+        } else {
+            saw_code = true;
+        }
+    }
+    saw_code
+}
+
 fn fixed_field<const N: usize>(text: &str) -> Result<[u8; N], InputError> {
     if text.len() != N || !text.is_ascii() {
         return Err(InputError::InvalidLabel);
@@ -315,11 +371,15 @@ fn parse_position(parts: &[&str]) -> Result<EventKind, InputError> {
 fn parse_flight(parts: &[&str]) -> Result<EventKind, InputError> {
     let op = match part(parts, 9)? {
         "PLAN" if parts.len() == 12 => FlightOperation::SetPlan {
-            plan_id: fixed_field::<12>(part(parts, 10)?)?,
+            plan_id: alphanumeric_field::<12>(part(parts, 10)?)?,
             status: part(parts, 11)?
                 .parse()
                 .map_err(|_| InputError::InvalidInteger)?,
         },
+        "DEPART" if parts.len() == 10 => FlightOperation::Depart,
+        "COMPLETE" if parts.len() == 10 => FlightOperation::Complete,
+        "CANCEL" if parts.len() == 10 => FlightOperation::Cancel,
+        "DROP" if parts.len() == 10 => FlightOperation::Drop,
         "ASSIGNED" if parts.len() == 11 => FlightOperation::AssignAltitude {
             altitude_ft: parse_i32(part(parts, 10)?)?,
         },
@@ -330,12 +390,32 @@ fn parse_flight(parts: &[&str]) -> Result<EventKind, InputError> {
         "OWNER" if parts.len() == 11 => FlightOperation::SetOwner {
             unit: field::<8>(part(parts, 10)?)?,
         },
+        "OWNER_PARTS" if parts.len() == 12 => FlightOperation::SetOwnerParts {
+            unit_code: unit_code_field(part(parts, 10)?)?,
+            sector_code: match part(parts, 11)? {
+                "-" => [0; 4],
+                text => alphanumeric_field::<4>(text)?,
+            },
+        },
         "ADDRESS" if parts.len() == 10 => FlightOperation::SetAddress,
         "IDENTITY" if parts.len() == 13 => FlightOperation::SetIdentity {
             callsign: field::<8>(part(parts, 10)?)?,
             departure: field::<12>(part(parts, 11)?)?,
             arrival: field::<12>(part(parts, 12)?)?,
         },
+        "IDENTITY_PARTIAL" if parts.len() == 13 => {
+            let callsign = optional_field::<8>(part(parts, 10)?)?;
+            let departure = optional_field::<12>(part(parts, 11)?)?;
+            let arrival = optional_field::<12>(part(parts, 12)?)?;
+            if callsign == [0; 8] && departure == [0; 12] && arrival == [0; 12] {
+                return Err(InputError::InvalidOperation);
+            }
+            FlightOperation::SetIdentity {
+                callsign,
+                departure,
+                arrival,
+            }
+        }
         "HO_OFFER" if parts.len() == 11 => FlightOperation::Handoff {
             operation: HandoffOperation::Offer,
             unit: field::<8>(part(parts, 10)?)?,
@@ -440,7 +520,16 @@ pub fn parse_event_line(line: &str) -> Result<NormalizedEvent, InputError> {
     if line.len() > MAX_EVENT_LINE_BYTES {
         return Err(InputError::RowTooLong);
     }
-    let parts: Vec<&str> = line.split('\t').collect();
+    let mut parts: Vec<&str> = line.split('\t').collect();
+    let source_message_id =
+        if parts.len() >= 2 && parts.get(parts.len() - 2).copied() == Some("SRCMSG") {
+            let value = parts.last().copied().ok_or(InputError::BadFieldCount)?;
+            let id = parse_u64(value)?;
+            parts.truncate(parts.len() - 2);
+            Some(id)
+        } else {
+            None
+        };
     if parts.len() < 9 {
         return Err(InputError::BadFieldCount);
     }
@@ -455,11 +544,15 @@ pub fn parse_event_line(line: &str) -> Result<NormalizedEvent, InputError> {
         return Err(InputError::SealedTimestamp);
     }
     let sequence = parse_u64(part(&parts, 3)?)?;
+    if source_message_id.is_some_and(|message_id| message_id > sequence) {
+        return Err(InputError::InvalidOperation);
+    }
     let source = parse_source(part(&parts, 4)?)?;
     let flight_gufi = parse_hex_u128(part(&parts, 5)?)?;
     let aircraft_address = parse_hex_u32(part(&parts, 6)?)?;
-    let centre = fixed_field::<4>(part(&parts, 7)?)?;
     let kind_name = part(&parts, 8)?;
+    let centre_text = part(&parts, 7)?;
+    let centre = alphanumeric_field::<4>(centre_text)?;
     // ADS-B carries an aircraft address, not a GUFI. Preserve explicit absence instead of
     // requiring a normalizer to manufacture a flight identity for raw surveillance.
     if flight_gufi == 0 && !matches!(kind_name, "POS" | "FEED") {
@@ -489,6 +582,9 @@ pub fn parse_event_line(line: &str) -> Result<NormalizedEvent, InputError> {
     };
     if expected_source.is_some_and(|expected| expected != source) {
         return Err(InputError::SourceEventMismatch);
+    }
+    if source_message_id.is_some() && (source != SourceKind::Flight || kind_name != "FLIGHT") {
+        return Err(InputError::InvalidOperation);
     }
     let kind = match kind_name {
         "POS" if parts.len() == 15 => parse_position(&parts)?,
@@ -578,6 +674,7 @@ pub fn parse_event_line(line: &str) -> Result<NormalizedEvent, InputError> {
         receipt_ns,
         source_ns,
         sequence,
+        source_message_id,
         source,
         identity: Identity {
             flight_gufi,
@@ -586,4 +683,131 @@ pub fn parse_event_line(line: &str) -> Result<NormalizedEvent, InputError> {
         centre,
         kind,
     })
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::{is_valid_centre_code, parse_event_line};
+    use crate::recordings::serialize_recorded_events;
+
+    #[test]
+    fn padded_sfdps_centre_and_short_plan_id_round_trip_without_aliasing() {
+        let centre_text = "ZAU";
+        let plan_text = "FP7";
+        let line = format!(
+            "v1\t2000000000\t1000000000\t1\tFLIGHT\t00000000000000000000000000000001\t000000\t{centre_text}\tFLIGHT\tPLAN\t{plan_text}\t2"
+        );
+        let event = parse_event_line(&line).unwrap();
+        assert!(is_valid_centre_code(&event.centre));
+        assert_eq!(
+            event.centre.get(..centre_text.len()),
+            Some(centre_text.as_bytes())
+        );
+        assert!(event
+            .centre
+            .get(centre_text.len()..)
+            .is_some_and(|padding| padding.iter().all(|byte| *byte == 0)));
+        let crate::input::EventKind::Flight(crate::input::FlightOperation::SetPlan {
+            plan_id, ..
+        }) = event.kind
+        else {
+            panic!("short plan identifier did not parse as a plan operation");
+        };
+        assert_eq!(plan_id.get(..plan_text.len()), Some(plan_text.as_bytes()));
+        assert!(plan_id
+            .get(plan_text.len()..)
+            .is_some_and(|padding| padding.iter().all(|byte| *byte == 0)));
+
+        let serialized = serialize_recorded_events(&[event]).unwrap();
+        let mut lines = serialized.lines();
+        assert_eq!(lines.next(), Some("OA-RS\t1"));
+        let row = lines.next().unwrap();
+        assert!(lines.next().is_none());
+        let round_trip = parse_event_line(row).unwrap();
+        assert_eq!(round_trip, event);
+    }
+
+    #[test]
+    fn padded_code_fields_reject_internal_nul_bytes() {
+        let valid = "v1\t2000000000\t1000000000\t1\tFLIGHT\t00000000000000000000000000000001\t000000\tZAU\tFLIGHT\tPLAN\tFP7\t2";
+        let invalid_centre = valid.replace("\tZAU\t", "\tZ\0AU\t");
+        let invalid_plan = valid.replace("\tFP7\t", "\tF\0P7\t");
+        assert!(parse_event_line(&invalid_centre).is_err());
+        assert!(parse_event_line(&invalid_plan).is_err());
+
+        let valid_centre = parse_event_line(valid).unwrap().centre;
+        let mut embedded_nul = valid_centre;
+        embedded_nul[1] = 0;
+        embedded_nul[2] = b'A';
+        assert!(!is_valid_centre_code(&embedded_nul));
+    }
+
+    #[test]
+    fn identity_wire_format_preserves_absent_source_fields() {
+        // Kills whole-row refusal of a valid callsign-only OP_IDENTITY source update.
+        let line = "v1\t2000000000\t1000000000\t7\tFLIGHT\t00000000000000000000000000000001\t000000\tZAU\tFLIGHT\tIDENTITY_PARTIAL\tABC123\t-\t-";
+        let event = parse_event_line(line).unwrap();
+        assert!(matches!(
+            event.kind,
+            crate::input::EventKind::Flight(crate::input::FlightOperation::SetIdentity {
+                callsign,
+                departure,
+                arrival,
+            }) if callsign.get(..6) == Some(&b"ABC123"[..])
+                && departure == [0; 12] && arrival == [0; 12]
+        ));
+        let serialized = serialize_recorded_events(&[event]).unwrap();
+        assert!(serialized.contains("\tIDENTITY_PARTIAL\t"));
+        let row = serialized.split_terminator('\n').nth(1).unwrap();
+        assert_eq!(parse_event_line(row).unwrap(), event);
+
+        let legacy_line = line
+            .replace("IDENTITY_PARTIAL", "IDENTITY")
+            .replace("ABC123\t-\t-", "-\tKAAA\tKBBB");
+        let legacy = parse_event_line(&legacy_line).unwrap();
+        assert!(matches!(
+            legacy.kind,
+            crate::input::EventKind::Flight(crate::input::FlightOperation::SetIdentity {
+                callsign,
+                departure,
+                arrival,
+            }) if callsign.first() == Some(&b'-')
+                && departure.get(..4) == Some(b"KAAA")
+                && arrival.get(..4) == Some(b"KBBB")
+        ));
+        let legacy_serialized = serialize_recorded_events(&[legacy]).unwrap();
+        assert!(legacy_serialized.contains("\tIDENTITY\t-\tKAAA\tKBBB"));
+    }
+
+    #[test]
+    fn parses_source_lifecycle_and_unit_sector_as_separate_fields() {
+        let prefix = "v1\t2000000000\t1000000000\t1\tFLIGHT\t00000000000000000000000000000001\t000000\tZAU\tFLIGHT";
+        for (name, expected) in [
+            ("DEPART", super::FlightOperation::Depart),
+            ("COMPLETE", super::FlightOperation::Complete),
+            ("CANCEL", super::FlightOperation::Cancel),
+            ("DROP", super::FlightOperation::Drop),
+        ] {
+            let event = parse_event_line(&format!("{prefix}\t{name}")).unwrap();
+            assert_eq!(event.kind, super::EventKind::Flight(expected));
+        }
+
+        let event = parse_event_line(&format!("{prefix}\tOWNER_PARTS\tZXX\t03")).unwrap();
+        assert_eq!(
+            event.kind,
+            super::EventKind::Flight(super::FlightOperation::SetOwnerParts {
+                unit_code: *b"ZXX\0",
+                sector_code: *b"03\0\0",
+            })
+        );
+        let missing_sector = parse_event_line(&format!("{prefix}\tOWNER_PARTS\tZXX\t-")).unwrap();
+        assert_eq!(
+            missing_sector.kind,
+            super::EventKind::Flight(super::FlightOperation::SetOwnerParts {
+                unit_code: *b"ZXX\0",
+                sector_code: [0; 4],
+            })
+        );
+    }
 }

@@ -40,6 +40,11 @@ pub const MAX_OFFLINE_CA_WORK_PER_FRAME: u64 = 8_388_608;
 /// A 60-second gap emits at most 32 * 60 ticks plus 256 group updates, under 4096 rows.
 pub const MAX_FRAME_GAP_NS: i64 = 60 * SECOND_NS;
 pub const MAX_DRAIN_ROWS: usize = 4096;
+/// Recorded-hour engineering timing values, mirrored from
+/// `oa-track-tools/src/score.rs::SCORING_FIXED_10_30_120_*` (profile V1).
+pub const RECORDED_HOUR_EXPECTED_INTERVAL_NS: i64 = 10 * SECOND_NS;
+pub const RECORDED_HOUR_INIT_INTERVAL_NS: i64 = 30 * SECOND_NS;
+pub const RECORDED_HOUR_DROP_AFTER_NS: i64 = 120 * SECOND_NS;
 pub const FRAME_WIDTH: u32 = 800;
 pub const FRAME_HEIGHT: u32 = 600;
 /// C7: control redraws over the entire offline session, including ordinary completed frames.
@@ -65,6 +70,16 @@ pub struct SurveillanceProfile {
     pub max_ca_work_per_frame: u64,
     pub max_presentation_updates: usize,
     pub render_scope: bool,
+    pub tracker_timing: TrackerTimingProfile,
+}
+
+/// Explicit timing configuration for report confirmation and track retention.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TrackerTimingProfile {
+    /// Historical one-second cadence used by live-style and recorded-peak profiles.
+    DefaultV1,
+    /// Fixed 10/30/120-second engineering profile for sparse archived reports.
+    ArchivedFixed10_30_120V1,
 }
 
 pub const DEFAULT_SURVEILLANCE_PROFILE: SurveillanceProfile = SurveillanceProfile {
@@ -77,6 +92,7 @@ pub const DEFAULT_SURVEILLANCE_PROFILE: SurveillanceProfile = SurveillanceProfil
     max_ca_work_per_frame: 1_000_000,
     max_presentation_updates: MAX_PRESENTATION_UPDATES,
     render_scope: true,
+    tracker_timing: TrackerTimingProfile::DefaultV1,
 };
 const FEED_NAMES: [[u8; 8]; 5] = [
     *b"TRACK\0\0\0",
@@ -270,14 +286,19 @@ pub fn surveillance_new_with_profile(
     {
         return Err("offline surveillance profile is outside its bounded capacity contract".into());
     }
-    let tracker = tracker_new(&oa_track::TrackerConfig {
+    let mut tracker_config = oa_track::TrackerConfig {
         max_tracks: profile.max_tracks,
         out_capacity: profile.max_drain_rows,
         log_capacity: profile.max_drain_rows,
         confirm_pool: profile.max_tracks,
         ..DEFAULT_CONFIG
-    })
-    .map_err(err)?;
+    };
+    if profile.tracker_timing == TrackerTimingProfile::ArchivedFixed10_30_120V1 {
+        tracker_config.expected_interval_ns = RECORDED_HOUR_EXPECTED_INTERVAL_NS;
+        tracker_config.init_interval_ns = RECORDED_HOUR_INIT_INTERVAL_NS;
+        tracker_config.drop_after_ns = RECORDED_HOUR_DROP_AFTER_NS;
+    }
+    let tracker = tracker_new(&tracker_config).map_err(err)?;
     let mut scope = replay_new_with_top_inset(
         model,
         &ReplayConfig {
@@ -1299,6 +1320,8 @@ mod tests {
     use oa_airspace::core::model::{self, Model};
     use oa_ca::ca_cycle;
 
+    const SPARSE_TEST_ADDRESS: u32 = 0x00ab_cdef;
+
     fn test_model() -> Model {
         let mut model = Model {
             meta: model::Meta {
@@ -1374,6 +1397,7 @@ mod tests {
             receipt_ns,
             source_ns,
             sequence,
+            source_message_id: None,
             source: SourceKind::Surveillance,
             identity: crate::input::Identity {
                 flight_gufi: 1,
@@ -1389,6 +1413,67 @@ mod tests {
                 vertical_rate_fpm: Some(0),
             },
         }
+    }
+
+    fn run_sparse_aircraft_profile(
+        profile: SurveillanceProfile,
+    ) -> Result<SurveillanceFrame, String> {
+        let base_ns = 1_893_456_780_000_000_000i64;
+        let mut surveillance = surveillance_new_with_profile(
+            test_model(),
+            SurveillanceConfig {
+                centre_lat_e7: 410_000_000,
+                centre_lon_e7: -870_000_000,
+                range_nm: 100.0,
+            },
+            profile,
+        )?;
+        let mut latest = None;
+        for tick in 0..=42i64 {
+            let cutoff = base_ns + tick * SECOND_NS;
+            surveillance_begin(&mut surveillance, cutoff)?;
+            if [0, 4, 8].contains(&tick) {
+                let sequence =
+                    u64::try_from(tick).map_err(|_| "fixture tick exceeds sequence width")?;
+                let mut event = position(cutoff, cutoff, SPARSE_TEST_ADDRESS, sequence);
+                if let EventKind::Position {
+                    east_mmps,
+                    north_mmps,
+                    ..
+                } = &mut event.kind
+                {
+                    *east_mmps = 0;
+                    *north_mmps = 0;
+                }
+                surveillance_event(&mut surveillance, &event)?;
+            }
+            latest = Some(surveillance_finish(&mut surveillance, None)?);
+        }
+        latest.ok_or_else(|| "sparse profile produced no surveillance frame".to_owned())
+    }
+
+    // REQ: OA-REG-013
+    #[test]
+    fn archived_timing_confirms_and_coasts_sparse_reports() -> Result<(), String> {
+        let live_style = run_sparse_aircraft_profile(DEFAULT_SURVEILLANCE_PROFILE)?;
+        let mut archived_profile = DEFAULT_SURVEILLANCE_PROFILE;
+        archived_profile.tracker_timing = TrackerTimingProfile::ArchivedFixed10_30_120V1;
+        let archived = run_sparse_aircraft_profile(archived_profile)?;
+
+        assert!(
+            archived.tracker_stats.confirmed > live_style.tracker_stats.confirmed,
+            "archived timing did not confirm the three sparse reports: archive={:?}, default={:?}",
+            archived.tracker_stats,
+            live_style.tracker_stats
+        );
+        assert!(archived
+            .tracks
+            .iter()
+            .zip(&archived.flags)
+            .any(|(track, flags)| {
+                track.address == SPARSE_TEST_ADDRESS && flags & O_COAST == O_COAST
+            }));
+        Ok(())
     }
 
     // REQ: OA-REG-018

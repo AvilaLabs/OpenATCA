@@ -7,12 +7,17 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 use oa_regional_session::{
-    flush_receipt_group, parse_event_line, push_event, session_cursor_new_with_limit,
-    session_total_events, summarize_input_batch, FrameEvidence, InputError, MAX_EVENT_LINE_BYTES,
-    MAX_RECORDED_PROFILE_EVENTS, MAX_SESSION_EVENTS,
+    flush_receipt_group, parse_event_line, push_event, session_cursor_new_with_profile_limits,
+    session_total_events, summarize_input_batch_with_limit, FrameEvidence, InputError,
+    MAX_EVENTS_PER_RECEIPT, MAX_EVENT_LINE_BYTES, MAX_RECORDED_PROFILE_EVENTS, MAX_SESSION_EVENTS,
+    RECORDED_HOUR_MAX_EVENTS_PER_RECEIPT,
 };
 
 const MAX_INPUT_BYTES: u64 = 16 * 1024 * 1024;
+/// Explicit one-hour profile input envelope. This bounds the retained byte buffer independently
+/// of the existing ten-million-event parser ceiling; input is refused rather than truncated.
+const MAX_RECORDED_HOUR_INPUT_BYTES: u64 =
+    oa_regional_session::recordings_cli::MAX_RECORDED_HOUR_BYTES as u64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct RowAccounting {
@@ -26,7 +31,9 @@ struct RowAccounting {
 enum CliError {
     Usage,
     Io(io::Error),
-    InputTooLarge,
+    InputTooLarge {
+        max_bytes: u64,
+    },
     InvalidUtf8,
     BadHeader,
     MissingHeader,
@@ -52,8 +59,16 @@ struct Arguments {
     model: Option<oa_regional_session::cli::ModelSource>,
     safety: oa_regional_session::cli::MsawSource,
     performance: Option<PathBuf>,
-    profile: oa_regional_session::cli::RegionalCliProfile,
+    options: oa_regional_session::cli::RegionalSessionOptions,
     quarantine_release: Option<oa_regional_session::cli::QuarantineReleaseOptions>,
+}
+
+#[derive(Default)]
+struct ReplayArgs {
+    profile: Option<oa_regional_session::cli::RegionalCliProfile>,
+    start_ns: Option<i64>,
+    end_ns: Option<i64>,
+    warmup_start_ns: Option<i64>,
 }
 
 fn arguments() -> Result<Arguments, CliError> {
@@ -72,7 +87,7 @@ fn arguments() -> Result<Arguments, CliError> {
     let mut processor_id = None;
     let mut safety = None;
     let mut performance = None;
-    let mut profile = None;
+    let mut replay = ReplayArgs::default();
     let mut quarantine_source = None;
     let mut quarantine_instance = None;
     let mut quarantine_item = None;
@@ -125,19 +140,13 @@ fn arguments() -> Result<Arguments, CliError> {
             Some("--performance") if execute && performance.is_none() => {
                 performance = Some(args.next().map(PathBuf::from).ok_or(CliError::Usage)?);
             }
-            Some("--profile") if execute && profile.is_none() => {
-                profile = Some(
-                    match args
-                        .next()
-                        .and_then(|value| value.into_string().ok())
-                        .as_deref()
-                    {
-                        Some("recorded-peak-rendered") => {
-                            oa_regional_session::cli::RegionalCliProfile::RecordedPeakRendered
-                        }
-                        _ => return Err(CliError::Usage),
-                    },
-                );
+            Some(
+                flag @ ("--profile"
+                | "--replay-start-ns"
+                | "--replay-end-ns"
+                | "--replay-warmup-start-ns"),
+            ) if execute => {
+                parse_replay_option(flag, &mut args, &mut replay)?;
             }
             Some("--quarantine-release-source") if execute && quarantine_source.is_none() => {
                 quarantine_source = args
@@ -313,15 +322,128 @@ fn arguments() -> Result<Arguments, CliError> {
     } else {
         None
     };
+    let profile = replay
+        .profile
+        .unwrap_or(oa_regional_session::cli::RegionalCliProfile::Default);
+    let options = session_options_with_warmup(
+        profile,
+        replay.start_ns,
+        replay.end_ns,
+        replay.warmup_start_ns,
+    )?;
     Ok(Arguments {
         input,
         output,
         model,
         safety: safety.unwrap_or(oa_regional_session::cli::MsawSource::Disabled),
         performance,
-        profile: profile.unwrap_or(oa_regional_session::cli::RegionalCliProfile::Default),
+        options,
         quarantine_release,
     })
+}
+
+fn parse_replay_option(
+    flag: &str,
+    args: &mut impl Iterator<Item = std::ffi::OsString>,
+    replay: &mut ReplayArgs,
+) -> Result<(), CliError> {
+    match flag {
+        "--profile" if replay.profile.is_none() => {
+            let value = args
+                .next()
+                .and_then(|value| value.into_string().ok())
+                .ok_or(CliError::Usage)?;
+            replay.profile = Some(parse_cli_profile(&value)?);
+        }
+        "--replay-start-ns" if replay.start_ns.is_none() => {
+            replay.start_ns = Some(
+                args.next()
+                    .and_then(|value| value.into_string().ok())
+                    .and_then(|value| value.parse::<i64>().ok())
+                    .ok_or(CliError::Usage)?,
+            );
+        }
+        "--replay-end-ns" if replay.end_ns.is_none() => {
+            replay.end_ns = Some(
+                args.next()
+                    .and_then(|value| value.into_string().ok())
+                    .and_then(|value| value.parse::<i64>().ok())
+                    .ok_or(CliError::Usage)?,
+            );
+        }
+        "--replay-warmup-start-ns" if replay.warmup_start_ns.is_none() => {
+            replay.warmup_start_ns = Some(
+                args.next()
+                    .and_then(|value| value.into_string().ok())
+                    .and_then(|value| value.parse::<i64>().ok())
+                    .ok_or(CliError::Usage)?,
+            );
+        }
+        _ => return Err(CliError::Usage),
+    }
+    Ok(())
+}
+
+fn parse_cli_profile(
+    value: &str,
+) -> Result<oa_regional_session::cli::RegionalCliProfile, CliError> {
+    match value {
+        "recorded-peak-rendered" => {
+            Ok(oa_regional_session::cli::RegionalCliProfile::RecordedPeakRendered)
+        }
+        "recorded-hour-rendered" => {
+            Ok(oa_regional_session::cli::RegionalCliProfile::RecordedHourRendered)
+        }
+        _ => Err(CliError::Usage),
+    }
+}
+
+#[cfg(test)]
+fn session_options(
+    profile: oa_regional_session::cli::RegionalCliProfile,
+    start_ns: Option<i64>,
+    end_ns: Option<i64>,
+) -> Result<oa_regional_session::cli::RegionalSessionOptions, CliError> {
+    session_options_with_warmup(profile, start_ns, end_ns, None)
+}
+
+fn session_options_with_warmup(
+    profile: oa_regional_session::cli::RegionalCliProfile,
+    start_ns: Option<i64>,
+    end_ns: Option<i64>,
+    warmup_start_ns: Option<i64>,
+) -> Result<oa_regional_session::cli::RegionalSessionOptions, CliError> {
+    let recorded_hour = match (start_ns, end_ns) {
+        (None, None) if warmup_start_ns.is_none() => None,
+        (Some(start_ns), Some(end_ns)) => Some(
+            oa_regional_session::cli::RecordedHourWindow::new_with_warmup(
+                start_ns,
+                end_ns,
+                warmup_start_ns,
+            )
+            .map_err(|_| CliError::Usage)?,
+        ),
+        _ => return Err(CliError::Usage),
+    };
+    if (profile == oa_regional_session::cli::RegionalCliProfile::RecordedHourRendered)
+        != recorded_hour.is_some()
+    {
+        return Err(CliError::Usage);
+    }
+    Ok(oa_regional_session::cli::RegionalSessionOptions {
+        profile,
+        recorded_hour,
+    })
+}
+
+fn input_byte_limit(profile: oa_regional_session::cli::RegionalCliProfile) -> u64 {
+    match profile {
+        oa_regional_session::cli::RegionalCliProfile::RecordedHourRendered => {
+            MAX_RECORDED_HOUR_INPUT_BYTES
+        }
+        oa_regional_session::cli::RegionalCliProfile::Default
+        | oa_regional_session::cli::RegionalCliProfile::RecordedPeakRendered => MAX_INPUT_BYTES,
+    }
 }
 
 fn parse_audit_digest(value: &str) -> Result<[u8; 32], ()> {
@@ -373,18 +495,28 @@ fn hex_nibble(byte: u8) -> Option<u8> {
     }
 }
 
-fn read_input(path: &Path) -> Result<Vec<u8>, CliError> {
+fn read_input(path: &Path, max_bytes: u64) -> Result<Vec<u8>, CliError> {
     let (file, len) = oa_sealed::open_regular(path).map_err(CliError::Io)?;
-    if len > MAX_INPUT_BYTES {
-        return Err(CliError::InputTooLarge);
+    if len > max_bytes {
+        return Err(CliError::InputTooLarge { max_bytes });
     }
+    let bytes = read_bounded_bytes(file, max_bytes)?;
+    Ok(bytes)
+}
+
+fn read_bounded_bytes(reader: impl Read, max_bytes: u64) -> Result<Vec<u8>, CliError> {
+    let take_bytes = max_bytes
+        .checked_add(1)
+        .ok_or(CliError::InputTooLarge { max_bytes })?;
     let mut bytes = Vec::new();
-    file.take(MAX_INPUT_BYTES + 1)
+    reader
+        .take(take_bytes)
         .read_to_end(&mut bytes)
         .map_err(CliError::Io)?;
-    let byte_count = u64::try_from(bytes.len()).map_err(|_| CliError::InputTooLarge)?;
-    if byte_count > MAX_INPUT_BYTES {
-        return Err(CliError::InputTooLarge);
+    let byte_count =
+        u64::try_from(bytes.len()).map_err(|_| CliError::InputTooLarge { max_bytes })?;
+    if byte_count > max_bytes {
+        return Err(CliError::InputTooLarge { max_bytes });
     }
     Ok(bytes)
 }
@@ -427,7 +559,16 @@ fn parse_input(bytes: &[u8]) -> Result<Vec<FrameEvidence>, CliError> {
     parse_input_with_limit(bytes, MAX_SESSION_EVENTS)
 }
 
+#[cfg(test)]
 fn parse_input_with_limit(bytes: &[u8], max_events: usize) -> Result<Vec<FrameEvidence>, CliError> {
+    parse_input_with_profile_limits(bytes, max_events, MAX_EVENTS_PER_RECEIPT)
+}
+
+fn parse_input_with_profile_limits(
+    bytes: &[u8],
+    max_events: usize,
+    max_events_per_receipt: usize,
+) -> Result<Vec<FrameEvidence>, CliError> {
     let text = std::str::from_utf8(bytes).map_err(|_| CliError::InvalidUtf8)?;
     let mut lines = text.split('\n');
     match lines.next() {
@@ -435,8 +576,8 @@ fn parse_input_with_limit(bytes: &[u8], max_events: usize) -> Result<Vec<FrameEv
         Some(_) => return Err(CliError::BadHeader),
         None => return Err(CliError::MissingHeader),
     }
-    let mut cursor =
-        session_cursor_new_with_limit(max_events).map_err(|_| CliError::TooManyEvents)?;
+    let mut cursor = session_cursor_new_with_profile_limits(max_events, max_events_per_receipt)
+        .map_err(|_| CliError::TooManyEvents)?;
     let mut evidence = Vec::new();
     let mut line_number = 1usize;
     while let Some(raw) = lines.next() {
@@ -516,11 +657,17 @@ fn parse_input_with_limit(bytes: &[u8], max_events: usize) -> Result<Vec<FrameEv
             }
         };
         if let Some(batch) = completed {
-            evidence.push(summarize_input_batch(&batch).map_err(|_| CliError::TooManyEvents)?);
+            evidence.push(
+                summarize_input_batch_with_limit(&batch, max_events_per_receipt)
+                    .map_err(|_| CliError::TooManyEvents)?,
+            );
         }
     }
     if let Some(batch) = flush_receipt_group(&mut cursor).map_err(|_| CliError::TooManyEvents)? {
-        evidence.push(summarize_input_batch(&batch).map_err(|_| CliError::TooManyEvents)?);
+        evidence.push(
+            summarize_input_batch_with_limit(&batch, max_events_per_receipt)
+                .map_err(|_| CliError::TooManyEvents)?,
+        );
     }
     Ok(evidence)
 }
@@ -576,7 +723,7 @@ fn run() -> Result<(), CliError> {
         model,
         safety,
         performance,
-        profile,
+        options,
         quarantine_release,
     } = arguments()?;
     oa_sealed::refuse_io(&input).map_err(CliError::Io)?;
@@ -593,27 +740,35 @@ fn run() -> Result<(), CliError> {
     if let Some(request) = &quarantine_release {
         oa_sealed::refuse_io(&request.audit_log).map_err(CliError::Io)?;
     }
-    let bytes = read_input(&input)?;
-    let max_events = match profile {
+    let bytes = read_input(&input, input_byte_limit(options.profile))?;
+    let max_events = match options.profile {
         oa_regional_session::cli::RegionalCliProfile::Default => MAX_SESSION_EVENTS,
-        oa_regional_session::cli::RegionalCliProfile::RecordedPeakRendered => {
+        oa_regional_session::cli::RegionalCliProfile::RecordedPeakRendered
+        | oa_regional_session::cli::RegionalCliProfile::RecordedHourRendered => {
             MAX_RECORDED_PROFILE_EVENTS
         }
     };
-    let frames = parse_input_with_limit(&bytes, max_events)?;
-    match model {
-        Some(source) => {
-            oa_regional_session::cli::run_session_with_profile_options_and_quarantine_release(
-                &bytes,
-                &output,
-                &source,
-                &safety,
-                performance.as_deref(),
-                profile,
-                quarantine_release.as_ref(),
-            )
-            .map_err(CliError::Runtime)
+    let max_events_per_receipt = match options.profile {
+        oa_regional_session::cli::RegionalCliProfile::RecordedHourRendered => {
+            RECORDED_HOUR_MAX_EVENTS_PER_RECEIPT
         }
+        oa_regional_session::cli::RegionalCliProfile::Default
+        | oa_regional_session::cli::RegionalCliProfile::RecordedPeakRendered => {
+            MAX_EVENTS_PER_RECEIPT
+        }
+    };
+    let frames = parse_input_with_profile_limits(&bytes, max_events, max_events_per_receipt)?;
+    match model {
+        Some(source) => oa_regional_session::cli::run_session_with_options_and_quarantine_release(
+            &bytes,
+            &output,
+            &source,
+            &safety,
+            performance.as_deref(),
+            options,
+            quarantine_release.as_ref(),
+        )
+        .map_err(CliError::Runtime),
         None => write_report(&output, &frames),
     }
 }
@@ -621,9 +776,12 @@ fn run() -> Result<(), CliError> {
 fn main() {
     if let Err(error) = run() {
         let message = match error {
-            CliError::Usage => "usage: oa-regional-session run --input FILE --out NEW_DIR (--snapshot FILE | --synthetic-model | --issued-package DIR --issued-manifest-sha256 PIN --processor-id ID) [--msaw-inputs MANIFEST | --synthetic-msaw] [--performance MANIFEST] [--profile recorded-peak-rendered] [--quarantine-release-source flight-data|surveillance --quarantine-release-instance N --quarantine-release-item N --manual-handoff-ref TEXT --audit-registry FILE --audit-registry-sha256 SHA256 --audit-log FILE --audit-count N --audit-tail SHA256 --audit-principal N [--audit-role operate|configure] --audit-time-ns N]; stage --input FILE --out NEW_DIR".to_owned(),
+            CliError::Usage => "usage: oa-regional-session run --input FILE --out NEW_DIR (--snapshot FILE | --synthetic-model | --issued-package DIR --issued-manifest-sha256 PIN --processor-id ID) [--msaw-inputs MANIFEST | --synthetic-msaw] [--performance MANIFEST] [--profile recorded-peak-rendered|recorded-hour-rendered --replay-start-ns NS --replay-end-ns NS [--replay-warmup-start-ns NS]] [--quarantine-release-source flight-data|surveillance --quarantine-release-instance N --quarantine-release-item N --manual-handoff-ref TEXT --audit-registry FILE --audit-registry-sha256 SHA256 --audit-log FILE --audit-count N --audit-tail SHA256 --audit-principal N [--audit-role operate|configure] --audit-time-ns NS]; stage --input FILE --out NEW_DIR".to_owned(),
             CliError::Io(error) => format!("I/O error: {error}"),
-            CliError::InputTooLarge => "input exceeds the 16 MiB limit".to_owned(),
+            CliError::InputTooLarge { max_bytes } => format!(
+                "input exceeds the {} MiB profile limit",
+                max_bytes / (1024 * 1024)
+            ),
             CliError::InvalidUtf8 => "input is not UTF-8".to_owned(),
             CliError::BadHeader => "expected header OA-RS<TAB>1".to_owned(),
             CliError::MissingHeader => "input header is missing".to_owned(),
@@ -649,13 +807,217 @@ mod tests {
     #![allow(clippy::expect_used)]
 
     use super::{
-        load_quarantine_principal_registry, parse_input, parse_input_with_limit, CliError,
-        FrameEvidence, InputError, RowAccounting,
+        input_byte_limit, load_quarantine_principal_registry, parse_cli_profile, parse_input,
+        parse_input_with_limit, parse_input_with_profile_limits, read_bounded_bytes, read_input,
+        session_options, session_options_with_warmup, CliError, FrameEvidence, InputError,
+        RowAccounting, MAX_EVENTS_PER_RECEIPT, MAX_INPUT_BYTES, MAX_RECORDED_HOUR_INPUT_BYTES,
+        MAX_RECORDED_PROFILE_EVENTS, RECORDED_HOUR_MAX_EVENTS_PER_RECEIPT,
     };
+    use oa_regional_session::cli::RegionalCliProfile;
+    use oa_regional_session::surveillance;
+    use std::ffi::OsString;
+    use std::fs::OpenOptions;
+    use std::io::Cursor;
+    use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     const ROW: &str = "v1\t1000\t900\t{sequence}\tADAPTATION\t00000000000000000000000000000385\tABC123\tZAU1\tFEED\tUP\t1";
     static REGISTRY_TEST_ID: AtomicU64 = AtomicU64::new(0);
+    static INPUT_TEST_ID: AtomicU64 = AtomicU64::new(0);
+    const HOUR_NS: i64 = 3_600 * 1_000_000_000;
+
+    fn input_test_path(label: &str) -> PathBuf {
+        let id = INPUT_TEST_ID.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "oa-regional-input-{label}-{}-{id}.bin",
+            std::process::id()
+        ))
+    }
+
+    // REQ: OA-REG-019
+    #[test]
+    fn recorded_hour_has_separate_byte_cap_and_requires_one_exact_window() {
+        let default = RegionalCliProfile::Default;
+        let peak = parse_cli_profile("recorded-peak-rendered").expect("legacy profile parses");
+        let hour = parse_cli_profile("recorded-hour-rendered").expect("hour profile parses");
+        assert_eq!(input_byte_limit(default), MAX_INPUT_BYTES);
+        assert_eq!(input_byte_limit(peak), MAX_INPUT_BYTES);
+        assert_eq!(input_byte_limit(hour), MAX_RECORDED_HOUR_INPUT_BYTES);
+        assert!(session_options(default, None, None).is_ok());
+        assert!(session_options(peak, None, None).is_ok());
+        assert!(session_options(hour, None, None).is_err());
+        assert!(session_options(default, Some(0), Some(HOUR_NS)).is_err());
+        assert!(session_options(hour, Some(0), None).is_err());
+        assert!(session_options(hour, Some(0), Some(HOUR_NS)).is_ok());
+        assert!(parse_cli_profile("unbounded").is_err());
+    }
+
+    // REQ: OA-REG-019
+    #[test]
+    fn replay_cli_parser_requires_both_window_flags_only_for_hour_profile() {
+        let mut replay = super::ReplayArgs::default();
+        let mut profile_value = vec![OsString::from("recorded-hour-rendered")].into_iter();
+        super::parse_replay_option("--profile", &mut profile_value, &mut replay)
+            .expect("synthetic test value");
+        let mut start_value = vec![OsString::from("0")].into_iter();
+        super::parse_replay_option("--replay-start-ns", &mut start_value, &mut replay)
+            .expect("synthetic test value");
+        let mut end_value = vec![OsString::from(HOUR_NS.to_string())].into_iter();
+        super::parse_replay_option("--replay-end-ns", &mut end_value, &mut replay)
+            .expect("synthetic test value");
+        let options = session_options(
+            replay.profile.expect("synthetic test value"),
+            replay.start_ns,
+            replay.end_ns,
+        )
+        .expect("hour profile has one validated half-open window");
+        assert_eq!(options.profile, RegionalCliProfile::RecordedHourRendered);
+        assert!(options.recorded_hour.is_some());
+
+        assert!(session_options(RegionalCliProfile::RecordedHourRendered, None, None).is_err());
+        assert!(session_options(RegionalCliProfile::Default, Some(0), Some(HOUR_NS)).is_err());
+        assert!(session_options(RegionalCliProfile::Default, Some(0), None).is_err());
+        assert!(session_options(RegionalCliProfile::Default, None, Some(HOUR_NS)).is_err());
+        let mut duplicate_profile = vec![OsString::from("recorded-peak-rendered")].into_iter();
+        assert!(
+            super::parse_replay_option("--profile", &mut duplicate_profile, &mut replay).is_err()
+        );
+    }
+
+    // REQ: OA-REG-019. Mutation killed: allowing an unbounded or display-after warmup interval.
+    #[test]
+    fn warmup_option_requires_a_bounded_whole_second_recorded_window() {
+        let display_start = HOUR_NS * 4;
+        let display_end = display_start + HOUR_NS;
+        let warmup_start = display_start - 600 * surveillance::SECOND_NS;
+        let options = session_options_with_warmup(
+            RegionalCliProfile::RecordedHourRendered,
+            Some(display_start),
+            Some(display_end),
+            Some(warmup_start),
+        )
+        .expect("ten-minute warmup interval");
+        let window = options.recorded_hour.expect("recorded-hour selection");
+        assert_eq!(window.warmup_start_ns, Some(warmup_start));
+        assert_eq!(
+            ((window.start_ns - window.warmup_start_ns.expect("parsed warmup start"))
+                / surveillance::SECOND_NS) as usize,
+            ((display_start - warmup_start) / surveillance::SECOND_NS) as usize
+        );
+        assert_eq!(
+            window.frame_count(),
+            ((display_end - display_start) / surveillance::SECOND_NS) as usize
+        );
+        assert!(session_options_with_warmup(
+            RegionalCliProfile::RecordedHourRendered,
+            Some(display_start),
+            Some(display_end),
+            Some(warmup_start - surveillance::SECOND_NS),
+        )
+        .is_err());
+        assert!(session_options_with_warmup(
+            RegionalCliProfile::RecordedHourRendered,
+            Some(display_start),
+            Some(display_end),
+            Some(display_start + surveillance::SECOND_NS),
+        )
+        .is_err());
+        assert!(session_options_with_warmup(
+            RegionalCliProfile::RecordedHourRendered,
+            Some(display_start),
+            Some(display_end),
+            Some(warmup_start + 1),
+        )
+        .is_err());
+        assert!(session_options_with_warmup(
+            RegionalCliProfile::RecordedHourRendered,
+            None,
+            None,
+            Some(warmup_start),
+        )
+        .is_err());
+    }
+
+    // REQ: OA-REG-019. Mutation killed: silently ignoring the explicit warmup CLI flag.
+    #[test]
+    fn replay_cli_parser_preserves_explicit_warmup_start() {
+        let mut replay = super::ReplayArgs::default();
+        let warmup_start_ns = 1_700_000_000_000_000_000i64;
+        let mut warmup = vec![OsString::from(warmup_start_ns.to_string())].into_iter();
+        super::parse_replay_option("--replay-warmup-start-ns", &mut warmup, &mut replay)
+            .expect("synthetic warmup flag");
+        assert_eq!(replay.warmup_start_ns, Some(warmup_start_ns));
+        assert!(super::parse_replay_option(
+            "--replay-warmup-start-ns",
+            &mut Vec::<OsString>::new().into_iter(),
+            &mut replay,
+        )
+        .is_err());
+    }
+
+    // REQ: OA-REG-019
+    #[test]
+    fn bounded_input_reader_accepts_exact_limit_and_refuses_one_more_byte() {
+        let limit = 4_u64;
+        assert_eq!(
+            read_bounded_bytes(Cursor::new(b"abcd"), limit).expect("synthetic test value"),
+            b"abcd"
+        );
+        assert!(matches!(
+            read_bounded_bytes(Cursor::new(b"abcde"), limit),
+            Err(CliError::InputTooLarge { max_bytes }) if max_bytes == limit
+        ));
+    }
+
+    // REQ: OA-REG-019
+    #[test]
+    fn recorded_hour_reader_admits_more_than_legacy_cap_and_refuses_its_own_cap() {
+        let path = input_test_path("large");
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .expect("create synthetic sparse input");
+        file.set_len(MAX_INPUT_BYTES + 1)
+            .expect("set synthetic input length");
+        drop(file);
+
+        assert!(matches!(
+            read_input(&path, input_byte_limit(RegionalCliProfile::Default)),
+            Err(CliError::InputTooLarge { max_bytes }) if max_bytes == MAX_INPUT_BYTES
+        ));
+        let hour_bytes = read_input(
+            &path,
+            input_byte_limit(RegionalCliProfile::RecordedHourRendered),
+        )
+        .expect("hour profile accepts the same bounded input");
+        assert_eq!(
+            u64::try_from(hour_bytes.len()).expect("synthetic test value"),
+            MAX_INPUT_BYTES + 1
+        );
+        drop(hour_bytes);
+        std::fs::remove_file(&path).expect("remove synthetic input");
+
+        let oversized_path = input_test_path("over-cap");
+        let oversized = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&oversized_path)
+            .expect("create synthetic over-cap input");
+        oversized
+            .set_len(MAX_RECORDED_HOUR_INPUT_BYTES + 1)
+            .expect("set synthetic over-cap length");
+        drop(oversized);
+        assert!(matches!(
+            read_input(
+                &oversized_path,
+                input_byte_limit(RegionalCliProfile::RecordedHourRendered)
+            ),
+            Err(CliError::InputTooLarge { max_bytes })
+                if max_bytes == MAX_RECORDED_HOUR_INPUT_BYTES
+        ));
+        std::fs::remove_file(oversized_path).expect("remove synthetic over-cap input");
+    }
 
     // REQ: OA-AUDIT-002, OA-AUDIT-008
     #[test]
@@ -755,6 +1117,45 @@ mod tests {
             }
         );
         assert!(parse_input(input.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn recorded_hour_preflight_accepts_dense_receipt_and_default_refuses_it() {
+        let rows = (1..=MAX_EVENTS_PER_RECEIPT + 1)
+            .map(|sequence| ROW.replace("{sequence}", &sequence.to_string()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let input = format!("OA-RS\t1\n{rows}\n");
+        let hour = parse_input_with_profile_limits(
+            input.as_bytes(),
+            MAX_RECORDED_PROFILE_EVENTS,
+            RECORDED_HOUR_MAX_EVENTS_PER_RECEIPT,
+        )
+        .expect("hour preflight uses the explicit larger receipt bound");
+        assert_eq!(hour.len(), 1);
+        assert_eq!(
+            hour.first()
+                .expect("the dense receipt emits one frame")
+                .input_events as usize,
+            MAX_EVENTS_PER_RECEIPT + 1
+        );
+
+        assert_eq!(
+            ordering_accounting(
+                parse_input_with_profile_limits(
+                    input.as_bytes(),
+                    MAX_RECORDED_PROFILE_EVENTS,
+                    MAX_EVENTS_PER_RECEIPT,
+                ),
+                "receipt group capacity reached"
+            ),
+            RowAccounting {
+                admitted: MAX_EVENTS_PER_RECEIPT as u64,
+                refused: 1,
+                unexamined: 0,
+                denominator: (MAX_EVENTS_PER_RECEIPT + 1) as u64,
+            }
+        );
     }
 
     #[test]

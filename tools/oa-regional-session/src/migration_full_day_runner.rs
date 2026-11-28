@@ -76,13 +76,14 @@ fn fixm_summary_refusal_count(
 
 // Budget: each receipt group holds at most MAX_EVENT_GROUP normalized events. The fixed
 // normalized event (including its largest 16-fix/256-byte route variant) plus original receive
-// timestamp is 432 bytes; the pre-reserved Vec is therefore bounded to 110,592 element bytes.
+// timestamp and the explicit Option<u64> source-message identity is 448 bytes; the latter adds
+// 16 bytes to the prior layout. The unchanged 256-entry Vec holds 114,688 element bytes.
 #[repr(C)]
 struct PendingEvent {
     event: NormalizedEvent,
     original_receive_ns: i64,
 }
-const _: () = assert!(core::mem::size_of::<PendingEvent>() == 432);
+const _: () = assert!(core::mem::size_of::<PendingEvent>() == 448);
 
 #[derive(Clone, Copy)]
 struct PositionAvailability {

@@ -401,6 +401,7 @@ pub fn nam_flight_apply(
         receipt_ns: context.receipt_ns,
         source_ns: context.source_ns,
         sequence: u64::from(number),
+        source_message_id: None,
         source: SourceKind::Flight,
         identity: Identity {
             flight_gufi: context.key.gufi,

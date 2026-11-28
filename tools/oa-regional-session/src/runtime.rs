@@ -8,7 +8,10 @@ use crate::flight::{
 };
 use crate::nam_flight::{self, NamFlightContext, NamFlightResult, NamFlightRuntime};
 use crate::route::{self, RouteStore};
-use crate::session::{summarize_input_batch, FrameEvidence, ReceiptBatch, MAX_EVENTS_PER_RECEIPT};
+use crate::session::{
+    summarize_input_batch_with_limit, FrameEvidence, ReceiptBatch, MAX_EVENTS_PER_RECEIPT,
+    RECORDED_HOUR_MAX_EVENTS_PER_RECEIPT,
+};
 use crate::surveillance::{self, Surveillance, SurveillanceConfig, SurveillanceFrame};
 use oa_adapt::manifest::VerifiedPackage;
 use oa_airspace::core::model::Model;
@@ -30,12 +33,12 @@ const QUARANTINE_CLOCK_DOMAIN_ID: u32 = 1;
 const MAX_FLIGHT_KEY_SEARCH_STEPS: usize = 14;
 /// C7 budget for the bounded in-place suffix move when a new key is registered.
 const MAX_FLIGHT_KEY_INSERT_MOVES: usize = flight::MAX_OFFLINE_DRIVER_FLIGHTS;
-/// C7 budget for retiring absent ledger keys when the view ledger reaches its configured capacity.
+/// C7 budget for terminal-key retirement when the view ledger reaches its configured capacity.
 const MAX_FLIGHT_KEY_RECLAIM_WORK: usize = flight::MAX_OFFLINE_DRIVER_FLIGHTS;
-/// C7 worst-case hash probes for that retirement pass: one `index_find` per outer key, each
-/// bounded by the exact `by_key.cells.len()` limit exposed by the flight adapter.
+/// C7 worst-case hash probes for that retirement pass: at most two exact-key lookups per ledger
+/// key, each bounded by the driver's exact `by_key.cells.len()` limit.
 const MAX_FLIGHT_KEY_RECLAIM_PROBE_WORK: usize =
-    MAX_FLIGHT_KEY_RECLAIM_WORK * flight::MAX_OFFLINE_DRIVER_KEY_INDEX_CELLS;
+    MAX_FLIGHT_KEY_RECLAIM_WORK * 2 * flight::MAX_OFFLINE_DRIVER_KEY_INDEX_CELLS;
 /// C7 budget for exporting the current bounded full-key flight view list once per frame.
 const MAX_FLIGHT_DATA_VIEW_WORK: usize = flight::MAX_OFFLINE_DRIVER_FLIGHTS;
 const MAX_RUNTIME_ITEM_WORK: u32 =
@@ -115,6 +118,7 @@ pub struct RegionalRunProfile {
     pub reclaim_current_route_by_key: bool,
     pub max_flight_log_entries: usize,
     pub max_total_events: usize,
+    pub max_events_per_receipt: usize,
 }
 
 impl RegionalRunProfile {
@@ -137,12 +141,14 @@ impl RegionalRunProfile {
                 max_ca_work_per_frame: 8_388_608,
                 max_presentation_updates: 0,
                 render_scope: false,
+                tracker_timing: surveillance::TrackerTimingProfile::DefaultV1,
             },
             max_flights: 8192,
             max_route_revisions: route::MAX_ROUTE_REVISIONS,
             reclaim_current_route_by_key: false,
             max_flight_log_entries: MAX_DRIVER_LOG_ENTRIES,
             max_total_events: crate::session::MAX_RECORDED_PROFILE_EVENTS,
+            max_events_per_receipt: MAX_EVENTS_PER_RECEIPT,
         }
     }
 
@@ -156,6 +162,15 @@ impl RegionalRunProfile {
         profile.max_flights = profile.surveillance.max_tracks;
         profile.surveillance.max_presentation_updates = surveillance::MAX_PRESENTATION_UPDATES;
         profile.surveillance.render_scope = true;
+        profile
+    }
+
+    /// Bounded output profile for imported recorded-hour replay. Only this explicitly selected
+    /// offline profile raises the normalized receipt group to accommodate dense SFDPS cutoffs.
+    pub const fn recorded_hour_rendered() -> Self {
+        let mut profile = Self::recorded_peak_rendered();
+        profile.surveillance.max_frames = crate::cli::RECORDED_HOUR_FRAMES;
+        profile.max_events_per_receipt = RECORDED_HOUR_MAX_EVENTS_PER_RECEIPT;
         profile
     }
 
@@ -184,6 +199,7 @@ pub const DEFAULT_REGIONAL_RUN_PROFILE: RegionalRunProfile = RegionalRunProfile 
     reclaim_current_route_by_key: false,
     max_flight_log_entries: MAX_DRIVER_LOG_ENTRIES,
     max_total_events: crate::session::MAX_SESSION_EVENTS,
+    max_events_per_receipt: MAX_EVENTS_PER_RECEIPT,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -289,6 +305,9 @@ pub struct RegionalFrame {
     pub flight_data_as_of: Vec<flight::SharedFlightAsOf>,
     /// Known keys without a current view for this centre; never silently folded into the list.
     pub flight_data_unavailable: u32,
+    /// Bounded address-join counts for the exact rendered frame; unavailable other-centre keys
+    /// remain separately represented by `flight_data_unavailable`.
+    pub flight_correlation: FlightCorrelationSummary,
     pub flight_report: FlightDriverReport,
     pub refused_legacy_route_events: u64,
     pub controller_views: Vec<oa_display::interaction::TargetView>,
@@ -299,6 +318,18 @@ pub struct RegionalFrame {
     pub controller_selection: Option<oa_display::interaction::FlightIdentity>,
     pub console_text: String,
     pub quarantine: RuntimeQuarantineReport,
+}
+
+/// Aggregate of full-key flight views available for this runtime centre and address joins for
+/// observed tracks. It contains no per-flight identifiers.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FlightCorrelationSummary {
+    pub available_flight_views_for_runtime_centre: u32,
+    pub positive_address_claims_for_runtime_centre: u32,
+    pub matched_observed_tracks: u32,
+    pub unmatched_observed_tracks: u32,
+    pub ambiguous_observed_tracks: u32,
+    pub refused_observed_track_lookups: u32,
 }
 // A7.2: cold shell evidence, bounded by runtime capacities.
 
@@ -352,13 +383,24 @@ fn quarantine_source(event: &crate::input::NormalizedEvent) -> Result<InputSourc
     }
 }
 
-fn runtime_item_id(batch_ordinal: u64, item_index: usize) -> Result<u64, String> {
+fn runtime_item_id(
+    batch_ordinal: u64,
+    item_index: usize,
+    receipt_limit: usize,
+) -> Result<u64, String> {
     let index = u64::try_from(item_index).map_err(|_| "quarantine item index overflow")?;
-    if index >= (1 << 8) || batch_ordinal == 0 || batch_ordinal > (u64::MAX >> 8) {
+    if !matches!(
+        receipt_limit,
+        MAX_EVENTS_PER_RECEIPT | RECORDED_HOUR_MAX_EVENTS_PER_RECEIPT
+    ) {
+        return Err("quarantine batch/item identity overflow".into());
+    }
+    let stride = u64::try_from(receipt_limit).map_err(|_| "quarantine item index overflow")?;
+    if index >= stride || batch_ordinal == 0 {
         return Err("quarantine batch/item identity overflow".into());
     }
     batch_ordinal
-        .checked_shl(8)
+        .checked_mul(stride)
         .and_then(|base| base.checked_add(index))
         .filter(|value| *value != 0)
         .ok_or_else(|| "quarantine item identity overflow".into())
@@ -418,7 +460,7 @@ fn flight_key_search(
     Ok(Err(low))
 }
 
-fn reclaim_retired_flight_keys(runtime: &mut RegionalRuntime) -> Result<(), String> {
+fn reclaim_retired_flight_keys(runtime: &mut RegionalRuntime, now_ms: i64) -> Result<(), String> {
     let len = runtime.known_flights.len();
     if len > MAX_FLIGHT_KEY_RECLAIM_WORK {
         return Err("flight-key retirement scan exceeded its C7 bound".into());
@@ -429,6 +471,7 @@ fn reclaim_retired_flight_keys(runtime: &mut RegionalRuntime) -> Result<(), Stri
     }
     let maximum_probe_work = len
         .checked_mul(probes_per_key)
+        .and_then(|work| work.checked_mul(2))
         .ok_or("flight-key retirement probe-work counter overflow")?;
     if maximum_probe_work > MAX_FLIGHT_KEY_RECLAIM_PROBE_WORK {
         return Err("flight-key retirement probe-work budget exceeded".into());
@@ -443,7 +486,9 @@ fn reclaim_retired_flight_keys(runtime: &mut RegionalRuntime) -> Result<(), Stri
             .get(read)
             .copied()
             .ok_or("flight-key retirement index invariant")?;
-        if flight::flight_driver_has_key(&runtime.flights, key) {
+        let retired = flight::flight_driver_remove_retired(&mut runtime.flights, &key, now_ms)
+            .map_err(|error| format!("flight-key retirement receipt: {error}"))?;
+        if retired.is_none() && flight::flight_driver_has_key(&runtime.flights, key) {
             if write != read {
                 let dest = runtime
                     .known_flights
@@ -470,7 +515,7 @@ fn preflight_flight_key(
         return Ok(None);
     };
     if runtime.known_flights.len() >= runtime.profile.max_flights {
-        reclaim_retired_flight_keys(runtime)?;
+        reclaim_retired_flight_keys(runtime, event.receipt_ns / 1_000_000)?;
     }
     match flight_key_search(&runtime.known_flights, key)? {
         Ok(_) => Ok(None),
@@ -524,7 +569,11 @@ fn runtime_item_outcome(
         identity: InputIdentity {
             source: input_source,
             source_instance: runtime.session_namespace,
-            item_id: runtime_item_id(batch_ordinal, item_index)?,
+            item_id: runtime_item_id(
+                batch_ordinal,
+                item_index,
+                runtime.profile.max_events_per_receipt,
+            )?,
         },
         refusal_reasons: ReasonFlags(reasons),
         clock_domain_id: QUARANTINE_CLOCK_DOMAIN_ID,
@@ -1000,8 +1049,10 @@ fn regional_new_with_source_identity_and_checkpoint(
         expected_snapshot_sha256,
         issued_manifest_sha256,
     } = source;
-    if !centre.iter().all(u8::is_ascii_alphanumeric) {
-        return Err("centre must be four ASCII alphanumeric bytes".into());
+    if !crate::input::is_valid_centre_code(&centre) {
+        return Err(
+            "centre must be an alphanumeric code with optional trailing zero padding".into(),
+        );
     }
     if session_namespace == 0 {
         return Err("session namespace must be nonzero".into());
@@ -1014,6 +1065,10 @@ fn regional_new_with_source_identity_and_checkpoint(
         || profile.max_flight_log_entries > MAX_DRIVER_LOG_ENTRIES
         || profile.max_total_events == 0
         || profile.max_total_events > crate::session::MAX_RECORDED_PROFILE_EVENTS
+        || !matches!(
+            profile.max_events_per_receipt,
+            MAX_EVENTS_PER_RECEIPT | RECORDED_HOUR_MAX_EVENTS_PER_RECEIPT
+        )
         || (profile.surveillance.render_scope
             && profile.max_flights > profile.surveillance.max_tracks)
     {
@@ -1091,6 +1146,12 @@ pub fn regional_adaptation_sha256(runtime: &RegionalRuntime) -> [u8; 32] {
     runtime.adaptation_sha256
 }
 
+/// Snapshot-bound inventory of the public geometry rendered from this runtime's adaptation.
+/// The summary identifies element counts by source/type and contains no flight-level data.
+pub fn regional_map_evidence(runtime: &RegionalRuntime) -> Result<String, String> {
+    crate::map::render_inventory(&runtime.model, &runtime.adaptation_sha256)
+}
+
 /// Independent issued manifest pin retained with this runtime, if startup used an issued package.
 pub fn regional_issued_manifest_sha256(runtime: &RegionalRuntime) -> Option<[u8; 32]> {
     runtime.issued_manifest_sha256
@@ -1101,7 +1162,7 @@ fn execute(
     batch: &ReceiptBatch,
     performance: Option<&[PerformanceEnvelope]>,
 ) -> Result<RegionalFrame, String> {
-    if batch.events.len() > MAX_EVENTS_PER_RECEIPT
+    if batch.events.len() > runtime.profile.max_events_per_receipt
         || batch
             .events
             .iter()
@@ -1117,7 +1178,8 @@ fn execute(
     {
         return Err("operator requests are unavailable in the analysis-only replay profile".into());
     }
-    let input = summarize_input_batch(batch).map_err(|e| format!("input accounting: {e:?}"))?;
+    let input = summarize_input_batch_with_limit(batch, runtime.profile.max_events_per_receipt)
+        .map_err(|e| format!("input accounting: {e:?}"))?;
     let performance_cutoff_ms = match performance {
         Some(_) => Some(route::receipt_cutoff_ms(batch.receipt_ns)?),
         None => None,
@@ -1295,6 +1357,7 @@ fn execute(
     runtime.frame_sequence = next_frame_sequence;
     let mut flights = Vec::with_capacity(runtime.profile.surveillance.max_tracks);
     let mut views = Vec::with_capacity(runtime.profile.max_flights);
+    let mut flight_correlation = FlightCorrelationSummary::default();
     for observed in &surveillance.tracks {
         let result = flight::flight_views_for_address(
             &mut runtime.flights,
@@ -1316,6 +1379,27 @@ fn execute(
             },
             refusal: String::new(),
         };
+        match result.status {
+            FlightViewStatus::Found => {
+                flight_correlation.matched_observed_tracks =
+                    flight_correlation.matched_observed_tracks.saturating_add(1);
+            }
+            FlightViewStatus::AmbiguousAddress => {
+                flight_correlation.ambiguous_observed_tracks = flight_correlation
+                    .ambiguous_observed_tracks
+                    .saturating_add(1);
+            }
+            FlightViewStatus::UnknownFlight | FlightViewStatus::UnknownCentre => {
+                flight_correlation.unmatched_observed_tracks = flight_correlation
+                    .unmatched_observed_tracks
+                    .saturating_add(1);
+            }
+            FlightViewStatus::FutureSnapshot | FlightViewStatus::OutputCapacity => {
+                flight_correlation.refused_observed_track_lookups = flight_correlation
+                    .refused_observed_track_lookups
+                    .saturating_add(1);
+            }
+        }
         if result.status != FlightViewStatus::Found {
             row.refusal = format!("flight view: {:?}", result.status);
         } else if let Some(view) = views.first() {
@@ -1433,6 +1517,11 @@ fn execute(
             ) => return Err("unexpected full-key flight view status".into()),
         }
     }
+    flight_correlation.available_flight_views_for_runtime_centre =
+        u32::try_from(flight_data.len()).unwrap_or(u32::MAX);
+    flight_correlation.positive_address_claims_for_runtime_centre =
+        u32::try_from(flight_data.iter().filter(|view| view.address > 0).count())
+            .unwrap_or(u32::MAX);
     Ok(RegionalFrame {
         sequence: runtime.frame_sequence,
         input,
@@ -1443,6 +1532,7 @@ fn execute(
         flight_data,
         flight_data_as_of,
         flight_data_unavailable,
+        flight_correlation,
         flight_report: flight::flight_driver_report(&runtime.flights),
         refused_legacy_route_events: runtime.routes.rejected_legacy_routes,
         controller_views: runtime.views.clone(),
@@ -1613,12 +1703,19 @@ pub fn regional_enable_msaw(
     runtime: &mut RegionalRuntime,
     data: oa_msaw_run::regional::RegionalData,
 ) -> Result<(), String> {
-    let service = crate::msaw_bridge::regional_msaw_new(data, surveillance::MAX_TRACKS)?;
+    let service = crate::msaw_bridge::regional_msaw_new_for_profile(
+        data,
+        runtime.profile.surveillance.max_tracks,
+        runtime.profile.surveillance.max_frames,
+    )?;
     regional_attach_msaw(runtime, service)
 }
 
 pub fn regional_enable_synthetic_msaw(runtime: &mut RegionalRuntime) -> Result<(), String> {
-    let service = crate::msaw_bridge::regional_msaw_synthetic(surveillance::MAX_TRACKS)?;
+    let service = crate::msaw_bridge::regional_msaw_synthetic_for_profile(
+        runtime.profile.surveillance.max_tracks,
+        runtime.profile.surveillance.max_frames,
+    )?;
     regional_attach_msaw(runtime, service)
 }
 
@@ -1635,10 +1732,33 @@ mod transaction_tests {
 
     use super::*;
     use crate::cli::synthetic_model;
-    use crate::input::parse_event_line;
+    use crate::input::{
+        parse_event_line, EventKind, FlightOperation, Identity, NormalizedEvent, SourceKind,
+    };
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_QUARANTINE_AUDIT_TEST: AtomicU64 = AtomicU64::new(0);
+
+    // REQ: OA-QUAR-004, OA-REG-013
+    #[test]
+    fn recorded_hour_quarantine_ids_cover_the_dense_batch_without_aliasing() {
+        let limit = RECORDED_HOUR_MAX_EVENTS_PER_RECEIPT;
+        let first = runtime_item_id(1, 0, limit).unwrap();
+        let last = runtime_item_id(1, limit - 1, limit).unwrap();
+        let next = runtime_item_id(2, 0, limit).unwrap();
+        assert_eq!(first, 8192);
+        assert_eq!(last, 16383);
+        assert_eq!(next, 16384);
+        assert!(first < last && last < next);
+        assert_eq!(
+            runtime_item_id(1, 255, MAX_EVENTS_PER_RECEIPT).unwrap(),
+            511
+        );
+        assert!(runtime_item_id(1, 256, MAX_EVENTS_PER_RECEIPT).is_err());
+        assert!(runtime_item_id(1, limit, limit).is_err());
+        assert!(runtime_item_id(u64::MAX, 0, limit).is_err());
+        assert!(runtime_item_id(0, 0, limit).is_err());
+    }
 
     fn intern(model: &mut Model, text: &str) -> oa_airspace::core::model::StrIx {
         let raw = model.strings.offsets.len().checked_sub(1).unwrap();
@@ -1867,6 +1987,90 @@ mod transaction_tests {
         .unwrap()
     }
 
+    fn seeded_claim_frame(
+        engine: &mut RegionalRuntime,
+        claims: &[(u128, u32, [u8; 4])],
+        receipt_ns: i64,
+    ) -> RegionalFrame {
+        let mut events = Vec::with_capacity(claims.len().saturating_mul(2));
+        for (index, (gufi, address, centre)) in claims.iter().enumerate() {
+            let sequence = (index as u64).saturating_mul(2).saturating_add(1);
+            for (offset, operation) in [
+                FlightOperation::SetPlan {
+                    plan_id: *b"PLAN00000001",
+                    status: oa_flight::ST_ACTIVE,
+                },
+                FlightOperation::SetAddress,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                events.push(NormalizedEvent {
+                    receipt_ns,
+                    source_ns: receipt_ns,
+                    sequence: sequence.saturating_add(offset as u64),
+                    source_message_id: None,
+                    source: SourceKind::Flight,
+                    identity: Identity {
+                        flight_gufi: *gufi,
+                        aircraft_address: *address,
+                    },
+                    centre: *centre,
+                    kind: EventKind::Flight(operation),
+                });
+            }
+        }
+        regional_step(
+            engine,
+            &ReceiptBatch {
+                receipt_ns,
+                source_clock_regressions: 0,
+                events,
+            },
+        )
+        .unwrap()
+    }
+
+    fn observed_address_frame(
+        engine: &mut RegionalRuntime,
+        address: u32,
+        receipt_ns: i64,
+    ) -> RegionalFrame {
+        let events = [receipt_ns - surveillance::SECOND_NS, receipt_ns]
+            .into_iter()
+            .enumerate()
+            .map(|(index, source_ns)| NormalizedEvent {
+                receipt_ns,
+                source_ns,
+                sequence: u64::try_from(index + 1).unwrap(),
+                source_message_id: None,
+                source: SourceKind::Surveillance,
+                identity: Identity {
+                    flight_gufi: 0,
+                    aircraft_address: address,
+                },
+                centre: *b"ZAU1",
+                kind: EventKind::Position {
+                    latitude_e7: 410_000_000,
+                    longitude_e7: -870_000_000,
+                    altitude_ft: Some(10_000),
+                    east_mmps: 0,
+                    north_mmps: 0,
+                    vertical_rate_fpm: None,
+                },
+            })
+            .collect();
+        regional_step(
+            engine,
+            &ReceiptBatch {
+                receipt_ns,
+                source_clock_regressions: 0,
+                events,
+            },
+        )
+        .unwrap()
+    }
+
     #[test]
     fn flight_view_key_capacity_refuses_before_a_second_plan_commit() {
         let mut engine = runtime();
@@ -1900,6 +2104,71 @@ mod transaction_tests {
         .is_err());
         assert_eq!(flight::flight_driver_report(&engine.flights).flights, 1);
         assert_eq!(engine.known_flights.len(), 1);
+    }
+
+    // Kills the preflight mutation that retained terminal core rows in the key ledger until
+    // capacity refusal, despite the core's explicit retirement receipt path.
+    #[test]
+    fn terminal_full_key_is_retired_with_receipt_before_reusing_view_capacity() {
+        let mut engine = runtime();
+        engine.profile.max_flights = 1;
+        let first = parse_event_line(
+            "v1\t1000000000\t1000000000\t1\tFLIGHT\t00000000000000000000000000000001\tABC101\tZAU1\tFLIGHT\tPLAN\tPLAN00000001\t2",
+        )
+        .unwrap();
+        regional_step(
+            &mut engine,
+            &ReceiptBatch {
+                receipt_ns: first.receipt_ns,
+                source_clock_regressions: 0,
+                events: vec![first],
+            },
+        )
+        .unwrap();
+        let complete = parse_event_line(
+            "v1\t2000000000\t2000000000\t2\tFLIGHT\t00000000000000000000000000000001\tABC101\tZAU1\tFLIGHT\tCOMPLETE",
+        )
+        .unwrap();
+        regional_step(
+            &mut engine,
+            &ReceiptBatch {
+                receipt_ns: complete.receipt_ns,
+                source_clock_regressions: 0,
+                events: vec![complete],
+            },
+        )
+        .unwrap();
+        let retirements_before_capacity_reuse =
+            flight::flight_driver_report(&engine.flights).retirements_consumed;
+
+        let second = parse_event_line(
+            "v1\t3000000000\t3000000000\t3\tFLIGHT\t00000000000000000000000000000002\tABC102\tZAU1\tFLIGHT\tPLAN\tPLAN00000002\t2",
+        )
+        .unwrap();
+        regional_step(
+            &mut engine,
+            &ReceiptBatch {
+                receipt_ns: second.receipt_ns,
+                source_clock_regressions: 0,
+                events: vec![second],
+            },
+        )
+        .unwrap();
+
+        let report = flight::flight_driver_report(&engine.flights);
+        assert_eq!(report.flights, engine.known_flights.len());
+        assert_eq!(
+            report.retirements_consumed,
+            retirements_before_capacity_reuse + 1
+        );
+        assert!(engine
+            .known_flights
+            .iter()
+            .any(|key| key.gufi == second.identity.flight_gufi));
+        assert!(!engine
+            .known_flights
+            .iter()
+            .any(|key| key.gufi == first.identity.flight_gufi));
     }
 
     // REQ: OA-REG-018
@@ -2026,21 +2295,106 @@ mod transaction_tests {
             .contains("reconstruct"));
     }
 
-    // REQ: OA-REG-004
+    #[test]
+    fn frame_consumer_reports_exact_address_and_centre_correlation_outcomes() {
+        let receipt = 1_800_000_000_000_000_000i64;
+        let next_receipt = receipt + surveillance::SECOND_NS;
+        let address = 0x00ab_cdef;
+        let gufi_a = 0x1000_0000_0000_0000_0000_0000_0000_0001;
+        let gufi_b = 0x1000_0000_0000_0000_0000_0000_0000_0002;
+
+        let mut matched = runtime();
+        let claims = [(gufi_a, address, *b"ZAU1")];
+        seeded_claim_frame(&mut matched, &claims, receipt);
+        let matched_frame = observed_address_frame(&mut matched, address, next_receipt);
+        assert_eq!(
+            matched_frame
+                .flight_correlation
+                .available_flight_views_for_runtime_centre,
+            claims.len() as u32
+        );
+        assert_eq!(
+            matched_frame
+                .flight_correlation
+                .positive_address_claims_for_runtime_centre,
+            claims.len() as u32
+        );
+        assert_eq!(
+            matched_frame.flight_correlation.matched_observed_tracks,
+            matched_frame.surveillance.tracks.len() as u32
+        );
+        assert!(!matched_frame.surveillance.tracks.is_empty());
+
+        let mut wrong_address = runtime();
+        let claims = [(gufi_a, address + 1, *b"ZAU1")];
+        seeded_claim_frame(&mut wrong_address, &claims, receipt);
+        let unmatched_frame = observed_address_frame(&mut wrong_address, address, next_receipt);
+        assert_eq!(
+            unmatched_frame.flight_correlation.unmatched_observed_tracks,
+            unmatched_frame.surveillance.tracks.len() as u32
+        );
+        assert_eq!(
+            unmatched_frame.flight_correlation.matched_observed_tracks,
+            0
+        );
+
+        let mut ambiguous = runtime();
+        let claims = [(gufi_a, address, *b"ZAU1"), (gufi_b, address, *b"ZAU1")];
+        seeded_claim_frame(&mut ambiguous, &claims, receipt);
+        let ambiguous_frame = observed_address_frame(&mut ambiguous, address, next_receipt);
+        assert_eq!(
+            ambiguous_frame
+                .flight_correlation
+                .positive_address_claims_for_runtime_centre,
+            claims.len() as u32
+        );
+        assert_eq!(
+            ambiguous_frame.flight_correlation.ambiguous_observed_tracks,
+            ambiguous_frame.surveillance.tracks.len() as u32
+        );
+        assert_eq!(
+            ambiguous_frame.flight_correlation.matched_observed_tracks,
+            0
+        );
+
+        let mut wrong_centre = runtime();
+        let claims = [(gufi_a, address, *b"KXYZ")];
+        seeded_claim_frame(&mut wrong_centre, &claims, receipt);
+        let centre_frame = observed_address_frame(&mut wrong_centre, address, next_receipt);
+        assert_eq!(centre_frame.flight_data_unavailable, claims.len() as u32);
+        assert_eq!(
+            centre_frame
+                .flight_correlation
+                .available_flight_views_for_runtime_centre,
+            0
+        );
+        assert_eq!(centre_frame.flight_correlation.unmatched_observed_tracks, 1);
+    }
+
     #[test]
     fn recorded_profile_is_separate_and_stays_within_predeclared_bounds() {
         let default = DEFAULT_REGIONAL_RUN_PROFILE;
         assert_eq!(default.surveillance.max_tracks, surveillance::MAX_TRACKS);
         assert_eq!(default.surveillance.max_frames, surveillance::MAX_FRAMES);
+        assert_eq!(
+            default.surveillance.tracker_timing,
+            surveillance::TrackerTimingProfile::DefaultV1
+        );
         assert_eq!(default.max_flights, MAX_DRIVER_FLIGHTS);
         assert_eq!(default.max_total_events, crate::session::MAX_SESSION_EVENTS);
+        assert_eq!(default.max_events_per_receipt, MAX_EVENTS_PER_RECEIPT);
 
         let recorded = RegionalRunProfile::recorded_peak();
+        assert_eq!(
+            recorded.surveillance.tracker_timing,
+            surveillance::TrackerTimingProfile::DefaultV1
+        );
         assert_eq!(recorded.surveillance.max_tracks, 4096);
         assert_eq!(recorded.surveillance.max_frames, 20_000_000);
         assert_eq!(recorded.surveillance.max_drain_rows, 262_144);
         assert_eq!(recorded.max_flights, 8192);
         assert_eq!(recorded.max_total_events, 10_000_000);
+        assert_eq!(recorded.max_events_per_receipt, MAX_EVENTS_PER_RECEIPT);
         assert!(!recorded.surveillance.render_scope);
         let pairs = recorded.surveillance.max_tracks * (recorded.surveillance.max_tracks - 1) / 2;
         assert!(pairs <= recorded.surveillance.max_candidate_pairs);
@@ -2064,12 +2418,108 @@ mod transaction_tests {
             recorded.surveillance.max_ca_work_per_frame
         );
         assert_eq!(rendered.max_total_events, recorded.max_total_events);
+        assert_eq!(rendered.max_events_per_receipt, MAX_EVENTS_PER_RECEIPT);
         assert_eq!(rendered.max_flights, rendered.surveillance.max_tracks);
         assert!(rendered.surveillance.render_scope);
         assert_eq!(
             rendered.surveillance.max_presentation_updates,
             surveillance::MAX_PRESENTATION_UPDATES
         );
+
+        let hour = RegionalRunProfile::recorded_hour_rendered();
+        assert_eq!(
+            hour.max_events_per_receipt,
+            RECORDED_HOUR_MAX_EVENTS_PER_RECEIPT
+        );
+        assert_eq!(
+            hour.surveillance.max_frames,
+            crate::cli::RECORDED_HOUR_FRAMES
+        );
+        assert!(hour.surveillance.render_scope);
+    }
+
+    #[test]
+    fn recorded_hour_runtime_accepts_dense_cutoff_without_raising_legacy_cap() {
+        let model = synthetic_model().unwrap();
+        let snapshot_bytes = oa_airspace::core::snapshot::encode(&model).unwrap();
+        let snapshot_sha = oa_sha256::sha256(&snapshot_bytes);
+        let config = SurveillanceConfig {
+            centre_lat_e7: 410_000_000,
+            centre_lon_e7: -870_000_000,
+            range_nm: 180.0,
+        };
+        let receipt_ns = 1_800_000_000_000_000_000;
+        let batch = ReceiptBatch {
+            receipt_ns,
+            source_clock_regressions: 0,
+            events: (1..=MAX_EVENTS_PER_RECEIPT + 1)
+                .map(|sequence| NormalizedEvent {
+                    receipt_ns,
+                    source_ns: receipt_ns,
+                    sequence: sequence as u64,
+                    source_message_id: None,
+                    source: SourceKind::Surveillance,
+                    identity: Identity {
+                        flight_gufi: 0,
+                        aircraft_address: sequence as u32,
+                    },
+                    centre: *b"ZAU1",
+                    kind: EventKind::Position {
+                        latitude_e7: 410_000_000,
+                        longitude_e7: -870_000_000,
+                        altitude_ft: Some(10_000),
+                        east_mmps: 0,
+                        north_mmps: 0,
+                        vertical_rate_fpm: None,
+                    },
+                })
+                .collect(),
+        };
+        let mut legacy = regional_new_with_profile(
+            model.clone(),
+            snapshot_sha,
+            *b"ZAU1",
+            config,
+            RegionalRunProfile::recorded_peak_rendered(),
+        )
+        .unwrap();
+        assert!(regional_step(&mut legacy, &batch).is_err());
+
+        let mut hour = regional_new_with_profile(
+            model,
+            snapshot_sha,
+            *b"ZAU1",
+            config,
+            RegionalRunProfile::recorded_hour_rendered(),
+        )
+        .unwrap();
+        let frame = regional_step(&mut hour, &batch).unwrap();
+        assert_eq!(
+            frame.input.input_events as usize,
+            MAX_EVENTS_PER_RECEIPT + 1
+        );
+    }
+
+    // REQ: OA-REG-013; kills the mutation that rejects a native three-character ARTCC after
+    // it has been faithfully zero-padded to the four-byte runtime identity.
+    #[test]
+    fn runtime_accepts_zero_padded_source_artcc_and_refuses_embedded_padding() {
+        let mut model = synthetic_model().expect("public synthetic model");
+        model.meta.artcc = "ZAU".to_owned();
+        let snapshot = oa_airspace::core::snapshot::encode(&model).expect("encode model");
+        let snapshot_sha = oa_sha256::sha256(&snapshot);
+        let cfg = SurveillanceConfig {
+            centre_lat_e7: 410_000_000,
+            centre_lon_e7: -870_000_000,
+            range_nm: 180.0,
+        };
+
+        let runtime = regional_new(model.clone(), snapshot_sha, *b"ZAU\0", cfg)
+            .expect("zero-padded source ARTCC remains a valid runtime identity");
+        assert_eq!(runtime.centre, *b"ZAU\0");
+
+        let refusal = regional_new(model, snapshot_sha, *b"ZA\0U", cfg);
+        assert!(refusal.is_err(), "embedded zero padding must be refused");
     }
 
     // REQ: OA-REG-019

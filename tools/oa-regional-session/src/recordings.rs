@@ -10,9 +10,9 @@ use oa_adsb::{
 };
 use oa_fixm::{new_events, Decoder, Field, Limits as FixmLimits};
 use oa_flight::{
-    Alt, ALT_NIL, ALT_SIMPLE, OP_ADDRESS, OP_ASSIGN, OP_COUNT, OP_HO_ACCEPT, OP_HO_FAIL,
-    OP_HO_INITIATE, OP_HO_RETRACT, OP_HO_TAKE, OP_HO_UPDATE, OP_IDENTITY, OP_INTERIM, OP_OWNER,
-    OP_REQUEST, OP_SET_PLAN,
+    Alt, ALT_NIL, ALT_SIMPLE, OP_ADDRESS, OP_ASSIGN, OP_CANCEL, OP_COMPLETE, OP_COUNT, OP_DEPART,
+    OP_DROP, OP_HO_ACCEPT, OP_HO_FAIL, OP_HO_INITIATE, OP_HO_RETRACT, OP_HO_TAKE, OP_HO_UPDATE,
+    OP_IDENTITY, OP_INTERIM, OP_OWNER, OP_REQUEST, OP_SET_PLAN,
 };
 use oa_flight_sfdps::{row_ops, AdapterStats as SfdpsAdapterStats, MAX_OPS_PER_MESSAGE};
 use oa_quarantine::{
@@ -126,6 +126,17 @@ fn issue_cutoff(receipt_ns: i64) -> Result<i64, CutoffRefusal> {
     Ok(cutoff)
 }
 
+fn record_cutoff_refusal(counts: &mut RecordedAdapterCounts, refusal: CutoffRefusal) {
+    let counter = match refusal {
+        CutoffRefusal::Negative => &mut counts.cutoff_negative_refused,
+        CutoffRefusal::Zero => &mut counts.cutoff_zero_refused,
+        CutoffRefusal::SealedReceipt => &mut counts.cutoff_sealed_receipt_refused,
+        CutoffRefusal::Overflow => &mut counts.cutoff_overflow_refused,
+        CutoffRefusal::SealedCutoff => &mut counts.cutoff_sealed_issue_refused,
+    };
+    *counter = counter.saturating_add(1);
+}
+
 /// Development sizing for the next adapter increment. The work cap is checked against decoded
 /// rows before conversion; byte capacity is checked by the caller before retaining source rows.
 // A7.2: cold shell limits for offline conversion.
@@ -190,6 +201,8 @@ pub struct RecordedAdapterCounts {
     pub adsb_velocity_unavailable: u64,
     /// Thirteen oa-truth quality refusal reasons, in the decoder's stable reason order.
     pub adsb_quality_removed: [u64; 13],
+    /// Rows whose current quality passed but whose source state could not be retained at cache cap.
+    pub adsb_quality_cache_capacity_refused: u64,
     pub adsb_unknown_gufi_positions: u64,
     pub sfdps_payload_refused: u64,
     pub sfdps_timestamp_precision_refused: u64,
@@ -201,6 +214,10 @@ pub struct RecordedAdapterCounts {
     pub sfdps_no_status: u64,
     pub sfdps_operations_unusable: u64,
     pub sfdps_owner_unknown: u64,
+    pub sfdps_rows_positive_address: u64,
+    pub sfdps_rows_nonempty_callsign: u64,
+    /// Raw operation kinds emitted by row_ops before whole-row normalization admission.
+    pub sfdps_emitted_operations: [u64; OP_COUNT],
     pub sfdps_handoff_incomplete: u64,
     pub sfdps_handoff_unknown_unit: u64,
     pub sfdps_handoff_receiving_only: u64,
@@ -224,6 +241,8 @@ pub struct RecordedAdapterCounts {
     pub output_capacity_refusals: u64,
     pub receipt_groups_over_capacity: u64,
     pub receipt_group_events_refused: u64,
+    /// Candidate normalized events before over-capacity same-receipt groups are refused.
+    pub candidate_events_before_receipt_filter: u64,
     pub receipt_groups_over_frame_capacity: u64,
     pub receipt_frame_capacity_events_refused: u64,
     pub receipt_gap_groups_refused: u64,
@@ -255,6 +274,7 @@ fn zero_recorded_adapter_counts() -> RecordedAdapterCounts {
         adsb_rows_order_refused: 0,
         adsb_velocity_unavailable: 0,
         adsb_quality_removed: [0; 13],
+        adsb_quality_cache_capacity_refused: 0,
         adsb_unknown_gufi_positions: 0,
         sfdps_payload_refused: 0,
         sfdps_timestamp_precision_refused: 0,
@@ -266,6 +286,9 @@ fn zero_recorded_adapter_counts() -> RecordedAdapterCounts {
         sfdps_no_status: 0,
         sfdps_operations_unusable: 0,
         sfdps_owner_unknown: 0,
+        sfdps_rows_positive_address: 0,
+        sfdps_rows_nonempty_callsign: 0,
+        sfdps_emitted_operations: [0; OP_COUNT],
         sfdps_handoff_incomplete: 0,
         sfdps_handoff_unknown_unit: 0,
         sfdps_handoff_receiving_only: 0,
@@ -289,6 +312,7 @@ fn zero_recorded_adapter_counts() -> RecordedAdapterCounts {
         output_capacity_refusals: 0,
         receipt_groups_over_capacity: 0,
         receipt_group_events_refused: 0,
+        candidate_events_before_receipt_filter: 0,
         receipt_groups_over_frame_capacity: 0,
         receipt_frame_capacity_events_refused: 0,
         receipt_gap_groups_refused: 0,
@@ -611,6 +635,53 @@ pub fn adapt_recorded_frames_with_sequence_starts(
     adsb_centre: [u8; 4],
     sequence_starts: [u64; 2],
 ) -> Result<RecordedAdaptation, AdapterError> {
+    let mut quality = oa_track::adsb::AdsbQualityCache::default();
+    adapt_recorded_frames_with_sequence_starts_and_quality(
+        frames,
+        recording_counts,
+        max_events,
+        adsb_centre,
+        sequence_starts,
+        &mut quality,
+    )
+}
+
+/// Stateful counterpart for streaming callers that must carry ADS-B quality within its source
+/// age across frame boundaries. The cache owns its finite population and expiry policy.
+pub fn adapt_recorded_frames_with_sequence_starts_and_quality(
+    frames: &[RecordedFrame],
+    recording_counts: RecordingCounts,
+    max_events: usize,
+    adsb_centre: [u8; 4],
+    sequence_starts: [u64; 2],
+    quality_cache: &mut oa_track::adsb::AdsbQualityCache,
+) -> Result<RecordedAdaptation, AdapterError> {
+    adapt_recorded_frames_with_sequence_starts_and_quality_limit(
+        frames,
+        recording_counts,
+        max_events,
+        adsb_centre,
+        sequence_starts,
+        crate::session::MAX_EVENTS_PER_RECEIPT,
+        quality_cache,
+    )
+}
+
+/// Profile-bounded streaming adapter; only the legacy and recorded-hour receipt caps are valid.
+pub fn adapt_recorded_frames_with_sequence_starts_and_quality_limit(
+    frames: &[RecordedFrame],
+    recording_counts: RecordingCounts,
+    max_events: usize,
+    adsb_centre: [u8; 4],
+    sequence_starts: [u64; 2],
+    receipt_group_limit: usize,
+    quality_cache: &mut oa_track::adsb::AdsbQualityCache,
+) -> Result<RecordedAdaptation, AdapterError> {
+    if receipt_group_limit != crate::session::MAX_EVENTS_PER_RECEIPT
+        && receipt_group_limit != crate::session::RECORDED_HOUR_MAX_EVENTS_PER_RECEIPT
+    {
+        return Err(AdapterError::WorkBudget);
+    }
     if max_events == 0 {
         return Err(AdapterError::ZeroCapacity);
     }
@@ -619,7 +690,7 @@ pub fn adapt_recorded_frames_with_sequence_starts(
     {
         return Err(AdapterError::WorkBudget);
     }
-    if !adsb_centre.iter().all(u8::is_ascii_alphanumeric) {
+    if !crate::input::is_valid_centre_code(&adsb_centre) {
         return Err(AdapterError::InvalidCentre);
     }
     let declared_decoded = usize::try_from(recording_counts.total_decoded_bytes)
@@ -823,15 +894,18 @@ pub fn adapt_recorded_frames_with_sequence_starts(
                 let mut quarantine = std::mem::take(&mut out.quarantine);
                 let result = adapt_adsb_frame(
                     frame,
-                    issue_receipt_ns,
-                    adsb_centre,
-                    max_events,
-                    &mut next_surveillance_sequence,
-                    &mut quarantine_queue,
-                    &mut quarantine,
-                    conversion_started,
-                    frame_started,
-                    &mut out,
+                    AdsbFrameContext {
+                        issue_receipt_ns,
+                        adsb_centre,
+                        max_events,
+                        next_sequence: &mut next_surveillance_sequence,
+                        quarantine_queue: &mut quarantine_queue,
+                        quarantine: &mut quarantine,
+                        conversion_started,
+                        frame_started,
+                        out: &mut out,
+                        quality_cache,
+                    },
                 );
                 out.quarantine = quarantine;
                 result?;
@@ -857,10 +931,13 @@ pub fn adapt_recorded_frames_with_sequence_starts(
             }
         }
     }
+    out.counts.candidate_events_before_receipt_filter =
+        u64::try_from(out.events.len()).map_err(|_| AdapterError::CountOverflow)?;
     sort_and_refuse_oversize_receipt_groups_with_quarantine(
         &mut out,
         &mut quarantine_queue,
         conversion_started,
+        receipt_group_limit,
     )?;
     out.counts.events_emitted =
         u64::try_from(out.events.len()).map_err(|_| AdapterError::CountOverflow)?;
@@ -875,20 +952,35 @@ pub fn adapt_recorded_frames_with_sequence_starts(
     Ok(out)
 }
 
-// Keep source-specific state and accounting explicit at this narrow adapter boundary.
-#[allow(clippy::too_many_arguments)]
-fn adapt_adsb_frame(
-    frame: &RecordedFrame,
+struct AdsbFrameContext<'a> {
     issue_receipt_ns: i64,
     adsb_centre: [u8; 4],
     max_events: usize,
-    next_sequence: &mut u64,
-    quarantine_queue: &mut QuarantineQueue,
-    quarantine: &mut Vec<RecordedQuarantine>,
+    next_sequence: &'a mut u64,
+    quarantine_queue: &'a mut QuarantineQueue,
+    quarantine: &'a mut Vec<RecordedQuarantine>,
     conversion_started: Instant,
     frame_started: Instant,
-    out: &mut RecordedAdaptation,
+    out: &'a mut RecordedAdaptation,
+    quality_cache: &'a mut oa_track::adsb::AdsbQualityCache,
+}
+
+fn adapt_adsb_frame(
+    frame: &RecordedFrame,
+    context: AdsbFrameContext<'_>,
 ) -> Result<(), AdapterError> {
+    let AdsbFrameContext {
+        issue_receipt_ns,
+        adsb_centre,
+        max_events,
+        next_sequence,
+        quarantine_queue,
+        quarantine,
+        conversion_started,
+        frame_started,
+        out,
+        quality_cache,
+    } = context;
     let record_count = match oa_adsb::payload_record_count(&frame.payload) {
         Ok(count) => count,
         Err(_) => {
@@ -1009,29 +1101,6 @@ fn adapt_adsb_frame(
     {
         out.counts.adsb_source_time_regressions =
             out.counts.adsb_source_time_regressions.saturating_add(1);
-        out.counts.adsb_rows_order_refused = out
-            .counts
-            .adsb_rows_order_refused
-            .saturating_add(u64::try_from(counts.kept).map_err(|_| AdapterError::CountOverflow)?);
-        for &ordinal in &decoded_source_ordinals {
-            let row_locator = u32::try_from(ordinal)
-                .ok()
-                .and_then(|value| value.checked_add(1))
-                .filter(|value| *value < QUARANTINE_FRAME_ROW_LOCATOR)
-                .ok_or(AdapterError::WorkBudget)?;
-            quarantine_item(
-                quarantine_queue,
-                quarantine,
-                frame,
-                row_locator,
-                REASON_INPUT_INVALID,
-                1,
-                1,
-                conversion_started,
-                frame_started,
-            )?;
-        }
-        return Ok(());
     }
     let (airborne_reports, airborne_report_indexes, unknown_ground_indexes) =
         airborne_adsb_reports(&reports, &mut out.counts)?;
@@ -1069,8 +1138,11 @@ fn adapt_adsb_frame(
     }
     // Reuse the tracker’s existing quality/velocity conversion so the regional adapter does not
     // duplicate ADS-B unit math or platform trig. All quality-gated row losses remain reported.
-    let (measurements, stats) =
-        oa_track::adsb::adsb_measurements(&airborne_reports, &oa_track::adsb::DEFAULT_ADSB_CONFIG);
+    let (measurements, stats) = oa_track::adsb::adsb_measurements_with_cache(
+        &airborne_reports,
+        &oa_track::adsb::DEFAULT_ADSB_CONFIG,
+        quality_cache,
+    );
     for (dst, src) in out
         .counts
         .adsb_quality_removed
@@ -1079,6 +1151,24 @@ fn adapt_adsb_frame(
     {
         *dst = dst.saturating_add(src);
     }
+    out.counts.adsb_quality_cache_capacity_refused = out
+        .counts
+        .adsb_quality_cache_capacity_refused
+        .saturating_add(stats.quality_state_capacity_refused);
+    // The tracker returns measurements sorted by source time (ties by original row index).
+    // Build the same bounded ordering for source rows so the join remains linear while provenance
+    // continues to use the unsorted source ordinal.
+    let mut source_order = Vec::new();
+    source_order
+        .try_reserve_exact(reports_len(&airborne_reports))
+        .map_err(|_| AdapterError::AllocationRefused)?;
+    for (index, &time_ns) in airborne_reports.time_ns.iter().enumerate() {
+        source_order.push((
+            time_ns,
+            u32::try_from(index).map_err(|_| AdapterError::CountOverflow)?,
+        ));
+    }
+    source_order.sort_unstable();
     let mut source_row_cursor = 0usize;
     let mut represented_rows = Vec::new();
     represented_rows
@@ -1088,8 +1178,13 @@ fn adapt_adsb_frame(
     for measurement in measurements {
         let mut source_row = None;
         let mut source_index = None;
-        while source_row_cursor < reports_len(&airborne_reports) {
-            let index = source_row_cursor;
+        while source_row_cursor < source_order.len() {
+            let (_, ordered_source_index) = source_order
+                .get(source_row_cursor)
+                .copied()
+                .ok_or(AdapterError::WorkBudget)?;
+            let index =
+                usize::try_from(ordered_source_index).map_err(|_| AdapterError::WorkBudget)?;
             source_row_cursor += 1;
             let Some(candidate) = reports_row(&airborne_reports, index) else {
                 continue;
@@ -1154,22 +1249,51 @@ fn adapt_adsb_frame(
             )?;
             continue;
         }
+        // OAF1 archives store the first report time in the frame header; OAF2 live captures carry
+        // an actual receipt plus monotonic time. Only the archive contract permits later row time.
         if measurement.toa_ns > frame.receipt_ns {
             out.counts.source_after_receipt = out.counts.source_after_receipt.saturating_add(1);
-            out.counts.invalid_position_rows = out.counts.invalid_position_rows.saturating_add(1);
-            quarantine_item(
-                quarantine_queue,
-                quarantine,
-                frame,
-                row_locator,
-                REASON_INPUT_INVALID,
-                1,
-                1,
-                conversion_started,
-                frame_started,
-            )?;
-            continue;
+            if frame.mono_ns.is_some() {
+                out.counts.invalid_position_rows =
+                    out.counts.invalid_position_rows.saturating_add(1);
+                quarantine_item(
+                    quarantine_queue,
+                    quarantine,
+                    frame,
+                    row_locator,
+                    REASON_INPUT_INVALID,
+                    1,
+                    1,
+                    conversion_started,
+                    frame_started,
+                )?;
+                continue;
+            }
         }
+        let row_receipt_ns = if frame.mono_ns.is_some() {
+            issue_receipt_ns
+        } else {
+            match issue_cutoff(measurement.toa_ns) {
+                Ok(cutoff) => cutoff,
+                Err(refusal) => {
+                    record_cutoff_refusal(&mut out.counts, refusal);
+                    out.counts.invalid_position_rows =
+                        out.counts.invalid_position_rows.saturating_add(1);
+                    quarantine_item(
+                        quarantine_queue,
+                        quarantine,
+                        frame,
+                        row_locator,
+                        REASON_INPUT_INVALID,
+                        1,
+                        1,
+                        conversion_started,
+                        frame_started,
+                    )?;
+                    continue;
+                }
+            }
+        };
         let Some(east_mmps) = fixed_mmps(measurement.vel_east_mps) else {
             out.counts.invalid_position_rows = out.counts.invalid_position_rows.saturating_add(1);
             quarantine_item(
@@ -1204,7 +1328,7 @@ fn adapt_adsb_frame(
         let vertical_rate_fpm =
             (measurement.vrate_fpm != oa_track::NONE_I32).then_some(measurement.vrate_fpm);
         let position = RecordedPosition {
-            receipt_ns: issue_receipt_ns,
+            receipt_ns: row_receipt_ns,
             source_ns: measurement.toa_ns,
             sequence: *next_sequence,
             address: measurement.addr,
@@ -1422,15 +1546,20 @@ fn sort_and_refuse_oversize_receipt_groups(
     out: &mut RecordedAdaptation,
 ) -> Result<(), AdapterError> {
     let mut queue = queue_new();
-    sort_and_refuse_oversize_receipt_groups_with_quarantine(out, &mut queue, Instant::now())
+    sort_and_refuse_oversize_receipt_groups_with_quarantine(
+        out,
+        &mut queue,
+        Instant::now(),
+        crate::session::MAX_EVENTS_PER_RECEIPT,
+    )
 }
 
 fn sort_and_refuse_oversize_receipt_groups_with_quarantine(
     out: &mut RecordedAdaptation,
     quarantine_queue: &mut QuarantineQueue,
     clock_origin: Instant,
+    receipt_group_limit: usize,
 ) -> Result<(), AdapterError> {
-    use crate::session::MAX_EVENTS_PER_RECEIPT;
     use crate::surveillance::{MAX_FRAMES, MAX_FRAME_GAP_NS};
     if out.events.len() != out.provenance.len() {
         return Err(AdapterError::UnsupportedEvent);
@@ -1444,6 +1573,7 @@ fn sort_and_refuse_oversize_receipt_groups_with_quarantine(
         (Some(event), Some(provenance)) => (
             event.receipt_ns,
             event.source,
+            event.sequence,
             provenance.input_receipt_ns,
             provenance.frame_sequence,
             provenance.stream_index,
@@ -1453,6 +1583,7 @@ fn sort_and_refuse_oversize_receipt_groups_with_quarantine(
         _ => (
             i64::MAX,
             SourceKind::Adaptation,
+            u64::MAX,
             i64::MAX,
             u64::MAX,
             u8::MAX,
@@ -1529,7 +1660,7 @@ fn sort_and_refuse_oversize_receipt_groups_with_quarantine(
             end += 1;
         }
         let group_len = end - start;
-        if group_len > MAX_EVENTS_PER_RECEIPT {
+        if group_len > receipt_group_limit {
             out.counts.receipt_groups_over_capacity =
                 out.counts.receipt_groups_over_capacity.saturating_add(1);
             out.counts.receipt_group_events_refused = out
@@ -1792,6 +1923,21 @@ fn adapt_sfdps_frame(
         .saturating_add(u64::try_from(events.len).map_err(|_| AdapterError::CountOverflow)?);
     let seen_ms = issue_receipt_ns / 1_000_000;
     for row in 0..events.len {
+        if oa_fixm::has_field(&events, row, Field::AircraftAddress)
+            && events.address.get(row).is_some_and(|address| *address > 0)
+        {
+            out.counts.sfdps_rows_positive_address =
+                out.counts.sfdps_rows_positive_address.saturating_add(1);
+        }
+        if oa_fixm::has_field(&events, row, Field::Callsign)
+            && events
+                .callsign
+                .get(row)
+                .is_some_and(|callsign| *callsign != [0; 8])
+        {
+            out.counts.sfdps_rows_nonempty_callsign =
+                out.counts.sfdps_rows_nonempty_callsign.saturating_add(1);
+        }
         let has_position = oa_fixm::has_field(&events, row, Field::Position);
         if has_position {
             out.counts.sfdps_positions_unmapped =
@@ -1809,6 +1955,15 @@ fn adapt_sfdps_frame(
             &mut adapter_stats,
             &mut ops,
         );
+        for op in &ops {
+            if let Some(count) = out
+                .counts
+                .sfdps_emitted_operations
+                .get_mut(usize::from(op.kind))
+            {
+                *count = count.saturating_add(1);
+            }
+        }
         out.counts.sfdps_owner_unknown = out
             .counts
             .sfdps_owner_unknown
@@ -1936,7 +2091,7 @@ fn adapt_sfdps_frame(
                         refusal_reasons |= REASON_IDENTITY_OR_LOCATION_CONFLICT;
                         continue;
                     }
-                    if !op.centre.iter().all(u8::is_ascii_alphanumeric) {
+                    if !crate::input::is_valid_centre_code(&op.centre) {
                         out.counts.invalid_operation_centre =
                             out.counts.invalid_operation_centre.saturating_add(1);
                         unsupported = true;
@@ -1955,6 +2110,7 @@ fn adapt_sfdps_frame(
                             receipt_ns: issue_receipt_ns,
                             source_ns,
                             sequence: 0,
+                            source_message_id: None,
                             source: SourceKind::Flight,
                             identity: Identity {
                                 flight_gufi: op.key.gufi,
@@ -2012,6 +2168,10 @@ fn adapt_sfdps_frame(
         out.provenance
             .try_reserve(pending.len())
             .map_err(|_| AdapterError::AllocationRefused)?;
+        // `next_sequence` is the collision-free, cross-stream row identity allocated from the
+        // shared flight sequence cursor. All operations in this decoded source row share it;
+        // provenance retains the original stream/frame/row tuple independently.
+        let source_message_id = *next_sequence;
         for (offset, (mut event, operation_index)) in pending.into_iter().enumerate() {
             if event.identity.aircraft_address == 0 {
                 out.counts.unbound_flight_updates =
@@ -2020,6 +2180,7 @@ fn adapt_sfdps_frame(
             event.sequence = next_sequence
                 .checked_add(u64::try_from(offset).map_err(|_| AdapterError::CountOverflow)?)
                 .ok_or(AdapterError::CountOverflow)?;
+            event.source_message_id = Some(source_message_id);
             out.events.push(event);
             out.provenance.push(EventProvenance {
                 source: frame.source,
@@ -2077,14 +2238,14 @@ fn normalized_flight_operation(
         arr,
     } = input;
     let op = match kind {
-        OP_SET_PLAN
-            if plan_id != [0; 12] && valid_padded_ascii(&plan_id) && !plan_id.contains(&0) =>
-        {
-            FlightOperation::SetPlan {
-                plan_id,
-                status: state,
-            }
-        }
+        OP_SET_PLAN if valid_padded_code(&plan_id) => FlightOperation::SetPlan {
+            plan_id,
+            status: state,
+        },
+        OP_DEPART => FlightOperation::Depart,
+        OP_COMPLETE => FlightOperation::Complete,
+        OP_CANCEL => FlightOperation::Cancel,
+        OP_DROP => FlightOperation::Drop,
         OP_ASSIGN if alt.form == ALT_SIMPLE => FlightOperation::AssignAltitude {
             altitude_ft: alt.a_ft,
         },
@@ -2095,15 +2256,19 @@ fn normalized_flight_operation(
         OP_INTERIM if alt.form == ALT_NIL => {
             FlightOperation::SetInterimAltitude { altitude_ft: None }
         }
-        OP_OWNER if valid_padded_ascii(&unit_a) => FlightOperation::SetOwner { unit: unit_a },
+        OP_OWNER if valid_padded_unit_parts(&unit_a) => {
+            let (unit_code, sector_code) = split_unit_parts(&unit_a)?;
+            FlightOperation::SetOwnerParts {
+                unit_code,
+                sector_code,
+            }
+        }
         OP_ADDRESS => FlightOperation::SetAddress,
         OP_IDENTITY
-            if callsign != [0; 8]
-                && dep != [0; 12]
-                && arr != [0; 12]
-                && valid_padded_ascii(&callsign)
-                && valid_padded_ascii(&dep)
-                && valid_padded_ascii(&arr) =>
+            if (callsign != [0; 8] || dep != [0; 12] || arr != [0; 12])
+                && valid_optional_padded_ascii(&callsign)
+                && valid_optional_padded_ascii(&dep)
+                && valid_optional_padded_ascii(&arr) =>
         {
             FlightOperation::SetIdentity {
                 callsign,
@@ -2119,13 +2284,16 @@ fn normalized_flight_operation(
             operation: HandoffOperation::Take,
             unit: unit_b,
         },
-        // The normalized model cannot represent the transferring unit, receiving-unit updates,
-        // retractions, requested altitudes, departures, or terminal plan events without loss.
+        // These source lifecycle events remain unsupported because this representation cannot
+        // preserve their remaining event-specific fields.
         OP_HO_INITIATE | OP_HO_UPDATE | OP_HO_RETRACT | OP_HO_FAIL | OP_REQUEST => return None,
-        2..=5 => return None,
         _ => return None,
     };
     Some((op, if kind == OP_ADDRESS { address } else { 0 }))
+}
+
+fn valid_optional_padded_ascii(bytes: &[u8]) -> bool {
+    bytes.iter().all(|byte| *byte == 0) || valid_padded_ascii(bytes)
 }
 
 fn valid_padded_ascii(bytes: &[u8]) -> bool {
@@ -2137,6 +2305,46 @@ fn valid_padded_ascii(bytes: &[u8]) -> bool {
         && bytes
             .get(end..)
             .is_some_and(|tail| tail.iter().all(|&b| b == 0))
+}
+
+fn valid_padded_code(bytes: &[u8]) -> bool {
+    valid_padded_ascii(bytes)
+        && bytes
+            .iter()
+            .take_while(|&&byte| byte != 0)
+            .all(u8::is_ascii_alphanumeric)
+}
+
+fn valid_padded_unit_code(bytes: &[u8; 4]) -> bool {
+    let mut saw_padding = false;
+    let mut saw_code = false;
+    for byte in bytes {
+        if *byte == 0 {
+            saw_padding = true;
+        } else if saw_padding || !(byte.is_ascii_alphanumeric() || *byte == b'?') {
+            return false;
+        } else {
+            saw_code = true;
+        }
+    }
+    saw_code
+}
+
+fn split_unit_parts(bytes: &[u8; 8]) -> Option<([u8; 4], [u8; 4])> {
+    let unit_code = bytes
+        .get(..4)
+        .and_then(|part| <[u8; 4]>::try_from(part).ok())?;
+    let sector_code = bytes
+        .get(4..)
+        .and_then(|part| <[u8; 4]>::try_from(part).ok())?;
+    Some((unit_code, sector_code))
+}
+
+fn valid_padded_unit_parts(bytes: &[u8; 8]) -> bool {
+    let Some((unit_code, sector_code)) = split_unit_parts(bytes) else {
+        return false;
+    };
+    valid_padded_unit_code(&unit_code) && (sector_code == [0; 4] || valid_padded_code(&sector_code))
 }
 
 /// Converts a bounded prefix of decoded ADS-B positions. Oversize input emits no prefix: the
@@ -2206,7 +2414,7 @@ pub fn adapt_positions(
             counts.invalid_altitude += 1;
             continue;
         }
-        if !row.centre.iter().all(u8::is_ascii_alphanumeric) {
+        if !crate::input::is_valid_centre_code(&row.centre) {
             counts.invalid_record += 1;
             counts.invalid_centre += 1;
             continue;
@@ -2215,6 +2423,7 @@ pub fn adapt_positions(
             receipt_ns: row.receipt_ns,
             source_ns: row.source_ns,
             sequence: row.sequence,
+            source_message_id: None,
             source: SourceKind::Surveillance,
             identity: Identity {
                 flight_gufi: gufi,
@@ -2254,7 +2463,7 @@ pub fn serialize_positions(events: &[NormalizedEvent]) -> Result<String, Adapter
         if event.source != SourceKind::Surveillance {
             return Err(AdapterError::UnsupportedEvent);
         }
-        if !event.centre.iter().all(u8::is_ascii_alphanumeric) {
+        if !crate::input::is_valid_centre_code(&event.centre) {
             return Err(AdapterError::InvalidCentre);
         }
         use core::fmt::Write;
@@ -2266,7 +2475,7 @@ pub fn serialize_positions(events: &[NormalizedEvent]) -> Result<String, Adapter
             event.sequence,
             event.identity.flight_gufi,
             event.identity.aircraft_address,
-            core::str::from_utf8(&event.centre).map_err(|_| AdapterError::InvalidCentre)?,
+            ascii_trimmed(&event.centre)?,
             latitude_e7,
             longitude_e7,
             altitude_ft.map_or_else(|| "-".to_owned(), |v| v.to_string()),
@@ -2291,11 +2500,12 @@ pub fn serialize_recorded_events(events: &[NormalizedEvent]) -> Result<String, A
             SourceKind::Flight => ("FLIGHT", "FLIGHT"),
             _ => return Err(AdapterError::UnsupportedEvent),
         };
-        if !event.centre.iter().all(u8::is_ascii_alphanumeric)
+        if !crate::input::is_valid_centre_code(&event.centre)
             || event.identity.aircraft_address > 0x01ff_ffff
         {
             return Err(AdapterError::InvalidCentre);
         }
+        let centre_text = ascii_trimmed(&event.centre)?;
         write!(
             out,
             "v1\t{}\t{}\t{}\t{}\t{:032X}\t{:06X}\t{}\t{}",
@@ -2305,7 +2515,7 @@ pub fn serialize_recorded_events(events: &[NormalizedEvent]) -> Result<String, A
             source_name,
             event.identity.flight_gufi,
             event.identity.aircraft_address,
-            core::str::from_utf8(&event.centre).map_err(|_| AdapterError::InvalidCentre)?,
+            centre_text,
             kind
         )
         .map_err(|_| AdapterError::CountOverflow)?;
@@ -2343,8 +2553,15 @@ pub fn serialize_recorded_events(events: &[NormalizedEvent]) -> Result<String, A
                         return Err(AdapterError::UnsupportedEvent);
                     }
                     FlightOperation::SetPlan { plan_id, status } => {
-                        write!(out, "\tPLAN\t{}\t{}", ascii_field(&plan_id)?, status)
+                        if !valid_padded_code(&plan_id) {
+                            return Err(AdapterError::InvalidField);
+                        }
+                        write!(out, "\tPLAN\t{}\t{}", ascii_trimmed(&plan_id)?, status)
                     }
+                    FlightOperation::Depart => write!(out, "\tDEPART"),
+                    FlightOperation::Complete => write!(out, "\tCOMPLETE"),
+                    FlightOperation::Cancel => write!(out, "\tCANCEL"),
+                    FlightOperation::Drop => write!(out, "\tDROP"),
                     FlightOperation::AssignAltitude { altitude_ft } => {
                         write!(out, "\tASSIGNED\t{altitude_ft}")
                     }
@@ -2357,18 +2574,50 @@ pub fn serialize_recorded_events(events: &[NormalizedEvent]) -> Result<String, A
                     FlightOperation::SetOwner { unit } => {
                         write!(out, "\tOWNER\t{}", ascii_trimmed(&unit)?)
                     }
+                    FlightOperation::SetOwnerParts {
+                        unit_code,
+                        sector_code,
+                    } => {
+                        if !valid_padded_unit_code(&unit_code)
+                            || (sector_code != [0; 4] && !valid_padded_code(&sector_code))
+                        {
+                            return Err(AdapterError::InvalidField);
+                        }
+                        let sector = if sector_code == [0; 4] {
+                            "-".to_owned()
+                        } else {
+                            ascii_trimmed(&sector_code)?
+                        };
+                        write!(
+                            out,
+                            "\tOWNER_PARTS\t{}\t{}",
+                            ascii_trimmed(&unit_code)?,
+                            sector
+                        )
+                    }
                     FlightOperation::SetAddress => write!(out, "\tADDRESS"),
                     FlightOperation::SetIdentity {
                         callsign,
                         departure,
                         arrival,
-                    } => write!(
-                        out,
-                        "\tIDENTITY\t{}\t{}\t{}",
-                        ascii_trimmed(&callsign)?,
-                        ascii_trimmed(&departure)?,
-                        ascii_trimmed(&arrival)?
-                    ),
+                    } => {
+                        if callsign == [0; 8] && departure == [0; 12] && arrival == [0; 12] {
+                            return Err(AdapterError::InvalidField);
+                        }
+                        let operation =
+                            if callsign == [0; 8] || departure == [0; 12] || arrival == [0; 12] {
+                                "IDENTITY_PARTIAL"
+                            } else {
+                                "IDENTITY"
+                            };
+                        write!(
+                            out,
+                            "\t{operation}\t{}\t{}\t{}",
+                            ascii_optional_trimmed(&callsign)?,
+                            ascii_optional_trimmed(&departure)?,
+                            ascii_optional_trimmed(&arrival)?
+                        )
+                    }
                     FlightOperation::Handoff { operation, unit } => {
                         let name = match operation {
                             HandoffOperation::Update => "HO_UPDATE",
@@ -2390,6 +2639,13 @@ pub fn serialize_recorded_events(events: &[NormalizedEvent]) -> Result<String, A
             }
             _ => return Err(AdapterError::UnsupportedEvent),
         }
+        if let Some(source_message_id) = event.source_message_id {
+            if event.source != SourceKind::Flight {
+                return Err(AdapterError::UnsupportedEvent);
+            }
+            write!(out, "\tSRCMSG\t{source_message_id}")
+                .map_err(|_| AdapterError::CountOverflow)?;
+        }
         if out
             .len()
             .saturating_sub(out.rfind('\n').map_or(0, |i| i + 1))
@@ -2400,6 +2656,23 @@ pub fn serialize_recorded_events(events: &[NormalizedEvent]) -> Result<String, A
         out.push('\n');
     }
     Ok(out)
+}
+
+/// Append one established OA-RS event row without its file header. The caller must bound the
+/// destination before appending; the serialized row itself retains the existing 768-byte cap.
+pub(crate) fn append_recorded_event_row(
+    out: &mut String,
+    event: &NormalizedEvent,
+) -> Result<(), AdapterError> {
+    let serialized = serialize_recorded_events(core::slice::from_ref(event))?;
+    let newline = serialized.find('\n').ok_or(AdapterError::InvalidField)?;
+    let row = serialized
+        .get(newline + 1..)
+        .ok_or(AdapterError::InvalidField)?;
+    out.try_reserve(row.len())
+        .map_err(|_| AdapterError::AllocationRefused)?;
+    out.push_str(row);
+    Ok(())
 }
 
 /// Deterministic companion manifest binding each normalized line to its input recording frame.
@@ -2434,42 +2707,53 @@ pub fn serialize_provenance(
         .map_err(|_| AdapterError::CountOverflow)?;
     }
     for (index, (event, origin)) in events.iter().zip(provenance).enumerate() {
-        let source = match event.source {
-            SourceKind::Surveillance => "SURVEILLANCE",
-            SourceKind::Flight => "FLIGHT",
-            SourceKind::Route => "ROUTE",
-            SourceKind::Weather => "WEATHER",
-            SourceKind::Adaptation => "ADAPTATION",
-        };
-        let feed = match origin.source {
-            RecordingSource::Adsb => "ADSB",
-            RecordingSource::Sfdps => "SFDPS",
-        };
-        writeln!(
-            out,
-            "EVENT\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:02X}\t{}\t{}\t{:08X}\t{:02X}{:02X}",
-            index,
-            source,
-            event.sequence,
-            feed,
-            origin.stream_index,
-            origin.frame_sequence,
-            origin.input_receipt_ns,
-            origin.frame_byte_offset,
-            origin.jms_timestamp_ms,
-            origin
-                .mono_ns
-                .map_or_else(|| "-".to_owned(), |v| v.to_string()),
-            origin.oaf_flags,
-            origin.skipped_before,
-            origin.emitted_item_ordinal,
-            origin.native_flags,
-            origin.native_source[0],
-            origin.native_source[1]
-        )
-        .map_err(|_| AdapterError::CountOverflow)?;
+        append_provenance_event_row(&mut out, index, event, *origin)?;
     }
     Ok(out)
+}
+
+/// Append one established provenance row without a file header or stream table.
+pub(crate) fn append_provenance_event_row(
+    out: &mut String,
+    index: usize,
+    event: &NormalizedEvent,
+    origin: EventProvenance,
+) -> Result<(), AdapterError> {
+    use core::fmt::Write;
+    let source = match event.source {
+        SourceKind::Surveillance => "SURVEILLANCE",
+        SourceKind::Flight => "FLIGHT",
+        SourceKind::Route => "ROUTE",
+        SourceKind::Weather => "WEATHER",
+        SourceKind::Adaptation => "ADAPTATION",
+    };
+    let feed = match origin.source {
+        RecordingSource::Adsb => "ADSB",
+        RecordingSource::Sfdps => "SFDPS",
+    };
+    writeln!(
+        out,
+        "EVENT\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:02X}\t{}\t{}\t{:08X}\t{:02X}{:02X}",
+        index,
+        source,
+        event.sequence,
+        feed,
+        origin.stream_index,
+        origin.frame_sequence,
+        origin.input_receipt_ns,
+        origin.frame_byte_offset,
+        origin.jms_timestamp_ms,
+        origin
+            .mono_ns
+            .map_or_else(|| "-".to_owned(), |v| v.to_string()),
+        origin.oaf_flags,
+        origin.skipped_before,
+        origin.emitted_item_ordinal,
+        origin.native_flags,
+        origin.native_source[0],
+        origin.native_source[1]
+    )
+    .map_err(|_| AdapterError::CountOverflow)
 }
 
 /// Serializes refusal locators and reason metadata. Raw payloads are deliberately not copied;
@@ -2513,13 +2797,12 @@ pub fn serialize_quarantine(records: &[RecordedQuarantine]) -> Result<String, Ad
     Ok(out)
 }
 
-fn ascii_field(bytes: &[u8]) -> Result<String, AdapterError> {
-    if !bytes.is_ascii() || bytes.contains(&0) {
-        return Err(AdapterError::InvalidField);
+fn ascii_optional_trimmed<const N: usize>(bytes: &[u8; N]) -> Result<String, AdapterError> {
+    if bytes.iter().all(|byte| *byte == 0) {
+        Ok("-".to_owned())
+    } else {
+        ascii_trimmed(bytes)
     }
-    core::str::from_utf8(bytes)
-        .map(str::to_owned)
-        .map_err(|_| AdapterError::InvalidField)
 }
 
 fn ascii_trimmed(bytes: &[u8]) -> Result<String, AdapterError> {
@@ -2580,6 +2863,21 @@ mod tests {
             vec![(7, 10, 0x1122), (6, 10, 0x3344)]
         );
         assert_eq!(serialize_positions(&got.events).unwrap(), "OA-RS\t1\nv1\t20\t10\t7\tSURVEILLANCE\t00000000000000000000000000001122\tABCDEF\tZAU1\tPOS\t410000000\t-870000000\t-\t123\t-456\t0\nv1\t20\t10\t6\tSURVEILLANCE\t00000000000000000000000000003344\tABCDEF\tZAU1\tPOS\t410000000\t-870000000\t-\t123\t-456\t0\n");
+    }
+
+    #[test]
+    fn adapts_and_serializes_padded_three_character_surveillance_centre() {
+        let mut source = row(RecordedIdentity::Unknown, 1);
+        source.centre = *b"ZAU\0";
+        let adapted = adapt_positions(&[source], 1).unwrap();
+        assert_eq!(adapted.events.len(), 1);
+        assert!(crate::input::is_valid_centre_code(
+            &adapted.events[0].centre
+        ));
+        let serialized = serialize_positions(&adapted.events).unwrap();
+        let row = serialized.split_terminator('\n').nth(1).unwrap();
+        let reparsed = crate::input::parse_event_line(row).unwrap();
+        assert_eq!(reparsed.centre, source.centre);
     }
 
     #[test]
@@ -2841,12 +3139,231 @@ mod tests {
     }
 
     #[test]
+    fn sfdps_short_codes_lifecycle_and_unknown_owner_reach_the_flight_table() {
+        let xml = br#"<ns5:MessageCollection xmlns:ns5="http://www.faa.aero/nas/3.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><message xsi:type="ns5:FlightMessageType"><flight xsi:type="ns5:NasFlightType" centre="ZXX" source="AH" system="SLC" timestamp="2030-01-02T03:04:05.000Z"><gufi codeSpace="urn:uuid">11111111-2222-3333-4444-555555555555</gufi><flightPlan identifier="FP7"/><flightStatus fdpsFlightStatus="ACTIVE"/><departure><runwayPositionAndTime><runwayTime><actual time="2030-01-02T03:00:00Z"/></runwayTime></runwayPositionAndTime></departure><controllingUnit unitIdentifier="???"/></flight></message><message xsi:type="ns5:FlightMessageType"><flight xsi:type="ns5:NasFlightType" centre="ZXX" source="TH" system="SLC" timestamp="2030-01-02T03:04:06.000Z"><gufi codeSpace="urn:uuid">11111111-2222-3333-4444-555555555555</gufi><flightPlan identifier="FP7"/><flightStatus fdpsFlightStatus="ACTIVE"/><flightIdentification aircraftIdentification="ABC123"/><aircraftDescription aircraftAddress="ABCDEF"/><controllingUnit unitIdentifier="ZXX" sectorIdentifier="03"/></flight></message></ns5:MessageCollection>"#;
+        let receipt_ms = oa_fixm::parse_iso_ms(b"2030-01-02T03:04:07.250Z").unwrap();
+        let receipt_ns = receipt_ms.checked_mul(1_000_000).unwrap();
+        let frame = RecordedFrame {
+            source: RecordingSource::Sfdps,
+            stream_index: 0,
+            receipt_ns,
+            sequence: 1,
+            jms_timestamp_ms: receipt_ms,
+            mono_ns: None,
+            oaf_flags: 0,
+            byte_offset: 0,
+            skipped_before: 0,
+            kind: oa_feed::Kind::Message,
+            payload: xml.to_vec(),
+        };
+        let payload_len = u64::try_from(frame.payload.len()).unwrap();
+        let counts = RecordingCounts {
+            total_frames: 1,
+            total_bytes: payload_len,
+            total_decoded_bytes: payload_len,
+            ..RecordingCounts::default()
+        };
+        let adapted = adapt_recorded_frames(&[frame], counts, 8, *b"ZAU1").unwrap();
+        assert_eq!(adapted.counts.sfdps_rows_decoded, 2);
+        assert_eq!(adapted.counts.sfdps_rows_refused, 0);
+        assert_eq!(adapted.counts.sfdps_owner_unknown, 1);
+        assert!(adapted.counts.sfdps_rows_positive_address > 0);
+        assert!(adapted.counts.sfdps_rows_nonempty_callsign > 0);
+        assert!(adapted.counts.sfdps_emitted_operations[usize::from(OP_ADDRESS)] > 0);
+        assert!(adapted.counts.sfdps_emitted_operations[usize::from(OP_IDENTITY)] > 0);
+        assert!(!adapted.events.is_empty());
+        let first_message_id = adapted.events.first().unwrap().source_message_id;
+        let second_message_id = adapted
+            .events
+            .iter()
+            .find_map(|event| {
+                (event.source_message_id != first_message_id).then_some(event.source_message_id)
+            })
+            .unwrap();
+        let first_message_events = adapted
+            .events
+            .iter()
+            .filter(|event| event.source_message_id == first_message_id)
+            .count();
+        let second_message_events = adapted
+            .events
+            .iter()
+            .filter(|event| event.source_message_id == second_message_id)
+            .count();
+        assert!(first_message_events > 1);
+        assert!(second_message_events > first_message_events);
+        assert_ne!(first_message_id, second_message_id);
+        assert!(adapted.events.iter().any(|event| {
+            matches!(
+                event.kind,
+                EventKind::Flight(crate::input::FlightOperation::SetAddress)
+            )
+        }));
+        assert!(adapted.events.iter().any(|event| {
+            matches!(
+                event.kind,
+                EventKind::Flight(crate::input::FlightOperation::SetIdentity { callsign, .. })
+                    if callsign != [0; 8]
+            )
+        }));
+        let event = adapted.events[0];
+        assert!(crate::input::is_valid_centre_code(&event.centre));
+        assert_eq!(&event.centre[..3], b"ZXX");
+        assert_eq!(event.centre[3], 0);
+        assert!(adapted.events.iter().any(|event| {
+            matches!(
+                event.kind,
+                EventKind::Flight(crate::input::FlightOperation::Depart)
+            )
+        }));
+        assert!(adapted.events.iter().any(|event| {
+            matches!(
+                event.kind,
+                EventKind::Flight(crate::input::FlightOperation::SetOwnerParts {
+                    unit_code,
+                    sector_code
+                }) if unit_code == *b"ZXX\0" && sector_code == *b"03\0\0"
+            )
+        }));
+        let serialized = serialize_recorded_events(&adapted.events).unwrap();
+        let mut reparsed = Vec::new();
+        for row in serialized.split_terminator('\n').skip(1) {
+            reparsed.push(crate::input::parse_event_line(row).unwrap());
+        }
+        assert_eq!(reparsed, adapted.events);
+
+        let mut driver = crate::flight::flight_driver_new(crate::flight::FlightDriverConfig {
+            flight_capacity: 8,
+            refusal_log_capacity: 16,
+            conflict_log_capacity: 16,
+        })
+        .unwrap();
+        for event in &reparsed {
+            let outcome = crate::flight::flight_apply_event(&mut driver, event).unwrap();
+            assert!(
+                matches!(
+                    outcome.operation,
+                    Some(oa_flight::Outcome::Applied | oa_flight::Outcome::Unchanged)
+                ),
+                "flight consumer refused {:?} as {:?}",
+                event.kind,
+                outcome.operation
+            );
+            assert_eq!(outcome.adapter_refusal, None);
+        }
+        let gufi = oa_fixm::parse_uuid(b"11111111-2222-3333-4444-555555555555").unwrap();
+        let cutoff_ms = adapted.events[0].receipt_ns / 1_000_000;
+        let view =
+            crate::flight::flight_view_for_gufi(&mut driver, gufi, *b"ZXX\0", cutoff_ms).unwrap();
+        assert_eq!(view.plan_state, oa_flight::ST_DEPARTED);
+        assert_eq!(view.address, u32::from_str_radix("ABCDEF", 16).unwrap());
+        assert_eq!(view.callsign.get(..6), Some(&b"ABC123"[..]));
+        assert_eq!(view.departure, [0; 12]);
+        assert_eq!(view.arrival, [0; 12]);
+        let mut joined_views = Vec::with_capacity(8);
+        let joined = crate::flight::flight_views_for_address(
+            &mut driver,
+            view.address,
+            *b"ZXX\0",
+            cutoff_ms,
+            &mut joined_views,
+        );
+        assert_eq!(joined.status, crate::flight::FlightViewStatus::Found);
+        assert!(joined.claimants > 0);
+        assert_eq!(joined_views.len(), joined.claimants);
+        let unmatched = crate::flight::flight_views_for_address(
+            &mut driver,
+            view.address.saturating_add(1),
+            *b"ZXX\0",
+            cutoff_ms,
+            &mut joined_views,
+        );
+        assert_eq!(
+            unmatched.status,
+            crate::flight::FlightViewStatus::UnknownFlight
+        );
+        assert!(joined_views.is_empty());
+        assert_eq!(&view.plan_id[..3], b"FP7");
+        assert_eq!(view.plan_id[3], 0);
+        assert_eq!(view.owner_unit, [b'Z', b'X', b'X', 0, b'0', b'3', 0, 0]);
+    }
+
+    #[test]
+    fn source_message_identity_groups_operations_without_merging_messages() {
+        // Kills substituting per-operation sequence IDs (plan→depart must share a core stamp)
+        // and substituting receipt time (a distinct same-stamp message must still be refused).
+        let first_message = 41u64;
+        let second_message = first_message + 1;
+        let common = "2000000000\t1000000000";
+        let prefix = "FLIGHT\t00000000000000000000000000000001\t000000\tZXX\tFLIGHT";
+        let first_depart_sequence = first_message + 1;
+        let rows = [
+            format!(
+                "v1\t{common}\t{first_message}\t{prefix}\tPLAN\tFP7\t2\tSRCMSG\t{first_message}"
+            ),
+            format!(
+                "v1\t{common}\t{first_depart_sequence}\t{prefix}\tDEPART\tSRCMSG\t{first_message}"
+            ),
+            format!("v1\t{common}\t{second_message}\t{prefix}\tCOMPLETE\tSRCMSG\t{second_message}"),
+        ];
+        let events = rows
+            .iter()
+            .map(|row| crate::input::parse_event_line(row).unwrap())
+            .collect::<Vec<_>>();
+        let encoded = serialize_recorded_events(&events).unwrap();
+        let reparsed = encoded
+            .split_terminator('\n')
+            .skip(1)
+            .map(crate::input::parse_event_line)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(reparsed, events);
+
+        let mut invalid_identity = *events.first().unwrap();
+        invalid_identity.sequence = first_message - 1;
+        let mut validation_driver =
+            crate::flight::flight_driver_new(crate::flight::FlightDriverConfig {
+                flight_capacity: 2,
+                refusal_log_capacity: 4,
+                conflict_log_capacity: 4,
+            })
+            .unwrap();
+        assert_eq!(
+            crate::flight::flight_apply_event(&mut validation_driver, &invalid_identity),
+            Err(crate::flight::FlightDriverError::InvalidBatchOrder)
+        );
+
+        let mut driver = crate::flight::flight_driver_new(crate::flight::FlightDriverConfig {
+            flight_capacity: 2,
+            refusal_log_capacity: 4,
+            conflict_log_capacity: 4,
+        })
+        .unwrap();
+        for event in reparsed.iter().take(2) {
+            let outcome = crate::flight::flight_apply_event(&mut driver, event).unwrap();
+            assert!(matches!(
+                outcome.operation,
+                Some(oa_flight::Outcome::Applied | oa_flight::Outcome::Unchanged)
+            ));
+        }
+        let distinct_message = reparsed.get(2).unwrap();
+        let outcome = crate::flight::flight_apply_event(&mut driver, distinct_message).unwrap();
+        assert_eq!(
+            outcome.operation,
+            Some(oa_flight::Outcome::Refused(
+                oa_flight::R_SAME_STAMP_DIFFERENT
+            ))
+        );
+    }
+
+    #[test]
     fn serializes_flight_events_and_exact_frame_provenance() {
         use crate::input::FlightOperation;
         let event = NormalizedEvent {
             receipt_ns: 20,
             source_ns: 10,
             sequence: 3,
+            source_message_id: None,
             source: SourceKind::Flight,
             identity: Identity {
                 flight_gufi: 0x123,
@@ -2892,6 +3409,200 @@ mod tests {
         assert_eq!(adsb_ground_class(0, 12_000), AdsGroundClass::Airborne);
     }
 
+    #[test]
+    fn adsb_rows_with_mixed_aircraft_times_keep_sorted_events_and_source_ordinals() {
+        let base_ns = 1_893_456_780_000_000_000i64;
+        let reports = [
+            oa_adsb::Row {
+                time_ns: base_ns + 900_000_000,
+                icao: 0xABCDEF,
+                lat_e7: 419_000_000,
+                lon_e7: -873_000_000,
+                baro_alt_ft: 35_000,
+                gs_dkt: 4_500,
+                track_ddeg: 900,
+                vrate_fpm: 0,
+                nic: 8,
+                nac_p: 9,
+                nac_v: 2,
+                sil: 3,
+                version: 2,
+                source: 0,
+                ..oa_adsb::ROW_EMPTY
+            },
+            oa_adsb::Row {
+                time_ns: base_ns + 100_000_000,
+                icao: 0x123456,
+                lat_e7: 420_000_000,
+                lon_e7: -872_000_000,
+                baro_alt_ft: 34_000,
+                gs_dkt: 4_300,
+                track_ddeg: 1_000,
+                vrate_fpm: 0,
+                nic: 8,
+                nac_p: 9,
+                nac_v: 2,
+                sil: 3,
+                version: 2,
+                source: 0,
+                ..oa_adsb::ROW_EMPTY
+            },
+        ];
+        let mut decoded = Reports::default();
+        for report in &reports {
+            reports_push(&mut decoded, report);
+        }
+        let mut payload = Vec::new();
+        oa_adsb::encode_payload(&mut payload, &decoded, 0, reports.len())
+            .expect("synthetic ADS-B rows encode");
+        let frame = RecordedFrame {
+            source: RecordingSource::Adsb,
+            stream_index: 0,
+            receipt_ns: base_ns + 900_000_000,
+            sequence: 0,
+            jms_timestamp_ms: (base_ns + 900_000_000) / 1_000_000,
+            mono_ns: None,
+            oaf_flags: oa_feed::FLAG_BYTES,
+            byte_offset: 0,
+            skipped_before: 0,
+            kind: oa_feed::Kind::Message,
+            payload,
+        };
+        let got = adapt_recorded_frames(
+            core::slice::from_ref(&frame),
+            RecordingCounts {
+                total_decoded_bytes: u64::try_from(frame.payload.len()).unwrap(),
+                ..RecordingCounts::default()
+            },
+            8,
+            *b"ZAU1",
+        )
+        .unwrap();
+
+        assert_eq!(
+            got.events
+                .iter()
+                .map(|event| event.source_ns)
+                .collect::<Vec<_>>(),
+            vec![base_ns + 100_000_000, base_ns + 900_000_000],
+            "adapter counters: {:?}",
+            got.counts
+        );
+        assert_eq!(
+            got.provenance
+                .iter()
+                .map(|origin| origin.emitted_item_ordinal)
+                .collect::<Vec<_>>(),
+            vec![1, 0]
+        );
+        assert_eq!(
+            got.events
+                .iter()
+                .zip(&got.provenance)
+                .map(|(event, origin)| (event.source_ns, origin.emitted_item_ordinal))
+                .collect::<Vec<_>>(),
+            vec![(base_ns + 100_000_000, 1), (base_ns + 900_000_000, 0)]
+        );
+        assert_eq!(got.counts.adsb_source_time_regressions, 1);
+        assert_eq!(got.counts.adsb_rows_order_refused, 0);
+        assert_eq!(got.counts.invalid_position_rows, 0);
+        assert_eq!(got.counts.events_emitted, 2);
+        assert!(got.quarantine.is_empty());
+    }
+
+    #[test]
+    fn adsb_frame_first_report_time_does_not_reject_later_rows() {
+        let base_ns = 1_893_456_780_000_000_000i64;
+        let mut reports = Reports::default();
+        for (time_ns, icao, lat_e7) in [
+            (base_ns + 950_000_000, 0xABCDEF, 419_000_000),
+            (base_ns + 1_050_000_000, 0x123456, 420_000_000),
+        ] {
+            reports_push(
+                &mut reports,
+                &oa_adsb::Row {
+                    time_ns,
+                    icao,
+                    lat_e7,
+                    lon_e7: -873_000_000,
+                    baro_alt_ft: 35_000,
+                    gs_dkt: 4_500,
+                    track_ddeg: 900,
+                    vrate_fpm: 0,
+                    nic: 8,
+                    nac_p: 9,
+                    nac_v: 2,
+                    sil: 3,
+                    version: 2,
+                    source: 0,
+                    ..oa_adsb::ROW_EMPTY
+                },
+            );
+        }
+        let mut payload = Vec::new();
+        oa_adsb::encode_payload(&mut payload, &reports, 0, reports_len(&reports))
+            .expect("synthetic ADS-B rows encode");
+        let frame = RecordedFrame {
+            source: RecordingSource::Adsb,
+            stream_index: 0,
+            receipt_ns: base_ns + 950_000_000,
+            sequence: 0,
+            jms_timestamp_ms: (base_ns + 950_000_000) / 1_000_000,
+            mono_ns: None,
+            oaf_flags: oa_feed::FLAG_BYTES,
+            byte_offset: 0,
+            skipped_before: 0,
+            kind: oa_feed::Kind::Message,
+            payload,
+        };
+        let got = adapt_recorded_frames(
+            core::slice::from_ref(&frame),
+            RecordingCounts {
+                total_decoded_bytes: u64::try_from(frame.payload.len()).unwrap(),
+                ..RecordingCounts::default()
+            },
+            8,
+            *b"ZAU1",
+        )
+        .unwrap();
+
+        assert_eq!(
+            got.events
+                .iter()
+                .map(|event| (event.source_ns, event.receipt_ns))
+                .collect::<Vec<_>>(),
+            vec![
+                (base_ns + 950_000_000, base_ns + 1_000_000_000),
+                (base_ns + 1_050_000_000, base_ns + 2_000_000_000)
+            ],
+            "adapter counters: {:?}",
+            got.counts
+        );
+        assert_eq!(got.counts.source_after_receipt, 1);
+        assert_eq!(got.counts.invalid_position_rows, 0);
+        assert_eq!(got.counts.events_emitted, 2);
+        assert!(got.quarantine.is_empty());
+
+        let live_frame = RecordedFrame {
+            mono_ns: Some(1),
+            ..frame.clone()
+        };
+        let live = adapt_recorded_frames(
+            core::slice::from_ref(&live_frame),
+            RecordingCounts {
+                total_decoded_bytes: u64::try_from(live_frame.payload.len()).unwrap(),
+                ..RecordingCounts::default()
+            },
+            8,
+            *b"ZAU1",
+        )
+        .unwrap();
+        assert_eq!(live.events.len(), 1);
+        assert_eq!(live.counts.source_after_receipt, 1);
+        assert_eq!(live.counts.invalid_position_rows, 1);
+        assert_eq!(live.counts.events_emitted, 1);
+    }
+
     fn event(source: SourceKind, sequence: u64) -> NormalizedEvent {
         let kind = match source {
             SourceKind::Surveillance => EventKind::Position {
@@ -2911,6 +3622,7 @@ mod tests {
             receipt_ns: 2_000_000_000,
             source_ns: 1_000_000_000,
             sequence,
+            source_message_id: None,
             source,
             identity: Identity {
                 flight_gufi: 1,

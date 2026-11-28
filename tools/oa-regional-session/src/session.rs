@@ -9,6 +9,8 @@ use crate::input::{NormalizedEvent, SourceKind};
 /// Maximum events sharing one receipt timestamp. Reaching the bound refuses the next row and
 /// reports it; no event is silently replaced or dropped (RULESET C2, C7, E6).
 pub const MAX_EVENTS_PER_RECEIPT: usize = 256;
+/// Hour-profile-only ceiling for a dense normalized receipt cutoff.
+pub const RECORDED_HOUR_MAX_EVENTS_PER_RECEIPT: usize = 8_192;
 
 /// Maximum normalized input events accepted by one invocation.
 pub const MAX_SESSION_EVENTS: usize = 100_000;
@@ -59,6 +61,7 @@ pub struct SessionCursor {
     source_clock_regressions: u64,
     total_events: u64,
     max_events: usize,
+    max_events_per_receipt: usize,
     closed: bool,
 }
 
@@ -73,19 +76,34 @@ pub fn session_cursor_new() -> SessionCursor {
         source_clock_regressions: 0,
         total_events: 0,
         max_events: MAX_SESSION_EVENTS,
+        max_events_per_receipt: MAX_EVENTS_PER_RECEIPT,
         closed: false,
     }
 }
 
-/// Constructs a bounded streaming cursor for an explicitly selected offline profile. The pending
-/// receipt group remains capped at `MAX_EVENTS_PER_RECEIPT`; only the total admitted-event budget
-/// changes, up to `MAX_RECORDED_PROFILE_EVENTS`.
+/// Constructs a bounded streaming cursor for an explicitly selected offline profile. This legacy
+/// constructor retains the default per-receipt cap.
 pub fn session_cursor_new_with_limit(max_events: usize) -> Result<SessionCursor, SessionError> {
+    session_cursor_new_with_profile_limits(max_events, MAX_EVENTS_PER_RECEIPT)
+}
+
+/// Constructs a bounded cursor with explicit total-event and receipt-group budgets. The larger
+/// receipt-group limit is reserved for the recorded-hour profile; ordinary profiles keep 256.
+pub fn session_cursor_new_with_profile_limits(
+    max_events: usize,
+    max_events_per_receipt: usize,
+) -> Result<SessionCursor, SessionError> {
     if max_events == 0 || max_events > MAX_RECORDED_PROFILE_EVENTS {
         return Err(SessionError::SessionFull);
     }
+    if !matches!(
+        max_events_per_receipt,
+        MAX_EVENTS_PER_RECEIPT | RECORDED_HOUR_MAX_EVENTS_PER_RECEIPT
+    ) {
+        return Err(SessionError::ReceiptGroupFull);
+    }
     Ok(SessionCursor {
-        pending: Vec::with_capacity(MAX_EVENTS_PER_RECEIPT),
+        pending: Vec::with_capacity(max_events_per_receipt),
         receipt_ns: None,
         prior_receipt_ns: None,
         prior_source_ns: [None; 5],
@@ -93,6 +111,7 @@ pub fn session_cursor_new_with_limit(max_events: usize) -> Result<SessionCursor,
         source_clock_regressions: 0,
         total_events: 0,
         max_events,
+        max_events_per_receipt,
         closed: false,
     })
 }
@@ -109,6 +128,17 @@ fn source_index(source: SourceKind) -> usize {
         SourceKind::Route => 2,
         SourceKind::Weather => 3,
         SourceKind::Adaptation => 4,
+    }
+}
+
+fn compact_profile_batch(
+    events: Vec<NormalizedEvent>,
+    max_events_per_receipt: usize,
+) -> Vec<NormalizedEvent> {
+    if max_events_per_receipt == RECORDED_HOUR_MAX_EVENTS_PER_RECEIPT {
+        events.into_boxed_slice().into_vec()
+    } else {
+        events
     }
 }
 
@@ -153,7 +183,7 @@ pub fn push_event(
         {
             return Err(SessionError::EqualTimeOrderRegression);
         }
-        if cursor.pending.len() >= MAX_EVENTS_PER_RECEIPT {
+        if cursor.pending.len() >= cursor.max_events_per_receipt {
             return Err(SessionError::ReceiptGroupFull);
         }
     }
@@ -188,8 +218,9 @@ pub fn push_event(
         Some(current) if event.receipt_ns > current => {
             let events = core::mem::replace(
                 &mut cursor.pending,
-                Vec::with_capacity(MAX_EVENTS_PER_RECEIPT),
+                Vec::with_capacity(cursor.max_events_per_receipt),
             );
+            let events = compact_profile_batch(events, cursor.max_events_per_receipt);
             let source_clock_regressions = cursor.source_clock_regressions;
             cursor.source_clock_regressions = 0;
             Some(ReceiptBatch {
@@ -225,8 +256,9 @@ pub fn flush_receipt_group(
     };
     let events = core::mem::replace(
         &mut cursor.pending,
-        Vec::with_capacity(MAX_EVENTS_PER_RECEIPT),
+        Vec::with_capacity(cursor.max_events_per_receipt),
     );
+    let events = compact_profile_batch(events, cursor.max_events_per_receipt);
     cursor.receipt_ns = None;
     let source_clock_regressions = cursor.source_clock_regressions;
     cursor.source_clock_regressions = 0;
@@ -241,7 +273,19 @@ pub fn flush_receipt_group(
 /// Summarizes a batch as input accounting only; it does not claim tracking, flight, alert or
 /// display output. This public input-only helper does not execute the subsystem bridge.
 pub fn summarize_input_batch(batch: &ReceiptBatch) -> Result<FrameEvidence, SessionError> {
-    if batch.events.len() > MAX_EVENTS_PER_RECEIPT {
+    summarize_input_batch_with_limit(batch, MAX_EVENTS_PER_RECEIPT)
+}
+
+/// Summarizes input using a profile’s explicit receipt-group bound.
+pub fn summarize_input_batch_with_limit(
+    batch: &ReceiptBatch,
+    max_events_per_receipt: usize,
+) -> Result<FrameEvidence, SessionError> {
+    if !matches!(
+        max_events_per_receipt,
+        MAX_EVENTS_PER_RECEIPT | RECORDED_HOUR_MAX_EVENTS_PER_RECEIPT
+    ) || batch.events.len() > max_events_per_receipt
+    {
         return Err(SessionError::ReceiptGroupFull);
     }
     let mut counts = [0u16; 5];
@@ -266,7 +310,39 @@ pub fn summarize_input_batch(batch: &ReceiptBatch) -> Result<FrameEvidence, Sess
 
 #[cfg(test)]
 mod profile_limit_tests {
-    use super::{session_cursor_new_with_limit, SessionError, MAX_RECORDED_PROFILE_EVENTS};
+    use super::{
+        flush_receipt_group, push_event, session_cursor_new, session_cursor_new_with_limit,
+        session_cursor_new_with_profile_limits, SessionError, MAX_EVENTS_PER_RECEIPT,
+        MAX_RECORDED_PROFILE_EVENTS, RECORDED_HOUR_MAX_EVENTS_PER_RECEIPT,
+    };
+    use crate::input::{EventKind, Identity, NormalizedEvent, SourceKind};
+
+    fn same_receipt_event(sequence: u64) -> NormalizedEvent {
+        event_at(sequence, 1_800_000_000_000_000_000)
+    }
+
+    fn event_at(sequence: u64, receipt_ns: i64) -> NormalizedEvent {
+        NormalizedEvent {
+            receipt_ns,
+            source_ns: receipt_ns,
+            sequence,
+            source_message_id: None,
+            source: SourceKind::Surveillance,
+            identity: Identity {
+                flight_gufi: 0,
+                aircraft_address: 0xabc123,
+            },
+            centre: *b"ZAU1",
+            kind: EventKind::Position {
+                latitude_e7: 410_000_000,
+                longitude_e7: -870_000_000,
+                altitude_ft: Some(10_000),
+                east_mmps: 0,
+                north_mmps: 0,
+                vertical_rate_fpm: None,
+            },
+        }
+    }
 
     #[test]
     fn offline_cursor_accepts_declared_cap_and_refuses_out_of_range_caps() {
@@ -279,5 +355,141 @@ mod profile_limit_tests {
             session_cursor_new_with_limit(MAX_RECORDED_PROFILE_EVENTS + 1),
             Err(SessionError::SessionFull)
         ));
+    }
+
+    #[test]
+    fn recorded_hour_receipt_cap_is_explicit_bounded_and_profile_specific() -> Result<(), String> {
+        let mut ordinary = session_cursor_new_with_limit(10_000)
+            .map_err(|error| format!("ordinary cursor limit is valid: {error:?}"))?;
+        for sequence in 1..=MAX_EVENTS_PER_RECEIPT as u64 {
+            push_event(&mut ordinary, same_receipt_event(sequence)).map_err(|error| {
+                format!("ordinary receipt group remains within its cap: {error:?}")
+            })?;
+        }
+        assert!(matches!(
+            push_event(
+                &mut ordinary,
+                same_receipt_event(MAX_EVENTS_PER_RECEIPT as u64 + 1)
+            ),
+            Err(SessionError::ReceiptGroupFull)
+        ));
+
+        let mut hour =
+            session_cursor_new_with_profile_limits(10_000, RECORDED_HOUR_MAX_EVENTS_PER_RECEIPT)
+                .map_err(|error| format!("recorded-hour cursor limit is valid: {error:?}"))?;
+        for sequence in 1..=RECORDED_HOUR_MAX_EVENTS_PER_RECEIPT as u64 {
+            push_event(&mut hour, same_receipt_event(sequence)).map_err(|error| {
+                format!("recorded-hour receipt group remains within its cap: {error:?}")
+            })?;
+        }
+        assert!(matches!(
+            push_event(
+                &mut hour,
+                same_receipt_event(RECORDED_HOUR_MAX_EVENTS_PER_RECEIPT as u64 + 1)
+            ),
+            Err(SessionError::ReceiptGroupFull)
+        ));
+        assert!(matches!(
+            session_cursor_new_with_profile_limits(
+                10_000,
+                RECORDED_HOUR_MAX_EVENTS_PER_RECEIPT + 1
+            ),
+            Err(SessionError::ReceiptGroupFull)
+        ));
+        assert!(matches!(
+            session_cursor_new_with_profile_limits(10_000, 512),
+            Err(SessionError::ReceiptGroupFull)
+        ));
+
+        let dense_batch = super::ReceiptBatch {
+            receipt_ns: 1_800_000_000_000_000_000,
+            source_clock_regressions: 0,
+            events: (1..=MAX_EVENTS_PER_RECEIPT + 1)
+                .map(|sequence| same_receipt_event(sequence as u64))
+                .collect(),
+        };
+        assert!(matches!(
+            super::summarize_input_batch(&dense_batch),
+            Err(SessionError::ReceiptGroupFull)
+        ));
+        assert_eq!(
+            super::summarize_input_batch_with_limit(
+                &dense_batch,
+                RECORDED_HOUR_MAX_EVENTS_PER_RECEIPT
+            )
+            .map_err(|error| format!("recorded-hour batch fits its declared event cap: {error:?}"))?
+            .input_events,
+            (MAX_EVENTS_PER_RECEIPT + 1) as u16
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn recorded_hour_batches_compact_at_rollover_and_eof_then_refill() -> Result<(), String> {
+        let start = 1_800_000_000_000_000_000;
+        let second = 1_000_000_000;
+        let mut hour =
+            session_cursor_new_with_profile_limits(32, RECORDED_HOUR_MAX_EVENTS_PER_RECEIPT)
+                .map_err(|error| format!("recorded-hour cursor limit is valid: {error:?}"))?;
+        assert!(push_event(&mut hour, event_at(1, start))
+            .map_err(|error| format!("first event is admitted: {error:?}"))?
+            .is_none());
+        assert!(push_event(&mut hour, event_at(2, start))
+            .map_err(|error| format!("same-receipt event is admitted: {error:?}"))?
+            .is_none());
+        let first = push_event(&mut hour, event_at(3, start + second))
+            .map_err(|error| format!("receipt rollover succeeds: {error:?}"))?
+            .ok_or("rollover flushes the first batch")?;
+        assert_eq!(first.events.capacity(), first.events.len());
+        assert_eq!(
+            first
+                .events
+                .iter()
+                .map(|event| event.sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+
+        assert!(push_event(&mut hour, event_at(4, start + second))
+            .map_err(|error| format!("same-receipt event is admitted: {error:?}"))?
+            .is_none());
+        let second_batch = push_event(&mut hour, event_at(5, start + 2 * second))
+            .map_err(|error| format!("receipt rollover succeeds: {error:?}"))?
+            .ok_or("rollover flushes the second batch")?;
+        assert_eq!(second_batch.events.capacity(), second_batch.events.len());
+        assert_eq!(
+            second_batch
+                .events
+                .iter()
+                .map(|event| event.sequence)
+                .collect::<Vec<_>>(),
+            vec![3, 4]
+        );
+
+        assert!(push_event(&mut hour, event_at(6, start + 2 * second))
+            .map_err(|error| format!("same-receipt event is admitted: {error:?}"))?
+            .is_none());
+        let final_batch = flush_receipt_group(&mut hour)
+            .map_err(|error| format!("final receipt flush succeeds: {error:?}"))?
+            .ok_or("EOF flushes the final batch")?;
+        assert_eq!(final_batch.events.capacity(), final_batch.events.len());
+        assert_eq!(
+            final_batch
+                .events
+                .iter()
+                .map(|event| event.sequence)
+                .collect::<Vec<_>>(),
+            vec![5, 6]
+        );
+
+        let mut ordinary = session_cursor_new();
+        assert!(push_event(&mut ordinary, event_at(1, start))
+            .map_err(|error| format!("ordinary cursor accepts its first event: {error:?}"))?
+            .is_none());
+        let ordinary_batch = push_event(&mut ordinary, event_at(2, start + second))
+            .map_err(|error| format!("ordinary cursor accepts next receipt: {error:?}"))?
+            .ok_or("next receipt flushes the ordinary batch")?;
+        assert_eq!(ordinary_batch.events.capacity(), MAX_EVENTS_PER_RECEIPT);
+        Ok(())
     }
 }

@@ -16,6 +16,10 @@ use std::path::{Path, PathBuf};
 
 const MAX_REGIONAL_MSAW_SAMPLES: usize = 64;
 const MAX_REGIONAL_MSAW_LOGS: usize = 4096;
+const MAX_REGIONAL_MSAW_ROWS: usize = 4096;
+const MAX_REGIONAL_MSAW_CYCLES: usize = crate::surveillance::MAX_OFFLINE_FRAMES;
+const MAX_REGIONAL_MSAW_CORE_TRACKS: usize = 8192;
+const MAX_REGIONAL_MSAW_OPEN: usize = 4096;
 
 /// Explicit, bounded startup manifest. Observation time is never substituted for a METAR
 /// file's actual receipt time. Relative paths resolve beside this manifest.
@@ -113,6 +117,7 @@ pub struct RegionalMsaw {
     last_ns: Option<i64>,
     max_rows: usize,
     max_points: usize,
+    max_cycles: usize,
     cycles: usize,
     failed: bool,
     admitted_cutoff_ms: i64,
@@ -146,13 +151,20 @@ fn assemble(
     provenance_sha256: [u8; 32],
     synthetic: bool,
     max_rows: usize,
+    max_cycles: usize,
 ) -> Result<RegionalMsaw, String> {
-    if max_rows == 0 || max_rows > crate::surveillance::MAX_TRACKS {
+    if max_rows == 0 || max_rows > MAX_REGIONAL_MSAW_ROWS {
         return Err("MSAW regional row capacity is outside the configured session envelope".into());
     }
-    if settings.msaw.max_tracks > max_rows
-        || settings.msaw.max_open > max_rows
-        || settings.msaw.track_budget > max_rows
+    if max_cycles == 0 || max_cycles > MAX_REGIONAL_MSAW_CYCLES {
+        return Err(
+            "MSAW regional cycle capacity is outside the configured session envelope".into(),
+        );
+    }
+    if settings.msaw.max_tracks < max_rows
+        || settings.msaw.max_tracks > MAX_REGIONAL_MSAW_CORE_TRACKS
+        || settings.msaw.max_open > MAX_REGIONAL_MSAW_OPEN
+        || settings.msaw.track_budget > MAX_REGIONAL_MSAW_ROWS
         || settings.msaw.samples > MAX_REGIONAL_MSAW_SAMPLES
         || settings.alert_log_capacity > MAX_REGIONAL_MSAW_LOGS
         || settings.skip_log_capacity > MAX_REGIONAL_MSAW_LOGS
@@ -188,6 +200,7 @@ fn assemble(
         last_ns: None,
         max_rows,
         max_points,
+        max_cycles,
         cycles: 0,
         failed: false,
         admitted_cutoff_ms: 0,
@@ -195,6 +208,14 @@ fn assemble(
 }
 
 pub fn regional_msaw_new(data: RegionalData, max_rows: usize) -> Result<RegionalMsaw, String> {
+    regional_msaw_new_for_profile(data, max_rows, crate::surveillance::MAX_FRAMES)
+}
+
+pub fn regional_msaw_new_for_profile(
+    data: RegionalData,
+    max_rows: usize,
+    max_cycles: usize,
+) -> Result<RegionalMsaw, String> {
     let admitted_cutoff_ms = data.provenance.cutoff_ms;
     let mut service = assemble(
         data.settings,
@@ -203,6 +224,7 @@ pub fn regional_msaw_new(data: RegionalData, max_rows: usize) -> Result<Regional
         data.provenance.manifest_sha256,
         false,
         max_rows,
+        max_cycles,
     )?;
     service.admitted_cutoff_ms = admitted_cutoff_ms;
     Ok(service)
@@ -211,6 +233,13 @@ pub fn regional_msaw_new(data: RegionalData, max_rows: usize) -> Result<Regional
 /// Explicit public test model: a flat 500-ft floor in the Chicago test box and one synthetic
 /// 15-C/1013.25-hPa station at elevation zero, observed at Unix second zero. No FAA inputs.
 pub fn regional_msaw_synthetic(max_rows: usize) -> Result<RegionalMsaw, String> {
+    regional_msaw_synthetic_for_profile(max_rows, crate::surveillance::MAX_FRAMES)
+}
+
+pub fn regional_msaw_synthetic_for_profile(
+    max_rows: usize,
+    max_cycles: usize,
+) -> Result<RegionalMsaw, String> {
     let config = format!(
         "look_ahead_s=60\nwarning_s=20\nsamples=13\nhysteresis_s=3\ngtm_clearance_ft=500\nobstacle_clearance_ft=500\nmax_tracks={max_rows}\nmax_open={max_rows}\ntrack_budget={max_rows}\nmax_speed_mps=400\nwide_degrade_share=0.2\nnet_stale_limit_s=10\nnet_future_horizon_s=0\nalert_log_capacity=64\nskip_log_capacity=4096\ninhibit_max_duration_s=3600\ninhibit_max_start_ahead_s=0\ninhibit_max_extent_deg=2\napproach_half_width_nm=1\napproach_allowance_ft=100\napproach_min_clearance_ft=100\ndeparture_min_clearance_ft=100\nvelocity_uncertainty_mps=0\nmax_altitude_age_s=5\nstale_hold_s=30\naltitude_loss_degrade_share=0\nterminal_lookahead_s=60\ncapture_heading_deg=10\nno_qnh_allowance_ft=100\nmetar_radius_nm=50\nmetar_max_age_s=3600\nairport_area_nm=5\nairport_area_ceiling_ft_agl=3000\nairport_area_clearance_ft=200\n"
     );
@@ -226,6 +255,7 @@ pub fn regional_msaw_synthetic(max_rows: usize) -> Result<RegionalMsaw, String> 
         oa_sha256::sha256(&provenance),
         true,
         max_rows,
+        max_cycles,
     )
 }
 
@@ -269,8 +299,8 @@ fn evaluate_cycle(
     if service.last_ns.is_some_and(|last| time_ns <= last) || time_ns <= 0 {
         return Err("MSAW cycle time must be positive and increase".into());
     }
-    if service.cycles >= crate::surveillance::MAX_FRAMES {
-        return Err("MSAW cycle limit exceeded before evaluation".into());
+    if service.cycles >= service.max_cycles {
+        return Err("MSAW selected-profile cycle limit exceeded before evaluation".into());
     }
     if time_ns / 1_000_000 < service.admitted_cutoff_ms {
         return Err("MSAW input set was admitted after this frame cutoff".into());
@@ -564,6 +594,7 @@ mod tests {
                 receipt_ns: second * 1_000_000_000,
                 source_ns: second * 1_000_000_000,
                 sequence: second as u64,
+                source_message_id: None,
                 source: crate::SourceKind::Surveillance,
                 identity: crate::Identity {
                     flight_gufi: 0,
@@ -580,6 +611,142 @@ mod tests {
                 },
             }],
         }
+    }
+
+    fn development_provider_data() -> (RegionalData, PathBuf) {
+        use oa_msaw_run::regional::{
+            load_regional_data, RegionalDataLimits, RegionalDataPaths, WeatherAdmission,
+        };
+
+        let root =
+            std::env::temp_dir().join(format!("oa-regional-msaw-provider-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("tiles")).unwrap();
+        let config = root.join("dev.cfg");
+        let config_text = include_str!("../../oa-msaw/testdata/dev.cfg")
+            .replace("alert_log_capacity = 262144", "alert_log_capacity = 4096")
+            .replace("skip_log_capacity = 262144", "skip_log_capacity = 4096");
+        std::fs::write(&config, config_text).unwrap();
+        let data = load_regional_data(
+            &RegionalDataPaths {
+                config,
+                terrain_dir: Some(root.join("tiles")),
+                dof_files: Vec::new(),
+                metar_files: Vec::new(),
+            },
+            RegionalDataLimits::default(),
+            WeatherAdmission { cutoff_ms: 0 },
+        )
+        .unwrap();
+        (data, root)
+    }
+
+    fn bulk_receipt(second: i64, count: u32) -> crate::ReceiptBatch {
+        let receipt_ns = second * 1_000_000_000;
+        let events = (0..count)
+            .map(|index| crate::NormalizedEvent {
+                receipt_ns,
+                source_ns: receipt_ns,
+                sequence: u64::try_from((second - 1) * i64::from(count) + i64::from(index) + 1)
+                    .unwrap(),
+                source_message_id: None,
+                source: crate::SourceKind::Surveillance,
+                identity: crate::Identity {
+                    flight_gufi: u128::from(index + 1),
+                    aircraft_address: 0xabc000 + index,
+                },
+                centre: *b"ZAU1",
+                kind: crate::EventKind::Position {
+                    latitude_e7: 410_000_000,
+                    longitude_e7: -870_000_000 + i32::try_from(index).unwrap() * 100_000,
+                    altitude_ft: Some(10_000),
+                    east_mmps: 0,
+                    north_mmps: 0,
+                    vertical_rate_fpm: Some(0),
+                },
+            })
+            .collect();
+        crate::ReceiptBatch {
+            receipt_ns,
+            source_clock_regressions: 0,
+            events,
+        }
+    }
+
+    // REQ: OA-REG-011. Kills the hard-coded 32-row runtime MSAW attachment.
+    #[test]
+    fn recorded_profile_passes_more_than_default_rows_through_provider_path() {
+        let track_count = crate::surveillance::MAX_TRACKS + 8;
+        let pair_count = track_count * (track_count - 1) / 2;
+        let (data, root) = development_provider_data();
+        let model = crate::cli::synthetic_model().unwrap();
+        let snapshot = oa_airspace::core::snapshot::encode(&model).unwrap();
+        let mut profile = crate::runtime::DEFAULT_REGIONAL_RUN_PROFILE;
+        profile.surveillance.max_tracks = track_count;
+        // Flight evidence/controller views share the same selected offline population. Keeping
+        // the default 32-flight cap while raising only surveillance rows refuses this intended
+        // over-default provider-path case before MSAW receives its rows.
+        profile.max_flights = track_count;
+        profile.surveillance.max_frames = crate::surveillance::MAX_FRAMES + 1;
+        profile.surveillance.max_open_alerts = pair_count;
+        profile.surveillance.max_candidate_pairs = pair_count;
+        let mut runtime = crate::runtime::regional_new_with_profile(
+            model,
+            oa_sha256::sha256(&snapshot),
+            *b"ZAU1",
+            crate::surveillance::SurveillanceConfig {
+                centre_lat_e7: 410_000_000,
+                centre_lon_e7: -870_000_000,
+                range_nm: 180.0,
+            },
+            profile,
+        )
+        .unwrap();
+        crate::runtime::regional_enable_msaw(&mut runtime, data).unwrap();
+
+        for second in 1..=3 {
+            crate::runtime::regional_step(
+                &mut runtime,
+                &bulk_receipt(second, u32::try_from(track_count).unwrap()),
+            )
+            .unwrap();
+        }
+        let batch = bulk_receipt(4, u32::try_from(track_count).unwrap());
+        let expected_tracks = batch.events.len();
+        let frame = crate::runtime::regional_step(&mut runtime, &batch).unwrap();
+        assert_eq!(frame.surveillance.tracks.len(), expected_tracks);
+        let msaw = frame.surveillance.msaw.as_ref().unwrap();
+        assert_eq!(msaw.submitted_rows, expected_tracks);
+        assert!(!msaw.synthetic);
+        assert!(msaw.evaluation_attempted);
+        let stats = msaw.stats.unwrap();
+        assert!(stats.qnh_missing > 0, "absent weather stays flagged");
+        assert!(
+            stats.no_coverage > 0,
+            "empty terrain fixture stays uncovered"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    // REQ: OA-REG-011. Kills the fixed 512-cycle MSAW bridge limit.
+    #[test]
+    fn selected_profile_may_run_more_than_default_bridge_cycles() {
+        let selected_cycles = crate::surveillance::MAX_FRAMES + 1;
+        let mut service = regional_msaw_synthetic_for_profile(1, selected_cycles).unwrap();
+        let mut states = oa_safety::net::state_table_new(10_000_000_000, 0).unwrap();
+        let mut inhibits = oa_safety::inhibit::inhibits_new();
+        let row = track(15_000.0, 0.0);
+        for second in 1..=i64::try_from(selected_cycles).unwrap() {
+            regional_msaw_cycle(
+                &mut service,
+                second * 1_000_000_000,
+                &[row],
+                &mut states,
+                &mut inhibits,
+            )
+            .unwrap();
+        }
+        assert_eq!(service.cycles, selected_cycles);
     }
 
     // REQ: OA-REG-011
@@ -640,6 +807,7 @@ mod tests {
                     receipt_ns: 3_000_000_000,
                     source_ns: 3_000_000_000,
                     sequence: 3,
+                    source_message_id: None,
                     source: crate::SourceKind::Surveillance,
                     identity: crate::Identity {
                         flight_gufi: 0,

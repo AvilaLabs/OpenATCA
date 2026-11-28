@@ -22,7 +22,7 @@
 //!   altitude passes it flagged geometric (the tracker counts and ignores it). A vertical rate
 //!   flagged geometric by readsb is not passed.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use oa_adsb::{reports_len, reports_row, Reports, F_RATE_GEOM, NONE_I32, NONE_U16};
 use oa_truth::{
@@ -97,11 +97,146 @@ pub struct AdsbStats {
     pub velocity_refused: u64,
     pub with_altitude: u64,
     pub with_vrate: u64,
+    /// Rows whose required per-aircraft carry state could not be retained at the configured cap.
+    pub quality_state_capacity_refused: u64,
+}
+
+struct QualityCacheEntry {
+    state: QualityState,
+    expires_ns: i64,
+}
+
+/// Bounded carry-forward quality state for consecutive ADS-B frames. Entries expire only after
+/// every held field is older than the configured carry interval.
+pub struct AdsbQualityCache {
+    entries: BTreeMap<u32, QualityCacheEntry>,
+    expiries: BTreeSet<(i64, u32)>,
+    capacity: usize,
+}
+
+impl AdsbQualityCache {
+    /// A cache sized for one tracker population. Callers can use a smaller bound in tests.
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            entries: BTreeMap::new(),
+            expiries: BTreeSet::new(),
+            capacity,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    fn expire_before(&mut self, time_ns: i64) {
+        while self
+            .expiries
+            .first()
+            .is_some_and(|(expires_ns, _)| *expires_ns < time_ns)
+        {
+            let Some((expires_ns, address)) = self.expiries.pop_first() else {
+                break;
+            };
+            if self
+                .entries
+                .get(&address)
+                .is_some_and(|entry| entry.expires_ns == expires_ns)
+            {
+                self.entries.remove(&address);
+            }
+        }
+    }
+
+    fn update(
+        &mut self,
+        address: u32,
+        row: &oa_adsb::Row,
+        time_ns: i64,
+        cfg: &TruthConfig,
+    ) -> (oa_truth::QualityVerdict, bool) {
+        self.expire_before(time_ns);
+        let existing = self.entries.contains_key(&address);
+        let has_room = existing || self.entries.len() < self.capacity;
+        if !has_room {
+            let mut state = QualityState::default();
+            let verdict = quality_check(&mut state, row, time_ns, cfg);
+            return (verdict, state_has_quality(&state));
+        }
+
+        if let Some(expires_ns) = self.entries.get(&address).map(|entry| entry.expires_ns) {
+            self.expiries.remove(&(expires_ns, address));
+            let (verdict, next_expiry) = if let Some(entry) = self.entries.get_mut(&address) {
+                let verdict = quality_check(&mut entry.state, row, time_ns, cfg);
+                (verdict, quality_expiry(&entry.state, cfg))
+            } else {
+                let mut state = QualityState::default();
+                return (quality_check(&mut state, row, time_ns, cfg), true);
+            };
+            if let Some(expires_ns) = next_expiry {
+                if let Some(entry) = self.entries.get_mut(&address) {
+                    entry.expires_ns = expires_ns;
+                }
+                self.expiries.insert((expires_ns, address));
+            } else {
+                self.entries.remove(&address);
+            }
+            return (verdict, false);
+        }
+
+        let mut state = QualityState::default();
+        let verdict = quality_check(&mut state, row, time_ns, cfg);
+        if let Some(expires_ns) = quality_expiry(&state, cfg) {
+            self.entries
+                .insert(address, QualityCacheEntry { state, expires_ns });
+            self.expiries.insert((expires_ns, address));
+        }
+        (verdict, false)
+    }
+}
+
+impl Default for AdsbQualityCache {
+    fn default() -> Self {
+        Self::new(crate::params::MAX_TRACKS)
+    }
+}
+
+fn state_has_quality(state: &QualityState) -> bool {
+    [state.nacp, state.nic, state.sil, state.version, state.nacv]
+        .iter()
+        .any(|held| held.at_ns != oa_truth::HELD_NONE.at_ns)
+}
+
+fn quality_expiry(state: &QualityState, cfg: &TruthConfig) -> Option<i64> {
+    if !state_has_quality(state) {
+        return None;
+    }
+    let carry_ns = cfg.quality_carry_ms.checked_mul(1_000_000)?;
+    let newest = [state.nacp, state.nic, state.sil, state.version, state.nacv]
+        .iter()
+        .map(|held| held.at_ns)
+        .filter(|time_ns| *time_ns != oa_truth::HELD_NONE.at_ns)
+        .max()?;
+    Some(newest.checked_add(carry_ns).unwrap_or(i64::MAX))
 }
 
 /// Measurements of `reports`, in time order (ties by input order), and what was removed. The
 /// per-aircraft carried quality values follow time order, as in oa-truth.
 pub fn adsb_measurements(reports: &Reports, cfg: &AdsbConfig) -> (Vec<Measurement>, AdsbStats) {
+    let mut quality = AdsbQualityCache::new(usize::MAX);
+    adsb_measurements_with_cache(reports, cfg, &mut quality)
+}
+
+/// Measurements of `reports` using caller-owned bounded quality state. The ordinary
+/// [`adsb_measurements`] API remains frame-local; streaming adapters keep this cache across frames.
+pub fn adsb_measurements_with_cache(
+    reports: &Reports,
+    cfg: &AdsbConfig,
+    quality: &mut AdsbQualityCache,
+) -> (Vec<Measurement>, AdsbStats) {
     let n = reports_len(reports);
     let mut order: Vec<(i64, u32)> = Vec::with_capacity(n);
     for (i, &t) in reports.time_ns.iter().enumerate() {
@@ -112,7 +247,6 @@ pub fn adsb_measurements(reports: &Reports, cfg: &AdsbConfig) -> (Vec<Measuremen
         rows_in: n as u64,
         ..AdsbStats::default()
     };
-    let mut quality: BTreeMap<u32, QualityState> = BTreeMap::new();
     let mut out = Vec::with_capacity(n);
     for &(t, i) in &order {
         let Some(row) = reports_row(reports, i as usize) else {
@@ -121,8 +255,10 @@ pub fn adsb_measurements(reports: &Reports, cfg: &AdsbConfig) -> (Vec<Measuremen
             }
             continue;
         };
-        let q = quality.entry(row.icao).or_default();
-        let v = quality_check(q, &row, t, &cfg.gates);
+        let (v, capacity_refused) = quality.update(row.icao, &row, t, &cfg.gates);
+        if capacity_refused {
+            stats.quality_state_capacity_refused += 1;
+        }
         if let Some(why) = v.removal {
             if let Some(c) = stats.removed.get_mut(why) {
                 *c += 1;

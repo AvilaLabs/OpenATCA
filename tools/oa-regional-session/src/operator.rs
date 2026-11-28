@@ -440,6 +440,7 @@ pub fn prepare_batch(
                     receipt_ns: recorded.receipt_ns,
                     source_ns: recorded.receipt_ns,
                     sequence: 0,
+                    source_message_id: None,
                     source: SourceKind::Flight,
                     identity: Identity {
                         flight_gufi: command.gufi,

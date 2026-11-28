@@ -86,6 +86,7 @@ fn driver() -> (
             source_ns: time * 1_000_000,
             sequence,
             source: SourceKind::Flight,
+            source_message_id: None,
             identity: Identity {
                 flight_gufi: 0,
                 aircraft_address: 0,

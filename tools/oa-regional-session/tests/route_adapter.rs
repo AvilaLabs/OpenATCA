@@ -34,6 +34,7 @@ fn event(
         source_ns: source_ms * 1_000_000,
         receipt_ns: receipt_ms * 1_000_000,
         sequence,
+        source_message_id: None,
         source: SourceKind::Route,
         identity: Identity {
             flight_gufi: gufi,

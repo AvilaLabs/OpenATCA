@@ -244,6 +244,7 @@ fn event(
         receipt_ns: time.receipt_ns,
         source_ns: time.source_ns,
         sequence: time.sequence,
+        source_message_id: None,
         source: SourceKind::Flight,
         // NAM does not carry GUFI. The exact key is carried by HandoffByKey instead.
         identity: Identity {

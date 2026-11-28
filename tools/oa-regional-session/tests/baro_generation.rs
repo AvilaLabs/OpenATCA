@@ -43,6 +43,7 @@ fn batch(receipt_s: i64, source_times_s: &[i64], altitudes_ft: &[Option<i32>]) -
             receipt_ns: receipt_s * SECOND,
             source_ns: source_s * SECOND,
             sequence: u64::try_from(index + 1).expect("bounded fixture sequence"),
+            source_message_id: None,
             source: SourceKind::Surveillance,
             identity: Identity {
                 flight_gufi: 0,

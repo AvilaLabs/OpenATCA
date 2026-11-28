@@ -2,10 +2,11 @@
 
 use oa_flight::{ALT_NIL, HO_ACCEPTED, HO_NONE, R_NO_HANDOFF, R_STALE, ST_ACTIVE};
 use oa_regional_session::flight::{
-    flight_apply_batch, flight_apply_event, flight_driver_capacity, flight_driver_new,
-    flight_driver_new_bounded, flight_driver_report, flight_view_as_of, flight_view_for_gufi,
-    flight_views_for_address, AdapterRefusal, FieldAsOf, FlightDriverConfig, FlightDriverError,
-    FlightViewStatus, SharedFlightView, MAX_DRIVER_FLIGHTS, MAX_OFFLINE_DRIVER_FLIGHTS,
+    flight_apply_batch, flight_apply_batch_with_limit, flight_apply_event, flight_driver_capacity,
+    flight_driver_new, flight_driver_new_bounded, flight_driver_report, flight_view_as_of,
+    flight_view_for_gufi, flight_views_for_address, AdapterRefusal, FieldAsOf, FlightDriverConfig,
+    FlightDriverError, FlightViewStatus, SharedFlightView, MAX_DRIVER_FLIGHTS,
+    MAX_OFFLINE_DRIVER_FLIGHTS,
 };
 use oa_regional_session::{
     EventKind, FlightOperation, HandoffOperation, Identity, NormalizedEvent, SourceKind,
@@ -35,6 +36,7 @@ fn flight_event(
     operation: FlightOperation,
 ) -> NormalizedEvent {
     NormalizedEvent {
+        source_message_id: None,
         receipt_ns: time_ms * 1_000_000,
         source_ns: time_ms * 1_000_000,
         sequence,
@@ -374,6 +376,42 @@ fn malformed_later_batch_event_refuses_before_any_table_mutation() {
     );
 }
 
+#[test]
+fn recorded_hour_flight_batch_limit_is_explicit_and_legacy_stays_at_256() {
+    let gufi = 0x1000_0000_0000_0000_0000_0000_0000_0007;
+    let events = (1..=oa_regional_session::MAX_EVENTS_PER_RECEIPT + 1)
+        .map(|sequence| {
+            flight_event(
+                gufi,
+                ADDRESS,
+                100,
+                sequence as u64,
+                FlightOperation::SetPlan {
+                    plan_id: *b"PLAN00000001",
+                    status: 2,
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let mut ordinary = driver(4, 8, 8);
+    assert_eq!(
+        flight_apply_batch(&mut ordinary, &events),
+        Err(FlightDriverError::ReceiptBatchTooLarge)
+    );
+    assert_eq!(flight_driver_report(&ordinary).flights, 0);
+
+    let mut recorded_hour = driver(4, 8, 8);
+    let applied = flight_apply_batch_with_limit(
+        &mut recorded_hour,
+        &events,
+        oa_regional_session::RECORDED_HOUR_MAX_EVENTS_PER_RECEIPT,
+    )
+    .expect("explicit recorded-hour cap accepts the dense batch");
+    assert_eq!(applied.len(), events.len());
+    assert_eq!(flight_driver_report(&recorded_hour).flights, 1);
+}
+
 // REQ: OA-REG-001
 #[test]
 fn timeout_and_late_acceptance_are_visible_in_actual_core_outcomes() {
@@ -579,6 +617,7 @@ fn identity_binding_requires_an_explicit_flight_operation_and_source_precision_i
         receipt_ns: 2_000_000,
         source_ns: 1_000_000,
         sequence: 1,
+        source_message_id: None,
         source: SourceKind::Surveillance,
         identity: Identity {
             flight_gufi: gufi,

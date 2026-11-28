@@ -7,6 +7,7 @@ pub mod commands;
 pub mod conflict_probe;
 pub mod flight;
 pub mod input;
+mod map;
 pub mod migration_amendment;
 pub mod migration_full_day;
 pub mod migration_full_day_runner;
@@ -39,6 +40,8 @@ pub use runtime::{
 };
 pub use session::{
     flush_receipt_group, push_event, session_cursor_new, session_cursor_new_with_limit,
-    session_total_events, summarize_input_batch, FrameEvidence, ReceiptBatch, SessionCursor,
-    SessionError, MAX_EVENTS_PER_RECEIPT, MAX_RECORDED_PROFILE_EVENTS, MAX_SESSION_EVENTS,
+    session_cursor_new_with_profile_limits, session_total_events, summarize_input_batch,
+    summarize_input_batch_with_limit, FrameEvidence, ReceiptBatch, SessionCursor, SessionError,
+    MAX_EVENTS_PER_RECEIPT, MAX_RECORDED_PROFILE_EVENTS, MAX_SESSION_EVENTS,
+    RECORDED_HOUR_MAX_EVENTS_PER_RECEIPT,
 };

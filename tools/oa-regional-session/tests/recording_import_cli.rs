@@ -252,3 +252,259 @@ fn synthetic_oaf_import_runs_through_tracking_and_stage_contract() {
     assert!(evidence.contains("tracks: ["), "{evidence}");
     fs::remove_dir_all(Path::new(&scratch)).unwrap();
 }
+
+// REQ: OA-MIG-415
+#[test]
+fn hour_count_cli_accepts_fourteen_sfdps_segments_and_counts_source_messages_only() {
+    const NS_PER_HOUR: i64 = 3_600_000_000_000;
+    const UTC_DAY_START_NS: i64 = 1_893_542_400_000_000_000;
+    const BUSY_HOUR: usize = 14;
+    const OTHER_HOUR: usize = 13;
+    const HOUR_ROW_TAG: &str = "hour";
+    const FLIGHT_ROW_TAG: &str = "flight";
+
+    let scratch = scratch_dir();
+    fs::create_dir(&scratch).unwrap();
+    let importer = scratch.join("regional-recording-import");
+    fs::copy(env!("CARGO_BIN_EXE_regional-recording-import"), &importer).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&importer, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let mut args = Vec::new();
+    let mut busy_hour_messages = 0u64;
+    let mut other_hour_messages = 0u64;
+    let mut sfdps_segments = 0usize;
+    for index in 0..14usize {
+        let path = scratch.join(format!("synthetic-sfdps-{index}.oaf"));
+        let hour = if index == 0 {
+            other_hour_messages += 1;
+            OTHER_HOUR
+        } else {
+            busy_hour_messages += 1;
+            BUSY_HOUR
+        };
+        let hour_offset = i64::try_from(hour).unwrap() * NS_PER_HOUR;
+        let within_hour = i64::try_from(index).unwrap() * 1_000_000_000;
+        let receipt_ns = UTC_DAY_START_NS + hour_offset + within_hour;
+        write_oaf(
+            &path,
+            oa_feed::Kind::Message as u8,
+            u64::try_from(index + 1).unwrap(),
+            receipt_ns,
+            receipt_ns / 1_000_000,
+            b"synthetic message frame",
+        );
+        args.push("--sfdps".into());
+        args.push(path.into_os_string());
+        sfdps_segments += 1;
+    }
+    let adsb_path = scratch.join("synthetic-adsb.oaf");
+    let adsb_receipt = UTC_DAY_START_NS + i64::try_from(BUSY_HOUR).unwrap() * NS_PER_HOUR;
+    write_oaf(
+        &adsb_path,
+        oa_feed::Kind::Message as u8,
+        1,
+        adsb_receipt,
+        adsb_receipt / 1_000_000,
+        b"synthetic adsb frame",
+    );
+    args.push("--adsb".into());
+    args.push(adsb_path.into_os_string());
+    args.push("--count-hours".into());
+    args.push(UTC_DAY_START_NS.to_string().into());
+    let output_path = scratch.join("hour-counts.tsv");
+    args.push("--hours-out".into());
+    args.push(output_path.clone().into_os_string());
+
+    let result = Command::new(&importer).args(args).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let report = fs::read_to_string(output_path).unwrap();
+    let busy_hour_label = format!("{BUSY_HOUR:02}");
+    let other_hour_label = format!("{OTHER_HOUR:02}");
+    let read_hour_count = |label: &str| {
+        report
+            .lines()
+            .filter_map(|line| {
+                let fields = line.split('\t').collect::<Vec<_>>();
+                (fields.first() == Some(&"hour") && fields.get(1) == Some(&label))
+                    .then(|| fields.get(4).and_then(|value| value.parse::<u64>().ok()))
+                    .flatten()
+            })
+            .next()
+    };
+    assert_eq!(read_hour_count(&busy_hour_label), Some(busy_hour_messages));
+    assert_eq!(
+        read_hour_count(&other_hour_label),
+        Some(other_hour_messages)
+    );
+    let stream_rows = report
+        .lines()
+        .filter(|line| line.split('\t').next() == Some("stream"))
+        .count();
+    let expected_stream_rows = sfdps_segments + 1;
+    assert_eq!(stream_rows, expected_stream_rows);
+    let output_tags = report
+        .lines()
+        .filter_map(|line| line.split('\t').next())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert!(output_tags.contains(HOUR_ROW_TAG));
+    assert!(!output_tags.contains(FLIGHT_ROW_TAG));
+    fs::remove_dir_all(Path::new(&scratch)).unwrap();
+}
+
+// REQ: OA-MIG-415
+#[test]
+fn window_import_is_half_open_streamed_and_emits_an_hour_envelope() {
+    const NS_PER_HOUR: i64 = 3_600_000_000_000;
+    const NS_PER_MINUTE: i64 = 60_000_000_000;
+    const UTC_DAY_START_NS: i64 = 1_794_614_400_000_000_000;
+    const WINDOW_HOUR: i64 = 14;
+    const NORMALIZED_HEADER: &str = "OA-RS\t1";
+    const HOUR_MANIFEST_HEADER: &str = "OA_RECORDING_HOUR_MANIFEST\t1";
+    const HOUR_COMPLETE_NAME: &str = "HOUR_COMPLETE";
+    const QUARANTINE_HEADER: &str = "OA-RS-QUARANTINE-AGGREGATE\t1";
+
+    let scratch = scratch_dir();
+    fs::create_dir(&scratch).unwrap();
+    let sfdps_inside = scratch.join("sfdps-inside.oaf");
+    let sfdps_at_end = scratch.join("sfdps-at-end.oaf");
+    let adsb_inside = scratch.join("adsb-inside.oaf");
+    let imported = scratch.join("window-import");
+    let importer = scratch.join("regional-recording-import");
+    fs::copy(env!("CARGO_BIN_EXE_regional-recording-import"), &importer).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&importer, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let start_ns = UTC_DAY_START_NS + WINDOW_HOUR * NS_PER_HOUR;
+    let end_ns = start_ns + NS_PER_MINUTE;
+    let source_time_inside = "2026-11-14T14:00:00.000Z";
+    let source_time_at_end = "2026-11-14T14:01:00.000Z";
+    let xml = |timestamp: &str| {
+        format!(
+            r#"<ns5:MessageCollection xmlns:ns5="http://www.faa.aero/nas/3.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><message xsi:type="ns5:FlightMessageType"><flight xsi:type="ns5:NasFlightType" centre="ZXX1" source="TH" system="SLC" timestamp="{timestamp}"><gufi codeSpace="urn:uuid">11111111-2222-3333-4444-555555555555</gufi><controllingUnit unitIdentifier="ZXX1"/></flight></message></ns5:MessageCollection>"#
+        )
+    };
+    let payload_inside = xml(source_time_inside);
+    let payload_at_end = xml(source_time_at_end);
+    let receipt_ms = start_ns / 1_000_000;
+    write_oaf(
+        &sfdps_inside,
+        oa_feed::Kind::Message as u8,
+        1,
+        start_ns,
+        receipt_ms,
+        payload_inside.as_bytes(),
+    );
+    write_oaf(
+        &sfdps_at_end,
+        oa_feed::Kind::Message as u8,
+        2,
+        end_ns,
+        end_ns / 1_000_000,
+        payload_at_end.as_bytes(),
+    );
+    let mut reports = oa_adsb::Reports::default();
+    oa_adsb::reports_push(
+        &mut reports,
+        &adsb_row(start_ns, 41.900_000_0, -88.300_000_0),
+    );
+    let mut adsb_payload = Vec::new();
+    oa_adsb::encode_payload(&mut adsb_payload, &reports, 0, 1).unwrap();
+    write_oaf(
+        &adsb_inside,
+        oa_feed::Kind::Message as u8,
+        1,
+        start_ns,
+        receipt_ms,
+        &adsb_payload,
+    );
+
+    let result = Command::new(&importer)
+        .args([
+            "--sfdps",
+            sfdps_inside.to_str().unwrap(),
+            "--sfdps",
+            sfdps_at_end.to_str().unwrap(),
+            "--adsb",
+            adsb_inside.to_str().unwrap(),
+            "--start",
+            &start_ns.to_string(),
+            "--end",
+            &end_ns.to_string(),
+            "--centre",
+            "ZAU1",
+            "--out",
+            imported.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let normalized = fs::read_to_string(imported.join("normalized.tsv")).unwrap();
+    let normalized_lines = normalized.lines().collect::<Vec<_>>();
+    assert_eq!(normalized_lines.first().copied(), Some(NORMALIZED_HEADER));
+    let event_lines = normalized_lines
+        .iter()
+        .filter(|line| line.starts_with("v1\t"))
+        .count();
+    let expected_in_window_events = 2usize;
+    assert_eq!(event_lines, expected_in_window_events);
+
+    let counts = fs::read_to_string(imported.join("counts.tsv")).unwrap();
+    let expected_outside_messages = format!("outside_window_messages\t{}", 1u64);
+    assert!(counts.lines().any(|line| line == expected_outside_messages));
+    let provenance = fs::read_to_string(imported.join("provenance.tsv")).unwrap();
+    let expected_stream_lines = 3usize;
+    assert_eq!(
+        provenance
+            .lines()
+            .filter(|line| line.starts_with("STREAM\t"))
+            .count(),
+        expected_stream_lines
+    );
+    let quarantine = fs::read_to_string(imported.join("quarantine.tsv")).unwrap();
+    assert_eq!(quarantine.lines().next(), Some(QUARANTINE_HEADER));
+    let manifest = fs::read_to_string(imported.join("hour-manifest.tsv")).unwrap();
+    assert_eq!(manifest.lines().next(), Some(HOUR_MANIFEST_HEADER));
+    assert!(imported.join(HOUR_COMPLETE_NAME).is_file());
+    assert!(!imported.join("COMPLETE").exists());
+    let manifest_bytes = fs::read(imported.join("hour-manifest.tsv")).unwrap();
+    let complete = fs::read_to_string(imported.join(HOUR_COMPLETE_NAME)).unwrap();
+    assert_eq!(
+        complete.trim(),
+        oa_sha256::to_hex(&oa_sha256::sha256(&manifest_bytes))
+    );
+
+    let incomplete_pair_output = scratch.join("missing-end");
+    let incomplete_pair = Command::new(&importer)
+        .args([
+            "--sfdps",
+            sfdps_inside.to_str().unwrap(),
+            "--adsb",
+            adsb_inside.to_str().unwrap(),
+            "--start",
+            &start_ns.to_string(),
+            "--centre",
+            "ZAU1",
+            "--out",
+            incomplete_pair_output.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(!incomplete_pair.status.success());
+    assert!(!incomplete_pair_output.exists());
+    fs::remove_dir_all(Path::new(&scratch)).unwrap();
+}

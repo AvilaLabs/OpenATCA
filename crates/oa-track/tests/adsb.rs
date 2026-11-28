@@ -9,7 +9,10 @@
 use oa_adsb::{
     reports_push, Reports, Row, F_ALT_GEOM, F_STALE, NONE_I32, NONE_U16, NONE_U8, ROW_EMPTY,
 };
-use oa_track::adsb::{adsb_measurements, check_adsb_config, AdsbConfig};
+use oa_track::adsb::{
+    adsb_measurements, adsb_measurements_with_cache, check_adsb_config, AdsbConfig,
+    AdsbQualityCache,
+};
 use oa_track::params::{NACV_BOUND_VEL_SIGMA_MPS, NACV_VEL_SIGMA_MPS};
 use oa_track::{M_ALT_GEOMETRIC, M_HAS_VEL};
 use oa_truth::{build_truth, DEFAULT_CONFIG, REMOVE_NAMES};
@@ -121,6 +124,70 @@ fn quality_carry_forward_defaults_and_geometric_altitude() {
     e.gs_dkt = NONE_U16;
     let (m, _) = adsb_measurements(&reports(&[e]), &bound_cfg());
     assert_eq!(m[0].flags & M_HAS_VEL, 0);
+}
+
+#[test]
+fn bounded_quality_cache_carries_across_frames_and_expires_for_refill() {
+    let mut cache = AdsbQualityCache::new(1);
+    let first = row(1, 0x100001, 41.9, -88.3);
+    let (measurements, stats) =
+        adsb_measurements_with_cache(&reports(&[first]), &AdsbConfig::default(), &mut cache);
+    assert_eq!((measurements.len(), stats.passed), (1, 1));
+    assert_eq!(cache.len(), 1);
+
+    let mut carried = row(10, 0x100001, 41.9, -88.2);
+    carried.nac_p = NONE_U8;
+    carried.nic = NONE_U8;
+    carried.sil = NONE_U8;
+    carried.version = NONE_U8;
+    carried.nac_v = NONE_U8;
+    let (measurements, stats) =
+        adsb_measurements_with_cache(&reports(&[carried]), &AdsbConfig::default(), &mut cache);
+    assert_eq!((measurements.len(), stats.passed), (1, 1));
+
+    let full_quality_other = row(20, 0x100002, 41.9, -88.1);
+    let (measurements, stats) = adsb_measurements_with_cache(
+        &reports(&[full_quality_other]),
+        &AdsbConfig::default(),
+        &mut cache,
+    );
+    assert_eq!((measurements.len(), stats.passed), (1, 1));
+    assert_eq!(stats.quality_state_capacity_refused, 1);
+    assert_eq!(cache.len(), 1);
+
+    let mut other_without_quality = row(21, 0x100002, 41.9, -88.0);
+    other_without_quality.nac_p = NONE_U8;
+    other_without_quality.nic = NONE_U8;
+    other_without_quality.sil = NONE_U8;
+    other_without_quality.version = NONE_U8;
+    other_without_quality.nac_v = NONE_U8;
+    let (measurements, stats) = adsb_measurements_with_cache(
+        &reports(&[other_without_quality]),
+        &AdsbConfig::default(),
+        &mut cache,
+    );
+    assert!(measurements.is_empty());
+    assert_eq!(stats.removed[oa_truth::REM_NO_QUALITY], 1);
+
+    let refill = row(62, 0x100002, 41.9, -88.0);
+    let (measurements, stats) =
+        adsb_measurements_with_cache(&reports(&[refill]), &AdsbConfig::default(), &mut cache);
+    assert_eq!((measurements.len(), stats.passed), (1, 1));
+    assert_eq!(stats.quality_state_capacity_refused, 0);
+    assert_eq!(cache.len(), 1);
+
+    let mut carried_after_refill = row(63, 0x100002, 41.9, -87.9);
+    carried_after_refill.nac_p = NONE_U8;
+    carried_after_refill.nic = NONE_U8;
+    carried_after_refill.sil = NONE_U8;
+    carried_after_refill.version = NONE_U8;
+    carried_after_refill.nac_v = NONE_U8;
+    let (measurements, stats) = adsb_measurements_with_cache(
+        &reports(&[carried_after_refill]),
+        &AdsbConfig::default(),
+        &mut cache,
+    );
+    assert_eq!((measurements.len(), stats.passed), (1, 1));
 }
 
 // REQ: OA-TRK-286

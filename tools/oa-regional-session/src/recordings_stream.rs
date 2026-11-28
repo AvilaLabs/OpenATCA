@@ -7,7 +7,8 @@
 use crate::recordings_reader::{RecordedFrame, RecordingSource};
 use oa_feed::{FrameError, FrameReader, FrameWorkBudget, FrameWorkStats, Kind, MAX_FRAME_LEN};
 use oa_zip::{GzipReader, InflateLimits};
-use std::collections::VecDeque;
+use std::cmp::{Ordering, Reverse};
+use std::collections::{BinaryHeap, VecDeque};
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -22,6 +23,8 @@ pub const MAX_PENDING_FRAME_BYTES_PER_STREAM: usize = 4 * 1024 * 1024;
 /// Recorder-activity reporting threshold, separate from the G3 candidate's 1 s state-age rule.
 pub const H2_RECORDER_ACTIVITY_MAX_GAP_NS: i64 = 60_000_000_000;
 const INPUT_CHUNK_BYTES: usize = 4 * 1024;
+const NS_PER_HOUR: i64 = 3_600_000_000_000;
+const NS_PER_UTC_DAY: i64 = 24 * NS_PER_HOUR;
 type StreamSortKey = (i64, u8, u64, u8, u64);
 type SelectedStream = Option<(usize, StreamSortKey)>;
 
@@ -41,6 +44,8 @@ pub struct StreamCounts {
     pub outside_window_messages: u64,
     pub outside_window_status_frames: u64,
     pub outside_window_reject_frames: u64,
+    /// OAF1 archive ADS-B messages decoded before the requested start for quality warmup.
+    pub adsb_warmup_frames: u64,
     pub physical_bytes: u64,
     pub expanded_bytes: u64,
     pub frame_work_units: u64,
@@ -49,7 +54,10 @@ pub struct StreamCounts {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StreamDigest {
     pub source: RecordingSource,
+    pub stream_index: u8,
     pub bytes: u64,
+    pub expanded_bytes: u64,
+    pub gzip: bool,
     pub sha256: [u8; 32],
     pub messages: u64,
     pub first_frame_receive_ns: Option<i64>,
@@ -63,6 +71,14 @@ pub struct StreamSummary {
     pub streams: Vec<StreamDigest>,
 }
 
+/// Source-only SFDPS message-frame counts for one explicit UTC day.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UtcHourMessageCounts {
+    pub utc_day_start_ns: i64,
+    pub sfdps_messages_by_hour: [u64; 24],
+    pub stream: StreamSummary,
+}
+
 /// Aggregate-only result of adapting OAF input through the existing normalized-event adapter.
 /// A caller can repeat the guarded stream for an independent runtime; no day-sized event vector
 /// or payload spool is created here.
@@ -73,6 +89,96 @@ pub struct NormalizedStreamSummary {
     pub quarantine_rows: u64,
     pub manual_handling_required: u64,
     pub unprocessed_frames: u64,
+    /// Per-input-source diagnostics for adapter refusals, including oversized receipt groups.
+    pub source_counts: [NormalizedInputCounts; 2],
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NormalizedInputCounts {
+    pub message_frames: u64,
+    pub candidate_events_before_receipt_filter: u64,
+    pub max_candidate_events_per_frame: u64,
+    /// OAF1 ADS-B rows excluded by their own source time, rather than the frame's first-report time.
+    pub outside_window_events: u64,
+    /// Excluded pre-start ADS-B rows processed only to warm carried quality state.
+    pub adsb_warmup_events: u64,
+    /// Current ADS-B rows processed without retaining new per-address quality state at the cap.
+    pub adsb_quality_cache_capacity_refused: u64,
+    pub receipt_groups_over_capacity: u64,
+    pub receipt_group_events_refused: u64,
+    pub quarantine_rows: u64,
+    pub quarantine_reason_counts: [u64; oa_quarantine::REASON_COUNTER_COUNT],
+    pub adsb_rows_in: u64,
+    pub adsb_rows_dropped: u64,
+    pub adsb_quality_removed: [u64; 13],
+    pub adsb_ground_excluded: u64,
+    pub adsb_unknown_ground_refused: u64,
+    pub adsb_source_time_regressions: u64,
+    pub adsb_rows_order_refused: u64,
+    pub adsb_velocity_unavailable: u64,
+    pub adsb_unknown_gufi_positions: u64,
+    pub invalid_position_rows: u64,
+    pub source_after_receipt: u64,
+    pub sfdps_rows_decoded: u64,
+    pub sfdps_rows_refused: u64,
+    pub sfdps_rows_no_operations: u64,
+    pub sfdps_operations_unusable: u64,
+    pub sfdps_owner_unknown: u64,
+    pub sfdps_rows_positive_address: u64,
+    pub sfdps_rows_nonempty_callsign: u64,
+    pub sfdps_emitted_operations: [u64; oa_flight::OP_COUNT],
+    pub sfdps_unsupported_operations: [u64; oa_flight::OP_COUNT],
+    pub invalid_operation_time: u64,
+    pub invalid_operation_identity: u64,
+    pub invalid_operation_centre: u64,
+    pub invalid_operation_address: u64,
+    pub sfdps_field_errors: u64,
+    pub sfdps_rejected_messages: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NormalizedStreamProfile {
+    Legacy,
+    RecordedHour,
+}
+
+const MAX_PENDING_NORMALIZED_EVENTS: usize = crate::recordings::MAX_ADSB_ROWS_PER_ADAPTATION;
+
+struct PendingNormalizedEvent {
+    event: crate::input::NormalizedEvent,
+    provenance: crate::recordings::EventProvenance,
+    arrival_order: u64,
+}
+
+impl PendingNormalizedEvent {
+    fn key(&self) -> (i64, crate::input::SourceKind, u64, u64) {
+        (
+            self.event.receipt_ns,
+            self.event.source,
+            self.event.sequence,
+            self.arrival_order,
+        )
+    }
+}
+
+impl PartialEq for PendingNormalizedEvent {
+    fn eq(&self, other: &Self) -> bool {
+        self.key() == other.key()
+    }
+}
+
+impl Eq for PendingNormalizedEvent {}
+
+impl PartialOrd for PendingNormalizedEvent {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for PendingNormalizedEvent {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.key().cmp(&other.key())
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -359,6 +465,13 @@ impl<'a> OafStream<'a> {
             let outside_window = self.receive_window_ns.is_some_and(|(start, end)| {
                 frame.recv_unix_ns < start || frame.recv_unix_ns >= end
             });
+            let archive_adsb_warmup = outside_window
+                && self.source == RecordingSource::Adsb
+                && frame.mono_ns().is_none()
+                && frame.kind == Kind::Message
+                && self.receive_window_ns.is_some_and(|(start, end)| {
+                    frame.recv_unix_ns < start && frame.recv_unix_ns < end
+                });
             if outside_window {
                 self.counts.outside_window_frames = self
                     .counts
@@ -370,6 +483,18 @@ impl<'a> OafStream<'a> {
                     .outside_window_frames
                     .checked_add(1)
                     .ok_or("outside-window frame count overflow")?;
+                if archive_adsb_warmup {
+                    self.counts.adsb_warmup_frames = self
+                        .counts
+                        .adsb_warmup_frames
+                        .checked_add(1)
+                        .ok_or("ADS-B warmup frame count overflow")?;
+                    budget.counts.adsb_warmup_frames = budget
+                        .counts
+                        .adsb_warmup_frames
+                        .checked_add(1)
+                        .ok_or("aggregate ADS-B warmup frame count overflow")?;
+                }
                 match frame.kind {
                     Kind::Message => {
                         self.counts.outside_window_messages = self
@@ -428,19 +553,23 @@ impl<'a> OafStream<'a> {
                             .ok_or("outside-window reject count overflow")?;
                     }
                 }
-                continue;
+                if !archive_adsb_warmup {
+                    continue;
+                }
             }
-            if let Some(previous) = self.coverage_prior_receipt_ns {
-                let gap = frame
-                    .recv_unix_ns
-                    .checked_sub(previous)
-                    .ok_or("coverage gap overflow")?;
-                self.max_frame_gap_ns = self.max_frame_gap_ns.max(gap);
-            } else {
-                self.first_frame_receive_ns = Some(frame.recv_unix_ns);
+            if !outside_window {
+                if let Some(previous) = self.coverage_prior_receipt_ns {
+                    let gap = frame
+                        .recv_unix_ns
+                        .checked_sub(previous)
+                        .ok_or("coverage gap overflow")?;
+                    self.max_frame_gap_ns = self.max_frame_gap_ns.max(gap);
+                } else {
+                    self.first_frame_receive_ns = Some(frame.recv_unix_ns);
+                }
+                self.coverage_prior_receipt_ns = Some(frame.recv_unix_ns);
+                self.last_frame_receive_ns = Some(frame.recv_unix_ns);
             }
-            self.coverage_prior_receipt_ns = Some(frame.recv_unix_ns);
-            self.last_frame_receive_ns = Some(frame.recv_unix_ns);
             match frame.kind {
                 Kind::Message => {
                     let payload_len = frame.payload.len();
@@ -646,7 +775,10 @@ impl<'a> OafStream<'a> {
             .ok_or("input stream was not fully consumed")?;
         Ok(StreamDigest {
             source: self.source,
+            stream_index: self.stream_index,
             bytes: self.physical_read,
+            expanded_bytes: self.expanded_read,
+            gzip: self.gzip.is_some(),
             sha256,
             messages: self.counts.messages,
             first_frame_receive_ns: self.first_frame_receive_ns,
@@ -801,6 +933,45 @@ pub fn stream_oaf_segments_in_window(
     })
 }
 
+/// Count SFDPS Message frames in 24 UTC bins without decoding source payloads. Inputs are still
+/// scanned by the guarded H2 reader, including frames outside the selected UTC day.
+pub fn count_sfdps_messages_by_utc_hour(
+    inputs: &[StreamInput],
+    utc_day_start_ns: i64,
+) -> Result<UtcHourMessageCounts, String> {
+    if utc_day_start_ns < 0 || utc_day_start_ns % NS_PER_UTC_DAY != 0 {
+        return Err("UTC histogram start must be a nonnegative UTC midnight".into());
+    }
+    let utc_day_end_ns = utc_day_start_ns
+        .checked_add(NS_PER_UTC_DAY)
+        .ok_or("UTC histogram day end overflow")?;
+    let mut sfdps_messages_by_hour = [0u64; 24];
+    let stream =
+        stream_oaf_segments_in_window(inputs, Some((utc_day_start_ns, utc_day_end_ns)), |frame| {
+            if frame.source != RecordingSource::Sfdps || frame.kind != Kind::Message {
+                return Ok(());
+            }
+            let elapsed = frame
+                .receipt_ns
+                .checked_sub(utc_day_start_ns)
+                .ok_or("UTC histogram frame offset overflow")?;
+            let hour = usize::try_from(elapsed / NS_PER_HOUR)
+                .map_err(|_| "UTC histogram hour index overflow")?;
+            let count = sfdps_messages_by_hour
+                .get_mut(hour)
+                .ok_or("UTC histogram frame escaped its day window")?;
+            *count = count
+                .checked_add(1)
+                .ok_or("UTC histogram message count overflow")?;
+            Ok(())
+        })?;
+    Ok(UtcHourMessageCounts {
+        utc_day_start_ns,
+        sfdps_messages_by_hour,
+        stream,
+    })
+}
+
 /// Adapt a bounded ordered OAF stream to normalized events without retaining the day. The visitor
 /// receives complete issue-time groups in deterministic source/sequence order. This is suitable
 /// for multiple independent runtime passes: each caller repeats the guarded source read and owns
@@ -809,13 +980,57 @@ pub fn stream_normalized_events(
     inputs: &[StreamInput],
     receive_window_ns: Option<(i64, i64)>,
     centre: [u8; 4],
+    visit: impl FnMut(
+        crate::input::NormalizedEvent,
+        crate::recordings::EventProvenance,
+    ) -> Result<(), String>,
+) -> Result<NormalizedStreamSummary, String> {
+    stream_normalized_events_with_limit(
+        inputs,
+        receive_window_ns,
+        centre,
+        NormalizedStreamProfile::Legacy,
+        visit,
+    )
+}
+
+/// Offline recorded-hour variant; the caller must select this path explicitly for that profile.
+pub fn stream_recorded_hour_normalized_events(
+    inputs: &[StreamInput],
+    receive_window_ns: Option<(i64, i64)>,
+    centre: [u8; 4],
+    visit: impl FnMut(
+        crate::input::NormalizedEvent,
+        crate::recordings::EventProvenance,
+    ) -> Result<(), String>,
+) -> Result<NormalizedStreamSummary, String> {
+    stream_normalized_events_with_limit(
+        inputs,
+        receive_window_ns,
+        centre,
+        NormalizedStreamProfile::RecordedHour,
+        visit,
+    )
+}
+
+pub(crate) fn stream_normalized_events_with_limit(
+    inputs: &[StreamInput],
+    receive_window_ns: Option<(i64, i64)>,
+    centre: [u8; 4],
+    profile: NormalizedStreamProfile,
     mut visit: impl FnMut(
         crate::input::NormalizedEvent,
         crate::recordings::EventProvenance,
     ) -> Result<(), String>,
 ) -> Result<NormalizedStreamSummary, String> {
-    if !centre.iter().all(u8::is_ascii_alphanumeric) {
-        return Err("normalization centre must be four ASCII alphanumeric bytes".into());
+    let receipt_group_limit = match profile {
+        NormalizedStreamProfile::Legacy => crate::session::MAX_EVENTS_PER_RECEIPT,
+        NormalizedStreamProfile::RecordedHour => {
+            crate::session::RECORDED_HOUR_MAX_EVENTS_PER_RECEIPT
+        }
+    };
+    if !crate::input::is_valid_centre_code(&centre) {
+        return Err("normalization centre must be a valid padded ASCII alphanumeric code".into());
     }
     let mut sequence_starts = [0u64; 2];
     let mut pending: Vec<(
@@ -823,9 +1038,14 @@ pub fn stream_normalized_events(
         crate::recordings::EventProvenance,
     )> = Vec::new();
     pending
-        .try_reserve_exact(crate::session::MAX_EVENTS_PER_RECEIPT)
+        .try_reserve_exact(receipt_group_limit)
         .map_err(|_| "normalized event group allocation refused")?;
-    let mut pending_receipt = None;
+    let mut pending_heap = BinaryHeap::new();
+    pending_heap
+        .try_reserve(receipt_group_limit)
+        .map_err(|_| "normalized watermark queue allocation refused")?;
+    let mut pending_arrival_order = 0u64;
+    let mut quality_cache = oa_track::adsb::AdsbQualityCache::default();
     let mut counts = NormalizedAdapterCounts::default();
     let recording = stream_oaf_segments_in_window(inputs, receive_window_ns, |frame| {
         let mut input_counts = crate::recordings_reader::RecordingCounts::default();
@@ -833,14 +1053,67 @@ pub fn stream_normalized_events(
         input_counts.total_decoded_bytes = u64::try_from(frame.payload.len())
             .map_err(|_| "message payload byte count overflow")?;
         input_counts.total_bytes = input_counts.total_decoded_bytes;
-        let adapted = crate::recordings::adapt_recorded_frames_with_sequence_starts(
-            std::slice::from_ref(&frame),
-            input_counts,
-            100_000,
-            centre,
-            sequence_starts,
-        )
-        .map_err(|error| format!("normalized adapter refused message: {error:?}"))?;
+        let adapted =
+            crate::recordings::adapt_recorded_frames_with_sequence_starts_and_quality_limit(
+                std::slice::from_ref(&frame),
+                input_counts,
+                100_000,
+                centre,
+                sequence_starts,
+                receipt_group_limit,
+                &mut quality_cache,
+            )
+            .map_err(|error| format!("normalized adapter refused message: {error:?}"))?;
+        let source_index = match frame.source {
+            RecordingSource::Adsb => 0,
+            RecordingSource::Sfdps => 1,
+        };
+        let source_counts = counts
+            .source_counts
+            .get_mut(source_index)
+            .ok_or("normalized source index invariant")?;
+        source_counts.message_frames = source_counts
+            .message_frames
+            .checked_add(1)
+            .ok_or("source message-frame count overflow")?;
+        source_counts.candidate_events_before_receipt_filter = source_counts
+            .candidate_events_before_receipt_filter
+            .checked_add(adapted.counts.candidate_events_before_receipt_filter)
+            .ok_or("source candidate-event count overflow")?;
+        source_counts.max_candidate_events_per_frame = source_counts
+            .max_candidate_events_per_frame
+            .max(adapted.counts.candidate_events_before_receipt_filter);
+        source_counts.receipt_groups_over_capacity = source_counts
+            .receipt_groups_over_capacity
+            .checked_add(adapted.counts.receipt_groups_over_capacity)
+            .ok_or("source over-capacity-group count overflow")?;
+        source_counts.receipt_group_events_refused = source_counts
+            .receipt_group_events_refused
+            .checked_add(adapted.counts.receipt_group_events_refused)
+            .ok_or("source refused-event count overflow")?;
+        source_counts.adsb_quality_cache_capacity_refused = source_counts
+            .adsb_quality_cache_capacity_refused
+            .checked_add(adapted.counts.adsb_quality_cache_capacity_refused)
+            .ok_or("ADS-B quality-cache capacity count overflow")?;
+        source_counts.quarantine_rows = source_counts
+            .quarantine_rows
+            .checked_add(
+                u64::try_from(adapted.quarantine.len())
+                    .map_err(|_| "source quarantine row count overflow")?,
+            )
+            .ok_or("source quarantine row count overflow")?;
+        for stats in &adapted.quarantine_stats {
+            for (total, count) in source_counts
+                .quarantine_reason_counts
+                .iter_mut()
+                .zip(stats.reason_counts)
+            {
+                *total = total
+                    .checked_add(count)
+                    .ok_or("source quarantine reason count overflow")?;
+            }
+        }
+        accumulate_adapter_diagnostics(source_counts, &adapted.counts, source_index)?;
         counts.quarantine_rows = counts
             .quarantine_rows
             .checked_add(
@@ -865,25 +1138,7 @@ pub fn stream_normalized_events(
             .unprocessed_frames
             .checked_add(adapted.counts.unprocessed_frames)
             .ok_or("unprocessed frame count overflow")?;
-        let new_count =
-            u64::try_from(adapted.events.len()).map_err(|_| "normalized event count overflow")?;
-        counts.normalized_events = counts
-            .normalized_events
-            .checked_add(new_count)
-            .ok_or("normalized event count overflow")?;
-        if counts.normalized_events > 10_000_000 {
-            return Err("normalized event full-day cap exceeded".into());
-        }
         for (event, provenance) in adapted.events.into_iter().zip(adapted.provenance) {
-            if pending_receipt.is_some_and(|prior| event.receipt_ns < prior) {
-                return Err("normalized issue-time order regressed".into());
-            }
-            if pending_receipt.is_some_and(|prior| event.receipt_ns > prior) {
-                flush_normalized_group(&mut pending, &mut pending_receipt, &mut visit)?;
-            }
-            if pending.len() >= crate::session::MAX_EVENTS_PER_RECEIPT {
-                return Err("normalized issue-time group exceeds 256-event capacity".into());
-            }
             let sequence_index = match event.source {
                 crate::input::SourceKind::Surveillance => Some(0),
                 crate::input::SourceKind::Flight | crate::input::SourceKind::Route => Some(1),
@@ -900,22 +1155,146 @@ pub fn stream_normalized_events(
                         .ok_or("normalized sequence overflow")?,
                 );
             }
-            pending_receipt = Some(event.receipt_ns);
-            pending
+            let archive_adsb_window = (frame.source == RecordingSource::Adsb
+                && frame.mono_ns.is_none())
+            .then_some(receive_window_ns)
+            .flatten();
+            if let Some((start, end)) = archive_adsb_window {
+                if event.source_ns < start || event.source_ns >= end {
+                    source_counts.outside_window_events = source_counts
+                        .outside_window_events
+                        .checked_add(1)
+                        .ok_or("outside-window row count overflow")?;
+                    if event.source_ns < start {
+                        source_counts.adsb_warmup_events = source_counts
+                            .adsb_warmup_events
+                            .checked_add(1)
+                            .ok_or("ADS-B warmup row count overflow")?;
+                    }
+                    continue;
+                }
+            }
+            counts.normalized_events = counts
+                .normalized_events
+                .checked_add(1)
+                .ok_or("normalized event count overflow")?;
+            if counts.normalized_events > 10_000_000 {
+                return Err("normalized event full-day cap exceeded".into());
+            }
+            if pending_heap.len() >= MAX_PENDING_NORMALIZED_EVENTS {
+                return Err("normalized watermark queue capacity exceeded".into());
+            }
+            pending_heap
                 .try_reserve(1)
-                .map_err(|_| "normalized event allocation refused")?;
-            pending.push((event, provenance));
+                .map_err(|_| "normalized watermark queue allocation refused")?;
+            let arrival_order = pending_arrival_order;
+            pending_arrival_order = pending_arrival_order
+                .checked_add(1)
+                .ok_or("normalized event order overflow")?;
+            pending_heap.push(Reverse(PendingNormalizedEvent {
+                event,
+                provenance,
+                arrival_order,
+            }));
         }
+        flush_watermarked_groups(
+            &mut pending_heap,
+            frame.receipt_ns,
+            receipt_group_limit,
+            &mut pending,
+            &mut visit,
+        )?;
         Ok(())
     })?;
-    flush_normalized_group(&mut pending, &mut pending_receipt, &mut visit)?;
+    flush_watermarked_groups(
+        &mut pending_heap,
+        i64::MAX,
+        receipt_group_limit,
+        &mut pending,
+        &mut visit,
+    )?;
     Ok(NormalizedStreamSummary {
         recording,
         normalized_events: counts.normalized_events,
         quarantine_rows: counts.quarantine_rows,
         manual_handling_required: counts.manual_handling_required,
         unprocessed_frames: counts.unprocessed_frames,
+        source_counts: counts.source_counts,
     })
+}
+
+fn accumulate_adapter_diagnostics(
+    source: &mut NormalizedInputCounts,
+    adapter: &crate::recordings::RecordedAdapterCounts,
+    source_index: usize,
+) -> Result<(), String> {
+    macro_rules! add {
+        ($field:ident) => {
+            source.$field = source
+                .$field
+                .checked_add(adapter.$field)
+                .ok_or(concat!(stringify!($field), " aggregate overflow"))?;
+        };
+    }
+    match source_index {
+        0 => {
+            add!(adsb_rows_in);
+            add!(adsb_rows_dropped);
+            add!(adsb_ground_excluded);
+            add!(adsb_unknown_ground_refused);
+            add!(adsb_source_time_regressions);
+            add!(adsb_rows_order_refused);
+            add!(adsb_velocity_unavailable);
+            add!(adsb_unknown_gufi_positions);
+            add!(invalid_position_rows);
+            add!(source_after_receipt);
+            for (total, count) in source
+                .adsb_quality_removed
+                .iter_mut()
+                .zip(adapter.adsb_quality_removed)
+            {
+                *total = total
+                    .checked_add(count)
+                    .ok_or("ADS-B quality diagnostic overflow")?;
+            }
+        }
+        1 => {
+            add!(sfdps_rows_decoded);
+            add!(sfdps_rows_refused);
+            add!(sfdps_rows_no_operations);
+            add!(sfdps_operations_unusable);
+            add!(sfdps_owner_unknown);
+            add!(sfdps_rows_positive_address);
+            add!(sfdps_rows_nonempty_callsign);
+            add!(invalid_operation_time);
+            add!(source_after_receipt);
+            add!(invalid_operation_identity);
+            add!(invalid_operation_centre);
+            add!(invalid_operation_address);
+            add!(sfdps_field_errors);
+            add!(sfdps_rejected_messages);
+            for (total, count) in source
+                .sfdps_emitted_operations
+                .iter_mut()
+                .zip(adapter.sfdps_emitted_operations)
+            {
+                *total = total
+                    .checked_add(count)
+                    .ok_or("SFDPS emitted-operation diagnostic overflow")?;
+            }
+            for (total, count) in source
+                .sfdps_unsupported_operations
+                .iter_mut()
+                .zip(adapter.unsupported_operations)
+            {
+                *total = total
+                    .checked_add(count)
+                    .ok_or("SFDPS unsupported-operation diagnostic overflow")?;
+            }
+        }
+        _ => return Err("normalized source index invariant".into()),
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -924,6 +1303,7 @@ struct NormalizedAdapterCounts {
     quarantine_rows: u64,
     manual_handling_required: u64,
     unprocessed_frames: u64,
+    source_counts: [NormalizedInputCounts; 2],
 }
 
 fn flush_normalized_group(
@@ -945,9 +1325,55 @@ fn flush_normalized_group(
     Ok(())
 }
 
+fn flush_watermarked_groups(
+    heap: &mut BinaryHeap<Reverse<PendingNormalizedEvent>>,
+    watermark_ns: i64,
+    receipt_group_limit: usize,
+    group: &mut Vec<(
+        crate::input::NormalizedEvent,
+        crate::recordings::EventProvenance,
+    )>,
+    visit: &mut impl FnMut(
+        crate::input::NormalizedEvent,
+        crate::recordings::EventProvenance,
+    ) -> Result<(), String>,
+) -> Result<(), String> {
+    while heap
+        .peek()
+        .is_some_and(|Reverse(next)| next.event.receipt_ns < watermark_ns)
+    {
+        let receipt_ns = heap
+            .peek()
+            .map(|Reverse(next)| next.event.receipt_ns)
+            .ok_or("normalized watermark queue lost its head")?;
+        group.clear();
+        while heap
+            .peek()
+            .is_some_and(|Reverse(next)| next.event.receipt_ns == receipt_ns)
+        {
+            if group.len() >= receipt_group_limit {
+                return Err("normalized issue-time group exceeds selected profile capacity".into());
+            }
+            group
+                .try_reserve(1)
+                .map_err(|_| "normalized event group allocation refused")?;
+            let Reverse(entry) = heap
+                .pop()
+                .ok_or("normalized watermark queue lost an event")?;
+            group.push((entry.event, entry.provenance));
+        }
+        let mut receipt = Some(receipt_ns);
+        flush_normalized_group(group, &mut receipt, visit)?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{stream_oaf_segments, stream_oaf_segments_in_window, RecordingSource, StreamInput};
+    use super::{
+        count_sfdps_messages_by_utc_hour, stream_oaf_segments, stream_oaf_segments_in_window,
+        RecordingSource, StreamInput, NS_PER_HOUR, NS_PER_UTC_DAY,
+    };
     use std::error::Error;
     use std::fs::{self, OpenOptions};
     use std::io::Write;
@@ -986,11 +1412,45 @@ mod tests {
         Ok(())
     }
 
+    fn write_kind_frames(
+        path: &PathBuf,
+        frames: &[(oa_feed::Kind, i64)],
+    ) -> Result<(), Box<dyn Error>> {
+        let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
+        for (sequence, (kind, time)) in frames.iter().copied().enumerate() {
+            let mut bytes = vec![0; 64];
+            let size = oa_feed::encode_frame(
+                &mut bytes,
+                kind as u8,
+                0,
+                u64::try_from(sequence + 1)?,
+                time,
+                time / 1_000_000,
+                b"synthetic",
+            )
+            .ok_or_else(|| std::io::Error::other("synthetic OAF frame encoding failed"))?;
+            bytes.truncate(size);
+            file.write_all(&bytes)?;
+        }
+        file.sync_all()?;
+        Ok(())
+    }
+
     fn write_adsb_message(
         file: &mut std::fs::File,
         sequence: u64,
         source_ns: i64,
         receive_ns: i64,
+    ) -> Result<(), Box<dyn Error>> {
+        write_adsb_message_with_reports(file, sequence, source_ns, receive_ns, 1)
+    }
+
+    fn write_adsb_message_with_reports(
+        file: &mut std::fs::File,
+        sequence: u64,
+        source_ns: i64,
+        receive_ns: i64,
+        report_count: usize,
     ) -> Result<(), Box<dyn Error>> {
         let row = oa_adsb::Row {
             time_ns: source_ns,
@@ -1000,26 +1460,69 @@ mod tests {
             baro_alt_ft: 35_000,
             gs_dkt: 4_500,
             track_ddeg: 900,
+            vrate_fpm: 0,
             nic: 8,
             nac_p: 9,
             nac_v: 2,
             sil: 3,
             version: 2,
+            source: 0,
             ..oa_adsb::ROW_EMPTY
         };
         let mut reports = oa_adsb::Reports::default();
-        oa_adsb::reports_push(&mut reports, &row);
+        for _ in 0..report_count {
+            oa_adsb::reports_push(&mut reports, &row);
+        }
         let mut payload = Vec::new();
-        oa_adsb::encode_payload(&mut payload, &reports, 0, 1)
+        oa_adsb::encode_payload(&mut payload, &reports, 0, report_count)
             .map_err(|_| std::io::Error::other("synthetic ADS-B encode failed"))?;
         let mut frame = vec![0u8; oa_feed::HEADER_LEN + payload.len() + oa_feed::TRAILER_LEN];
         let encoded = oa_feed::encode_frame(
             &mut frame,
             oa_feed::Kind::Message as u8,
-            0,
+            oa_feed::FLAG_BYTES,
             sequence,
             receive_ns,
             receive_ns / 1_000_000,
+            &payload,
+        )
+        .ok_or_else(|| std::io::Error::other("synthetic OAF encode failed"))?;
+        frame.truncate(encoded);
+        file.write_all(&frame)?;
+        Ok(())
+    }
+
+    fn write_adsb_row(
+        file: &mut std::fs::File,
+        sequence: u64,
+        row: &oa_adsb::Row,
+    ) -> Result<(), Box<dyn Error>> {
+        write_adsb_rows(file, sequence, &[row])
+    }
+
+    fn write_adsb_rows(
+        file: &mut std::fs::File,
+        sequence: u64,
+        rows: &[&oa_adsb::Row],
+    ) -> Result<(), Box<dyn Error>> {
+        let first = rows
+            .first()
+            .ok_or_else(|| std::io::Error::other("synthetic ADS-B frame needs a report"))?;
+        let mut reports = oa_adsb::Reports::default();
+        for row in rows {
+            oa_adsb::reports_push(&mut reports, row);
+        }
+        let mut payload = Vec::new();
+        oa_adsb::encode_payload(&mut payload, &reports, 0, rows.len())
+            .map_err(|_| std::io::Error::other("synthetic ADS-B encode failed"))?;
+        let mut frame = vec![0u8; oa_feed::HEADER_LEN + payload.len() + oa_feed::TRAILER_LEN];
+        let encoded = oa_feed::encode_frame(
+            &mut frame,
+            oa_feed::Kind::Message as u8,
+            oa_feed::FLAG_BYTES,
+            sequence,
+            first.time_ns,
+            first.time_ns / 1_000_000,
             &payload,
         )
         .ok_or_else(|| std::io::Error::other("synthetic OAF encode failed"))?;
@@ -1112,11 +1615,28 @@ mod tests {
         let _ = fs::remove_file(&path);
         let _ = fs::remove_file(&sfdps_path);
         let accepted = accepted?;
-        assert_eq!(accepted.counts.messages, 3);
+        let expected_normalized_messages = [
+            (RecordingSource::Adsb, start - 1_000_000_000),
+            (RecordingSource::Adsb, start),
+            (RecordingSource::Adsb, end - 1_000_000_000),
+            (RecordingSource::Adsb, end),
+            (RecordingSource::Sfdps, start),
+        ]
+        .into_iter()
+        .filter(|(source, receipt_ns)| {
+            *source == RecordingSource::Sfdps
+                || (*source == RecordingSource::Adsb && *receipt_ns < end)
+        })
+        .count();
+        assert_eq!(
+            accepted.counts.messages,
+            u64::try_from(expected_normalized_messages)?
+        );
         assert_eq!(accepted.counts.frames, 5);
         assert_eq!(accepted.counts.outside_window_frames, 2);
         assert_eq!(accepted.counts.outside_window_messages, 2);
-        assert_eq!(seen, 3);
+        assert_eq!(accepted.counts.adsb_warmup_frames, 1);
+        assert_eq!(seen, accepted.counts.messages);
         let adsb_digest = accepted
             .streams
             .iter()
@@ -1125,6 +1645,104 @@ mod tests {
         assert_eq!(adsb_digest.first_frame_receive_ns, Some(start));
         assert_eq!(adsb_digest.last_frame_receive_ns, Some(end - 1_000_000_000));
         assert!(stream_oaf_segments_in_window(&input, Some((end, start)), |_| Ok(())).is_err());
+        Ok(())
+    }
+
+    // REQ: OA-MIG-415
+    #[test]
+    fn sfdps_hour_histogram_counts_only_message_frames_inside_explicit_utc_day(
+    ) -> Result<(), Box<dyn Error>> {
+        let utc_day_start_ns = NS_PER_UTC_DAY * 20_000;
+        let utc_day_end_ns = utc_day_start_ns + NS_PER_UTC_DAY;
+        let sfdps_messages = [
+            utc_day_start_ns + NS_PER_HOUR,
+            utc_day_start_ns + NS_PER_HOUR + 1,
+            utc_day_start_ns + 23 * NS_PER_HOUR,
+            utc_day_end_ns,
+        ];
+        let sfdps_path = temporary_path("hour_histogram_sfdps")?;
+        let adsb_path = temporary_path("hour_histogram_adsb")?;
+        write_kind_frames(
+            &sfdps_path,
+            &[
+                (oa_feed::Kind::Message, utc_day_start_ns - 1),
+                (oa_feed::Kind::Message, sfdps_messages[0]),
+                (oa_feed::Kind::Message, sfdps_messages[1]),
+                (oa_feed::Kind::Status, utc_day_start_ns + 2 * NS_PER_HOUR),
+                (oa_feed::Kind::Message, sfdps_messages[2]),
+                (oa_feed::Kind::Message, sfdps_messages[3]),
+            ],
+        )?;
+        write_frames(&adsb_path, &[utc_day_start_ns + NS_PER_HOUR])?;
+        let inputs = [
+            StreamInput {
+                source: RecordingSource::Sfdps,
+                path: sfdps_path.clone(),
+            },
+            StreamInput {
+                source: RecordingSource::Adsb,
+                path: adsb_path.clone(),
+            },
+        ];
+
+        let result = count_sfdps_messages_by_utc_hour(&inputs, utc_day_start_ns);
+        let invalid_day_start = count_sfdps_messages_by_utc_hour(&inputs, utc_day_start_ns + 1);
+        let _ = fs::remove_file(&sfdps_path);
+        let _ = fs::remove_file(&adsb_path);
+        let result = result?;
+
+        let mut expected = [0u64; 24];
+        for receipt_ns in sfdps_messages
+            .into_iter()
+            .filter(|time| *time >= utc_day_start_ns && *time < utc_day_end_ns)
+        {
+            let hour = usize::try_from((receipt_ns - utc_day_start_ns) / NS_PER_HOUR)?;
+            let count = expected.get_mut(hour).ok_or("fixture hour is in range")?;
+            *count += 1;
+        }
+        // Mutation killed: counting non-Message frames or letting either UTC-day boundary in.
+        assert_eq!(result.sfdps_messages_by_hour, expected);
+        assert_eq!(result.utc_day_start_ns, utc_day_start_ns);
+        assert_eq!(result.stream.streams.len(), inputs.len());
+        for (index, digest) in result.stream.streams.iter().enumerate() {
+            let input = inputs.get(index).ok_or("stream digest order is bounded")?;
+            assert_eq!(usize::from(digest.stream_index), index);
+            assert_eq!(digest.source, input.source);
+            assert_eq!(digest.expanded_bytes, digest.bytes);
+            assert!(!digest.gzip);
+        }
+        // Mutation killed: accepting a non-midnight histogram origin.
+        assert!(invalid_day_start.is_err());
+        Ok(())
+    }
+
+    // REQ: OA-MIG-415
+    #[test]
+    fn sfdps_hour_histogram_keeps_the_sealed_receipt_guard() -> Result<(), Box<dyn Error>> {
+        let sealed_day_start_ns = 1_795_132_800_000_000_000i64;
+        let sfdps_path = temporary_path("hour_histogram_sealed_sfdps")?;
+        let adsb_path = temporary_path("hour_histogram_sealed_adsb")?;
+        write_kind_frames(
+            &sfdps_path,
+            &[(oa_feed::Kind::Message, sealed_day_start_ns + NS_PER_HOUR)],
+        )?;
+        write_frames(&adsb_path, &[sealed_day_start_ns - 1])?;
+        let inputs = [
+            StreamInput {
+                source: RecordingSource::Sfdps,
+                path: sfdps_path.clone(),
+            },
+            StreamInput {
+                source: RecordingSource::Adsb,
+                path: adsb_path.clone(),
+            },
+        ];
+
+        let result = count_sfdps_messages_by_utc_hour(&inputs, sealed_day_start_ns);
+        let _ = fs::remove_file(&sfdps_path);
+        let _ = fs::remove_file(&adsb_path);
+        // Mutation killed: bypassing the sealed-receipt guard on the histogram reader.
+        assert!(result.is_err());
         Ok(())
     }
 
@@ -1141,9 +1759,10 @@ mod tests {
             .create_new(true)
             .open(&path)?;
         let source_ns = 1_893_456_780_000_000_000i64;
-        let receive_ns = source_ns + 2_000_000_000;
-        write_adsb_message(&mut file, 1, source_ns, receive_ns)?;
-        write_adsb_message(&mut file, 2, source_ns + 1_000_000_000, receive_ns)?;
+        let first_receive_ns = source_ns;
+        let second_receive_ns = source_ns + 1_000_000_000;
+        write_adsb_message(&mut file, 1, source_ns, first_receive_ns)?;
+        write_adsb_message(&mut file, 2, source_ns + 1_000_000_000, second_receive_ns)?;
         file.sync_all()?;
         drop(file);
         let inputs = [StreamInput {
@@ -1169,8 +1788,224 @@ mod tests {
             .and_then(|(first, tail)| tail.first().map(|second| (first, second)))
             .ok_or("synthetic normalized stream omitted expected events")?;
         assert!(first.0 < second.0);
-        assert!(events.iter().all(|row| row.1 == receive_ns));
-        assert!(events.iter().all(|row| row.2 == receive_ns));
+        assert_eq!(first.1, source_ns);
+        assert_eq!(second.1, second_receive_ns);
+        assert_eq!(first.2, first_receive_ns);
+        assert_eq!(second.2, second_receive_ns);
+        Ok(())
+    }
+
+    #[test]
+    fn archive_adsb_window_uses_row_time_and_prestart_frames_warm_quality(
+    ) -> Result<(), Box<dyn Error>> {
+        use super::stream_normalized_events;
+        use std::fs::OpenOptions;
+
+        let path = temporary_path("adsb_warmup_window")?;
+        let sfdps_path = temporary_path("adsb_warmup_window_sfdps")?;
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)?;
+        let start_ns = 1_893_456_780_000_000_000i64;
+        let end_ns = start_ns + 20_000_000_000;
+        let first = oa_adsb::Row {
+            time_ns: start_ns - 1_000_000_000,
+            icao: 0xABCDEF,
+            lat_e7: 419_000_000,
+            lon_e7: -873_000_000,
+            baro_alt_ft: 35_000,
+            gs_dkt: 4_500,
+            track_ddeg: 900,
+            vrate_fpm: 0,
+            nic: 8,
+            nac_p: 9,
+            nac_v: 2,
+            sil: 3,
+            version: 2,
+            source: 0,
+            ..oa_adsb::ROW_EMPTY
+        };
+        let mut in_window = oa_adsb::Row {
+            time_ns: start_ns + 1_000_000_000,
+            ..first
+        };
+        in_window.nac_p = oa_adsb::NONE_U8;
+        in_window.nic = oa_adsb::NONE_U8;
+        in_window.sil = oa_adsb::NONE_U8;
+        in_window.version = oa_adsb::NONE_U8;
+        in_window.nac_v = oa_adsb::NONE_U8;
+        write_adsb_row(&mut file, 1, &first)?;
+        write_adsb_row(&mut file, 2, &in_window)?;
+        file.sync_all()?;
+        drop(file);
+
+        write_kind_frames(&sfdps_path, &[(oa_feed::Kind::Status, start_ns)])?;
+        let inputs = [
+            StreamInput {
+                source: RecordingSource::Adsb,
+                path: path.clone(),
+            },
+            StreamInput {
+                source: RecordingSource::Sfdps,
+                path: sfdps_path.clone(),
+            },
+        ];
+        let mut source_times = Vec::new();
+        let result =
+            stream_normalized_events(&inputs, Some((start_ns, end_ns)), *b"ZAU1", |event, _| {
+                source_times.push(event.source_ns);
+                Ok(())
+            });
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(&sfdps_path);
+        let summary = result?;
+        assert_eq!(source_times, vec![start_ns + 1_000_000_000]);
+        assert_eq!(summary.normalized_events, 1);
+        assert_eq!(summary.recording.counts.adsb_warmup_frames, 1);
+        assert_eq!(summary.source_counts[0].adsb_warmup_events, 1);
+        assert_eq!(summary.source_counts[0].outside_window_events, 1);
+        assert_eq!(summary.quarantine_rows, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn archive_issue_groups_wait_for_global_header_watermark() -> Result<(), Box<dyn Error>> {
+        use super::stream_normalized_events;
+        use std::fs::OpenOptions;
+
+        let path = temporary_path("adsb_issue_watermark")?;
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)?;
+        let base = 1_893_456_780_000_000_000i64;
+        let first = oa_adsb::Row {
+            time_ns: base + 100_000_000,
+            icao: 0xABCDEF,
+            lat_e7: 419_000_000,
+            lon_e7: -873_000_000,
+            baro_alt_ft: 35_000,
+            gs_dkt: 4_500,
+            track_ddeg: 900,
+            vrate_fpm: 0,
+            nic: 8,
+            nac_p: 9,
+            nac_v: 2,
+            sil: 3,
+            version: 2,
+            source: 0,
+            ..oa_adsb::ROW_EMPTY
+        };
+        let later_in_first_frame = oa_adsb::Row {
+            icao: 0x123456,
+            time_ns: base + 2_100_000_000,
+            ..first
+        };
+        let middle_frame_row = oa_adsb::Row {
+            icao: 0x234567,
+            time_ns: base + 1_100_000_000,
+            ..first
+        };
+        write_adsb_rows(&mut file, 1, &[&first, &later_in_first_frame])?;
+        write_adsb_row(&mut file, 2, &middle_frame_row)?;
+        file.sync_all()?;
+        drop(file);
+
+        let inputs = [StreamInput {
+            source: RecordingSource::Adsb,
+            path: path.clone(),
+        }];
+        let mut issue_receipts = Vec::new();
+        let result = stream_normalized_events(&inputs, None, *b"ZAU1", |event, _| {
+            issue_receipts.push(event.receipt_ns);
+            Ok(())
+        });
+        let _ = fs::remove_file(&path);
+        let summary = result?;
+        assert_eq!(summary.normalized_events, 3);
+        let expected_issue_times = [
+            base + 1_000_000_000,
+            base + 2_000_000_000,
+            base + 3_000_000_000,
+        ];
+        assert_eq!(issue_receipts, expected_issue_times);
+        Ok(())
+    }
+
+    #[test]
+    fn normalized_stream_reports_oversized_adsb_receipt_group_aggregates(
+    ) -> Result<(), Box<dyn Error>> {
+        use super::stream_normalized_events;
+        use std::fs::OpenOptions;
+
+        let path = temporary_path("oversized_receipt")?;
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)?;
+        let source_ns = 1_893_456_780_000_000_000i64;
+        let receive_ns = source_ns;
+        write_adsb_message_with_reports(&mut file, 1, source_ns, receive_ns, 300)?;
+        file.sync_all()?;
+        drop(file);
+        let inputs = [StreamInput {
+            source: RecordingSource::Adsb,
+            path: path.clone(),
+        }];
+        let mut visited = 0u64;
+        let result = stream_normalized_events(&inputs, None, *b"ZAU1", |_, _| {
+            visited += 1;
+            Ok(())
+        });
+        let _ = fs::remove_file(&path);
+        let summary = result?;
+        let adsb = summary.source_counts[0];
+        assert_eq!(adsb.message_frames, 1);
+        assert!(adsb.candidate_events_before_receipt_filter > 256);
+        assert_eq!(
+            adsb.max_candidate_events_per_frame,
+            adsb.candidate_events_before_receipt_filter
+        );
+        assert_eq!(adsb.receipt_groups_over_capacity, 1);
+        assert_eq!(
+            adsb.receipt_group_events_refused,
+            adsb.candidate_events_before_receipt_filter
+        );
+        assert_eq!(visited, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn recorded_hour_normalizer_uses_explicit_8192_receipt_group_profile(
+    ) -> Result<(), Box<dyn Error>> {
+        use super::stream_recorded_hour_normalized_events;
+        use std::fs::OpenOptions;
+
+        let path = temporary_path("recorded_hour_group")?;
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)?;
+        let source_ns = 1_893_456_780_000_000_000i64;
+        write_adsb_message_with_reports(&mut file, 1, source_ns, source_ns, 300)?;
+        file.sync_all()?;
+        drop(file);
+        let inputs = [StreamInput {
+            source: RecordingSource::Adsb,
+            path: path.clone(),
+        }];
+        let mut visited = 0u64;
+        let result = stream_recorded_hour_normalized_events(&inputs, None, *b"ZAU1", |_, _| {
+            visited += 1;
+            Ok(())
+        });
+        let _ = fs::remove_file(&path);
+        let summary = result?;
+        assert_eq!(summary.source_counts[0].receipt_groups_over_capacity, 0);
+        assert_eq!(summary.source_counts[0].receipt_group_events_refused, 0);
+        assert_eq!(summary.normalized_events, 300);
+        assert_eq!(visited, 300);
         Ok(())
     }
 
@@ -1184,7 +2019,10 @@ mod tests {
         let streams = [
             StreamDigest {
                 source: RecordingSource::Adsb,
+                stream_index: 0,
                 bytes: 10,
+                expanded_bytes: 10,
+                gzip: false,
                 sha256: [1; 32],
                 messages: 1,
                 first_frame_receive_ns: Some(start + 17 * 60 * 1_000_000_000),
@@ -1193,7 +2031,10 @@ mod tests {
             },
             StreamDigest {
                 source: RecordingSource::Sfdps,
+                stream_index: 1,
                 bytes: 10,
+                expanded_bytes: 10,
+                gzip: false,
                 sha256: [2; 32],
                 messages: 1,
                 first_frame_receive_ns: Some(start),
