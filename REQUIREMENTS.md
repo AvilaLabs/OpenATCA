@@ -7639,7 +7639,7 @@ FAA value.
   entry within the configured lookahead is a caution; a track remaining on its own course is clear. The default
   cadence is 1.2 s and default caution horizon is 10 s. These are this monitor's engineering policy. Tested by
   `on_course_clear`, `drift_caution_then_warning`, `configured_runtime_warning_reaches_frame_and_raster_consumer`,
-  and `configured_runtime_withholds_missing_and_unusable_prediction_alerts`.
+  and `configured_runtime_withholds_stale_and_unusable_prediction_alerts`.
 - **OA-RWY-016** Prediction evaluation consumes bounded tracker-prediction columns, validates them as a complete
   set before output mutation, and identifies alerts by stable runway/end and track identifiers. When geographic
   positions are projected into the airport plane, true east/north velocity is converted through that projection's

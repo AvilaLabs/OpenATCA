@@ -217,7 +217,7 @@ fn reserved_status_header_uses_compact_band_only_when_explicitly_enabled() {
             style: DEFAULT_STYLE,
             convert: DEFAULT_CONVERT,
         },
-        160,
+        184,
     )
     .expect("synthetic scope with reserved status band initializes");
     let states = state_table_new(10 * S, 0).expect("synthetic state table initializes");
@@ -263,7 +263,7 @@ fn reserved_status_header_uses_compact_band_only_when_explicitly_enabled() {
             .expect("display text span is valid");
         if text.starts_with("PICTURE ") || text.starts_with("NET ") || text.starts_with("FEED ") {
             status_rows += 1;
-            assert!((128 * 16..160 * 16).contains(&y));
+            assert!((151 * 16..184 * 16).contains(&y));
         }
         summary_visible |= text.starts_with('+') && text.contains("MORE STATES NOT SHOWN");
     }
