@@ -99,6 +99,8 @@ pub struct AdsbStats {
     pub with_vrate: u64,
     /// Rows whose required per-aircraft carry state could not be retained at the configured cap.
     pub quality_state_capacity_refused: u64,
+    /// Rows older than the newest held value; they cannot consume or replace future carry state.
+    pub quality_state_order_refused: u64,
 }
 
 struct QualityCacheEntry {
@@ -157,14 +159,23 @@ impl AdsbQualityCache {
         row: &oa_adsb::Row,
         time_ns: i64,
         cfg: &TruthConfig,
-    ) -> (oa_truth::QualityVerdict, bool) {
+    ) -> (oa_truth::QualityVerdict, bool, bool) {
         self.expire_before(time_ns);
+        let regresses_state = self
+            .entries
+            .get(&address)
+            .and_then(|entry| state_newest_quality_ns(&entry.state))
+            .is_some_and(|newest| time_ns < newest);
+        if regresses_state {
+            let mut state = QualityState::default();
+            return (quality_check(&mut state, row, time_ns, cfg), false, true);
+        }
         let existing = self.entries.contains_key(&address);
         let has_room = existing || self.entries.len() < self.capacity;
         if !has_room {
             let mut state = QualityState::default();
             let verdict = quality_check(&mut state, row, time_ns, cfg);
-            return (verdict, state_has_quality(&state));
+            return (verdict, state_has_quality(&state), false);
         }
 
         if let Some(expires_ns) = self.entries.get(&address).map(|entry| entry.expires_ns) {
@@ -174,7 +185,7 @@ impl AdsbQualityCache {
                 (verdict, quality_expiry(&entry.state, cfg))
             } else {
                 let mut state = QualityState::default();
-                return (quality_check(&mut state, row, time_ns, cfg), true);
+                return (quality_check(&mut state, row, time_ns, cfg), true, false);
             };
             if let Some(expires_ns) = next_expiry {
                 if let Some(entry) = self.entries.get_mut(&address) {
@@ -184,7 +195,7 @@ impl AdsbQualityCache {
             } else {
                 self.entries.remove(&address);
             }
-            return (verdict, false);
+            return (verdict, false, false);
         }
 
         let mut state = QualityState::default();
@@ -194,7 +205,7 @@ impl AdsbQualityCache {
                 .insert(address, QualityCacheEntry { state, expires_ns });
             self.expiries.insert((expires_ns, address));
         }
-        (verdict, false)
+        (verdict, false, false)
     }
 }
 
@@ -208,6 +219,14 @@ fn state_has_quality(state: &QualityState) -> bool {
     [state.nacp, state.nic, state.sil, state.version, state.nacv]
         .iter()
         .any(|held| held.at_ns != oa_truth::HELD_NONE.at_ns)
+}
+
+fn state_newest_quality_ns(state: &QualityState) -> Option<i64> {
+    [state.nacp, state.nic, state.sil, state.version, state.nacv]
+        .iter()
+        .map(|held| held.at_ns)
+        .filter(|time_ns| *time_ns != oa_truth::HELD_NONE.at_ns)
+        .max()
 }
 
 fn quality_expiry(state: &QualityState, cfg: &TruthConfig) -> Option<i64> {
@@ -255,9 +274,12 @@ pub fn adsb_measurements_with_cache(
             }
             continue;
         };
-        let (v, capacity_refused) = quality.update(row.icao, &row, t, &cfg.gates);
+        let (v, capacity_refused, order_refused) = quality.update(row.icao, &row, t, &cfg.gates);
         if capacity_refused {
             stats.quality_state_capacity_refused += 1;
+        }
+        if order_refused {
+            stats.quality_state_order_refused += 1;
         }
         if let Some(why) = v.removal {
             if let Some(c) = stats.removed.get_mut(why) {

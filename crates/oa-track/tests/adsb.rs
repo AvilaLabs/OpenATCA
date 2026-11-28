@@ -145,6 +145,19 @@ fn bounded_quality_cache_carries_across_frames_and_expires_for_refill() {
     assert_eq!(cache.len(), 1);
     assert!(!cache.is_empty());
 
+    let mut out_of_order = row(0, 0x100001, 41.9, -88.25);
+    out_of_order.nac_p = NONE_U8;
+    out_of_order.nic = NONE_U8;
+    out_of_order.sil = NONE_U8;
+    out_of_order.version = NONE_U8;
+    out_of_order.nac_v = NONE_U8;
+    let (measurements, stats) =
+        adsb_measurements_with_cache(&reports(&[out_of_order]), &cfg, &mut cache);
+    assert!(measurements.is_empty());
+    assert_eq!(stats.quality_state_order_refused, 1);
+    assert_eq!(cache.len(), 1);
+    assert!(!cache.is_empty());
+
     let mut rejected_without_state = row(9, 0x100002, 41.9, -88.1);
     rejected_without_state.nac_p = NONE_U8;
     rejected_without_state.nic = NONE_U8;
