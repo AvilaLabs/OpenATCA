@@ -82,6 +82,7 @@ pub enum AdapterError {
     UnsupportedEvent,
     InvalidCentre,
     InvalidField,
+    ArchiveHeaderLowerBound,
     RowTooLong,
     FramesNotMerged,
     WorkBudget,
@@ -1102,7 +1103,7 @@ pub(crate) fn decode_ordered_adsb_frame(
         return Err(AdapterError::WorkBudget);
     }
     if frame.mono_ns.is_none() && reports.time_ns.iter().any(|time| *time < frame.receipt_ns) {
-        return Err(AdapterError::InvalidField);
+        return Err(AdapterError::ArchiveHeaderLowerBound);
     }
     let source_time_regressions = reports
         .time_ns
@@ -1236,7 +1237,7 @@ pub(crate) fn adapt_ordered_adsb_row(
 ) -> Result<RecordedAdaptation, AdapterError> {
     let row = context.row;
     if row.frame.mono_ns.is_none() && row.row.time_ns < row.frame.receipt_ns {
-        return Err(AdapterError::InvalidField);
+        return Err(AdapterError::ArchiveHeaderLowerBound);
     }
     let source_ordinal = u32::try_from(row.source_ordinal).map_err(|_| AdapterError::WorkBudget)?;
     let quarantine_locator = source_ordinal
@@ -3296,7 +3297,10 @@ mod tests {
 
         let invalid = decode_ordered_adsb_frame(&make_frame(row.time_ns + 1, payload));
         // Mutation killed: accepting an OAF1 header that is later than a decoded report row.
-        assert!(matches!(invalid, Err(AdapterError::InvalidField)));
+        assert!(matches!(
+            invalid,
+            Err(AdapterError::ArchiveHeaderLowerBound)
+        ));
     }
 
     fn row(id: RecordedIdentity, seq: u64) -> RecordedPosition {
