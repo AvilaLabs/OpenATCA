@@ -3781,7 +3781,7 @@ mod transaction_tests {
         profile.surveillance.tracker_timing =
             surveillance::TrackerTimingProfile::ArchivedFixed10_30_120V1;
 
-        for offset_ns in [-1, 0, 1] {
+        for (offset_ns, should_be_fresh) in [(-1, false), (0, true), (1, true)] {
             let mut runtime = runtime_with_profile(profile);
             seeded_claim_frame(&mut runtime, &[(gufi, address, *b"ZAU\0")], base);
             let raw_receipt_ns = now_ns - drop_ns + offset_ns;
@@ -3861,7 +3861,7 @@ mod transaction_tests {
                     .last_consumed_receipt_ns,
                 Some(raw_receipt_ns)
             );
-            if offset_ns <= 0 {
+            if should_be_fresh {
                 assert_eq!(frame.flight_correlation.matched_observed_tracks, 1);
                 assert!(frame
                     .surveillance
