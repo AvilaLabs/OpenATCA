@@ -3693,6 +3693,14 @@ mod transaction_tests {
             Some(changed_receipt)
         );
 
+        co_timed_identity_frame(
+            &mut runtime,
+            address,
+            changed_receipt + 30 * surveillance::SECOND_NS,
+            Some("N123AC"),
+            None,
+        );
+
         let restatement = co_timed_identity_frame(
             &mut runtime,
             address,
@@ -3726,6 +3734,13 @@ mod transaction_tests {
         );
         let stale_source = base + surveillance::SECOND_NS;
         let stale_applied_receipt = stale_source + 61 * surveillance::SECOND_NS;
+        co_timed_identity_frame(
+            &mut stale_applied_runtime,
+            address,
+            stale_source + 30 * surveillance::SECOND_NS,
+            Some("N123AB"),
+            None,
+        );
         let stale_applied = co_timed_identity_frame(
             &mut stale_applied_runtime,
             address,
@@ -3770,11 +3785,12 @@ mod transaction_tests {
             let mut runtime = runtime_with_profile(profile);
             seeded_claim_frame(&mut runtime, &[(gufi, address, *b"ZAU\0")], base);
             let raw_receipt_ns = now_ns - drop_ns + offset_ns;
-            let issue_receipt_ns = if offset_ns > 0 {
-                raw_receipt_ns + surveillance::SECOND_NS - 1
-            } else {
-                raw_receipt_ns
-            };
+            let issue_receipt_ns = base
+                + if offset_ns > 0 {
+                    31 * surveillance::SECOND_NS
+                } else {
+                    30 * surveillance::SECOND_NS
+                };
             let identity = format!(
                 "v1\t{issue_receipt_ns}\t{raw_receipt_ns}\t3\tFLIGHT\t{gufi:032x}\t{address:06x}\tZAU\tFLIGHT\tIDENTITY_PARTIAL\tN123AB\t-\t-\tRAWRECEIPT\t{raw_receipt_ns}"
             );
