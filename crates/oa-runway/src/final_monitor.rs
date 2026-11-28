@@ -1187,7 +1187,7 @@ mod tests {
             seconds_to_entry_milli: &mut time,
         });
 
-        let (mut a, mut p, mut s, mut lat, mut lon, mut time) = buffers!();
+        let (mut a, _p, mut s, mut lat, mut lon, mut time) = buffers!();
         output_shape_refuses(FinalAlertBuffer {
             addresses: &mut a,
             pair_ids: &mut [],
@@ -1197,7 +1197,7 @@ mod tests {
             seconds_to_entry_milli: &mut time,
         });
 
-        let (mut a, mut p, mut s, mut lat, mut lon, mut time) = buffers!();
+        let (mut a, mut p, _s, mut lat, mut lon, mut time) = buffers!();
         output_shape_refuses(FinalAlertBuffer {
             addresses: &mut a,
             pair_ids: &mut p,
@@ -1207,7 +1207,7 @@ mod tests {
             seconds_to_entry_milli: &mut time,
         });
 
-        let (mut a, mut p, mut s, mut lat, mut lon, mut time) = buffers!();
+        let (mut a, mut p, mut s, _lat, mut lon, mut time) = buffers!();
         output_shape_refuses(FinalAlertBuffer {
             addresses: &mut a,
             pair_ids: &mut p,
@@ -1217,7 +1217,7 @@ mod tests {
             seconds_to_entry_milli: &mut time,
         });
 
-        let (mut a, mut p, mut s, mut lat, mut lon, mut time) = buffers!();
+        let (mut a, mut p, mut s, mut lat, _lon, mut time) = buffers!();
         output_shape_refuses(FinalAlertBuffer {
             addresses: &mut a,
             pair_ids: &mut p,
@@ -1227,7 +1227,7 @@ mod tests {
             seconds_to_entry_milli: &mut time,
         });
 
-        let (mut a, mut p, mut s, mut lat, mut lon, mut time) = buffers!();
+        let (mut a, mut p, mut s, mut lat, mut lon, _time) = buffers!();
         output_shape_refuses(FinalAlertBuffer {
             addresses: &mut a,
             pair_ids: &mut p,
@@ -1779,7 +1779,6 @@ mod tests {
             let result = evaluate_for(
                 pair(),
                 &mut state,
-                20,
                 TestTrack {
                     now: 20,
                     report: 20,
