@@ -101,6 +101,8 @@ pub struct FinalApproachAssignment {
 
 const MAX_FINAL_APPROACH_ASSIGNMENTS: usize = oa_display::core::alert_markers::MAX_ALERT_MARKERS;
 const _: () = assert!(MAX_FINAL_APPROACH_ASSIGNMENTS <= final_monitor_core::MAX_TRACKS);
+const MAX_OPERATOR_CONSOLE_BYTES: usize = 128;
+const OPERATOR_CONSOLE_SEPARATOR_BYTES: usize = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FinalMonitorStatus {
@@ -1042,8 +1044,9 @@ pub fn regional_new_from_issued_package_with_runtime_final_monitor(
     profile: RegionalRunProfile,
     monitor: RuntimeFinalMonitorConfig,
 ) -> Result<RegionalRuntime, String> {
+    let configured = configure_final_monitor(monitor, profile.surveillance)?;
     let mut runtime = regional_new_from_issued_package(package, centre, cfg, profile)?;
-    runtime.final_monitor = Some(configure_final_monitor(monitor)?);
+    runtime.final_monitor = Some(configured);
     Ok(runtime)
 }
 
@@ -1057,20 +1060,174 @@ pub fn regional_new_with_runtime_final_monitor(
     profile: RegionalRunProfile,
     monitor: RuntimeFinalMonitorConfig,
 ) -> Result<RegionalRuntime, String> {
+    let configured = configure_final_monitor(monitor, profile.surveillance)?;
     let mut runtime = regional_new_with_profile(model, snapshot_sha256, centre, cfg, profile)?;
-    runtime.final_monitor = Some(configure_final_monitor(monitor)?);
+    runtime.final_monitor = Some(configured);
     Ok(runtime)
+}
+
+fn validate_alert_composition(
+    profile: surveillance::SurveillanceProfile,
+    final_rows: usize,
+    msaw_rows: usize,
+) -> Result<(), String> {
+    let total_rows = final_rows
+        .checked_add(msaw_rows)
+        .ok_or("composed alert row count overflow")?;
+    if total_rows > profile.max_tracks {
+        return Err(format!(
+            "composed MSAW/final alert rows {total_rows} exceed shared profile reservation {}",
+            profile.max_tracks
+        ));
+    }
+    if !profile.render_scope {
+        return Ok(());
+    }
+    if profile.frame_width < 500 {
+        return Err(format!(
+            "final-monitor status requires rendered width at least 500 px; profile width is {}",
+            profile.frame_width
+        ));
+    }
+    if profile.frame_height <= surveillance::REGIONAL_STATUS_HEADER_INSET_PX {
+        return Err(format!(
+            "final-monitor status requires frame height greater than {} px; profile height is {}",
+            surveillance::REGIONAL_STATUS_HEADER_INSET_PX,
+            profile.frame_height
+        ));
+    }
+    if final_rows > MAX_FINAL_APPROACH_ASSIGNMENTS || msaw_rows > MAX_FINAL_APPROACH_ASSIGNMENTS {
+        return Err(format!(
+            "composed alert family exceeds the {}-row marker presenter limit",
+            MAX_FINAL_APPROACH_ASSIGNMENTS
+        ));
+    }
+
+    let marker = oa_display::core::alert_markers::ALERT_CIRCLES_PER_MARKER;
+    let circles_needed = total_rows
+        .checked_mul(marker)
+        .ok_or("composed alert circle requirement overflow")?;
+    let circles_reserved = profile
+        .max_tracks
+        .checked_mul(marker)
+        .ok_or("profile alert circle reservation overflow")?;
+    if circles_needed > circles_reserved {
+        return Err(
+            "composed MSAW/final alert circles exceed the shared display reservation".into(),
+        );
+    }
+
+    let header_count =
+        (if final_rows > 0 { 1_usize } else { 0 }) + (if msaw_rows > 0 { 1_usize } else { 0 });
+    let label_texts = total_rows
+        .checked_mul(oa_display::core::alert_markers::ALERT_TEXTS_PER_MARKER)
+        .ok_or("composed alert label count overflow")?;
+    let mode_rows = maximum_operator_status_bytes()
+        .checked_add(MAX_OPERATOR_CONSOLE_BYTES)
+        .and_then(|bytes| bytes.checked_add(OPERATOR_CONSOLE_SEPARATOR_BYTES))
+        .and_then(|bytes| bytes.checked_add(63))
+        .and_then(|bytes| bytes.checked_div(64))
+        .ok_or("operator status row requirement overflow")?;
+    let texts_needed = label_texts
+        .checked_add(header_count)
+        .and_then(|count| count.checked_add(mode_rows))
+        .ok_or("composed alert text row requirement overflow")?;
+    let texts_reserved = profile
+        .max_tracks
+        .checked_mul(oa_display::core::alert_markers::ALERT_TEXTS_PER_MARKER)
+        .and_then(|count| count.checked_add(oa_display::core::alert_markers::ALERT_HEADER_TEXTS))
+        .and_then(|count| count.checked_add(surveillance::STATUS_AUX_TEXT_ROWS))
+        .ok_or("profile alert text reservation overflow")?;
+    if texts_needed > texts_reserved {
+        return Err(
+            "composed MSAW/final headers exceed the shared display text-row reservation".into(),
+        );
+    }
+
+    let marker_bytes = total_rows
+        .checked_mul(oa_display::core::alert_markers::ALERT_TEXT_BYTES_PER_MARKER)
+        .ok_or("composed alert label byte requirement overflow")?;
+    let final_header_bytes = if final_rows > 0 {
+        oa_display::core::alert_markers::FINAL_MONITOR_HEADER_TEXT_BYTES
+    } else {
+        0
+    };
+    let msaw_header_bytes = if msaw_rows > 0 {
+        oa_display::core::alert_markers::MSAW_HEADER_TEXT_BYTES
+    } else {
+        0
+    };
+    let header_bytes = final_header_bytes
+        .checked_add(msaw_header_bytes)
+        .ok_or("composed alert header byte requirement overflow")?;
+    let bytes_needed = marker_bytes
+        .checked_add(header_bytes)
+        .and_then(|bytes| bytes.checked_add(MAX_OPERATOR_CONSOLE_BYTES))
+        .and_then(|bytes| bytes.checked_add(OPERATOR_CONSOLE_SEPARATOR_BYTES))
+        .and_then(|bytes| bytes.checked_add(maximum_operator_status_bytes()))
+        .ok_or("composed alert text byte requirement overflow")?;
+    let bytes_reserved = profile
+        .max_tracks
+        .checked_mul(oa_display::core::alert_markers::ALERT_TEXT_BYTES_PER_MARKER)
+        .and_then(|bytes| {
+            bytes.checked_add(oa_display::core::alert_markers::ALERT_HEADER_TEXT_BYTES)
+        })
+        .and_then(|bytes| bytes.checked_add(surveillance::STATUS_AUX_TEXT_BYTES))
+        .ok_or("profile alert text byte reservation overflow")?;
+    if bytes_needed > bytes_reserved {
+        return Err(
+            "composed MSAW/final headers exceed the shared display text-byte reservation".into(),
+        );
+    }
+    Ok(())
+}
+
+fn maximum_operator_status_bytes() -> usize {
+    [
+        RegionalAutomationStatus {
+            selected: RegionalAutomationMode::FlightDataOnly,
+            effective: EffectiveAutomationMode::FlightDataOnly,
+            degradation: AutomationDegradation::SurveillanceUnavailable,
+            fusion_off: true,
+        },
+        RegionalAutomationStatus {
+            selected: RegionalAutomationMode::Surveillance,
+            effective: EffectiveAutomationMode::Surveillance,
+            degradation: AutomationDegradation::SurveillanceUnavailable,
+            fusion_off: true,
+        },
+        RegionalAutomationStatus {
+            selected: RegionalAutomationMode::FlightDataOnly,
+            effective: EffectiveAutomationMode::FlightDataOnly,
+            degradation: AutomationDegradation::OperatorSelectedFlightDataOnly,
+            fusion_off: true,
+        },
+    ]
+    .iter()
+    .map(|status| automation_status_label(*status).len())
+    .fold(0, usize::max)
 }
 
 fn configure_final_monitor(
     monitor: RuntimeFinalMonitorConfig,
+    profile: surveillance::SurveillanceProfile,
 ) -> Result<ConfiguredFinalMonitor, String> {
-    if monitor.assignments.is_empty() || monitor.assignments.len() > MAX_FINAL_APPROACH_ASSIGNMENTS
-    {
+    if monitor.assignments.is_empty() {
+        return Err("final-monitor requires at least one runway assignment".into());
+    }
+    if monitor.assignments.len() > MAX_FINAL_APPROACH_ASSIGNMENTS {
         return Err(format!(
             "final-monitor assignment count must be within the renderable bound of {MAX_FINAL_APPROACH_ASSIGNMENTS}"
         ));
     }
+    if monitor.assignments.len() > profile.max_tracks {
+        return Err(format!(
+            "final-monitor assignment count {} exceeds selected profile track capacity {}",
+            monitor.assignments.len(),
+            profile.max_tracks
+        ));
+    }
+    validate_alert_composition(profile, monitor.assignments.len(), 0)?;
     let mut validation_state = final_monitor_core::FinalMonitorState::new();
     let empty: [u32; 0] = [];
     let empty_f64: [f64; 0] = [];
@@ -1850,7 +2007,7 @@ fn regional_new_with_source_identity_and_checkpoint(
         views: Vec::with_capacity(profile.max_flights),
         observed: Vec::with_capacity(profile.surveillance.max_tracks),
         next_generation: 0,
-        console_text: String::with_capacity(128),
+        console_text: String::with_capacity(MAX_OPERATOR_CONSOLE_BYTES),
         profile,
         selected_mode: RegionalAutomationMode::Surveillance,
         last_automation: RegionalAutomationStatus {
@@ -2536,7 +2693,9 @@ pub fn regional_console_overlay(
     if runtime.failed || runtime.frame_sequence == 0 {
         return Err("console presentation requires a completed regional frame".into());
     }
-    if text.len() > 128 || !text.bytes().all(|byte| (32..=126).contains(&byte)) {
+    if text.len() > MAX_OPERATOR_CONSOLE_BYTES
+        || !text.bytes().all(|byte| (32..=126).contains(&byte))
+    {
         return Err("console text must be at most 128 printable ASCII bytes".into());
     }
     runtime.console_text.clear();
@@ -2597,10 +2756,46 @@ pub fn regional_enable_synthetic_msaw(runtime: &mut RegionalRuntime) -> Result<(
     regional_attach_msaw(runtime, service)
 }
 
+fn available_msaw_marker_rows(runtime: &RegionalRuntime) -> Result<usize, String> {
+    let profile = runtime.profile.surveillance;
+    let final_rows = runtime
+        .final_monitor
+        .as_ref()
+        .map_or(0, |monitor| monitor.assignments.len());
+    let remaining = profile
+        .max_tracks
+        .checked_sub(final_rows)
+        .ok_or("final-monitor rows exceed the selected profile track capacity")?;
+    let max_rows = if profile.render_scope {
+        remaining.min(MAX_FINAL_APPROACH_ASSIGNMENTS)
+    } else {
+        remaining
+    };
+    if max_rows == 0 {
+        return Err("MSAW has no remaining shared alert rows in this rendered profile".into());
+    }
+    validate_alert_composition(profile, final_rows, max_rows)?;
+    Ok(max_rows)
+}
+
 pub fn regional_attach_msaw(
     runtime: &mut RegionalRuntime,
     service: crate::msaw_bridge::RegionalMsaw,
 ) -> Result<(), String> {
+    let available_rows = available_msaw_marker_rows(runtime)?;
+    let service_rows = crate::msaw_bridge::regional_msaw_row_limit(&service);
+    if service_rows > runtime.profile.surveillance.max_tracks {
+        return Err(format!(
+            "MSAW service row capacity {service_rows} exceeds selected profile track capacity {}",
+            runtime.profile.surveillance.max_tracks
+        ));
+    }
+    let alert_limit = crate::msaw_bridge::regional_msaw_alert_limit(&service);
+    if alert_limit > available_rows {
+        return Err(format!(
+            "MSAW open-alert capacity {alert_limit} exceeds composed profile allowance {available_rows}"
+        ));
+    }
     surveillance::surveillance_enable_msaw(&mut runtime.surveillance, service)
 }
 
@@ -4606,6 +4801,26 @@ mod transaction_tests {
         .unwrap()
     }
 
+    fn configured_runtime_with_profile(
+        profile: RegionalRunProfile,
+        monitor: RuntimeFinalMonitorConfig,
+    ) -> Result<RegionalRuntime, String> {
+        let model = synthetic_model().expect("public synthetic model");
+        let snapshot = oa_airspace::core::snapshot::encode(&model).expect("encode model");
+        regional_new_with_runtime_final_monitor(
+            model,
+            oa_sha256::sha256(&snapshot),
+            *b"ZAU1",
+            SurveillanceConfig {
+                centre_lat_e7: 410_000_000,
+                centre_lon_e7: -870_000_000,
+                range_nm: 180.0,
+            },
+            profile,
+            monitor,
+        )
+    }
+
     // Mutation killed: admit more assignments than the presenter can represent, then omit or
     // truncate the excess while rendering final-monitor markers.
     #[test]
@@ -4635,6 +4850,147 @@ mod transaction_tests {
         assert!(result.is_err(), "unrenderable assignments must be refused");
     }
 
+    // REQ: OA-REG-019
+    // Mutation killed: accept a configured assignment count larger than the selected track cap.
+    #[test]
+    fn final_monitor_admission_uses_selected_profile_track_capacity() {
+        let mut profile = DEFAULT_REGIONAL_RUN_PROFILE;
+        profile.surveillance.max_tracks = 32;
+        let mut at_edge = final_monitor_config(100.0);
+        at_edge.assignments = (1..=32)
+            .map(|key| FinalApproachAssignment {
+                flight: oa_flight::key_gufi(key),
+                runway_id: 27_001,
+                end_name: *b"27R",
+            })
+            .collect();
+        assert!(configured_runtime_with_profile(profile, at_edge).is_ok());
+
+        let mut beyond_edge = final_monitor_config(100.0);
+        beyond_edge.assignments = (1..=33)
+            .map(|key| FinalApproachAssignment {
+                flight: oa_flight::key_gufi(key),
+                runway_id: 27_001,
+                end_name: *b"27R",
+            })
+            .collect();
+        let error = configured_runtime_with_profile(profile, beyond_edge)
+            .err()
+            .expect("first count past the 32-track profile must refuse at startup");
+        assert!(error.contains("selected profile track capacity 32"));
+    }
+
+    // REQ: OA-REG-019, OA-DSP-078
+    // Mutation killed: install a final monitor on a frame too narrow for its real presenter.
+    #[test]
+    fn final_monitor_admission_refuses_unrenderable_profile_width() {
+        let mut at_boundary = DEFAULT_REGIONAL_RUN_PROFILE;
+        at_boundary.surveillance.frame_width = 500;
+        assert!(configured_runtime_with_profile(at_boundary, final_monitor_config(100.0)).is_ok());
+
+        let mut profile = DEFAULT_REGIONAL_RUN_PROFILE;
+        profile.surveillance.frame_width = 480;
+        let error = configured_runtime_with_profile(profile, final_monitor_config(100.0))
+            .err()
+            .expect("narrow rendered profile must refuse before the first receipt");
+        assert!(error.contains("width at least 500 px"));
+    }
+
+    // REQ: OA-REG-019, OA-DSP-078
+    // Mutation killed: allow the MSAW provider and final monitor to exceed their shared marker
+    // rows, then fail when both real product packets reach the runtime presenter.
+    #[test]
+    fn dual_alert_families_fit_the_composed_edge_and_refuse_the_next_msaw_row() {
+        let mut edge_runtime = configured_runtime(100.0);
+        let edge_service = crate::msaw_bridge::regional_msaw_synthetic_for_profile(
+            31,
+            edge_runtime.profile.surveillance.max_frames,
+        )
+        .expect("31 MSAW rows plus one assigned final row fit the 32-row envelope");
+        regional_attach_msaw(&mut edge_runtime, edge_service)
+            .expect("both provider capacities are admitted before the first frame");
+
+        let mut too_wide = configured_runtime(100.0);
+        let over_service = crate::msaw_bridge::regional_msaw_synthetic_for_profile(
+            32,
+            too_wide.profile.surveillance.max_frames,
+        )
+        .expect("provider can independently construct a 32-row service");
+        let error = regional_attach_msaw(&mut too_wide, over_service)
+            .err()
+            .expect("one final row plus 32 MSAW rows exceeds shared capacity");
+        assert!(error.contains("open-alert capacity 32 exceeds composed profile allowance 31"));
+        assert_eq!(too_wide.frame_sequence, 0);
+        assert!(!too_wide.failed);
+
+        let mut plain_runtime = runtime();
+        let plain_frame = seed_low_altitude_population(&mut plain_runtime);
+        let plain_counts =
+            surveillance::surveillance_overlay_primitive_counts(&plain_runtime.surveillance);
+        let frame = seed_low_altitude_population(&mut edge_runtime);
+        assert!(frame
+            .final_monitor
+            .alerts
+            .iter()
+            .any(|alert| alert.severity == final_monitor_core::FinalSeverity::Warning));
+        let msaw = frame
+            .surveillance
+            .msaw
+            .as_ref()
+            .expect("attached MSAW service runs in the actual frame");
+        assert_eq!(msaw.open.len(), 31, "each admitted MSAW row remains open");
+        assert!(frame
+            .surveillance
+            .msaw_markers
+            .is_some_and(|stats| stats.drawn == 31));
+        assert!(frame.surveillance.raster_rendered);
+        let edge_counts =
+            surveillance::surveillance_overlay_primitive_counts(&edge_runtime.surveillance);
+        assert_eq!(
+            edge_counts.circles.checked_sub(plain_counts.circles),
+            Some(64),
+            "31 MSAW rows and one final row each emit two circles at the runtime consumer"
+        );
+        assert_eq!(plain_frame.surveillance.tracks.len(), 31);
+        assert_eq!(frame.surveillance.tracks.len(), 31);
+    }
+
+    fn seed_low_altitude_population(runtime: &mut RegionalRuntime) -> RegionalFrame {
+        let mut last = None;
+        for scan in 0_i64..4 {
+            let time_ns = (scan + 1) * 1_000_000_000;
+            last = Some(
+                regional_step(runtime, &low_altitude_population_batch(time_ns, scan == 0))
+                    .expect("bounded low-altitude population produces a rendered frame"),
+            );
+        }
+        last.expect("four scans produce an admitted runtime frame")
+    }
+
+    fn low_altitude_population_batch(receipt_ns: i64, include_flight_setup: bool) -> ReceiptBatch {
+        let mut batch = final_monitor_batch_with_altitude(
+            receipt_ns,
+            receipt_ns,
+            410_000_000,
+            0,
+            100,
+            include_flight_setup,
+        );
+        for row in 1_u32..31 {
+            let address = 0x000abd_u32 + row;
+            let latitude_e7 = 410_000_000 + i32::try_from(row).expect("30 row offset") * 100;
+            let sequence = row + 1;
+            let callsign = format!("N{row:05}");
+            let line = format!(
+                "v1\t{receipt_ns}\t{receipt_ns}\t{sequence}\tSURVEILLANCE\t00000000000000000000000000000000\t{address:06x}\tZAU1\tPOS\t{latitude_e7}\t-870000000\t100\t0\t0\t0\tCALLSIGN\t{callsign}"
+            );
+            batch
+                .events
+                .push(parse_event_line(&line).expect("bounded synthetic airborne report"));
+        }
+        batch
+    }
+
     fn final_monitor_batch(
         receipt_ns: i64,
         source_ns: i64,
@@ -4642,8 +4998,26 @@ mod transaction_tests {
         north_mmps: i32,
         include_flight_setup: bool,
     ) -> ReceiptBatch {
+        final_monitor_batch_with_altitude(
+            receipt_ns,
+            source_ns,
+            latitude_e7,
+            north_mmps,
+            10_000,
+            include_flight_setup,
+        )
+    }
+
+    fn final_monitor_batch_with_altitude(
+        receipt_ns: i64,
+        source_ns: i64,
+        latitude_e7: i32,
+        north_mmps: i32,
+        altitude_ft: i32,
+        include_flight_setup: bool,
+    ) -> ReceiptBatch {
         let mut events = vec![parse_event_line(&format!(
-            "v1\t{receipt_ns}\t{source_ns}\t1\tSURVEILLANCE\t00000000000000000000000000000000\t000abc\tZAU1\tPOS\t{latitude_e7}\t-870000000\t10000\t0\t{north_mmps}\t0\tCALLSIGN\tN123AB"
+            "v1\t{receipt_ns}\t{source_ns}\t1\tSURVEILLANCE\t00000000000000000000000000000000\t000abc\tZAU1\tPOS\t{latitude_e7}\t-870000000\t{altitude_ft}\t0\t{north_mmps}\t0\tCALLSIGN\tN123AB"
         )).unwrap()];
         if include_flight_setup {
             events.push(parse_event_line(&format!(
@@ -5276,7 +5650,13 @@ mod transaction_tests {
     #[test]
     fn runtime_status_layout_handles_maximum_console_before_and_after_loss() {
         let mut monitored = configured_runtime(100.0);
-        regional_enable_synthetic_msaw(&mut monitored).expect("bounded synthetic MSAW service");
+        let synthetic_msaw = crate::msaw_bridge::regional_msaw_synthetic_for_profile(
+            31,
+            monitored.profile.surveillance.max_frames,
+        )
+        .expect("synthetic service reserves the 31 rows left beside the final assignment");
+        regional_attach_msaw(&mut monitored, synthetic_msaw)
+            .expect("composed synthetic MSAW capacity is admitted");
         let warning = seed_confirmed_final_monitor_track(&mut monitored, 410_000_000, 0);
         assert_eq!(warning.final_monitor.status, FinalMonitorStatus::Available);
         assert!(warning

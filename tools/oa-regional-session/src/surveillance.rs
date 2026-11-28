@@ -54,6 +54,9 @@ pub const FRAME_HEIGHT: u32 = 600;
 pub const REVIEW_FRAME_WIDTH: u32 = 1_600;
 pub const REVIEW_FRAME_HEIGHT: u32 = 1_200;
 pub const REGIONAL_STATUS_HEADER_INSET_PX: u32 = 224;
+/// Existing interaction-list allowance shared by the operator status and alert family headers.
+pub(crate) const STATUS_AUX_TEXT_ROWS: usize = 4;
+pub(crate) const STATUS_AUX_TEXT_BYTES: usize = 256;
 const REGIONAL_MODE_HEADER_Y_PX: i32 = 180;
 const REGIONAL_MODE_HEADER_PITCH_PX: i32 = 14;
 /// C7: control redraws over the entire offline session, including ordinary completed frames.
@@ -574,14 +577,16 @@ fn new_regional_scope(
         // One current conflict connector and one label per retained active alert.
         lines: 1 + profile.max_open_alerts,
         rects: 1,
+        // The marker reservation is shared by MSAW and final-monitor. Runtime admission checks
+        // their combined maximum against this existing per-profile row and header allowance.
         circles: profile.max_tracks * oa_display::core::alert_markers::ALERT_CIRCLES_PER_MARKER,
         polylines: 0,
         poly_vertices: 0,
-        texts: 4
+        texts: STATUS_AUX_TEXT_ROWS
             + profile.max_tracks * oa_display::core::alert_markers::ALERT_TEXTS_PER_MARKER
             + oa_display::core::alert_markers::ALERT_HEADER_TEXTS
             + profile.max_open_alerts,
-        text_bytes: 256
+        text_bytes: STATUS_AUX_TEXT_BYTES
             + profile.max_tracks * oa_display::core::alert_markers::ALERT_TEXT_BYTES_PER_MARKER
             + oa_display::core::alert_markers::ALERT_HEADER_TEXT_BYTES
             + profile.max_open_alerts * 2,

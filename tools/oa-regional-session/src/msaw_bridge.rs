@@ -123,6 +123,18 @@ pub struct RegionalMsaw {
     admitted_cutoff_ms: i64,
 }
 
+pub(crate) const fn regional_msaw_row_limit(service: &RegionalMsaw) -> usize {
+    service.max_rows
+}
+
+pub(crate) fn regional_msaw_alert_limit(service: &RegionalMsaw) -> usize {
+    service
+        .settings
+        .msaw
+        .max_open
+        .min(service.settings.msaw.max_tracks)
+}
+
 // A3/C6: bounded cold frame evidence; all rows are copied before the core logs are drained.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RegionalMsawFrame {
