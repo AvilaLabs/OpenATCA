@@ -2215,14 +2215,15 @@ mod transaction_tests {
             "v1\t2000000000\t2000000000\t2\tFLIGHT\t00000000000000000000000000000001\tABC101\tZAU1\tFLIGHT\tCOMPLETE",
         );
 
-        // A future source timestamp is rejected during staging, before capacity cleanup can
-        // mutate the terminal flight or consume its retirement receipt.
+        // A one-nanosecond off-grid adapter receipt parses as input, then the flight stage
+        // rejects it before capacity cleanup can mutate the terminal flight or consume its
+        // retirement receipt.
         let (invalid, rejected) = step_event_line(
             &mut engine,
-            "v1\t4000000000\t3000000000\t3\tFLIGHT\t00000000000000000000000000000002\tABC102\tZAU1\tFLIGHT\tPLAN\tPLAN00000002\t2",
+            "v1\t3000000001\t3000000000\t3\tFLIGHT\t00000000000000000000000000000002\tABC102\tZAU1\tFLIGHT\tPLAN\tPLAN00000002\t2",
         );
         assert_eq!(rejected.quarantine.records.len(), 1);
-        assert_eq!(invalid.source_ns, 4_000_000_000);
+        assert_ne!(invalid.receipt_ns % 1_000_000, 0);
         assert_eq!(
             flight::flight_driver_report(&engine.flights).retirements_consumed,
             0
