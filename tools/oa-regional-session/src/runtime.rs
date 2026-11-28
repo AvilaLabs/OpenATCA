@@ -3930,17 +3930,40 @@ mod transaction_tests {
         );
         let mut sealed_raw_event = parse_event_line(&row).unwrap();
         sealed_raw_event.input_receipt_ns = input_receipt_ns;
+        let mut sealed_runtime = runtime_with_centre(*b"ZAU1");
         let sealed_result = regional_step(
-            &mut runtime,
+            &mut sealed_runtime,
             &ReceiptBatch {
                 receipt_ns,
                 source_clock_regressions: 0,
                 events: vec![sealed_raw_event],
             },
         );
-        assert!(sealed_result.is_err());
-        assert!(runtime.known_flights.is_empty());
-        assert_eq!(flight::flight_driver_report(&runtime.flights).applied, 0);
+        assert!(
+            matches!(sealed_result, Err(ref reason) if reason == "malformed receipt batch"),
+            "sealed raw receipt must hit the direct batch clock guard; got {sealed_result:?}"
+        );
+        assert!(sealed_runtime.known_flights.is_empty());
+        assert_eq!(
+            flight::flight_driver_report(&sealed_runtime.flights).applied,
+            0
+        );
+
+        let mut unsealed_runtime = runtime_with_centre(*b"ZAU1");
+        let mut unsealed_event = parse_event_line(&row).unwrap();
+        unsealed_event.input_receipt_ns = receipt_ns;
+        let unsealed_result = regional_step(
+            &mut unsealed_runtime,
+            &ReceiptBatch {
+                receipt_ns,
+                source_clock_regressions: 0,
+                events: vec![unsealed_event],
+            },
+        );
+        assert!(
+            unsealed_result.is_ok(),
+            "same batch with unsealed raw receipt must pass the raw-seal boundary: {unsealed_result:?}"
+        );
     }
 
     // Kills mismatched-call-sign authority and verifies missing-call-sign and terminal views stay advisory.
