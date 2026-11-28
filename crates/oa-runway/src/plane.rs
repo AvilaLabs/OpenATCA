@@ -111,6 +111,16 @@ pub fn plane_origin(p: &Plane) -> Geo {
     }
 }
 
+fn short_longitude_delta_degrees(delta: f64) -> f64 {
+    if delta > 180.0 {
+        delta - 360.0
+    } else if delta < -180.0 {
+        delta + 360.0
+    } else {
+        delta
+    }
+}
+
 /// Degrees to the plane. `None` for a non-finite input or a point whose plane distance from the
 /// origin, `sqrt(east^2 + north^2)`, exceeds [`EXTENT_M`] (a disc, so the stated error bound,
 /// which is a distance from the origin, covers every point accepted). A longitude difference past 180 degrees is taken the short way
@@ -124,12 +134,7 @@ pub fn to_local(p: &Plane, g: Geo) -> Option<Local> {
     if !(-EXTENT_M..=EXTENT_M).contains(&north0) {
         return None;
     }
-    let mut dlon = g.lon_deg - p.lon0_deg;
-    if dlon > 180.0 {
-        dlon -= 360.0;
-    } else if dlon < -180.0 {
-        dlon += 360.0;
-    }
+    let dlon = short_longitude_delta_degrees(g.lon_deg - p.lon0_deg);
     let dlat_rad = dlat * (core::f64::consts::PI / 180.0);
     let east = p.m_per_deg_lon * dlon * (1.0 - p.tan_lat0 * dlat_rad);
     if !(-EXTENT_M..=EXTENT_M).contains(&east) {
@@ -173,12 +178,7 @@ pub fn true_velocity_to_local(p: &Plane, g: Geo, east_mps: f64, north_mps: f64) 
     let radians_per_second_east = east_mps / (prime_vertical * cos_latitude);
     let degrees_per_radian = 180.0 / core::f64::consts::PI;
     let latitude_delta_rad = (g.lat_deg - p.lat0_deg).to_radians();
-    let mut longitude_delta_deg = g.lon_deg - p.lon0_deg;
-    if longitude_delta_deg > 180.0 {
-        longitude_delta_deg -= 360.0;
-    } else if longitude_delta_deg < -180.0 {
-        longitude_delta_deg += 360.0;
-    }
+    let longitude_delta_deg = short_longitude_delta_degrees(g.lon_deg - p.lon0_deg);
     let east_factor = 1.0 - p.tan_lat0 * latitude_delta_rad;
     let east_mps = p.m_per_deg_lon
         * (radians_per_second_east * degrees_per_radian * east_factor
@@ -192,5 +192,18 @@ pub fn true_velocity_to_local(p: &Plane, g: Geo, east_mps: f64, north_mps: f64) 
         })
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::short_longitude_delta_degrees;
+
+    #[test]
+    fn longitude_delta_wrap_preserves_endpoints_and_wraps_just_outside() {
+        assert_eq!(short_longitude_delta_degrees(180.0), 180.0);
+        assert_eq!(short_longitude_delta_degrees(-180.0), -180.0);
+        assert_eq!(short_longitude_delta_degrees(180.001), -179.999);
+        assert_eq!(short_longitude_delta_degrees(-180.001), 179.999);
     }
 }
