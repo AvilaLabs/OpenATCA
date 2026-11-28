@@ -20,6 +20,7 @@ from kani_validation import (
     _copy_source_artifacts,
     _loop_unwind_configuration,
     _loop_unwind_argument,
+    _late_loop_locations,
     _enclosing_fn,
     _fn_attributes,
     _rust_fns,
@@ -39,7 +40,7 @@ from kani_validation import (
 
 DISAMBIGUATOR = "s54ksHOfKhD"
 OTHER_DISAMBIGUATOR = "seRq8xMCbGsa"
-LATE_LOOP_LINES = [1713, 1732, 1770, 1800]
+LATE_LOOP_LINES = _late_loop_locations(Path(__file__).resolve().parents[1])
 
 
 def late_goto_loops(disambiguator=DISAMBIGUATOR, lines=LATE_LOOP_LINES, function="tracker::update_late"):
@@ -95,7 +96,7 @@ def fixture_report():
     ]
     return {
         "metadata": {"version": "1.0", "kani_version": "0.68.0", "target": "x86_64-unknown-linux-gnu", "build_mode": "release"},
-        "project": {"crate_name": ["oa_track_core"], "workspace_root": "/tmp/repo", "output_dir": "/out"},
+        "project": {"crate_name": ["oa_track_core"], "workspace_root": str(Path(__file__).resolve().parents[1]), "output_dir": "/out"},
         "tools": {
             "kani": "0.68.0",
             "rustc": "rustc nightly for Kani",
@@ -238,7 +239,7 @@ def fixture_binding(report_text):
         "kani_version": "0.68.0",
         "package": "oa-track-core",
         "harness": HARNESS,
-        "repo": "/tmp/repo",
+        "repo": str(Path(__file__).resolve().parents[1]),
     }
 
 
@@ -473,7 +474,7 @@ class KaniBindingTests(unittest.TestCase):
         record["loop_unwind_configuration"] = _loop_unwind_configuration(preset_name)
         expected_line = (
             f"Not unwinding loop {preset['loop_id']} iteration 3 file "
-            f"crates/oa-track-core/src/tracker.rs line 1800 column 5 function tracker::update_late thread 0"
+            f"crates/oa-track-core/src/tracker.rs line {LATE_LOOP_LINES[3]} column 5 function tracker::update_late thread 0"
         )
         record["loop_unwind_log_check"] = {"passed": True, "matched_line": expected_line}
         self.assertEqual(evaluate_kani_binding(report_text, record), [])
@@ -494,14 +495,14 @@ class KaniBindingTests(unittest.TestCase):
         preset = resolve_loop_unwind_preset("late-replay-two-events", DISAMBIGUATOR)
         line = (
             f"Not unwinding loop {preset['loop_id']} iteration 3 file "
-            f"crates/oa-track-core/src/tracker.rs line 1800 column 5 function tracker::update_late thread 0"
+            f"crates/oa-track-core/src/tracker.rs line {LATE_LOOP_LINES[3]} column 5 function tracker::update_late thread 0"
         )
         self.assertTrue(_check_loop_unwind_log("late-replay-two-events", line, "", DISAMBIGUATOR)["passed"])
         for malformed in (
             line.replace(preset["loop_id"], "stale.id"),
             line.replace("iteration 3", "iteration 2"),
             line.replace("iteration 3", "iteration 4"),
-            line.replace("line 1800", "line 1803"),
+            line.replace(f"line {LATE_LOOP_LINES[3]}", f"line {LATE_LOOP_LINES[3] + 3}"),
             line.replace("tracker::update_late", "tracker::other_loop"),
             line.replace("tracker::update_late", "tracker::update_late_extra"),
             line.replace("tracker.rs", "other.rs"),
@@ -538,7 +539,7 @@ class KaniBindingTests(unittest.TestCase):
             (0, lines[0].replace(preset["loops"][0]["loop_id"], "stale.loop.id")),
             (0, lines[0].replace("iteration 1", "iteration 3")),
             (2, lines[2].replace("iteration 2", "iteration 3")),
-            (3, lines[3].replace("line 1770", "line 1773")),
+            (3, lines[3].replace(f"line {LATE_LOOP_LINES[2]}", f"line {LATE_LOOP_LINES[2] + 3}")),
             (4, lines[4].replace("tracker::update_late", "tracker::wrong_loop")),
         ):
             bad_lines = list(lines)
@@ -610,7 +611,7 @@ class KaniBindingTests(unittest.TestCase):
         one = resolve_loop_unwind_preset(one_name, DISAMBIGUATOR)
         self.assertEqual(_loop_unwind_argument(one), f"{ids[3]}:3")
         lines = []
-        for loop_index, source_line in ((0, 1713), (1, 1732), (2, 1770)):
+        for loop_index, source_line in enumerate(LATE_LOOP_LINES[:3]):
             unrequested_id = ids[loop_index]
             iterations = (1, 2) if loop_index == 0 else range(1, 16)
             lines.extend(
@@ -627,13 +628,13 @@ class KaniBindingTests(unittest.TestCase):
                 )
         lines.extend([
             f"Unwinding loop {ids[3]} iteration {iteration} file "
-            "crates/oa-track-core/src/tracker.rs line 1800 column 5 "
+            f"crates/oa-track-core/src/tracker.rs line {LATE_LOOP_LINES[3]} column 5 "
             "function tracker::update_late thread 0"
             for iteration in (1, 2)
         ])
         lines.append(
             f"Not unwinding loop {ids[3]} iteration 3 file "
-            "crates/oa-track-core/src/tracker.rs line 1800 column 5 "
+            f"crates/oa-track-core/src/tracker.rs line {LATE_LOOP_LINES[3]} column 5 "
             "function tracker::update_late thread 0"
         )
         self.assertTrue(_check_loop_unwind_log(one_name, "\n".join(lines), "", DISAMBIGUATOR)["passed"])
@@ -703,7 +704,9 @@ class KaniBindingTests(unittest.TestCase):
         self.assertEqual([entry["line"] for entry in found["loops"]], LATE_LOOP_LINES)
         self.assertTrue(all(entry["file"] == "crates/oa-track-core/src/tracker.rs" for entry in found["loops"]))
         # The registered owner and source line table must agree with the selected listing.
-        moved = late_goto_loops().replace("line 1800 column 5", "line 1801 column 5")
+        moved = late_goto_loops().replace(
+            f"line {LATE_LOOP_LINES[3]} column 5", f"line {LATE_LOOP_LINES[3] + 1} column 5"
+        )
         with self.assertRaisesRegex(ValueError, "registered"):
             discover_loop_unwind_loops("late-replay-two-events-pinned-cargo", moved)
 
@@ -761,6 +764,27 @@ class KaniBindingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "indexes"):
             discover_loop_unwind_loops(name, other_function)
 
+    def test_late_loop_markers_follow_line_shifts_and_refuse_bad_bindings(self):
+        loops = LOOP_UNWIND_PRESETS["late-replay-two-events-all-loops"]["loops"]
+        source = "fn update_late() {\n" + "\n".join(
+            f"// KANI-LOOP-MARKER: {loop['marker']}\n{loop['source_line']}\n}}"
+            for loop in loops
+        ) + "\n}\n"
+        with tempfile.TemporaryDirectory() as temp:
+            repo = Path(temp)
+            path = repo / "crates/oa-track-core/src/tracker.rs"
+            path.parent.mkdir(parents=True)
+            path.write_text(source)
+            original = _late_loop_locations(repo)
+            path.write_text("\n" + source)
+            self.assertEqual(_late_loop_locations(repo), [line + 1 for line in original])
+            path.write_text(source.replace("late-replay-prefix", "late-replay-wrong"))
+            with self.assertRaisesRegex(ValueError, "expected one"):
+                _late_loop_locations(repo)
+            path.write_text(source.replace("for k in 0..len {", "for k in 1..len {"))
+            with self.assertRaisesRegex(ValueError, "malformed or detached"):
+                _late_loop_locations(repo)
+
     def test_all_late_loop_preset_source_and_fixture_guards_cover_every_harness(self):
         preset_name = "late-replay-two-events-all-loops"
         for harness in sorted(LOOP_UNWIND_PRESETS[preset_name]["harnesses"]):
@@ -804,8 +828,8 @@ class KaniBindingTests(unittest.TestCase):
             repo = Path(temp)
             path = repo / LOOP_UNWIND_PRESETS[preset_name]["source"]
             path.parent.mkdir(parents=True)
-            path.write_text("fn update_late(\n" + "\n" * 1016 + "while other_condition {\n")
-            with self.assertRaisesRegex(ValueError, "stale source location"):
+            path.write_text("fn update_late() {\n// KANI-LOOP-MARKER: late-replay-decisions\nwhile other_condition {\n}\n}\n")
+            with self.assertRaisesRegex(ValueError, "expected one"):
                 _validate_loop_unwind_source(
                     repo, preset_name, "oa-track-core", sorted(LOOP_UNWIND_PRESETS[preset_name]["harnesses"])[0]
                 )
@@ -817,8 +841,14 @@ class KaniBindingTests(unittest.TestCase):
             repo = Path(temp)
             loop_path = repo / LOOP_UNWIND_PRESETS[preset_name]["source"]
             loop_path.parent.mkdir(parents=True)
-            loop_lines = ["fn update_late("] + [""] * (LOOP_UNWIND_PRESETS[preset_name]["line"] - 2) + ["while k < n_seq {"]
-            loop_path.write_text("\n".join(loop_lines) + "\n")
+            loops = LOOP_UNWIND_PRESETS["late-replay-two-events-all-loops"]["loops"]
+            source_lines = ["fn update_late() {"]
+            for loop in loops:
+                source_lines.extend([
+                    f"// KANI-LOOP-MARKER: {loop['marker']}", loop["source_line"], "}"
+                ])
+            source_lines.append("}")
+            loop_path.write_text("\n".join(source_lines) + "\n")
             source_rel = LOOP_UNWIND_PRESETS[preset_name].get("harness_source", {}).get(
                 harness, LOOP_UNWIND_PRESETS[preset_name]["default_harness_source"]
             )

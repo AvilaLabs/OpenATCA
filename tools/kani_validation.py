@@ -45,8 +45,6 @@ PINNED_CARGO_TOOLCHAIN = "1.89.0"
 # the registered source locations before any bound is passed to CBMC.
 _LATE_LOOP_ID_TEMPLATE = "_RNvNtC{disambiguator}_13oa_track_core7tracker11update_late."
 _DISAMBIGUATOR_RE = r"s[0-9A-Za-z]+"
-# Source line of every loop of update_late, by loop index; discovery must find exactly these.
-_LATE_FUNCTION_LOOPS = [1713, 1732, 1770, 1800]
 # Closed CBMC loop-bound presets. Loop labels are tied to the pinned Kani/CBMC
 # build and the source location below; never accept arbitrary CBMC arguments.
 LOOP_UNWIND_PRESETS = {
@@ -79,7 +77,7 @@ LOOP_UNWIND_PRESETS = {
         },
         "default_harness_source": "crates/oa-track-core/src/tracker/proofs/rollback_paths.rs",
         "source": "crates/oa-track-core/src/tracker.rs",
-        "line": 1800,
+        "marker": "late-replay-decisions",
         "function": "update_late",
         "source_line": "while k < n_seq {",
     },
@@ -88,10 +86,10 @@ _late_base_preset = LOOP_UNWIND_PRESETS["late-replay-two-events"]
 LOOP_UNWIND_PRESETS["late-replay-two-events-all-loops"] = {
     **_late_base_preset,
     "loops": [
-        {"loop_id": _LATE_LOOP_ID_TEMPLATE + "0", "bound": 3, "line": 1713, "guard_line": 1713, "source_line": "for k in 0..len {", "log_mode": "completed_before_bound", "iterations": [1, 2]},
-        {"loop_id": _LATE_LOOP_ID_TEMPLATE + "1", "bound": 2, "line": 1732, "guard_line": 1732, "source_line": "for k in (e + 1)..len {"},
-        {"loop_id": _LATE_LOOP_ID_TEMPLATE + "2", "bound": 2, "line": 1770, "source_line": "for k in 0..=e {"},
-        {"loop_id": _LATE_LOOP_ID_TEMPLATE + "3", "bound": 3, "line": 1800, "source_line": "while k < n_seq {"},
+        {"loop_id": _LATE_LOOP_ID_TEMPLATE + "0", "bound": 3, "marker": "late-replay-prefix", "source_line": "for k in 0..len {", "log_mode": "completed_before_bound", "iterations": [1, 2]},
+        {"loop_id": _LATE_LOOP_ID_TEMPLATE + "1", "bound": 2, "marker": "late-replay-suffix", "source_line": "for k in (e + 1)..len {"},
+        {"loop_id": _LATE_LOOP_ID_TEMPLATE + "2", "bound": 2, "marker": "late-replay-category", "source_line": "for k in 0..=e {"},
+        {"loop_id": _LATE_LOOP_ID_TEMPLATE + "3", "bound": 3, "marker": "late-replay-decisions", "source_line": "while k < n_seq {"},
     ],
     "fixture_source": "crates/oa-track-core/src/tracker/proofs.rs",
     "fixture_snippets": [
@@ -126,8 +124,6 @@ LOOP_UNWIND_PRESETS["late-replay-two-events-pinned-cargo-one-loop"] = {
     "log_family": "discovered",
     "cargo_toolchain": PINNED_CARGO_TOOLCHAIN,
 }
-for _preset in LOOP_UNWIND_PRESETS.values():
-    _preset["function_loops"] = list(_LATE_FUNCTION_LOOPS)
 DEFAULT_TIMEOUT_SECONDS = 360
 DEFAULT_MEMORY_MIB = 6144
 ALLOWED_CFGS = {"kani_full_capacity", "kani_late_replay_covers"}
@@ -172,6 +168,33 @@ def source_mapping_sha256(mapping: Mapping[str, str]) -> str:
     return _canonical_sha256(dict(sorted(mapping.items())))
 
 
+def _late_loop_locations(repo: Path) -> list[int]:
+    """Return the source lines bound to the four registered late-loop markers."""
+    source_rel = "crates/oa-track-core/src/tracker.rs"
+    path = repo / source_rel
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ValueError(f"cannot read marked loop source {source_rel}: {exc}") from exc
+    code, masked = _rust_scan(text)
+    raw_lines, code_lines = text.splitlines(), code.splitlines()
+    functions, resolved = _rust_fns(masked), []
+    loops = LOOP_UNWIND_PRESETS["late-replay-two-events-all-loops"]["loops"]
+    for loop in loops:
+        marker_text = f"// KANI-LOOP-MARKER: {loop['marker']}"
+        matches = [i for i, line in enumerate(raw_lines) if marker_text in line]
+        if len(matches) != 1:
+            raise ValueError(f"expected one {marker_text!r}, found {len(matches)}")
+        index = matches[0] + 1
+        if raw_lines[matches[0]].strip() != marker_text or index >= len(code_lines) or code_lines[index].strip() != loop["source_line"]:
+            raise ValueError(f"malformed or detached marker {loop['marker']!r}")
+        offset = sum(len(line) + 1 for line in code_lines[:index])
+        if _enclosing_fn(functions, offset) != "update_late":
+            raise ValueError(f"marker {loop['marker']!r} is outside update_late")
+        resolved.append(index + 1)
+    return resolved
+
+
 def _loop_unwind_configuration(preset_name: str | None) -> dict[str, Any] | None:
     if preset_name is None:
         return None
@@ -191,7 +214,9 @@ def _loop_id_regex(template: str) -> re.Pattern[str]:
     return re.compile(re.escape(head) + f"({_DISAMBIGUATOR_RE})" + re.escape(tail) + r"(\d+)")
 
 
-def resolve_loop_unwind_preset(preset_name: str, disambiguator: str) -> dict[str, Any]:
+def resolve_loop_unwind_preset(
+    preset_name: str, disambiguator: str, repo: Path | None = None
+) -> dict[str, Any]:
     """Return the preset with the discovered crate disambiguator filled in.
 
     Pinned-Cargo presets additionally get the single discovered log family, so
@@ -200,6 +225,10 @@ def resolve_loop_unwind_preset(preset_name: str, disambiguator: str) -> dict[str
     if not re.fullmatch(_DISAMBIGUATOR_RE, disambiguator):
         raise ValueError(f"invalid crate disambiguator: {disambiguator!r}")
     preset = copy.deepcopy(LOOP_UNWIND_PRESETS[preset_name])
+    source_lines = _late_loop_locations(repo or Path(__file__).resolve().parents[1])
+    for loop in preset.get("loops", [preset]):
+        index = int(loop["loop_id"].rsplit(".", 1)[1])
+        loop["line"] = source_lines[index]
 
     def fill(loop: dict[str, Any]) -> None:
         loop["loop_id"] = loop["loop_id"].replace("{disambiguator}", disambiguator)
@@ -218,7 +247,9 @@ def resolve_loop_unwind_preset(preset_name: str, disambiguator: str) -> dict[str
     return preset
 
 
-def discover_loop_unwind_loops(preset_name: str, goto_loops_output: str) -> dict[str, Any]:
+def discover_loop_unwind_loops(
+    preset_name: str, goto_loops_output: str, repo: Path | None = None
+) -> dict[str, Any]:
     """Bind `goto-instrument --show-loops` output to the preset's registered loops.
 
     The loops whose ids match the registered function symbol (ignoring only the
@@ -241,13 +272,16 @@ def discover_loop_unwind_loops(preset_name: str, goto_loops_output: str) -> dict
                 "line": int(match.group(3)),
                 "function": match.group(4),
             })
-    return bind_loop_unwind_discovery(preset_name, found)
+    source_root = repo if repo is not None else Path(__file__).resolve().parents[1]
+    return bind_loop_unwind_discovery(preset_name, found, _late_loop_locations(source_root))
 
 
-def bind_loop_unwind_discovery(preset_name: str, found: list[dict[str, Any]]) -> dict[str, Any]:
+def bind_loop_unwind_discovery(
+    preset_name: str, found: list[dict[str, Any]], expected_lines: list[int] | None = None
+) -> dict[str, Any]:
     preset = LOOP_UNWIND_PRESETS[preset_name]
     id_re = _loop_id_regex(preset["loop_id"])
-    registered = preset["function_loops"]
+    registered = expected_lines if expected_lines is not None else _late_loop_locations(Path(__file__).resolve().parents[1])
     for entry in found:
         id_match = id_re.fullmatch(str(entry.get("loop_id")))
         if (
@@ -281,10 +315,6 @@ def bind_loop_unwind_discovery(preset_name: str, found: list[dict[str, Any]]) ->
                 f"{entry['function']}; registered {preset['source']} line {registered[entry['index']]} "
                 f"function {preset['function']}"
             )
-    for loop in preset.get("loops", [preset]):
-        index = int(loop["loop_id"].rsplit(".", 1)[1])
-        if registered[index] != loop["line"]:
-            raise ValueError(f"registered loop {index} line differs from the function's loop table")
     return {
         "disambiguator": found[0]["disambiguator"],
         "loops": sorted(found, key=lambda entry: entry["index"]),
@@ -515,25 +545,23 @@ def _validate_loop_unwind_source(repo: Path, preset_name: str, package: str, har
     preset = LOOP_UNWIND_PRESETS[preset_name]
     if package != preset["package"] or harness not in preset["harnesses"]:
         raise ValueError(f"loop-unwind preset {preset_name!r} is not allowed for {package}:{harness}")
-    path = repo / preset["source"]
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise ValueError(f"cannot read source for loop-unwind preset {preset_name!r}: {exc}") from exc
-    code, masked = _rust_scan(text)
-    lines = code.split("\n")
-    starts = [0]
-    for line in lines[:-1]:
-        starts.append(starts[-1] + len(line) + 1)
-    fns = _rust_fns(masked)
-    loops = preset.get("loops", [preset])
-    for loop in loops:
-        line_index = loop.get("guard_line", loop["line"]) - 1
-        # comments are blanked, so a loop line that only appears in a comment is stale
-        if line_index >= len(lines) or lines[line_index].strip() != loop["source_line"]:
+    if preset.get("marker") or preset.get("loops"):
+        _late_loop_locations(repo)
+    else:
+        try:
+            text = (repo / preset["source"]).read_text(encoding="utf-8")
+        except OSError as exc:
+            raise ValueError(f"cannot read source for loop-unwind preset {preset_name!r}: {exc}") from exc
+        code, masked = _rust_scan(text)
+        lines = code.splitlines()
+        line_index = preset["line"] - 1
+        if line_index >= len(lines) or lines[line_index].strip() != preset["source_line"]:
             raise ValueError(f"stale source location for loop-unwind preset {preset_name!r}")
+        starts = [0]
+        for line in lines[:-1]:
+            starts.append(starts[-1] + len(line) + 1)
         offset = starts[line_index] + len(lines[line_index]) - len(lines[line_index].lstrip())
-        if _enclosing_fn(fns, offset) != preset["function"]:
+        if _enclosing_fn(_rust_fns(masked), offset) != preset["function"]:
             raise ValueError(f"stale function location for loop-unwind preset {preset_name!r}")
     harness_source = preset.get("harness_source", {}).get(harness, preset.get("default_harness_source"))
     if not isinstance(harness_source, str):
@@ -585,9 +613,9 @@ def _validate_loop_unwind_source(repo: Path, preset_name: str, package: str, har
 
 
 def _check_loop_unwind_log(
-    preset_name: str, stdout: str, stderr: str, disambiguator: str
+    preset_name: str, stdout: str, stderr: str, disambiguator: str, repo: Path | None = None
 ) -> dict[str, Any]:
-    preset = resolve_loop_unwind_preset(preset_name, disambiguator)
+    preset = resolve_loop_unwind_preset(preset_name, disambiguator, repo)
     families = preset.get("log_families")
     if families:
         return _check_aliased_loop_unwind_log(preset, stdout, stderr)
@@ -1188,6 +1216,9 @@ def evaluate_kani_binding(report_text: str | bytes, record: Mapping[str, Any]) -
             errors.append("scoped loop-unwind arguments require a registered preset")
     else:
         try:
+            repo_root = record.get("repo")
+            if not isinstance(repo_root, str) or not repo_root:
+                raise ValueError("recorded repository path is missing")
             expected_scoped = _loop_unwind_configuration(preset_name)
         except ValueError:
             expected_scoped = None
@@ -1213,11 +1244,15 @@ def evaluate_kani_binding(report_text: str | bytes, record: Mapping[str, Any]) -
                     rf"/(?:.*/)?kani-{re.escape(PINNED_KANI_VERSION)}/bin/goto-instrument", tool_path
                 ):
                     raise ValueError("goto-instrument is not from the pinned Kani bundle")
-                bound = bind_loop_unwind_discovery(preset_name, discovery["loops"])
+                bound = bind_loop_unwind_discovery(
+                    preset_name,
+                    discovery["loops"],
+                    _late_loop_locations(Path(repo_root)),
+                )
                 if bound != {"disambiguator": discovery.get("disambiguator"), "loops": discovery["loops"]}:
                     raise ValueError("discovery record is not canonical")
                 disambiguator = bound["disambiguator"]
-                resolved = resolve_loop_unwind_preset(preset_name, disambiguator)
+                resolved = resolve_loop_unwind_preset(preset_name, disambiguator, Path(repo_root))
             except ValueError as exc:
                 errors.append(f"loop-unwind discovery does not bind to the registered loops: {exc}")
                 resolved, disambiguator = None, None
@@ -1240,7 +1275,9 @@ def evaluate_kani_binding(report_text: str | bytes, record: Mapping[str, Any]) -
                 else:
                     matched_lines = log_check.get("matched_lines")
                 rechecked_log = (
-                    _check_loop_unwind_log(preset_name, "\n".join(matched_lines), "", disambiguator)
+                    _check_loop_unwind_log(
+                        preset_name, "\n".join(matched_lines), "", disambiguator, Path(repo_root)
+                    )
                     if disambiguator is not None and isinstance(matched_lines, list) and all(isinstance(line, str) for line in matched_lines)
                     else {"passed": False}
                 )
@@ -1519,7 +1556,11 @@ def _discover_loop_unwind_ids(
             )
         if rc != 0 or timed_out:
             raise ValueError(f"goto-instrument --show-loops failed (exit {rc}, timed out: {timed_out})")
-        bound = discover_loop_unwind_loops(preset_name, listing.read_text(encoding="utf-8", errors="replace"))
+        bound = discover_loop_unwind_loops(
+            preset_name,
+            listing.read_text(encoding="utf-8", errors="replace"),
+            repo,
+        )
         return {
             **bound,
             "goto_binary": goto.name,
@@ -1593,7 +1634,9 @@ def run_one(
         discovery = _discover_loop_unwind_ids(
             loop_unwind_preset, argv, harness, repo, target, env, check_dir, memory_bytes, timeout_seconds
         )
-        resolved_preset = resolve_loop_unwind_preset(loop_unwind_preset, discovery["disambiguator"])
+        resolved_preset = resolve_loop_unwind_preset(
+            loop_unwind_preset, discovery["disambiguator"], repo
+        )
         argv.extend([
             "--cbmc-args", "--unwindset",
             _loop_unwind_argument(resolved_preset),

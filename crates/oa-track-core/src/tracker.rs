@@ -1710,6 +1710,7 @@ fn update_late(t: &mut Tracker, slot: usize, m: &Measurement, out: &mut TrackOut
     // The newest stored update at or before the measurement (the state after an update is at
     // the update's own time).
     let mut base: Option<usize> = None;
+    // KANI-LOOP-MARKER: late-replay-prefix
     for k in 0..len {
         let at = ring_ix(t, slot, k);
         if col(&t.ring_m, at, blank_measurement()).toa_ns <= m.toa_ns {
@@ -1729,6 +1730,7 @@ fn update_late(t: &mut Tracker, slot: usize, m: &Measurement, out: &mut TrackOut
     // The measurement, then the stored ones after the base, in time order.
     let mut seq = [*m; RING_DEPTH + 1];
     let mut n_seq = 1usize;
+    // KANI-LOOP-MARKER: late-replay-suffix
     for k in (e + 1)..len {
         let at = ring_ix(t, slot, k);
         if let Some(c) = seq.get_mut(n_seq) {
@@ -1767,6 +1769,7 @@ fn update_late(t: &mut Tracker, slot: usize, m: &Measurement, out: &mut TrackOut
             ..CategoryState::default()
         }
     };
+    // KANI-LOOP-MARKER: late-replay-category
     for k in 0..=e {
         let em = col(&t.ring_m, ring_ix(t, slot, k), blank_measurement());
         category_observe(&mut cat, em.category);
@@ -1797,6 +1800,7 @@ fn update_late(t: &mut Tracker, slot: usize, m: &Measurement, out: &mut TrackOut
     // symbolic verification; an unexpected missing entry fails closed via transaction restore.
     let mut disturbed = false;
     let mut k = 0;
+    // KANI-LOOP-MARKER: late-replay-decisions
     while k < n_seq {
         let Some(cm) = seq.get(k) else {
             restore_track_txn(t, slot, transaction);
