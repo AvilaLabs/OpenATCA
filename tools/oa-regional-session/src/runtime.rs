@@ -2019,6 +2019,23 @@ mod transaction_tests {
         .unwrap()
     }
 
+    fn step_event_line(
+        engine: &mut RegionalRuntime,
+        line: &str,
+    ) -> (NormalizedEvent, RegionalFrame) {
+        let event = parse_event_line(line).unwrap();
+        let frame = regional_step(
+            engine,
+            &ReceiptBatch {
+                receipt_ns: event.receipt_ns,
+                source_clock_regressions: 0,
+                events: vec![event],
+            },
+        )
+        .unwrap();
+        (event, frame)
+    }
+
     fn seeded_claim_frame(
         engine: &mut RegionalRuntime,
         claims: &[(u128, u32, [u8; 4])],
@@ -2160,49 +2177,52 @@ mod transaction_tests {
     #[test]
     fn terminal_full_key_is_retired_with_receipt_before_reusing_view_capacity() {
         let mut engine = runtime_with_flight_capacity(1);
-        let first = parse_event_line(
+        let (first, _) = step_event_line(
+            &mut engine,
             "v1\t1000000000\t1000000000\t1\tFLIGHT\t00000000000000000000000000000001\tABC101\tZAU1\tFLIGHT\tPLAN\tPLAN00000001\t2",
-        )
-        .unwrap();
-        regional_step(
+        );
+        step_event_line(
             &mut engine,
-            &ReceiptBatch {
-                receipt_ns: first.receipt_ns,
-                source_clock_regressions: 0,
-                events: vec![first],
-            },
-        )
-        .unwrap();
-        let complete = parse_event_line(
             "v1\t2000000000\t2000000000\t2\tFLIGHT\t00000000000000000000000000000001\tABC101\tZAU1\tFLIGHT\tCOMPLETE",
-        )
-        .unwrap();
-        regional_step(
+        );
+        let (second, _) = step_event_line(
             &mut engine,
-            &ReceiptBatch {
-                receipt_ns: complete.receipt_ns,
-                source_clock_regressions: 0,
-                events: vec![complete],
-            },
-        )
-        .unwrap();
-        let retirements_before_capacity_reuse =
-            flight::flight_driver_report(&engine.flights).retirements_consumed;
+            "v1\t3000000000\t3000000000\t3\tFLIGHT\t00000000000000000000000000000002\tABC102\tZAU1\tFLIGHT\tPLAN\tPLAN00000002\t2",
+        );
 
-        let invalid_second = parse_event_line(
-            "v1\t3000000000\t3000000000\t2\tFLIGHT\t00000000000000000000000000000002\tABC102\tZAU1\tFLIGHT\tPLAN\tPLAN00000002\t2",
-        )
-        .unwrap();
-        let invalid_frame = regional_step(
+        let report = flight::flight_driver_report(&engine.flights);
+        assert_eq!(report.flights, engine.known_flights.len());
+        assert_eq!(report.retirements_consumed, 1);
+        assert!(engine
+            .known_flights
+            .iter()
+            .any(|key| key.gufi == second.identity.flight_gufi));
+        assert!(!engine
+            .known_flights
+            .iter()
+            .any(|key| key.gufi == first.identity.flight_gufi));
+    }
+
+    #[test]
+    fn invalid_staged_candidate_does_not_retire_terminal_capacity() {
+        let mut engine = runtime_with_flight_capacity(1);
+        let (first, _) = step_event_line(
             &mut engine,
-            &ReceiptBatch {
-                receipt_ns: invalid_second.receipt_ns,
-                source_clock_regressions: 0,
-                events: vec![invalid_second],
-            },
-        )
-        .unwrap();
-        assert_eq!(invalid_frame.quarantine.records.len(), 1);
+            "v1\t1000000000\t1000000000\t1\tFLIGHT\t00000000000000000000000000000001\tABC101\tZAU1\tFLIGHT\tPLAN\tPLAN00000001\t2",
+        );
+        step_event_line(
+            &mut engine,
+            "v1\t2000000000\t2000000000\t2\tFLIGHT\t00000000000000000000000000000001\tABC101\tZAU1\tFLIGHT\tCOMPLETE",
+        );
+
+        // A future source timestamp is rejected during staging, before capacity cleanup can
+        // mutate the terminal flight or consume its retirement receipt.
+        let (invalid, rejected) = step_event_line(
+            &mut engine,
+            "v1\t4000000000\t3000000000\t3\tFLIGHT\t00000000000000000000000000000002\tABC102\tZAU1\tFLIGHT\tPLAN\tPLAN00000002\t2",
+        );
+        assert_eq!(rejected.quarantine.records.len(), 1);
+        assert_eq!(invalid.source_ns, 4_000_000_000);
         assert_eq!(
             flight::flight_driver_report(&engine.flights).retirements_consumed,
             0
@@ -2212,70 +2232,14 @@ mod transaction_tests {
             .iter()
             .any(|key| key.gufi == first.identity.flight_gufi));
 
-        let second = parse_event_line(
-            "v1\t4000000000\t4000000000\t3\tFLIGHT\t00000000000000000000000000000002\tABC102\tZAU1\tFLIGHT\tPLAN\tPLAN00000002\t2",
-        )
-        .unwrap();
-        regional_step(
+        let (second, _) = step_event_line(
             &mut engine,
-            &ReceiptBatch {
-                receipt_ns: second.receipt_ns,
-                source_clock_regressions: 0,
-                events: vec![second],
-            },
-        )
-        .unwrap();
-
-        let report = flight::flight_driver_report(&engine.flights);
-        assert_eq!(report.flights, engine.known_flights.len());
-        assert_eq!(
-            report.retirements_consumed,
-            retirements_before_capacity_reuse + 1
+            "v1\t4000000000\t4000000000\t4\tFLIGHT\t00000000000000000000000000000002\tABC102\tZAU1\tFLIGHT\tPLAN\tPLAN00000002\t2",
         );
-        assert!(engine
-            .known_flights
-            .iter()
-            .any(|key| key.gufi == second.identity.flight_gufi));
-        assert!(!engine
-            .known_flights
-            .iter()
-            .any(|key| key.gufi == first.identity.flight_gufi));
-
-        let second_complete = parse_event_line(
-            "v1\t5000000000\t5000000000\t4\tFLIGHT\t00000000000000000000000000000002\tABC102\tZAU1\tFLIGHT\tCOMPLETE",
-        )
-        .unwrap();
-        regional_step(
-            &mut engine,
-            &ReceiptBatch {
-                receipt_ns: second_complete.receipt_ns,
-                source_clock_regressions: 0,
-                events: vec![second_complete],
-            },
-        )
-        .unwrap();
-        let third = parse_event_line(
-            "v1\t6000000000\t6000000000\t5\tFLIGHT\t00000000000000000000000000000003\tABC103\tZAU1\tFLIGHT\tPLAN\tPLAN00000003\t2",
-        )
-        .unwrap();
-        regional_step(
-            &mut engine,
-            &ReceiptBatch {
-                receipt_ns: third.receipt_ns,
-                source_clock_regressions: 0,
-                events: vec![third],
-            },
-        )
-        .unwrap();
         let report = flight::flight_driver_report(&engine.flights);
         assert_eq!(report.flights, 1);
-        assert_eq!(report.retirements_consumed, 2);
-        assert_eq!(engine.known_flights.len(), 1);
+        assert_eq!(report.retirements_consumed, 1);
         assert!(engine
-            .known_flights
-            .iter()
-            .any(|key| key.gufi == third.identity.flight_gufi));
-        assert!(!engine
             .known_flights
             .iter()
             .any(|key| key.gufi == second.identity.flight_gufi));
