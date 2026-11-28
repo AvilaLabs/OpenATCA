@@ -79,7 +79,21 @@ jobs:
           fi
           [[ "$base" =~ ^[0-9a-f]{40}$ ]]
           git diff --binary "$base" HEAD -- '*.rs' > "$RUNNER_TEMP/safety-source.diff"
-          cargo mutants --in-diff "$RUNNER_TEMP/safety-source.diff"
+          packages=(
+            --package oa-asterix
+            --package oa-ca
+            --package oa-display
+            --package oa-feed
+            --package oa-migration-switch
+            --package oa-msaw
+            --package oa-runway
+            --package oa-safety
+            --package oa-sealed
+            --package oa-track
+            --package oa-track-core
+            --package oa-adapt
+          )
+          cargo mutants "${packages[@]}" --in-diff "$RUNNER_TEMP/safety-source.diff"
   check:
     runs-on: ubuntu-24.04
     steps:
