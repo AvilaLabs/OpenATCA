@@ -74,17 +74,19 @@ fn fixm_summary_refusal_count(
     Ok(u64::from(summary.rejected) + u64::from(summary.not_decoded))
 }
 
-// Budget: each receipt group holds at most MAX_EVENT_GROUP normalized events. The normalized
-// event is 448 bytes: its previous 440-byte layout gains one exact input-receipt i64. PendingEvent
-// adds the original receive i64 for 456 bytes per slot. The unchanged 256-entry Vec holds 116,736
-// element bytes; the event-count cap and all other admission limits are unchanged.
+// Budget: each receipt group holds at most MAX_EVENT_GROUP normalized events. NormalizedEvent is
+// 448 bytes at 16-byte alignment; the exact input-receipt i64 grew its prior 432-byte layout.
+// PendingEvent adds the original receive i64, then 8 bytes of tail padding at that alignment, for
+// 464 bytes per slot. The unchanged 256-entry Vec holds 118,784 element bytes; the event-count cap
+// and all other admission limits are unchanged.
 #[repr(C)]
 struct PendingEvent {
     event: NormalizedEvent,
     original_receive_ns: i64,
 }
+const _: () = assert!(core::mem::align_of::<NormalizedEvent>() == 16);
 const _: () = assert!(core::mem::size_of::<NormalizedEvent>() == 448);
-const _: () = assert!(core::mem::size_of::<PendingEvent>() == 456);
+const _: () = assert!(core::mem::size_of::<PendingEvent>() == 464);
 
 #[derive(Clone, Copy)]
 struct PositionAvailability {
