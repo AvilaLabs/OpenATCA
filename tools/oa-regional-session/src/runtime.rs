@@ -99,7 +99,8 @@ pub struct FinalApproachAssignment {
     pub end_name: [u8; 3],
 }
 
-const MAX_FINAL_APPROACH_ASSIGNMENTS: usize = final_monitor_core::MAX_TRACKS;
+const MAX_FINAL_APPROACH_ASSIGNMENTS: usize = oa_display::core::alert_markers::MAX_ALERT_MARKERS;
+const _: () = assert!(MAX_FINAL_APPROACH_ASSIGNMENTS <= final_monitor_core::MAX_TRACKS);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FinalMonitorStatus {
@@ -149,6 +150,7 @@ struct ConfiguredFinalMonitor {
     assignments: Vec<FinalApproachAssignment>,
     state: final_monitor_core::FinalMonitorState,
     latest_alerts: Vec<RegionalFinalMonitorAlert>,
+    loss_reason: Option<FinalMonitorDegradation>,
 }
 
 #[derive(Clone, Copy)]
@@ -342,6 +344,7 @@ pub struct RegionalRuntime {
     last_automation: RegionalAutomationStatus,
     known_flights: Vec<KnownFlight>,
     final_monitor: Option<ConfiguredFinalMonitor>,
+    final_monitor_display: RegionalFinalMonitorFrame,
 }
 
 /// Versioned capacities for a single offline replay. Defaults reproduce the historic small
@@ -1064,7 +1067,9 @@ fn configure_final_monitor(
 ) -> Result<ConfiguredFinalMonitor, String> {
     if monitor.assignments.is_empty() || monitor.assignments.len() > MAX_FINAL_APPROACH_ASSIGNMENTS
     {
-        return Err("final-monitor assignment count is outside the fixed bound".into());
+        return Err(format!(
+            "final-monitor assignment count must be within the renderable bound of {MAX_FINAL_APPROACH_ASSIGNMENTS}"
+        ));
     }
     let mut validation_state = final_monitor_core::FinalMonitorState::new();
     let empty: [u32; 0] = [];
@@ -1122,6 +1127,7 @@ fn configure_final_monitor(
         assignments: monitor.assignments,
         state: final_monitor_core::FinalMonitorState::new(),
         latest_alerts: Vec::with_capacity(MAX_FINAL_APPROACH_ASSIGNMENTS),
+        loss_reason: None,
     })
 }
 
@@ -1318,6 +1324,41 @@ fn regional_final_monitor_frame(
     }
 }
 
+fn present_final_monitor_controls(
+    surveillance: &mut Surveillance,
+    interaction: &oa_display::interaction::InteractionState,
+    console: &str,
+    display: &RegionalFinalMonitorFrame,
+) -> Result<[u8; 32], String> {
+    if display.status == FinalMonitorStatus::NotConfigured {
+        return surveillance::surveillance_present_controls(surveillance, interaction, console);
+    }
+    if display.alerts.len() > MAX_FINAL_APPROACH_ASSIGNMENTS {
+        return Err("final-monitor display exceeds its admitted marker bound".into());
+    }
+    let mut markers = Vec::new();
+    markers
+        .try_reserve_exact(display.alerts.len())
+        .map_err(|_| "final-monitor marker allocation refused")?;
+    for alert in &display.alerts {
+        markers.push(oa_display::core::alert_markers::FinalMonitorMarker {
+            address: alert.address,
+            lat_e7: alert.lat_e7,
+            lon_e7: alert.lon_e7,
+            severity: alert.severity as u8,
+            position_known: 1,
+            reserved: [0; 2],
+        });
+    }
+    surveillance::surveillance_present_controls_with_final_monitor(
+        surveillance,
+        interaction,
+        console,
+        &markers,
+        display.status != FinalMonitorStatus::Available,
+    )
+}
+
 fn regional_final_monitor_timing(
     result: final_monitor_core::UpdateResult,
 ) -> RegionalFinalMonitorTiming {
@@ -1349,22 +1390,14 @@ fn configured_final_monitor_frame(
     let tracks =
         match prepare_final_monitor_tracks(monitor, frame, flight_data, unavailable_flight_data) {
             Ok(tracks) => tracks,
-            Err(reason) => {
-                monitor.latest_alerts.clear();
-                return regional_final_monitor_frame(
-                    FinalMonitorStatus::Degraded(reason),
-                    Vec::new(),
-                    None,
-                );
-            }
+            Err(reason) => return degrade_final_monitor(monitor, reason, None),
         };
     let now_ns = match u64::try_from(frame.time_ns) {
         Ok(value) => value,
         Err(_) => {
-            monitor.latest_alerts.clear();
-            return regional_final_monitor_frame(
-                FinalMonitorStatus::Degraded(FinalMonitorDegradation::InvalidPrediction),
-                Vec::new(),
+            return degrade_final_monitor(
+                monitor,
+                FinalMonitorDegradation::InvalidPrediction,
                 None,
             );
         }
@@ -1379,50 +1412,62 @@ fn configured_final_monitor_frame(
         match evaluate_final_monitor(monitor, &tracks, now_ns, prediction_report_ns) {
             Ok(result) => result,
             Err(final_monitor_core::UpdateError::UnusableUncertainty) => {
-                monitor.latest_alerts.clear();
-                return regional_final_monitor_frame(
-                    FinalMonitorStatus::Degraded(FinalMonitorDegradation::UnusableUncertainty),
-                    Vec::new(),
+                return degrade_final_monitor(
+                    monitor,
+                    FinalMonitorDegradation::UnusableUncertainty,
                     None,
                 );
             }
             Err(_) => {
-                monitor.latest_alerts.clear();
-                return regional_final_monitor_frame(
-                    FinalMonitorStatus::Degraded(FinalMonitorDegradation::CoreRefusal),
-                    Vec::new(),
-                    None,
-                );
+                return degrade_final_monitor(monitor, FinalMonitorDegradation::CoreRefusal, None);
             }
         };
     let timing = Some(regional_final_monitor_timing(result));
     if result.degraded {
-        monitor.latest_alerts.clear();
-        return regional_final_monitor_frame(
-            FinalMonitorStatus::Degraded(final_monitor_degradation(result)),
-            Vec::new(),
-            timing,
-        );
+        return degrade_final_monitor(monitor, final_monitor_degradation(result), timing);
     }
     if result.due {
-        monitor.latest_alerts.clear();
+        let mut latest_alerts = Vec::new();
+        if latest_alerts
+            .try_reserve_exact(usize::from(result.alerts))
+            .is_err()
+        {
+            return degrade_final_monitor(monitor, FinalMonitorDegradation::CoreRefusal, timing);
+        }
         for index in 0..usize::from(result.alerts) {
             let Some(alert) = regional_alert_from_buffers(index, &tracks, &output) else {
-                monitor.latest_alerts.clear();
-                return regional_final_monitor_frame(
-                    FinalMonitorStatus::Degraded(FinalMonitorDegradation::CoreRefusal),
-                    Vec::new(),
+                return degrade_final_monitor(
+                    monitor,
+                    FinalMonitorDegradation::CoreRefusal,
                     timing,
                 );
             };
-            monitor.latest_alerts.push(alert);
+            latest_alerts.push(alert);
         }
+        monitor.latest_alerts = latest_alerts;
+        monitor.loss_reason = None;
+    } else if let Some(reason) = monitor.loss_reason {
+        return regional_final_monitor_frame(
+            FinalMonitorStatus::Degraded(reason),
+            Vec::new(),
+            timing,
+        );
     }
     regional_final_monitor_frame(
         FinalMonitorStatus::Available,
         monitor.latest_alerts.clone(),
         timing,
     )
+}
+
+fn degrade_final_monitor(
+    monitor: &mut ConfiguredFinalMonitor,
+    reason: FinalMonitorDegradation,
+    timing: Option<RegionalFinalMonitorTiming>,
+) -> RegionalFinalMonitorFrame {
+    monitor.latest_alerts.clear();
+    monitor.loss_reason = Some(reason);
+    regional_final_monitor_frame(FinalMonitorStatus::Degraded(reason), Vec::new(), timing)
 }
 
 /// Construct from a verified issued package while preserving the caller's durable audit-chain
@@ -1816,6 +1861,11 @@ fn regional_new_with_source_identity_and_checkpoint(
         },
         known_flights: Vec::with_capacity(profile.max_flights),
         final_monitor: None,
+        final_monitor_display: regional_final_monitor_frame(
+            FinalMonitorStatus::NotConfigured,
+            Vec::new(),
+            None,
+        ),
     })
 }
 
@@ -2324,38 +2374,15 @@ fn execute(
         &monitor_flight_data,
         flight_data_unavailable,
     );
+    runtime.final_monitor_display = final_monitor.clone();
     if runtime.profile.surveillance.render_scope {
         let console = automation_console_text(&runtime.console_text, automation);
-        if final_monitor.status == FinalMonitorStatus::NotConfigured {
-            surveillance.frame_sha256 = surveillance::surveillance_present_controls(
-                &mut runtime.surveillance,
-                &runtime.interaction,
-                &console,
-            )?;
-        } else {
-            let markers: Vec<_> = final_monitor
-                .alerts
-                .iter()
-                .map(
-                    |alert| oa_display::core::alert_markers::FinalMonitorMarker {
-                        address: alert.address,
-                        lat_e7: alert.lat_e7,
-                        lon_e7: alert.lon_e7,
-                        severity: alert.severity as u8,
-                        position_known: 1,
-                        reserved: [0; 2],
-                    },
-                )
-                .collect();
-            surveillance.frame_sha256 =
-                surveillance::surveillance_present_controls_with_final_monitor(
-                    &mut runtime.surveillance,
-                    &runtime.interaction,
-                    &console,
-                    &markers,
-                    final_monitor.status != FinalMonitorStatus::Available,
-                )?;
-        }
+        surveillance.frame_sha256 = present_final_monitor_controls(
+            &mut runtime.surveillance,
+            &runtime.interaction,
+            &console,
+            &final_monitor,
+        )?;
     }
     Ok(RegionalFrame {
         sequence: runtime.frame_sequence,
@@ -2481,10 +2508,12 @@ pub fn regional_select(
     if !matches!(outcome, oa_display::interaction::InteractionResult::Applied) {
         oa_display::interaction::clear_selection(&mut runtime.interaction);
     }
-    let digest = match surveillance::surveillance_present_controls(
+    let final_monitor_display = runtime.final_monitor_display.clone();
+    let digest = match present_final_monitor_controls(
         &mut runtime.surveillance,
         &runtime.interaction,
         &automation_console_text(&runtime.console_text, runtime.last_automation),
+        &final_monitor_display,
     ) {
         Ok(digest) => digest,
         Err(reason) => {
@@ -2512,10 +2541,12 @@ pub fn regional_console_overlay(
     }
     runtime.console_text.clear();
     runtime.console_text.push_str(text);
-    match surveillance::surveillance_present_controls(
+    let final_monitor_display = runtime.final_monitor_display.clone();
+    match present_final_monitor_controls(
         &mut runtime.surveillance,
         &runtime.interaction,
         &automation_console_text(&runtime.console_text, runtime.last_automation),
+        &final_monitor_display,
     ) {
         Ok(digest) => Ok(digest),
         Err(reason) => {
@@ -2531,10 +2562,12 @@ pub fn regional_clear_selection(runtime: &mut RegionalRuntime) -> Result<[u8; 32
         return Err("selection clearing requires a completed regional frame".into());
     }
     oa_display::interaction::clear_selection(&mut runtime.interaction);
-    match surveillance::surveillance_present_controls(
+    let final_monitor_display = runtime.final_monitor_display.clone();
+    match present_final_monitor_controls(
         &mut runtime.surveillance,
         &runtime.interaction,
         &automation_console_text(&runtime.console_text, runtime.last_automation),
+        &final_monitor_display,
     ) {
         Ok(digest) => Ok(digest),
         Err(reason) => {
@@ -4502,6 +4535,35 @@ mod transaction_tests {
         .unwrap()
     }
 
+    // Mutation killed: admit more assignments than the presenter can represent, then omit or
+    // truncate the excess while rendering final-monitor markers.
+    #[test]
+    fn final_monitor_refuses_assignments_beyond_renderable_marker_capacity() {
+        let model = synthetic_model().unwrap();
+        let snapshot = oa_airspace::core::snapshot::encode(&model).unwrap();
+        let mut monitor = final_monitor_config(100.0);
+        monitor.assignments = (1..=MAX_FINAL_APPROACH_ASSIGNMENTS + 1)
+            .map(|key| FinalApproachAssignment {
+                flight: oa_flight::key_gufi(u128::try_from(key).expect("bounded key")),
+                runway_id: 27_001,
+                end_name: *b"27R",
+            })
+            .collect();
+        let result = regional_new_with_runtime_final_monitor(
+            model,
+            oa_sha256::sha256(&snapshot),
+            *b"ZAU1",
+            SurveillanceConfig {
+                centre_lat_e7: 410_000_000,
+                centre_lon_e7: -870_000_000,
+                range_nm: 180.0,
+            },
+            DEFAULT_REGIONAL_RUN_PROFILE,
+            monitor,
+        );
+        assert!(result.is_err(), "unrenderable assignments must be refused");
+    }
+
     fn final_monitor_batch(
         receipt_ns: i64,
         source_ns: i64,
@@ -4902,6 +4964,18 @@ mod transaction_tests {
             "the ordinary presenter removes the stale warning"
         );
 
+        let fresh_but_not_due = regional_step(
+            &mut runtime,
+            &final_monitor_batch(15_000_000_000, 15_000_000_000, 410_000_000, 0, false),
+        )
+        .unwrap();
+        assert_eq!(
+            fresh_but_not_due.final_monitor.status,
+            FinalMonitorStatus::Degraded(FinalMonitorDegradation::StalePredictionAndInputCadence),
+            "a fresh frame does not clear a loss state before the next scheduled evaluation"
+        );
+        assert!(fresh_but_not_due.final_monitor.alerts.is_empty());
+
         let recovered = regional_step(
             &mut runtime,
             &final_monitor_batch(18_800_000_000, 18_800_000_000, 410_000_000, 0, false),
@@ -4917,5 +4991,58 @@ mod transaction_tests {
             .alerts
             .iter()
             .any(|alert| alert.severity == final_monitor_core::FinalSeverity::Warning));
+    }
+
+    // Mutation killed: console/select/clear redraws use the ordinary presenter and erase the
+    // cached final-monitor protection-loss state after a completed frame.
+    #[test]
+    fn operator_redraws_preserve_final_monitor_protection_loss() {
+        let mut monitored = configured_runtime(100.0);
+        seed_confirmed_final_monitor_track(&mut monitored, 410_000_000, 0);
+        let mut plain = runtime();
+        seed_confirmed_final_monitor_track(&mut plain, 410_000_000, 0);
+
+        for runtime in [&mut monitored, &mut plain] {
+            let stale = regional_step(
+                runtime,
+                &final_monitor_batch(9_000_000_000, 4_201_000_000, 410_000_000, 0, false),
+            )
+            .expect("synthetic stale frame is admitted");
+            if runtime.final_monitor.is_some() {
+                assert_eq!(
+                    stale.final_monitor.status,
+                    FinalMonitorStatus::Degraded(
+                        FinalMonitorDegradation::StalePredictionAndInputCadence
+                    )
+                );
+            }
+        }
+
+        let console = "operator status";
+        regional_console_overlay(&mut monitored, console).expect("monitored console redraw");
+        regional_console_overlay(&mut plain, console).expect("plain console redraw");
+        assert_ne!(
+            oa_sha256::sha256(regional_pixels(&monitored).expect("monitored pixels")),
+            oa_sha256::sha256(regional_pixels(&plain).expect("plain pixels")),
+            "console redraw retains the protection-loss heading"
+        );
+
+        let monitored_selection = regional_select(&mut monitored, u32::MAX, 0, None);
+        let plain_selection = regional_select(&mut plain, u32::MAX, 0, None);
+        assert!(monitored_selection.is_err());
+        assert!(plain_selection.is_err());
+        assert_ne!(
+            oa_sha256::sha256(regional_pixels(&monitored).expect("monitored pixels")),
+            oa_sha256::sha256(regional_pixels(&plain).expect("plain pixels")),
+            "selection redraw retains the protection-loss heading"
+        );
+
+        regional_clear_selection(&mut monitored).expect("monitored clear redraw");
+        regional_clear_selection(&mut plain).expect("plain clear redraw");
+        assert_ne!(
+            oa_sha256::sha256(regional_pixels(&monitored).expect("monitored pixels")),
+            oa_sha256::sha256(regional_pixels(&plain).expect("plain pixels")),
+            "clear-selection redraw retains the protection-loss heading"
+        );
     }
 }
