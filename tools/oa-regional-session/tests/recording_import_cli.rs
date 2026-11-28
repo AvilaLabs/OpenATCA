@@ -270,6 +270,52 @@ fn synthetic_oaf_import_runs_through_tracking_and_stage_contract() {
     fs::remove_dir_all(Path::new(&scratch)).unwrap();
 }
 
+fn assert_half_open_fixture_bundle(imported: &Path, start_ns: i64, end_ns: i64) {
+    const NORMALIZED_HEADER: &str = "OA-RS\t1";
+    const HOUR_MANIFEST_HEADER: &str = "OA_RECORDING_HOUR_MANIFEST\t1";
+    const HOUR_COMPLETE_NAME: &str = "HOUR_COMPLETE";
+    const QUARANTINE_HEADER: &str = "OA-RS-QUARANTINE-AGGREGATE\t1";
+
+    let normalized = fs::read_to_string(imported.join("normalized.tsv")).unwrap();
+    let normalized_lines = normalized.lines().collect::<Vec<_>>();
+    assert_eq!(normalized_lines.first().copied(), Some(NORMALIZED_HEADER));
+    let event_lines = normalized_lines
+        .iter()
+        .filter(|line| line.starts_with("v1\t"))
+        .count();
+    let expected_in_window_events = 2usize;
+    assert_eq!(event_lines, expected_in_window_events);
+
+    let counts = fs::read_to_string(imported.join("counts.tsv")).unwrap();
+    let expected_outside_messages = format!("outside_window_messages\t{}", 1u64);
+    assert!(counts.lines().any(|line| line == expected_outside_messages));
+    let provenance = fs::read_to_string(imported.join("provenance.tsv")).unwrap();
+    let expected_stream_lines = 3usize;
+    assert_eq!(
+        provenance
+            .lines()
+            .filter(|line| line.starts_with("STREAM\t"))
+            .count(),
+        expected_stream_lines
+    );
+    let quarantine = fs::read_to_string(imported.join("quarantine.tsv")).unwrap();
+    assert_eq!(quarantine.lines().next(), Some(QUARANTINE_HEADER));
+    let manifest = fs::read_to_string(imported.join("hour-manifest.tsv")).unwrap();
+    assert_eq!(manifest.lines().next(), Some(HOUR_MANIFEST_HEADER));
+    // Kills putting the supplied end in the start slot while recomputing a matching bundle hash.
+    assert!(manifest_matches_supplied_window(
+        &manifest, start_ns, end_ns
+    ));
+    assert!(imported.join(HOUR_COMPLETE_NAME).is_file());
+    assert!(!imported.join("COMPLETE").exists());
+    let manifest_bytes = fs::read(imported.join("hour-manifest.tsv")).unwrap();
+    let complete = fs::read_to_string(imported.join(HOUR_COMPLETE_NAME)).unwrap();
+    assert_eq!(
+        complete.trim(),
+        oa_sha256::to_hex(&oa_sha256::sha256(&manifest_bytes))
+    );
+}
+
 // REQ: OA-MIG-415
 #[test]
 fn window_import_is_half_open_streamed_and_emits_an_hour_envelope() {
@@ -277,10 +323,6 @@ fn window_import_is_half_open_streamed_and_emits_an_hour_envelope() {
     const NS_PER_MINUTE: i64 = 60_000_000_000;
     const UTC_DAY_START_NS: i64 = 1_794_614_400_000_000_000;
     const WINDOW_HOUR: i64 = 14;
-    const NORMALIZED_HEADER: &str = "OA-RS\t1";
-    const HOUR_MANIFEST_HEADER: &str = "OA_RECORDING_HOUR_MANIFEST\t1";
-    const HOUR_COMPLETE_NAME: &str = "HOUR_COMPLETE";
-    const QUARANTINE_HEADER: &str = "OA-RS-QUARANTINE-AGGREGATE\t1";
 
     let scratch = scratch_dir();
     fs::create_dir(&scratch).unwrap();
@@ -364,44 +406,7 @@ fn window_import_is_half_open_streamed_and_emits_an_hour_envelope() {
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
-    let normalized = fs::read_to_string(imported.join("normalized.tsv")).unwrap();
-    let normalized_lines = normalized.lines().collect::<Vec<_>>();
-    assert_eq!(normalized_lines.first().copied(), Some(NORMALIZED_HEADER));
-    let event_lines = normalized_lines
-        .iter()
-        .filter(|line| line.starts_with("v1\t"))
-        .count();
-    let expected_in_window_events = 2usize;
-    assert_eq!(event_lines, expected_in_window_events);
-
-    let counts = fs::read_to_string(imported.join("counts.tsv")).unwrap();
-    let expected_outside_messages = format!("outside_window_messages\t{}", 1u64);
-    assert!(counts.lines().any(|line| line == expected_outside_messages));
-    let provenance = fs::read_to_string(imported.join("provenance.tsv")).unwrap();
-    let expected_stream_lines = 3usize;
-    assert_eq!(
-        provenance
-            .lines()
-            .filter(|line| line.starts_with("STREAM\t"))
-            .count(),
-        expected_stream_lines
-    );
-    let quarantine = fs::read_to_string(imported.join("quarantine.tsv")).unwrap();
-    assert_eq!(quarantine.lines().next(), Some(QUARANTINE_HEADER));
-    let manifest = fs::read_to_string(imported.join("hour-manifest.tsv")).unwrap();
-    assert_eq!(manifest.lines().next(), Some(HOUR_MANIFEST_HEADER));
-    // Kills putting the supplied end in the start slot while recomputing a matching bundle hash.
-    assert!(manifest_matches_supplied_window(
-        &manifest, start_ns, end_ns
-    ));
-    assert!(imported.join(HOUR_COMPLETE_NAME).is_file());
-    assert!(!imported.join("COMPLETE").exists());
-    let manifest_bytes = fs::read(imported.join("hour-manifest.tsv")).unwrap();
-    let complete = fs::read_to_string(imported.join(HOUR_COMPLETE_NAME)).unwrap();
-    assert_eq!(
-        complete.trim(),
-        oa_sha256::to_hex(&oa_sha256::sha256(&manifest_bytes))
-    );
+    assert_half_open_fixture_bundle(&imported, start_ns, end_ns);
 
     let incomplete_pair_output = scratch.join("missing-end");
     let incomplete_pair = Command::new(&importer)
