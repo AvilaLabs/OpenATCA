@@ -356,7 +356,8 @@ mod profile_limit_tests {
     // Kills bypassing the raw receipt through an issue cutoff outside the sealed span.
     // REQ: OA-REG-013, OA-SEAL-014
     #[test]
-    fn raw_receipt_inside_public_sealed_window_refuses_before_issue_cutoff() {
+    fn raw_receipt_inside_public_sealed_window_refuses_before_issue_cutoff(
+    ) -> Result<(), &'static str> {
         let second_ns = 1_000_000_000i64;
         let candidate = oa_sealed::sealed_windows().iter().find_map(|window| {
             let input_receipt_ns = window.to_ns.checked_sub(1)?;
@@ -371,7 +372,8 @@ mod profile_limit_tests {
                 && !oa_sealed::in_sealed_window(issue_receipt_ns))
             .then_some((source_ns, input_receipt_ns, issue_receipt_ns))
         });
-        let (source_ns, input_receipt_ns, issue_receipt_ns) = candidate.unwrap();
+        let (source_ns, input_receipt_ns, issue_receipt_ns) =
+            candidate.ok_or("public sealed list has no raw/issue boundary fixture")?;
         let mut event = event_at(1, issue_receipt_ns);
         event.input_receipt_ns = input_receipt_ns;
         event.source_ns = source_ns;
@@ -381,6 +383,7 @@ mod profile_limit_tests {
             Err(SessionError::SealedTimestamp)
         );
         assert_eq!(session_total_events(&cursor), 0);
+        Ok(())
     }
 
     #[test]
