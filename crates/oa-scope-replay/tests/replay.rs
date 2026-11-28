@@ -734,7 +734,8 @@ fn replayed_frames_are_the_same_in_every_run_and_do_not_depend_on_earlier_frames
     assert_eq!(first[2], GOLDEN, "the replay frame changed");
 }
 
-const GOLDEN: &str = "1cea770f89fecf6626ff544f7f1500d11e61830503d2b0a202f9f246cf2d2845";
+// Compact HIDDEN legend text and its 9px font intentionally change these legend pixels.
+const GOLDEN: &str = "2778de4e22fd062e2c50ef2b9c720b878d00cd6f9a245c2f0fa10df99b3faf19";
 
 // REQ: OA-DSP-072
 #[test]
