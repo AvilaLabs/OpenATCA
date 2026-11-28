@@ -2791,11 +2791,16 @@ mod tests {
         assert!(tracker_is_confirmed(&uncertain, ADDR));
         crate::types::output_clear(&mut out);
 
-        let snapshot_ns = at(1, 20, 100.0).toa_ns;
+        let snapshot_ns = at(1, 20, 100.0).toa_ns + S / 2;
+        tracker_advance(&mut uncertain, snapshot_ns, &mut out);
+        crate::types::output_clear(&mut out);
+        let uncertain_slot = lookup(&uncertain, ADDR).expect("confirmed track remains live");
+        assert_ne!(col(&uncertain.cur, uncertain_slot, blank_filter()).reacq, 0);
         assert!(tracker_snapshot_at(&mut uncertain, snapshot_ns, &mut out));
         assert_eq!(out.t_ns.len(), 1);
         assert_ne!(out.flags[0] & O_REACQUIRED, 0);
         assert_eq!(out.flags[0] & O_TICK, 0);
+        assert_ne!(col(&uncertain.cur, uncertain_slot, blank_filter()).reacq, 0);
 
         let mut certain_config = cfg(2, 0);
         certain_config.coast_max_r95_m = 1_000.0;
@@ -2806,6 +2811,10 @@ mod tests {
         assert!(tracker_is_confirmed(&certain, ADDR));
         crate::types::output_clear(&mut certain_out);
 
+        tracker_advance(&mut certain, snapshot_ns, &mut certain_out);
+        crate::types::output_clear(&mut certain_out);
+        let certain_slot = lookup(&certain, ADDR).expect("confirmed track remains live");
+        assert_eq!(col(&certain.cur, certain_slot, blank_filter()).reacq, 0);
         assert!(tracker_snapshot_at(
             &mut certain,
             snapshot_ns,
@@ -2814,6 +2823,7 @@ mod tests {
         assert_eq!(certain_out.t_ns.len(), 1);
         assert_eq!(certain_out.flags[0] & O_REACQUIRED, 0);
         assert_eq!(certain_out.flags[0] & O_TICK, 0);
+        assert_eq!(col(&certain.cur, certain_slot, blank_filter()).reacq, 0);
     }
 
     // REQ: OA-TRK-042
