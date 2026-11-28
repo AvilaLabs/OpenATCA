@@ -2436,8 +2436,7 @@ mod tests {
     }
 
     #[test]
-    fn archive_report_at_max_timestamp_is_not_silently_left_pending() -> Result<(), Box<dyn Error>>
-    {
+    fn archive_out_of_domain_report_time_is_explicitly_refused() -> Result<(), Box<dyn Error>> {
         use super::stream_normalized_events;
         use std::fs::OpenOptions;
 
@@ -2476,7 +2475,16 @@ mod tests {
             Ok(())
         });
         let _ = fs::remove_file(&path);
-        assert!(result.is_err());
+        let summary = result?;
+        assert!(summary.source_counts[0].adsb_rows_in > 0);
+        assert_eq!(
+            summary.source_counts[0].adsb_rows_dropped,
+            summary.source_counts[0].adsb_rows_in
+        );
+        assert_eq!(
+            summary.quarantine_rows,
+            summary.source_counts[0].adsb_rows_dropped
+        );
         assert!(!visited);
         Ok(())
     }
