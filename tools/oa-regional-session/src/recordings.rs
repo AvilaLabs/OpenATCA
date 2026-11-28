@@ -343,6 +343,11 @@ pub struct RecordedAdaptation {
 pub(crate) struct DecodedAdsbRow {
     row: oa_adsb::Row,
     source_ordinal: usize,
+    frame: DecodedAdsbFrameMetadata,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DecodedAdsbFrameMetadata {
     stream_index: u8,
     frame_sequence: u64,
     receipt_ns: i64,
@@ -351,6 +356,7 @@ pub(crate) struct DecodedAdsbRow {
     oaf_flags: u8,
     byte_offset: u64,
     skipped_before: u64,
+    payload_len: usize,
 }
 
 impl DecodedAdsbRow {
@@ -363,19 +369,19 @@ impl DecodedAdsbRow {
     }
 
     pub(crate) fn frame_sequence(&self) -> u64 {
-        self.frame_sequence
+        self.frame.frame_sequence
     }
 
     pub(crate) fn frame_receipt_ns(&self) -> i64 {
-        self.receipt_ns
+        self.frame.receipt_ns
     }
 
     pub(crate) fn stream_index(&self) -> u8 {
-        self.stream_index
+        self.frame.stream_index
     }
 
     pub(crate) fn byte_offset(&self) -> u64 {
-        self.byte_offset
+        self.frame.byte_offset
     }
 }
 
@@ -383,6 +389,7 @@ impl DecodedAdsbRow {
 /// stream's existing row-level diagnostics.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct DecodedAdsbFrameRows {
+    frame: DecodedAdsbFrameMetadata,
     declared_rows: usize,
     dropped_ordinals: Vec<usize>,
     source_time_regressions: bool,
@@ -1115,6 +1122,21 @@ pub(crate) fn decode_ordered_adsb_frame(
         rows.push(DecodedAdsbRow {
             row,
             source_ordinal: ordinal,
+            frame: DecodedAdsbFrameMetadata {
+                stream_index: frame.stream_index,
+                frame_sequence: frame.sequence,
+                receipt_ns: frame.receipt_ns,
+                jms_timestamp_ms: frame.jms_timestamp_ms,
+                mono_ns: frame.mono_ns,
+                oaf_flags: frame.oaf_flags,
+                byte_offset: frame.byte_offset,
+                skipped_before: frame.skipped_before,
+                payload_len: frame.payload.len(),
+            },
+        });
+    }
+    Ok(DecodedAdsbFrameRows {
+        frame: DecodedAdsbFrameMetadata {
             stream_index: frame.stream_index,
             frame_sequence: frame.sequence,
             receipt_ns: frame.receipt_ns,
@@ -1123,14 +1145,87 @@ pub(crate) fn decode_ordered_adsb_frame(
             oaf_flags: frame.oaf_flags,
             byte_offset: frame.byte_offset,
             skipped_before: frame.skipped_before,
-        });
-    }
-    Ok(DecodedAdsbFrameRows {
+            payload_len: frame.payload.len(),
+        },
         declared_rows,
         dropped_ordinals,
         source_time_regressions,
         rows,
     })
+}
+
+/// Preserve the existing dropped-row quarantine path for a source-time-decoded ADS-B frame.
+/// All dropped ordinals from the frame share one bounded quarantine queue, just as in the original
+/// whole-frame adapter, and retain the original byte offset and row locator.
+pub(crate) fn account_ordered_adsb_drops(
+    decoded: &DecodedAdsbFrameRows,
+) -> Result<RecordedAdaptation, AdapterError> {
+    let payload_bytes =
+        u64::try_from(decoded.frame.payload_len).map_err(|_| AdapterError::WorkBudget)?;
+    let mut out = RecordedAdaptation {
+        events: Vec::new(),
+        provenance: Vec::new(),
+        counts: zero_recorded_adapter_counts(),
+        recording: RecordingCounts {
+            total_frames: 1,
+            total_bytes: payload_bytes,
+            total_decoded_bytes: payload_bytes,
+            ..RecordingCounts::default()
+        },
+        quarantine: Vec::new(),
+        quarantine_stats: zero_quarantine_stats(),
+    };
+    out.counts.frames_adsb = 1;
+    out.counts.adsb_rows_in =
+        u64::try_from(decoded.declared_rows).map_err(|_| AdapterError::CountOverflow)?;
+    out.counts.adsb_rows_dropped =
+        u64::try_from(decoded.dropped_ordinals.len()).map_err(|_| AdapterError::CountOverflow)?;
+    out.counts.adsb_source_time_regressions = u64::from(decoded.source_time_regressions);
+    out.quarantine
+        .try_reserve_exact(decoded.dropped_ordinals.len())
+        .map_err(|_| AdapterError::AllocationRefused)?;
+    let frame = RecordedFrame {
+        source: RecordingSource::Adsb,
+        stream_index: decoded.frame.stream_index,
+        receipt_ns: decoded.frame.receipt_ns,
+        sequence: decoded.frame.frame_sequence,
+        jms_timestamp_ms: decoded.frame.jms_timestamp_ms,
+        mono_ns: decoded.frame.mono_ns,
+        oaf_flags: decoded.frame.oaf_flags,
+        byte_offset: decoded.frame.byte_offset,
+        skipped_before: decoded.frame.skipped_before,
+        kind: oa_feed::Kind::Message,
+        payload: Vec::new(),
+    };
+    let mut queue = queue_new();
+    let conversion_started = Instant::now();
+    for &ordinal in &decoded.dropped_ordinals {
+        let row_locator = u32::try_from(ordinal)
+            .ok()
+            .and_then(|value| value.checked_add(1))
+            .filter(|value| *value < QUARANTINE_FRAME_ROW_LOCATOR)
+            .ok_or(AdapterError::WorkBudget)?;
+        quarantine_item(
+            &mut queue,
+            &mut out.quarantine,
+            &frame,
+            row_locator,
+            REASON_SURVEILLANCE_INVALID,
+            1,
+            1,
+            conversion_started,
+            Instant::now(),
+        )?;
+    }
+    out.quarantine_stats = [
+        oa_quarantine::source_stats(&queue, InputSource::FlightData)
+            .map_err(|_| AdapterError::WorkBudget)?,
+        oa_quarantine::source_stats(&queue, InputSource::Surveillance)
+            .map_err(|_| AdapterError::WorkBudget)?,
+        oa_quarantine::source_stats(&queue, InputSource::Adaptation)
+            .map_err(|_| AdapterError::WorkBudget)?,
+    ];
+    Ok(out)
 }
 
 /// Adapt one decoder-issued ADS-B row through the existing measurement, quarantine and event
@@ -1140,7 +1235,7 @@ pub(crate) fn adapt_ordered_adsb_row(
     context: OrderedAdsbRowContext<'_>,
 ) -> Result<RecordedAdaptation, AdapterError> {
     let row = context.row;
-    if row.mono_ns.is_none() && row.row.time_ns < row.receipt_ns {
+    if row.frame.mono_ns.is_none() && row.row.time_ns < row.frame.receipt_ns {
         return Err(AdapterError::InvalidField);
     }
     let source_ordinal = u32::try_from(row.source_ordinal).map_err(|_| AdapterError::WorkBudget)?;
@@ -1150,14 +1245,14 @@ pub(crate) fn adapt_ordered_adsb_row(
         .ok_or(AdapterError::WorkBudget)?;
     let frame = RecordedFrame {
         source: RecordingSource::Adsb,
-        stream_index: row.stream_index,
-        receipt_ns: row.receipt_ns,
-        sequence: row.frame_sequence,
-        jms_timestamp_ms: row.jms_timestamp_ms,
-        mono_ns: row.mono_ns,
-        oaf_flags: row.oaf_flags,
-        byte_offset: row.byte_offset,
-        skipped_before: row.skipped_before,
+        stream_index: row.frame.stream_index,
+        receipt_ns: row.frame.receipt_ns,
+        sequence: row.frame.frame_sequence,
+        jms_timestamp_ms: row.frame.jms_timestamp_ms,
+        mono_ns: row.frame.mono_ns,
+        oaf_flags: row.frame.oaf_flags,
+        byte_offset: row.frame.byte_offset,
+        skipped_before: row.frame.skipped_before,
         kind: oa_feed::Kind::Message,
         payload: encode_one_adsb_row(&row.row)?,
     };
@@ -1180,10 +1275,11 @@ pub(crate) fn adapt_ordered_adsb_row(
     for provenance in &mut adapted.provenance {
         provenance.emitted_item_ordinal = source_ordinal;
     }
-    if row.byte_offset >= (1u64 << (64 - QUARANTINE_ITEM_SHIFT)) {
+    if row.frame.byte_offset >= (1u64 << (64 - QUARANTINE_ITEM_SHIFT)) {
         return Err(AdapterError::WorkBudget);
     }
     let frame_base = row
+        .frame
         .byte_offset
         .checked_shl(QUARANTINE_ITEM_SHIFT)
         .ok_or(AdapterError::WorkBudget)?;
@@ -3125,24 +3221,78 @@ mod tests {
             kind: oa_feed::Kind::Message,
             payload,
         };
-        let dropped = oa_adsb::Row {
+        let bad_time_row = oa_adsb::Row {
             time_ns: oa_adsb::TIME_MAX_NS,
             ..row
         };
+        let source_rows = [bad_time_row, row];
         let mut reports = Reports::default();
-        reports_push(&mut reports, &dropped);
-        reports_push(&mut reports, &row);
+        for source_row in &source_rows {
+            reports_push(&mut reports, source_row);
+        }
+        let expected_dropped_ordinals = source_rows
+            .iter()
+            .enumerate()
+            .filter(|(_, source_row)| source_row.time_ns >= oa_adsb::TIME_MAX_NS)
+            .map(|(ordinal, _)| ordinal)
+            .collect::<Vec<_>>();
+        let expected_valid_ordinal = source_rows
+            .iter()
+            .position(|source_row| source_row.time_ns == row.time_ns)
+            .expect("valid row is in fixture");
         let mut payload = Vec::new();
-        encode_payload(&mut payload, &reports, 0, 2).expect("synthetic row payload");
-        let valid = decode_ordered_adsb_frame(&make_frame(row.time_ns, payload.clone()))
-            .expect("header time is a valid lower bound");
+        encode_payload(&mut payload, &reports, 0, source_rows.len())
+            .expect("synthetic row payload");
+        let valid_frame = make_frame(row.time_ns, payload.clone());
+        let valid =
+            decode_ordered_adsb_frame(&valid_frame).expect("header time is a valid lower bound");
+        let drop_summary = account_ordered_adsb_drops(&valid).expect("drop accounting summary");
         let (_, dropped, regressions, rows) = valid.into_parts();
-        assert!(dropped.is_empty());
+        assert_eq!(dropped, expected_dropped_ordinals);
         assert!(!regressions);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].source_time_ns(), row.time_ns);
-        assert_eq!(rows[0].source_ordinal(), 1);
-        assert_eq!(dropped, vec![0]);
+        assert_eq!(rows[0].source_ordinal(), expected_valid_ordinal);
+        assert_eq!(
+            drop_summary.counts.adsb_rows_in,
+            u64::try_from(source_rows.len()).expect("fixture count fits")
+        );
+        assert_eq!(
+            drop_summary.counts.adsb_rows_dropped,
+            u64::try_from(expected_dropped_ordinals.len()).expect("fixture count fits")
+        );
+        assert_eq!(
+            drop_summary.quarantine.len(),
+            expected_dropped_ordinals.len()
+        );
+        let dropped_record = drop_summary
+            .quarantine
+            .first()
+            .expect("dropped row keeps source locator");
+        assert_eq!(
+            dropped_record.row_locator,
+            u32::try_from(expected_dropped_ordinals[0]).expect("fixture ordinal fits") + 1
+        );
+        assert_eq!(
+            dropped_record.event.identity.item_id,
+            (valid_frame.byte_offset << QUARANTINE_ITEM_SHIFT)
+                + u64::from(dropped_record.row_locator)
+        );
+        assert_eq!(
+            dropped_record.event.reasons,
+            ReasonFlags(REASON_SURVEILLANCE_INVALID)
+        );
+        assert_eq!(
+            drop_summary.quarantine_stats[1]
+                .reason_counts
+                .iter()
+                .sum::<u64>(),
+            u64::try_from(expected_dropped_ordinals.len()).expect("fixture count fits")
+        );
+        assert!(drop_summary
+            .quarantine
+            .iter()
+            .all(|record| !record.manual_handling_required));
 
         let invalid = decode_ordered_adsb_frame(&make_frame(row.time_ns + 1, payload));
         // Mutation killed: accepting an OAF1 header that is later than a decoded report row.
