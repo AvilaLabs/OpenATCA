@@ -1456,7 +1456,7 @@ fn adapt_adsb_frame(
         out.counts.adsb_source_time_regressions =
             out.counts.adsb_source_time_regressions.saturating_add(1);
     }
-    let (airborne_reports, airborne_report_indexes, unknown_ground_indexes) =
+    let (mut airborne_reports, airborne_report_indexes, unknown_ground_indexes) =
         airborne_adsb_reports(&reports, &mut out.counts)?;
     let mut airborne_source_ordinals = Vec::new();
     airborne_source_ordinals
@@ -1468,6 +1468,21 @@ fn adapt_adsb_frame(
                 .get(report_index)
                 .ok_or(AdapterError::WorkBudget)?,
         );
+    }
+    if frame.mono_ns.is_some() {
+        let (filtered_reports, filtered_ordinals) =
+            filter_oaf2_rows_after_receipt(Oaf2ReceiptFilterContext {
+                frame,
+                reports: &airborne_reports,
+                source_ordinals: &airborne_source_ordinals,
+                counts: &mut out.counts,
+                quarantine_queue,
+                quarantine,
+                conversion_started,
+                frame_started,
+            })?;
+        airborne_reports = filtered_reports;
+        airborne_source_ordinals = filtered_ordinals;
     }
     for report_index in unknown_ground_indexes {
         let ordinal = *decoded_source_ordinals
@@ -1607,26 +1622,10 @@ fn adapt_adsb_frame(
             )?;
             continue;
         }
-        // OAF1 archives store the first report time in the frame header; OAF2 live captures carry
-        // an actual receipt plus monotonic time. Only the archive contract permits later row time.
+        // OAF1 archives store the first report time in the frame header; later row times are
+        // allowed there. OAF2 rows past receipt were refused before the cache update above.
         if measurement.toa_ns > frame.receipt_ns {
             out.counts.source_after_receipt = out.counts.source_after_receipt.saturating_add(1);
-            if frame.mono_ns.is_some() {
-                out.counts.invalid_position_rows =
-                    out.counts.invalid_position_rows.saturating_add(1);
-                quarantine_item(
-                    quarantine_queue,
-                    quarantine,
-                    frame,
-                    row_locator,
-                    REASON_INPUT_INVALID,
-                    1,
-                    1,
-                    conversion_started,
-                    frame_started,
-                )?;
-                continue;
-            }
         }
         let row_receipt_ns = if frame.mono_ns.is_some() {
             issue_receipt_ns
@@ -1771,6 +1770,82 @@ fn adapt_adsb_frame(
         }
     }
     Ok(())
+}
+
+struct Oaf2ReceiptFilterContext<'a> {
+    frame: &'a RecordedFrame,
+    reports: &'a Reports,
+    source_ordinals: &'a [usize],
+    counts: &'a mut RecordedAdapterCounts,
+    quarantine_queue: &'a mut QuarantineQueue,
+    quarantine: &'a mut Vec<RecordedQuarantine>,
+    conversion_started: Instant,
+    frame_started: Instant,
+}
+
+fn filter_oaf2_rows_after_receipt(
+    context: Oaf2ReceiptFilterContext<'_>,
+) -> Result<(Reports, Vec<usize>), AdapterError> {
+    if context.frame.mono_ns.is_none()
+        || reports_len(context.reports) != context.source_ordinals.len()
+    {
+        return Err(AdapterError::WorkBudget);
+    }
+    let row_count = reports_len(context.reports);
+    let mut accepted_reports = Reports::default();
+    accepted_reports
+        .icao
+        .try_reserve_exact(row_count)
+        .map_err(|_| AdapterError::AllocationRefused)?;
+    accepted_reports
+        .time_ns
+        .try_reserve_exact(row_count)
+        .map_err(|_| AdapterError::AllocationRefused)?;
+    accepted_reports
+        .lat_e7
+        .try_reserve_exact(row_count)
+        .map_err(|_| AdapterError::AllocationRefused)?;
+    accepted_reports
+        .lon_e7
+        .try_reserve_exact(row_count)
+        .map_err(|_| AdapterError::AllocationRefused)?;
+    let mut accepted_ordinals = Vec::new();
+    accepted_ordinals
+        .try_reserve_exact(row_count)
+        .map_err(|_| AdapterError::AllocationRefused)?;
+    for index in 0..row_count {
+        let row = reports_row(context.reports, index).ok_or(AdapterError::WorkBudget)?;
+        let source_ordinal = *context
+            .source_ordinals
+            .get(index)
+            .ok_or(AdapterError::WorkBudget)?;
+        if row.time_ns > context.frame.receipt_ns {
+            context.counts.source_after_receipt =
+                context.counts.source_after_receipt.saturating_add(1);
+            context.counts.invalid_position_rows =
+                context.counts.invalid_position_rows.saturating_add(1);
+            let row_locator = u32::try_from(source_ordinal)
+                .ok()
+                .and_then(|ordinal| ordinal.checked_add(1))
+                .filter(|locator| *locator < QUARANTINE_FRAME_ROW_LOCATOR)
+                .ok_or(AdapterError::WorkBudget)?;
+            quarantine_item(
+                context.quarantine_queue,
+                context.quarantine,
+                context.frame,
+                row_locator,
+                REASON_INPUT_INVALID,
+                1,
+                1,
+                context.conversion_started,
+                context.frame_started,
+            )?;
+            continue;
+        }
+        reports_push(&mut accepted_reports, &row);
+        accepted_ordinals.push(source_ordinal);
+    }
+    Ok((accepted_reports, accepted_ordinals))
 }
 
 fn airborne_adsb_reports(
@@ -4073,6 +4148,110 @@ mod tests {
         assert_eq!(live.counts.source_after_receipt, 1);
         assert_eq!(live.counts.invalid_position_rows, 1);
         assert_eq!(live.counts.events_emitted, 1);
+    }
+
+    // REQ: OA-MIG-415
+    #[test]
+    fn future_oaf2_quality_is_refused_before_cache_and_keeps_later_prefix_equivalent() {
+        let base_ns = 1_893_456_780_000_000_000i64;
+        let future = oa_adsb::Row {
+            time_ns: base_ns + 1_500_000_000,
+            icao: 0xABCDEF,
+            lat_e7: 419_000_000,
+            lon_e7: -873_000_000,
+            baro_alt_ft: 35_000,
+            gs_dkt: 4_500,
+            track_ddeg: 900,
+            vrate_fpm: 0,
+            nic: 8,
+            nac_p: 8,
+            nac_v: 2,
+            sil: 3,
+            version: 2,
+            source: 0,
+            ..oa_adsb::ROW_EMPTY
+        };
+        let earlier = oa_adsb::Row {
+            time_ns: base_ns + 1_000_000_000,
+            nac_p: 9,
+            ..future
+        };
+        let mut carried = oa_adsb::Row {
+            time_ns: base_ns + 1_100_000_000,
+            ..earlier
+        };
+        carried.nac_p = oa_adsb::NONE_U8;
+        carried.nic = oa_adsb::NONE_U8;
+        carried.sil = oa_adsb::NONE_U8;
+        carried.version = oa_adsb::NONE_U8;
+        carried.nac_v = oa_adsb::NONE_U8;
+        let make_frame = |sequence, receipt_ns, mono_ns, row: oa_adsb::Row| {
+            let mut reports = Reports::default();
+            reports_push(&mut reports, &row);
+            let mut payload = Vec::new();
+            oa_adsb::encode_payload(&mut payload, &reports, 0, 1)
+                .expect("synthetic ADS-B row encodes");
+            RecordedFrame {
+                source: RecordingSource::Adsb,
+                stream_index: 0,
+                receipt_ns,
+                sequence,
+                jms_timestamp_ms: receipt_ns / 1_000_000,
+                mono_ns: Some(mono_ns),
+                oaf_flags: 0,
+                byte_offset: sequence * 128,
+                skipped_before: 0,
+                kind: oa_feed::Kind::Message,
+                payload,
+            }
+        };
+        let future_frame = make_frame(1, base_ns + 500_000_000, 1, future);
+        let earlier_frame = make_frame(2, base_ns + 1_000_000_000, 2, earlier);
+        let carried_frame = make_frame(3, base_ns + 1_100_000_000, 3, carried);
+        let adapt = |frames: &[RecordedFrame], cache: &mut oa_track::adsb::AdsbQualityCache| {
+            let bytes = frames
+                .iter()
+                .map(|frame| u64::try_from(frame.payload.len()).expect("fixture bytes fit"))
+                .sum::<u64>();
+            adapt_recorded_frames_with_sequence_starts_and_quality(
+                frames,
+                RecordingCounts {
+                    total_frames: u64::try_from(frames.len()).expect("fixture frames fit"),
+                    total_bytes: bytes,
+                    total_decoded_bytes: bytes,
+                    ..RecordingCounts::default()
+                },
+                8,
+                *b"ZAU1",
+                [0, 0],
+                cache,
+            )
+            .expect("synthetic OAF2 frames adapt")
+        };
+        let prefix_frames = [earlier_frame.clone(), carried_frame.clone()];
+        let suffix_frames = [future_frame, earlier_frame, carried_frame];
+        let mut prefix_cache = oa_track::adsb::AdsbQualityCache::new(4);
+        let mut suffix_cache = oa_track::adsb::AdsbQualityCache::new(4);
+        let prefix = adapt(&prefix_frames, &mut prefix_cache);
+        let suffix = adapt(&suffix_frames, &mut suffix_cache);
+
+        // Mutation killed: let a quarantined future OAF2 row update carried quality state.
+        assert_eq!(suffix.events, prefix.events);
+        assert_eq!(suffix.provenance, prefix.provenance);
+        assert_eq!(suffix_cache.len(), prefix_cache.len());
+        assert_eq!(suffix_cache.len(), 1);
+        assert_eq!(suffix.counts.source_after_receipt, 1);
+        assert_eq!(suffix.counts.invalid_position_rows, 1);
+        assert_eq!(suffix.quarantine.len(), 1);
+        assert_eq!(suffix.counts.adsb_rows_order_refused, 0);
+        assert_eq!(
+            suffix.counts.adsb_quality_removed,
+            prefix.counts.adsb_quality_removed
+        );
+        assert_eq!(
+            suffix.quarantine[0].event.reasons,
+            ReasonFlags(REASON_INPUT_INVALID)
+        );
     }
 
     fn event(source: SourceKind, sequence: u64) -> NormalizedEvent {
