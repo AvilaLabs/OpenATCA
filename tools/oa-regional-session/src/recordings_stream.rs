@@ -2050,12 +2050,14 @@ mod tests {
                 ),
             ]
         );
-        let serialized = crate::recordings::serialize_recorded_events(&normalized_events)?;
+        let serialized = crate::recordings::serialize_recorded_events(&normalized_events)
+            .map_err(|error| std::io::Error::other(format!("serialize normalized rows: {error:?}")))?;
         let reparsed: Vec<_> = serialized
             .lines()
             .skip(1)
             .map(crate::input::parse_event_line)
-            .collect::<Result<_, _>>()?;
+            .collect::<Result<_, _>>()
+            .map_err(|error| std::io::Error::other(format!("parse normalized row: {error:?}")))?;
         assert_eq!(reparsed, normalized_events);
         for event in reparsed {
             let batch = push_event(&mut cursor, event).map_err(|error| {
@@ -2096,7 +2098,8 @@ mod tests {
 
         let path = temporary_path("sfdps_srcmsg_groups")?;
         let payload = br#"<ns5:MessageCollection xmlns:ns5="http://www.faa.aero/nas/3.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><message xsi:type="ns5:FlightMessageType"><flight xsi:type="ns5:NasFlightType" centre="ZXX" source="AH" system="SLC" timestamp="2030-01-02T03:04:05.000Z"><gufi codeSpace="urn:uuid">11111111-2222-3333-4444-555555555555</gufi><flightPlan identifier="FP7"/><flightStatus fdpsFlightStatus="ACTIVE"/><departure><runwayPositionAndTime><runwayTime><actual time="2030-01-02T03:00:00Z"/></runwayTime></runwayPositionAndTime></departure><controllingUnit unitIdentifier="???"/></flight></message><message xsi:type="ns5:FlightMessageType"><flight xsi:type="ns5:NasFlightType" centre="ZXX" source="TH" system="SLC" timestamp="2030-01-02T03:04:06.000Z"><gufi codeSpace="urn:uuid">11111111-2222-3333-4444-555555555555</gufi><flightPlan identifier="FP7"/><flightStatus fdpsFlightStatus="ACTIVE"/><flightIdentification aircraftIdentification="ABC123"/><aircraftDescription aircraftAddress="ABCDEF"/><controllingUnit unitIdentifier="ZXX" sectorIdentifier="03"/></flight></message></ns5:MessageCollection>"#;
-        let receipt_ms = oa_fixm::parse_iso_ms(b"2030-01-02T03:04:07.250Z")?;
+        let receipt_ms = oa_fixm::parse_iso_ms(b"2030-01-02T03:04:07.250Z")
+            .ok_or_else(|| std::io::Error::other("parse fixture receipt"))?;
         let receipt_ns = receipt_ms
             .checked_mul(1_000_000)
             .ok_or_else(|| std::io::Error::other("fixture receipt overflow"))?;
@@ -2137,12 +2140,14 @@ mod tests {
         }));
         assert_ne!(groups[0].0, groups[1].0);
 
-        let serialized = crate::recordings::serialize_recorded_events(&events)?;
+        let serialized = crate::recordings::serialize_recorded_events(&events)
+            .map_err(|error| std::io::Error::other(format!("serialize flight events: {error:?}")))?;
         let reparsed: Vec<_> = serialized
             .lines()
             .skip(1)
             .map(crate::input::parse_event_line)
-            .collect::<Result<_, _>>()?;
+            .collect::<Result<_, _>>()
+            .map_err(|error| std::io::Error::other(format!("parse flight event: {error:?}")))?;
         assert_eq!(reparsed, events);
         let mut cursor = session_cursor_new();
         let mut batches = Vec::new();
