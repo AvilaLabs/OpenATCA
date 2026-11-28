@@ -1790,14 +1790,14 @@ fn every_legend_text_past_the_edge_gets_a_bar_at_the_narrowest_width() {
 // REQ: OA-DSP-025
 #[test]
 fn compact_hidden_legend_uses_nine_pixel_text_and_fits_its_full_line() {
-    let expected = "HIDDEN NM:FIX>19999.9, TERM>19999.9, RWY/LOC>19999.9, NON-IFR>19999.9, NDB/DME/TACAN>19999.9, LABEL>19999.9, VOR/IFR LABEL>19999.9";
+    let expected = "HIDDEN NM:FIX>19999.9, TERM>19999.9, RWY/LOC>19999.9, NON-IFR>19999.9, NDB/DME/TACAN>19999.9, LABEL>19999.9, VOR/IFR LABEL>19999.9;OFF:BOUNDARIES, AIRWAYS, RINGS";
     let m = model(Tail::None);
     let expected_chars = expected.chars().count() as i32;
     let bounds = (6, 42, 8 + expected_chars * 9 + 2, 57);
-    assert_eq!(bounds, (6, 42, 1_180, 57));
-    assert!(bounds.2 <= 1_200);
-    assert!(8 + expected_chars * 12 + 2 > 1_200);
-    for (width, expected_cuts) in [(1_200, 0u32), (1_150, 1u32)] {
+    assert_eq!(bounds, (6, 42, 1_459, 57));
+    assert!(bounds.2 <= 1_500);
+    assert!(8 + expected_chars * 12 + 2 > 1_500);
+    for (width, expected_cuts) in [(1_500, 0u32), (1_450, 1u32)] {
         let mut view = view_new(ORD.0, ORD.1, 20_000.0, width, 600).unwrap();
         view.fix_max_nm = 19_999.9;
         view.terminal_wpt_max_nm = 19_999.9;
@@ -1806,6 +1806,15 @@ fn compact_hidden_legend_uses_nine_pixel_text_and_fits_its_full_line() {
         view.minor_navaid_max_nm = 19_999.9;
         view.label_max_nm = 19_999.9;
         view.major_label_max_nm = 19_999.9;
+        for layer in [
+            "own-boundary",
+            "neighbour-boundaries",
+            "high-airways",
+            "low-airways",
+            "rings",
+        ] {
+            assert!(layer_set(&mut view.layers, layer, false));
+        }
         let mut list = list_new(scene_caps(&m).unwrap()).unwrap();
         let stats = build_scene(
             &mut list,
