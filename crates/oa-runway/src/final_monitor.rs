@@ -827,6 +827,61 @@ mod tests {
         }
     }
 
+    fn oblique_pair() -> FinalPair {
+        let course = |runway_id, outer_fix, threshold| FinalCourseInput {
+            runway_id,
+            end_name: *b"18L",
+            outer_fix,
+            threshold,
+        };
+        prepare_pair(
+            course(
+                11,
+                Local {
+                    east_m: -1_000.0,
+                    north_m: -1_000.0,
+                },
+                Local {
+                    east_m: -400.0,
+                    north_m: -200.0,
+                },
+            ),
+            course(
+                12,
+                Local {
+                    east_m: 1_000.0,
+                    north_m: -250.0,
+                },
+                Local {
+                    east_m: 1_600.0,
+                    north_m: 550.0,
+                },
+            ),
+            DEFAULT_CONFIG,
+        )
+        .expect("independent oblique parallel geometry is valid")
+    }
+
+    fn empty_tracks() -> PredictedTracks<'static> {
+        PredictedTracks {
+            addresses: &[],
+            east_m: &[],
+            north_m: &[],
+            velocity_east_mps: &[],
+            velocity_north_mps: &[],
+            r95_m: &[],
+            lat_e7: &[],
+            lon_e7: &[],
+        }
+    }
+
+    fn output_shape_refuses(output: FinalAlertBuffer<'_>) {
+        let mut state = FinalMonitorState::new();
+        let result = update(pair(), &mut state, 1, 1, empty_tracks(), output);
+        assert_eq!(result, Err(UpdateError::BadInput));
+        assert_eq!(state, FinalMonitorState::new());
+    }
+
     fn kord_end(name: &'static str, alignment: f64, lat: f64, lon: f64) -> EndInput<'static> {
         EndInput {
             name,
@@ -1033,6 +1088,154 @@ mod tests {
         assert_eq!(pair.origin.north_m, 0.0);
         assert_eq!(pair.ntz_half_width_m, 304.8);
         assert_eq!(pair.course_length_m, 10_000.0);
+    }
+
+    // REQ: OA-RWY-014, OA-RWY-015
+    #[test]
+    fn oblique_pair_preserves_independent_east_north_geometry_and_conflict() {
+        // Expected values come directly from the chosen vectors: (600,800)/1000 and
+        // perpendicular (-0.8,0.6). The offset vector (2000,750) has signed separation
+        // -1150 m; no monitor output is used to calculate these expectations.
+        let pair = oblique_pair();
+        assert!((pair.axis_east - 0.6).abs() < 1.0e-12);
+        assert!((pair.axis_north - 0.8).abs() < 1.0e-12);
+        assert!((pair.normal_east + 0.8).abs() < 1.0e-12);
+        assert!((pair.normal_north - 0.6).abs() < 1.0e-12);
+        assert!((pair.origin.east_m - 300.0).abs() < 1.0e-12);
+        assert!((pair.origin.north_m + 225.0).abs() < 1.0e-12);
+        assert!((pair.course_length_m - 1_000.0).abs() < 1.0e-9);
+
+        let mut state = FinalMonitorState::new();
+        let offset = 500.0;
+        let track = TestTrack {
+            now: 1_000,
+            report: 1_000,
+            east: pair.origin.east_m + pair.normal_east * offset,
+            north: pair.origin.north_m + pair.normal_north * offset,
+            vx: -pair.normal_east * 100.0,
+            vy: -pair.normal_north * 100.0,
+            r95: 0.0,
+        };
+        let (result, severity) = evaluate_for(pair, &mut state, track)
+            .expect("finite east/north prediction is accepted");
+        assert_eq!(result.alerts, 1);
+        assert_eq!(severity, Some(FinalSeverity::Caution));
+    }
+
+    // REQ: OA-RWY-015, OA-RWY-016
+    #[test]
+    fn uncertainty_at_adaptation_limit_is_accepted_and_next_value_refused() {
+        let pair = pair();
+        let mut at_limit_state = FinalMonitorState::new();
+        let at_limit = evaluate_for(
+            pair,
+            &mut at_limit_state,
+            TestTrack {
+                now: 1_000,
+                report: 1_000,
+                east: 0.0,
+                north: 0.0,
+                vx: 0.0,
+                vy: 0.0,
+                r95: pair.max_r95_m,
+            },
+        );
+        let (accepted, severity) = at_limit.expect("uncertainty at the bound is admissible");
+        assert_eq!(accepted.alerts, 1);
+        assert_eq!(severity, Some(FinalSeverity::Warning));
+
+        let mut beyond_limit_state = FinalMonitorState::new();
+        let beyond = evaluate_for(
+            pair,
+            &mut beyond_limit_state,
+            TestTrack {
+                now: 1_000,
+                report: 1_000,
+                east: 0.0,
+                north: 0.0,
+                vx: 0.0,
+                vy: 0.0,
+                r95: pair.max_r95_m + f64::EPSILON * pair.max_r95_m.max(1.0),
+            },
+        );
+        assert_eq!(beyond, Err(UpdateError::UnusableUncertainty));
+    }
+
+    // REQ: OA-RWY-015, OA-RWY-016
+    #[test]
+    fn each_misaligned_output_column_is_refused_before_state_changes() {
+        macro_rules! buffers {
+            () => {
+                (
+                    [0_u32],
+                    [pair().id],
+                    [FinalSeverity::Warning],
+                    [0_i32],
+                    [0_i32],
+                    [0_u32],
+                )
+            };
+        }
+
+        let (_a, mut p, mut s, mut lat, mut lon, mut time) = buffers!();
+        output_shape_refuses(FinalAlertBuffer {
+            addresses: &mut [],
+            pair_ids: &mut p,
+            severity: &mut s,
+            lat_e7: &mut lat,
+            lon_e7: &mut lon,
+            seconds_to_entry_milli: &mut time,
+        });
+
+        let (mut a, mut p, mut s, mut lat, mut lon, mut time) = buffers!();
+        output_shape_refuses(FinalAlertBuffer {
+            addresses: &mut a,
+            pair_ids: &mut [],
+            severity: &mut s,
+            lat_e7: &mut lat,
+            lon_e7: &mut lon,
+            seconds_to_entry_milli: &mut time,
+        });
+
+        let (mut a, mut p, mut s, mut lat, mut lon, mut time) = buffers!();
+        output_shape_refuses(FinalAlertBuffer {
+            addresses: &mut a,
+            pair_ids: &mut p,
+            severity: &mut [],
+            lat_e7: &mut lat,
+            lon_e7: &mut lon,
+            seconds_to_entry_milli: &mut time,
+        });
+
+        let (mut a, mut p, mut s, mut lat, mut lon, mut time) = buffers!();
+        output_shape_refuses(FinalAlertBuffer {
+            addresses: &mut a,
+            pair_ids: &mut p,
+            severity: &mut s,
+            lat_e7: &mut [],
+            lon_e7: &mut lon,
+            seconds_to_entry_milli: &mut time,
+        });
+
+        let (mut a, mut p, mut s, mut lat, mut lon, mut time) = buffers!();
+        output_shape_refuses(FinalAlertBuffer {
+            addresses: &mut a,
+            pair_ids: &mut p,
+            severity: &mut s,
+            lat_e7: &mut lat,
+            lon_e7: &mut [],
+            seconds_to_entry_milli: &mut time,
+        });
+
+        let (mut a, mut p, mut s, mut lat, mut lon, mut time) = buffers!();
+        output_shape_refuses(FinalAlertBuffer {
+            addresses: &mut a,
+            pair_ids: &mut p,
+            severity: &mut s,
+            lat_e7: &mut lat,
+            lon_e7: &mut lon,
+            seconds_to_entry_milli: &mut [],
+        });
     }
 
     // REQ: OA-RWY-014
@@ -1493,6 +1696,103 @@ mod tests {
     fn close_parallel_finals_are_refused() {
         let result = prepare_pair(input(1, -400.0), input(2, 400.0), DEFAULT_CONFIG);
         assert_eq!(result, Err(PrepareError::TooClose));
+    }
+
+    // REQ: OA-RWY-015
+    #[test]
+    fn nonunique_or_zero_track_addresses_are_refused_atomically() {
+        for addresses in [[1234, 1234], [0, 1234], [1235, 1234]] {
+            let mut state = FinalMonitorState::new();
+            let east = [0.0, 0.0];
+            let north = [-550.0, -550.0];
+            let velocity_east = [0.0, 0.0];
+            let velocity_north = [0.0, 0.0];
+            let r95 = [0.0, 0.0];
+            let lat = [100, 101];
+            let lon = [200, 201];
+            let mut out_addresses = [77, 78];
+            let mut out_pair_ids = [pair().id; 2];
+            let mut out_severity = [FinalSeverity::Warning; 2];
+            let mut out_lat = [303, 304];
+            let mut out_lon = [404, 405];
+            let mut out_entry = [505, 506];
+            let result = update(
+                pair(),
+                &mut state,
+                1,
+                1,
+                PredictedTracks {
+                    addresses: &addresses,
+                    east_m: &east,
+                    north_m: &north,
+                    velocity_east_mps: &velocity_east,
+                    velocity_north_mps: &velocity_north,
+                    r95_m: &r95,
+                    lat_e7: &lat,
+                    lon_e7: &lon,
+                },
+                FinalAlertBuffer {
+                    addresses: &mut out_addresses,
+                    pair_ids: &mut out_pair_ids,
+                    severity: &mut out_severity,
+                    lat_e7: &mut out_lat,
+                    lon_e7: &mut out_lon,
+                    seconds_to_entry_milli: &mut out_entry,
+                },
+            );
+            assert_eq!(result, Err(UpdateError::BadInput));
+            assert_eq!(state, FinalMonitorState::new());
+            assert_eq!(out_addresses, [77, 78]);
+            assert_eq!(out_severity, [FinalSeverity::Warning; 2]);
+            assert_eq!(out_lat, [303, 304]);
+            assert_eq!(out_lon, [404, 405]);
+            assert_eq!(out_entry, [505, 506]);
+        }
+    }
+
+    // REQ: OA-RWY-015, OA-RWY-017
+    #[test]
+    fn inconsistent_public_clock_state_is_refused_without_advancing() {
+        let invalid_states = [
+            FinalMonitorState {
+                clock_flags: KNOWN_CLOCK_FLAGS | 0x80,
+                ..FinalMonitorState::new()
+            },
+            FinalMonitorState {
+                last_input_frame_ns: 10,
+                last_evaluation_ns: 11,
+                clock_flags: KNOWN_CLOCK_FLAGS,
+                ..FinalMonitorState::new()
+            },
+            FinalMonitorState {
+                last_evaluation_ns: 10,
+                clock_flags: HAS_EVALUATION_TIME,
+                ..FinalMonitorState::new()
+            },
+            FinalMonitorState {
+                reserved: [1, 0, 0, 0, 0, 0, 0],
+                ..FinalMonitorState::new()
+            },
+        ];
+        for mut state in invalid_states {
+            let original = state;
+            let result = evaluate_for(
+                pair(),
+                &mut state,
+                20,
+                TestTrack {
+                    now: 20,
+                    report: 20,
+                    east: 0.0,
+                    north: 0.0,
+                    vx: 0.0,
+                    vy: 0.0,
+                    r95: 0.0,
+                },
+            );
+            assert_eq!(result, Err(UpdateError::BadInput));
+            assert_eq!(state, original);
+        }
     }
 
     // REQ: OA-RWY-019
