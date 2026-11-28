@@ -3661,7 +3661,7 @@ mod transaction_tests {
         let base = 1_800_000_000_000_000_000i64;
         let first_receipt = base + surveillance::SECOND_NS;
         let changed_receipt = first_receipt + surveillance::SECOND_NS;
-        let stale_restatement_receipt = changed_receipt + 60 * surveillance::SECOND_NS + 1;
+        let stale_restatement_receipt = changed_receipt + 61 * surveillance::SECOND_NS;
         let address = 0x00ab_cdef;
         let gufi = 0x1000_0000_0000_0000_0000_0000_0000_0001;
         let mut runtime = runtime_with_centre(*b"ZAU\0");
@@ -3725,7 +3725,7 @@ mod transaction_tests {
             base,
         );
         let stale_source = base + surveillance::SECOND_NS;
-        let stale_applied_receipt = stale_source + 60 * surveillance::SECOND_NS + 1;
+        let stale_applied_receipt = stale_source + 61 * surveillance::SECOND_NS;
         let stale_applied = co_timed_identity_frame(
             &mut stale_applied_runtime,
             address,
@@ -3758,8 +3758,7 @@ mod transaction_tests {
     #[test]
     fn flight_lease_uses_raw_receipt_at_the_120_second_freshness_boundary() {
         let base = 1_800_000_000_000_000_000i64;
-        let raw_receipt_ns = base + 100_000_000;
-        let issue_receipt_ns = base + surveillance::SECOND_NS;
+        let now_ns = base + 150 * surveillance::SECOND_NS;
         let address = 0x00ab_cdef;
         let gufi = 0x1000_0000_0000_0000_0000_0000_0000_0001u128;
         let drop_ns = surveillance::RECORDED_HOUR_DROP_AFTER_NS;
@@ -3770,6 +3769,12 @@ mod transaction_tests {
         for offset_ns in [-1, 0, 1] {
             let mut runtime = runtime_with_profile(profile);
             seeded_claim_frame(&mut runtime, &[(gufi, address, *b"ZAU\0")], base);
+            let raw_receipt_ns = now_ns - drop_ns + offset_ns;
+            let issue_receipt_ns = if offset_ns > 0 {
+                raw_receipt_ns + surveillance::SECOND_NS - 1
+            } else {
+                raw_receipt_ns
+            };
             let identity = format!(
                 "v1\t{issue_receipt_ns}\t{raw_receipt_ns}\t3\tFLIGHT\t{gufi:032x}\t{address:06x}\tZAU\tFLIGHT\tIDENTITY_PARTIAL\tN123AB\t-\t-\tRAWRECEIPT\t{raw_receipt_ns}"
             );
@@ -3788,7 +3793,7 @@ mod transaction_tests {
                 .any(|outcome| matches!(outcome.operation, Some(oa_flight::Outcome::Applied))));
 
             for tick in 1..=9i64 {
-                let receipt_ns = raw_receipt_ns + tick * 10 * surveillance::SECOND_NS;
+                let receipt_ns = issue_receipt_ns + tick * 10 * surveillance::SECOND_NS;
                 let line = format!(
                     "v1\t{receipt_ns}\t{receipt_ns}\t{}\tSURVEILLANCE\t00000000000000000000000000000000\t{address:06x}\tZAU\tPOS\t410000000\t-870000000\t10000\t0\t0\t0\tCALLSIGN\tN123AB",
                     tick + 10
@@ -3804,7 +3809,6 @@ mod transaction_tests {
                 .unwrap();
             }
 
-            let now_ns = raw_receipt_ns + drop_ns + offset_ns;
             let mut events = Vec::with_capacity(4);
             for (index, source_ns) in [
                 now_ns - 2 * 10 * surveillance::SECOND_NS,
