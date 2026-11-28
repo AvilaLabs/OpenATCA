@@ -359,14 +359,19 @@ pub fn convert_recordings(
 #[cfg(test)]
 mod recorded_hour_window_tests {
     use super::*;
+    use crate::input::{EventKind, FlightOperation, Identity, NormalizedEvent, SourceKind};
+    use crate::recordings::EventProvenance;
+    use crate::recordings_reader::RecordingSource;
 
-    #[test]
-    fn centre_scope_filters_only_other_flight_events_and_keeps_provenance() -> Result<(), String> {
-        // Kills filtering ADS-B by the flight-centre option or rewriting accepted event provenance.
-        use crate::input::{EventKind, FlightOperation, Identity, NormalizedEvent, SourceKind};
-        use crate::recordings::EventProvenance;
-        use crate::recordings_reader::RecordingSource;
+    struct CentreScopeFixture {
+        zau: crate::input::NormalizedEvent,
+        zxx: crate::input::NormalizedEvent,
+        adsb: crate::input::NormalizedEvent,
+        origin: crate::recordings::EventProvenance,
+        adsb_origin: crate::recordings::EventProvenance,
+    }
 
+    fn centre_scope_fixture() -> CentreScopeFixture {
         let make_event = |centre| NormalizedEvent {
             receipt_ns: 2_000_000_000,
             source_ns: 1_000_000_000,
@@ -420,6 +425,25 @@ mod recorded_hour_window_tests {
             source: RecordingSource::Adsb,
             ..origin
         };
+        CentreScopeFixture {
+            zau,
+            zxx,
+            adsb,
+            origin,
+            adsb_origin,
+        }
+    }
+
+    #[test]
+    fn centre_scope_filters_only_other_flight_events_and_keeps_provenance() -> Result<(), String> {
+        // Kills filtering ADS-B by the flight-centre option or rewriting accepted event provenance.
+        let CentreScopeFixture {
+            zau,
+            zxx,
+            adsb,
+            origin,
+            adsb_origin,
+        } = centre_scope_fixture();
         let mut normalized = String::from("OA-RS\t1\n");
         let mut provenance = String::new();
         let (excluded, selected) = {

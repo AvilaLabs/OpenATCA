@@ -24,6 +24,14 @@ fn write_oaf(path: &Path, kind: u8, sequence: u64, receipt_ns: i64, jms_ms: i64,
     fs::write(path, frame).unwrap();
 }
 
+fn manifest_matches_supplied_window(manifest: &str, start_ns: i64, end_ns: i64) -> bool {
+    let expected_start = format!("window_start_ns\t{start_ns}");
+    let expected_end = format!("window_end_ns\t{end_ns}");
+    let start_present = manifest.lines().any(|line| line == expected_start);
+    let end_present = manifest.lines().any(|line| line == expected_end);
+    start_present && end_present
+}
+
 fn adsb_row(time_ns: i64, latitude: f64, longitude: f64) -> oa_adsb::Row {
     oa_adsb::Row {
         time_ns,
@@ -382,6 +390,8 @@ fn window_import_is_half_open_streamed_and_emits_an_hour_envelope() {
     assert_eq!(quarantine.lines().next(), Some(QUARANTINE_HEADER));
     let manifest = fs::read_to_string(imported.join("hour-manifest.tsv")).unwrap();
     assert_eq!(manifest.lines().next(), Some(HOUR_MANIFEST_HEADER));
+    // Kills putting the supplied end in the start slot while recomputing a matching bundle hash.
+    assert!(manifest_matches_supplied_window(&manifest, start_ns, end_ns));
     assert!(imported.join(HOUR_COMPLETE_NAME).is_file());
     assert!(!imported.join("COMPLETE").exists());
     let manifest_bytes = fs::read(imported.join("hour-manifest.tsv")).unwrap();

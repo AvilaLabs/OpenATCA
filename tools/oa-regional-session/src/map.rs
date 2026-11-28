@@ -129,12 +129,14 @@ pub(crate) fn render_inventory(
 mod tests {
     use super::*;
 
-    // kills dropping source or boundary classification from the evidence.
+    // Kills ignoring CIFP point flags and treating dual-source rows as one source only.
     // REQ: OA-REG-008
     #[test]
     fn map_inventory_binds_source_geometry_counts_to_snapshot_identity() {
         let mut model = crate::cli::synthetic_model().expect("public synthetic adaptation");
         model::bit_set(&mut model.points.src_nasr, 0, true);
+        model::bit_set(&mut model.points.src_cifp, 0, true);
+        model::bit_set(&mut model.points.src_cifp, 1, true);
         model.vertices.extend([
             model::PosE7 {
                 lat: 410_000_000,
@@ -185,8 +187,13 @@ mod tests {
             "snapshot_sha256\t{}\n",
             oa_sha256::to_hex(&snapshot_sha256)
         )));
-        assert!(evidence.contains("point\tfix\tNASR\t1\n"));
-        assert!(evidence.contains("point\tfix\tUNATTRIBUTED\t1\n"));
+        let nasr_sources = 1usize;
+        let dual_sources = 1usize;
+        let cifp_only_sources = 1usize;
+        let expected_cifp_sources = dual_sources + cifp_only_sources;
+        assert!(evidence.contains(&format!("point\tfix\tNASR\t{nasr_sources}\n")));
+        assert!(evidence.contains(&format!("point\tfix\tCIFP\t{expected_cifp_sources}\n")));
+        assert!(!evidence.contains("point\tfix\tUNATTRIBUTED"));
         assert!(evidence.contains("boundary\tNASR_ARB\tARTCC HIGH\t1\n"));
     }
 }
