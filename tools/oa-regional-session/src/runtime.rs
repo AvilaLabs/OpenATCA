@@ -1853,6 +1853,7 @@ fn execute(
                 || e.input_receipt_ns < 0
                 || e.input_receipt_ns > e.receipt_ns
                 || e.source_ns > e.input_receipt_ns
+                || oa_sealed::in_sealed_window(e.input_receipt_ns)
         })
     {
         return Err("malformed receipt batch".into());
@@ -3803,8 +3804,8 @@ mod transaction_tests {
         }
     }
 
-    // Kills the mutation that accepts a caller-constructed raw receipt after its issue cutoff.
-    // REQ: OA-REG-013
+    // Kills inconsistent raw clocks and a sealed raw receipt hidden by an outside issue cutoff.
+    // REQ: OA-REG-013, OA-SEAL-014
     #[test]
     fn runtime_refuses_inconsistent_raw_receipt_at_the_batch_boundary() {
         let mut runtime = runtime_with_centre(*b"ZAU1");
@@ -3823,6 +3824,40 @@ mod transaction_tests {
             },
         );
         assert!(result.is_err());
+        assert!(runtime.known_flights.is_empty());
+        assert_eq!(flight::flight_driver_report(&runtime.flights).applied, 0);
+
+        let second_ns = surveillance::SECOND_NS;
+        let (source_ns, input_receipt_ns, receipt_ns) = oa_sealed::sealed_windows()
+            .iter()
+            .find_map(|window| {
+                let input_receipt_ns = window.to_ns.checked_sub(1)?;
+                let source_ns = window.from_ns.checked_sub(1)?;
+                let receipt_ns = input_receipt_ns
+                    .checked_add(second_ns - 1)?
+                    .checked_div(second_ns)?
+                    .checked_mul(second_ns)?;
+                (source_ns >= 0
+                    && oa_sealed::in_sealed_window(input_receipt_ns)
+                    && !oa_sealed::in_sealed_window(source_ns)
+                    && !oa_sealed::in_sealed_window(receipt_ns))
+                .then_some((source_ns, input_receipt_ns, receipt_ns))
+            })
+            .expect("public sealed list has a raw/issue boundary fixture");
+        let row = format!(
+            "v1\t{receipt_ns}\t{source_ns}\t1\tFLIGHT\t00000000000000000000000000000001\t000000\tZAU1\tFLIGHT\tIDENTITY_PARTIAL\tABC123\t-\t-"
+        );
+        let mut sealed_raw_event = parse_event_line(&row).unwrap();
+        sealed_raw_event.input_receipt_ns = input_receipt_ns;
+        let sealed_result = regional_step(
+            &mut runtime,
+            &ReceiptBatch {
+                receipt_ns,
+                source_clock_regressions: 0,
+                events: vec![sealed_raw_event],
+            },
+        );
+        assert!(sealed_result.is_err());
         assert!(runtime.known_flights.is_empty());
         assert_eq!(flight::flight_driver_report(&runtime.flights).applied, 0);
     }

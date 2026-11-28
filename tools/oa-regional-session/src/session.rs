@@ -151,10 +151,17 @@ pub fn push_event(
     if cursor.closed {
         return Err(SessionError::CursorClosed);
     }
-    if event.receipt_ns < 0 || event.source_ns < 0 || event.source_ns > event.receipt_ns {
+    if event.receipt_ns < 0
+        || event.input_receipt_ns < 0
+        || event.source_ns < 0
+        || event.input_receipt_ns > event.receipt_ns
+        || event.source_ns > event.input_receipt_ns
+    {
         return Err(SessionError::InvalidTime);
     }
-    if oa_sealed::in_sealed_window(event.source_ns) || oa_sealed::in_sealed_window(event.receipt_ns)
+    if oa_sealed::in_sealed_window(event.source_ns)
+        || oa_sealed::in_sealed_window(event.receipt_ns)
+        || oa_sealed::in_sealed_window(event.input_receipt_ns)
     {
         return Err(SessionError::SealedTimestamp);
     }
@@ -312,8 +319,8 @@ pub fn summarize_input_batch_with_limit(
 mod profile_limit_tests {
     use super::{
         flush_receipt_group, push_event, session_cursor_new, session_cursor_new_with_limit,
-        session_cursor_new_with_profile_limits, SessionError, MAX_EVENTS_PER_RECEIPT,
-        MAX_RECORDED_PROFILE_EVENTS, RECORDED_HOUR_MAX_EVENTS_PER_RECEIPT,
+        session_cursor_new_with_profile_limits, session_total_events, SessionError,
+        MAX_EVENTS_PER_RECEIPT, MAX_RECORDED_PROFILE_EVENTS, RECORDED_HOUR_MAX_EVENTS_PER_RECEIPT,
     };
     use crate::input::{EventKind, Identity, NormalizedEvent, SourceKind};
 
@@ -344,6 +351,37 @@ mod profile_limit_tests {
                 track_callsign: None,
             },
         }
+    }
+
+    // Kills bypassing the raw receipt through an issue cutoff outside the sealed span.
+    // REQ: OA-REG-013, OA-SEAL-014
+    #[test]
+    fn raw_receipt_inside_public_sealed_window_refuses_before_issue_cutoff() {
+        let second_ns = 1_000_000_000i64;
+        let candidate = oa_sealed::sealed_windows().iter().find_map(|window| {
+            let input_receipt_ns = window.to_ns.checked_sub(1)?;
+            let source_ns = window.from_ns.checked_sub(1)?;
+            let issue_receipt_ns = input_receipt_ns
+                .checked_add(second_ns - 1)?
+                .checked_div(second_ns)?
+                .checked_mul(second_ns)?;
+            (source_ns >= 0
+                && oa_sealed::in_sealed_window(input_receipt_ns)
+                && !oa_sealed::in_sealed_window(source_ns)
+                && !oa_sealed::in_sealed_window(issue_receipt_ns))
+            .then_some((source_ns, input_receipt_ns, issue_receipt_ns))
+        });
+        let (source_ns, input_receipt_ns, issue_receipt_ns) =
+            candidate.expect("public sealed list has a raw/issue boundary fixture");
+        let mut event = event_at(1, issue_receipt_ns);
+        event.input_receipt_ns = input_receipt_ns;
+        event.source_ns = source_ns;
+        let mut cursor = session_cursor_new();
+        assert_eq!(
+            push_event(&mut cursor, event),
+            Err(SessionError::SealedTimestamp)
+        );
+        assert_eq!(session_total_events(&cursor), 0);
     }
 
     #[test]
