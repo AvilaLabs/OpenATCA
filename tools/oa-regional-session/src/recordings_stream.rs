@@ -1045,6 +1045,7 @@ pub(crate) fn stream_normalized_events_with_limit(
         .try_reserve(receipt_group_limit)
         .map_err(|_| "normalized watermark queue allocation refused")?;
     let mut pending_arrival_order = 0u64;
+    let mut normalized_sequences = [0u64; 5];
     let mut quality_cache = oa_track::adsb::AdsbQualityCache::default();
     let mut counts = NormalizedAdapterCounts::default();
     let recording = stream_oaf_segments_in_window(inputs, receive_window_ns, |frame| {
@@ -1202,6 +1203,7 @@ pub(crate) fn stream_normalized_events_with_limit(
             frame.receipt_ns,
             receipt_group_limit,
             &mut pending,
+            &mut normalized_sequences,
             &mut visit,
         )?;
         Ok(())
@@ -1211,6 +1213,7 @@ pub(crate) fn stream_normalized_events_with_limit(
         i64::MAX,
         receipt_group_limit,
         &mut pending,
+        &mut normalized_sequences,
         &mut visit,
     )?;
     Ok(NormalizedStreamSummary {
@@ -1311,17 +1314,30 @@ fn flush_normalized_group(
         crate::input::NormalizedEvent,
         crate::recordings::EventProvenance,
     )>,
-    receipt: &mut Option<i64>,
+    normalized_sequences: &mut [u64; 5],
     visit: &mut impl FnMut(
         crate::input::NormalizedEvent,
         crate::recordings::EventProvenance,
     ) -> Result<(), String>,
 ) -> Result<(), String> {
     pending.sort_by_key(|(event, _)| (event.source, event.sequence));
-    for (event, provenance) in pending.drain(..) {
+    for (mut event, provenance) in pending.drain(..) {
+        let sequence_index = match event.source {
+            crate::input::SourceKind::Surveillance => 0,
+            crate::input::SourceKind::Flight => 1,
+            crate::input::SourceKind::Route => 2,
+            crate::input::SourceKind::Weather => 3,
+            crate::input::SourceKind::Adaptation => 4,
+        };
+        let next_sequence = normalized_sequences
+            .get_mut(sequence_index)
+            .ok_or("normalized sequence source index invariant")?;
+        event.sequence = *next_sequence;
+        *next_sequence = next_sequence
+            .checked_add(1)
+            .ok_or("normalized sequence overflow")?;
         visit(event, provenance)?;
     }
-    *receipt = None;
     Ok(())
 }
 
@@ -1333,6 +1349,7 @@ fn flush_watermarked_groups(
         crate::input::NormalizedEvent,
         crate::recordings::EventProvenance,
     )>,
+    normalized_sequences: &mut [u64; 5],
     visit: &mut impl FnMut(
         crate::input::NormalizedEvent,
         crate::recordings::EventProvenance,
@@ -1362,8 +1379,7 @@ fn flush_watermarked_groups(
                 .ok_or("normalized watermark queue lost an event")?;
             group.push((entry.event, entry.provenance));
         }
-        let mut receipt = Some(receipt_ns);
-        flush_normalized_group(group, &mut receipt, visit)?;
+        flush_normalized_group(group, normalized_sequences, visit)?;
     }
     Ok(())
 }
@@ -1872,6 +1888,10 @@ mod tests {
     #[test]
     fn archive_issue_groups_wait_for_global_header_watermark() -> Result<(), Box<dyn Error>> {
         use super::stream_normalized_events;
+        use crate::session::{
+            flush_receipt_group, push_event, session_cursor_new_with_profile_limits,
+            MAX_EVENTS_PER_RECEIPT,
+        };
         use std::fs::OpenOptions;
 
         let path = temporary_path("adsb_issue_watermark")?;
@@ -1916,20 +1936,78 @@ mod tests {
             source: RecordingSource::Adsb,
             path: path.clone(),
         }];
-        let mut issue_receipts = Vec::new();
-        let result = stream_normalized_events(&inputs, None, *b"ZAU1", |event, _| {
-            issue_receipts.push(event.receipt_ns);
+        let mut cursor = session_cursor_new_with_profile_limits(16, MAX_EVENTS_PER_RECEIPT)
+            .map_err(|error| std::io::Error::other(format!("cursor init: {error:?}")))?;
+        let mut observed = Vec::new();
+        let mut completed = Vec::new();
+        let result = stream_normalized_events(&inputs, None, *b"ZAU1", |event, provenance| {
+            let batch = push_event(&mut cursor, event)
+                .map_err(|error| format!("session rejected normalized event: {error:?}"))?;
+            observed.push((
+                event.receipt_ns,
+                event.source_ns,
+                event.sequence,
+                provenance.frame_sequence,
+                provenance.input_receipt_ns,
+                provenance.emitted_item_ordinal,
+            ));
+            if let Some(batch) = batch {
+                completed.push(batch);
+            }
             Ok(())
         });
         let _ = fs::remove_file(&path);
         let summary = result?;
+        if let Some(batch) = flush_receipt_group(&mut cursor)
+            .map_err(|error| std::io::Error::other(format!("session flush: {error:?}")))?
+        {
+            completed.push(batch);
+        }
         assert_eq!(summary.normalized_events, 3);
-        let expected_issue_times = [
-            base + 1_000_000_000,
-            base + 2_000_000_000,
-            base + 3_000_000_000,
+        assert_eq!(
+            observed,
+            vec![
+                (
+                    base + 1_000_000_000,
+                    base + 100_000_000,
+                    0,
+                    1,
+                    base + 100_000_000,
+                    0,
+                ),
+                (
+                    base + 2_000_000_000,
+                    base + 1_100_000_000,
+                    1,
+                    2,
+                    base + 1_100_000_000,
+                    0,
+                ),
+                (
+                    base + 3_000_000_000,
+                    base + 2_100_000_000,
+                    2,
+                    1,
+                    base + 100_000_000,
+                    1,
+                ),
+            ]
+        );
+        let completed_rows: Vec<_> = completed
+            .iter()
+            .flat_map(|batch| {
+                batch
+                    .events
+                    .iter()
+                    .map(|event| (batch.receipt_ns, event.source_ns, event.sequence))
+            })
+            .collect();
+        let expected_session_rows = [
+            (base + 1_000_000_000, base + 100_000_000, 0),
+            (base + 2_000_000_000, base + 1_100_000_000, 1),
+            (base + 3_000_000_000, base + 2_100_000_000, 2),
         ];
-        assert_eq!(issue_receipts, expected_issue_times);
+        assert_eq!(completed_rows, expected_session_rows);
         Ok(())
     }
 
