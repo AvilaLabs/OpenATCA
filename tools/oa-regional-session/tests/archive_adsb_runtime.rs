@@ -15,6 +15,7 @@ use oa_regional_session::session::{
 const OBSERVATIONS: usize = 5;
 const SECOND_NS: i64 = 1_000_000_000;
 const ADDRESS: u32 = 0x00ab_cdef;
+const SOURCE_LATITUDE_E7: i32 = 419_000_000;
 
 fn scratch_dir() -> PathBuf {
     let nonce = SystemTime::now()
@@ -28,7 +29,7 @@ fn valid_airborne_row(time_ns: i64, longitude_e7: i32) -> oa_adsb::Row {
     oa_adsb::Row {
         time_ns,
         icao: ADDRESS,
-        lat_e7: 419_000_000,
+        lat_e7: SOURCE_LATITUDE_E7,
         lon_e7: longitude_e7,
         baro_alt_ft: 35_000,
         gs_dkt: 4_500,
@@ -139,10 +140,12 @@ fn recorded_hour_adsb_adapter_roundtrip_reaches_regional_raster() {
     let base_ns = base_ms.checked_mul(1_000_000).expect("convert epoch to ns");
     write_sfdps_status(&sfdps_path, base_ns);
 
+    let mut source_longitudes = Vec::with_capacity(OBSERVATIONS);
     for index in 0..OBSERVATIONS {
         let step = i64::try_from(index).expect("small fixture index") * SECOND_NS;
         let time_ns = base_ns + step;
         let longitude_e7 = -883_000_000 + i32::try_from(index).expect("small index") * 27_900;
+        source_longitudes.push(longitude_e7);
         append_adsb_frame(
             &adsb_path,
             u64::try_from(index).expect("small OAF sequence"),
@@ -174,12 +177,37 @@ fn recorded_hour_adsb_adapter_roundtrip_reaches_regional_raster() {
     assert_eq!(frames.len(), OBSERVATIONS);
     let last = frames.last().expect("normalized timeline reached runtime");
     assert!(frames.iter().all(|frame| frame.input.source_events[0] == 1));
-    assert!(last
+    assert!(last.surveillance.displayed > 0);
+    // Kills replacing each report longitude with one constant in-view position.
+    let last_track = last
         .surveillance
         .tracks
         .iter()
-        .any(|track| track.address == ADDRESS));
-    assert!(last.surveillance.displayed > 0);
+        .find(|track| track.address == ADDRESS)
+        .expect("confirmed synthetic track is present");
+    let expected_last_longitude = source_longitudes
+        .last()
+        .copied()
+        .expect("synthetic reports include a final source position");
+    assert_eq!(last_track.lon_e7, expected_last_longitude);
+    assert_eq!(last_track.lat_e7, SOURCE_LATITUDE_E7);
+    let first_confirmed = frames
+        .iter()
+        .skip(1)
+        .find_map(|frame| {
+            frame
+                .surveillance
+                .tracks
+                .iter()
+                .find(|track| track.address == ADDRESS)
+        })
+        .expect("confirmation begins after the initial report");
+    let expected_first_confirmed_longitude = source_longitudes
+        .get(1)
+        .copied()
+        .expect("synthetic reports include a confirmation position");
+    assert_eq!(first_confirmed.lon_e7, expected_first_confirmed_longitude);
+    assert_ne!(first_confirmed.lon_e7, last_track.lon_e7);
 
     let rendered = regional_pixels(&runtime).expect("regional pixels are available");
     assert_eq!(rendered.len(), 800 * 600 * 4);
