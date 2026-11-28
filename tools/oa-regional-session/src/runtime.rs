@@ -5145,9 +5145,10 @@ mod transaction_tests {
         regional_console_overlay(&mut plain, console).expect("pre-loss plain console state");
 
         for runtime in [&mut monitored, &mut plain] {
+            // Seed ends at receipt/source 4 s; this cutoff is 9 s with no newer source time.
             let stale = regional_step(
                 runtime,
-                &final_monitor_batch(9_000_000_000, 4_201_000_000, 410_000_000, 0, false),
+                &final_monitor_batch(9_000_000_000, 4_000_000_000, 410_000_000, 0, false),
             )
             .expect("synthetic stale frame is admitted");
             if runtime.final_monitor.is_some() {
@@ -5157,6 +5158,9 @@ mod transaction_tests {
                         FinalMonitorDegradation::StalePredictionAndInputCadence
                     )
                 );
+                let timing = stale.final_monitor.timing.expect("stale evaluation timing");
+                assert_eq!(timing.observed_input_interval_ns, 5_000_000_000);
+                assert_eq!(timing.prediction_age_ns, 5_000_000_000);
             }
         }
 
