@@ -558,7 +558,7 @@ fn family_overflow_draws_allocated_rows_and_reports_omissions_in_reserved_strip(
         .unwrap();
     let heading_index = msaw_text
         .iter()
-        .position(|text| text.starts_with("MSAW WARNING"))
+        .position(|text| text == "MSAW PARTIAL")
         .unwrap();
     assert_ne!(
         msaw.texts.y.get(overflow_index),
@@ -589,10 +589,18 @@ fn family_overflow_draws_allocated_rows_and_reports_omissions_in_reserved_strip(
     assert_eq!(final_stats.omitted, 1);
     assert_eq!(final_stats.protection_lost, 1);
     assert_eq!(final_stats.warning, 1);
-    assert!(final_text
+    let final_heading_index = final_text
         .iter()
-        .any(|text| text.contains("PROTECTION LOST PARTIAL")));
-    assert!(final_text.iter().any(|text| text == "FINAL +1 NOT SHOWN"));
+        .position(|text| text == "FINAL DEGRADED PROTECTION LOST PARTIAL")
+        .unwrap();
+    let final_overflow_index = final_text
+        .iter()
+        .position(|text| text == "FINAL +1 NOT SHOWN")
+        .unwrap();
+    assert_ne!(
+        final_list.texts.y.get(final_heading_index),
+        final_list.texts.y.get(final_overflow_index)
+    );
 }
 
 // Mutation killed: keep the 128-row projection scratch limit as an input cap on budgeted APIs.
