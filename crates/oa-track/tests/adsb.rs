@@ -126,67 +126,80 @@ fn quality_carry_forward_defaults_and_geometric_altitude() {
     assert_eq!(m[0].flags & M_HAS_VEL, 0);
 }
 
+// REQ: OA-TRK-286
 #[test]
 fn bounded_quality_cache_carries_across_frames_and_expires_for_refill() {
     let mut cache = AdsbQualityCache::new(1);
+    assert_eq!(cache.len(), 0);
+    assert!(cache.is_empty());
+    let cfg = AdsbConfig {
+        gates: oa_truth::TruthConfig {
+            quality_carry_ms: 10_000,
+            ..DEFAULT_CONFIG
+        },
+        ..AdsbConfig::default()
+    };
     let first = row(1, 0x100001, 41.9, -88.3);
-    let (measurements, stats) =
-        adsb_measurements_with_cache(&reports(&[first]), &AdsbConfig::default(), &mut cache);
+    let (measurements, stats) = adsb_measurements_with_cache(&reports(&[first]), &cfg, &mut cache);
     assert_eq!((measurements.len(), stats.passed), (1, 1));
     assert_eq!(cache.len(), 1);
+    assert!(!cache.is_empty());
 
-    let mut carried = row(10, 0x100001, 41.9, -88.2);
+    let mut rejected_without_state = row(9, 0x100002, 41.9, -88.1);
+    rejected_without_state.nac_p = NONE_U8;
+    rejected_without_state.nic = NONE_U8;
+    rejected_without_state.sil = NONE_U8;
+    rejected_without_state.version = NONE_U8;
+    rejected_without_state.nac_v = NONE_U8;
+    let (measurements, stats) =
+        adsb_measurements_with_cache(&reports(&[rejected_without_state]), &cfg, &mut cache);
+    assert!(measurements.is_empty());
+    assert_eq!(stats.removed[oa_truth::REM_NO_QUALITY], 1);
+    assert_eq!(stats.quality_state_capacity_refused, 0);
+    assert_eq!(cache.len(), 1);
+
+    // oa-truth carries a held value inclusively through the configured age.
+    let mut carried = row(11, 0x100001, 41.9, -88.2);
     carried.nac_p = NONE_U8;
     carried.nic = NONE_U8;
     carried.sil = NONE_U8;
     carried.version = NONE_U8;
     carried.nac_v = NONE_U8;
     let (measurements, stats) =
-        adsb_measurements_with_cache(&reports(&[carried]), &AdsbConfig::default(), &mut cache);
+        adsb_measurements_with_cache(&reports(&[carried]), &cfg, &mut cache);
     assert_eq!((measurements.len(), stats.passed), (1, 1));
-
-    let full_quality_other = row(20, 0x100002, 41.9, -88.1);
-    let (measurements, stats) = adsb_measurements_with_cache(
-        &reports(&[full_quality_other]),
-        &AdsbConfig::default(),
-        &mut cache,
-    );
-    assert_eq!((measurements.len(), stats.passed), (1, 1));
-    assert_eq!(stats.quality_state_capacity_refused, 1);
     assert_eq!(cache.len(), 1);
+    assert!(!cache.is_empty());
 
-    let mut other_without_quality = row(21, 0x100002, 41.9, -88.0);
+    let mut other_without_quality = row(12, 0x100002, 41.9, -88.0);
     other_without_quality.nac_p = NONE_U8;
     other_without_quality.nic = NONE_U8;
     other_without_quality.sil = NONE_U8;
     other_without_quality.version = NONE_U8;
     other_without_quality.nac_v = NONE_U8;
-    let (measurements, stats) = adsb_measurements_with_cache(
-        &reports(&[other_without_quality]),
-        &AdsbConfig::default(),
-        &mut cache,
-    );
+    let (measurements, stats) =
+        adsb_measurements_with_cache(&reports(&[other_without_quality]), &cfg, &mut cache);
     assert!(measurements.is_empty());
     assert_eq!(stats.removed[oa_truth::REM_NO_QUALITY], 1);
+    assert_eq!(stats.quality_state_capacity_refused, 0);
+    assert_eq!(cache.len(), 0);
+    assert!(cache.is_empty());
 
-    let refill = row(62, 0x100002, 41.9, -88.0);
-    let (measurements, stats) =
-        adsb_measurements_with_cache(&reports(&[refill]), &AdsbConfig::default(), &mut cache);
+    let refill = row(13, 0x100002, 41.9, -88.0);
+    let (measurements, stats) = adsb_measurements_with_cache(&reports(&[refill]), &cfg, &mut cache);
     assert_eq!((measurements.len(), stats.passed), (1, 1));
     assert_eq!(stats.quality_state_capacity_refused, 0);
     assert_eq!(cache.len(), 1);
+    assert!(!cache.is_empty());
 
-    let mut carried_after_refill = row(63, 0x100002, 41.9, -87.9);
+    let mut carried_after_refill = row(23, 0x100002, 41.9, -87.9);
     carried_after_refill.nac_p = NONE_U8;
     carried_after_refill.nic = NONE_U8;
     carried_after_refill.sil = NONE_U8;
     carried_after_refill.version = NONE_U8;
     carried_after_refill.nac_v = NONE_U8;
-    let (measurements, stats) = adsb_measurements_with_cache(
-        &reports(&[carried_after_refill]),
-        &AdsbConfig::default(),
-        &mut cache,
-    );
+    let (measurements, stats) =
+        adsb_measurements_with_cache(&reports(&[carried_after_refill]), &cfg, &mut cache);
     assert_eq!((measurements.len(), stats.passed), (1, 1));
 }
 
