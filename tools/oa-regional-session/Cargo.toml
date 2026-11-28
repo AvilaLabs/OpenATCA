@@ -98,3 +98,5 @@ path = "src/bin/regional-console.rs"
 [dev-dependencies]
 # F1a: construct the WGS84 ellipsoid for the real traffic-renderer declutter regression.
 oa-geo = { path = "../../crates/oa-geo" }
+# F1a: construct a valid in-memory terrain grid for the provider open-table refusal regression.
+oa-tiff = { path = "../../crates/oa-tiff" }

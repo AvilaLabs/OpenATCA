@@ -5,6 +5,7 @@
     clippy::panic
 )]
 
+use oa_display::core::status_strip::{regional_status_plan, StatusStripRow};
 use oa_display::core::traffic::MAX_TARGET_SYMBOL_RADIUS_PX;
 use oa_display::palette::{bytes_of, TARGET};
 use oa_display::project::{projection_new, unproject};
@@ -20,8 +21,10 @@ const SECOND_FRAME_NS: i64 = 2_000_000_000;
 const CENTRE_LAT_E7: i32 = 410_000_000;
 const CENTRE_LON_E7: i32 = -870_000_000;
 const RANGE_NM: f64 = 180.0;
-const TOP_INSET_PX: u32 = 252;
-const EDGE_SCREENS: [(i32, i32); 4] = [(20, 380), (780, 380), (400, 253), (400, 584)];
+fn edge_screens() -> [(i32, i32); 4] {
+    let inset = i32::try_from(regional_status_plan().unwrap().top_inset_px()).unwrap();
+    [(20, 380), (780, 380), (400, inset + 1), (400, 584)]
+}
 
 fn surveillance() -> oa_regional_session::surveillance::Surveillance {
     surveillance_new(
@@ -109,18 +112,25 @@ fn has_target_pixel(pixels: &[u8], screen: (i32, i32)) -> bool {
 
 #[test]
 fn regional_reserved_status_strip_reports_faults_without_covering_edge_targets() {
+    let plan = regional_status_plan().expect("shared status plan is valid");
+    let edge_screens = edge_screens();
     let projection = projection_new(
         CENTRE_LAT_E7,
         CENTRE_LON_E7,
         RANGE_NM,
         FRAME_WIDTH,
         FRAME_HEIGHT,
-        TOP_INSET_PX,
+        plan.top_inset_px(),
     )
     .expect("synthetic top-inset projection is valid");
     // The fifth source lies in the reserved header and is correctly off-map, not hidden traffic.
-    let mut source_screens = EDGE_SCREENS.to_vec();
-    source_screens.push((400, 175));
+    let mut source_screens = edge_screens.to_vec();
+    source_screens.push((
+        400,
+        plan.row(StatusStripRow::FinalHeading)
+            .expect("final heading has a reserved row")
+            .y_px(),
+    ));
     let positions: Vec<_> = source_screens
         .iter()
         .map(|&(x, y)| unproject(&projection, x * 16, y * 16).expect("edge point is invertible"))
@@ -193,16 +203,16 @@ fn regional_reserved_status_strip_reports_faults_without_covering_edge_targets()
     assert_eq!(stats.targets_under_banner, 0);
     assert_eq!(
         usize::try_from(frame.displayed).unwrap_or(0),
-        EDGE_SCREENS.len()
+        edge_screens.len()
     );
     assert_eq!(
         usize::try_from(frame.off_map).unwrap_or(usize::MAX),
-        source_screens.len() - EDGE_SCREENS.len(),
+        source_screens.len() - edge_screens.len(),
         "the header-positioned fifth report is off-map"
     );
 
     let pixels = surveillance_pixels(&session).expect("completed frame has pixels");
-    for edge in EDGE_SCREENS {
+    for edge in edge_screens {
         assert!(
             has_target_pixel(pixels, edge),
             "status strip obscured target at independent screen coordinate {edge:?}"

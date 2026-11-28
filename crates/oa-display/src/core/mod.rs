@@ -14,6 +14,7 @@ pub mod project;
 pub mod raster;
 pub mod safety;
 pub mod scene;
+pub mod status_strip;
 pub mod text;
 pub mod traffic;
 pub mod workstation;

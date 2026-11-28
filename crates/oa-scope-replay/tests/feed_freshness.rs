@@ -5,6 +5,7 @@ use std::io::Cursor;
 
 use oa_airspace::model::{empty_model, Meta, Model};
 use oa_display::safety::{FeedState, FeedStatus};
+use oa_display::status_strip::{regional_status_plan, StatusStripRow};
 use oa_display::traffic::DEFAULT_STYLE;
 use oa_feed::health::{observe_frame, FeedHealth, STATE_CONNECTED};
 use oa_feed::{encode_frame, read_frames, Kind, HEADER_LEN, TRAILER_LEN};
@@ -205,6 +206,19 @@ fn status_heartbeat_does_not_refresh_message_age_or_clear_frozen_picture() {
 
 #[test]
 fn reserved_status_header_uses_compact_band_only_when_explicitly_enabled() {
+    let status_plan = regional_status_plan().expect("shared status plan is valid");
+    let safety_rows = [
+        status_plan
+            .row(StatusStripRow::Safety(0))
+            .expect("first safety row is reserved")
+            .y_px()
+            * 16,
+        status_plan
+            .row(StatusStripRow::Safety(1))
+            .expect("second safety row is reserved")
+            .y_px()
+            * 16,
+    ];
     let mut replay = replay_new_with_top_inset(
         model(),
         &ReplayConfig {
@@ -217,7 +231,7 @@ fn reserved_status_header_uses_compact_band_only_when_explicitly_enabled() {
             style: DEFAULT_STYLE,
             convert: DEFAULT_CONVERT,
         },
-        184,
+        status_plan.top_inset_px(),
     )
     .expect("synthetic scope with reserved status band initializes");
     let states = state_table_new(10 * S, 0).expect("synthetic state table initializes");
@@ -263,7 +277,7 @@ fn reserved_status_header_uses_compact_band_only_when_explicitly_enabled() {
             .expect("display text span is valid");
         if text.starts_with("PICTURE ") || text.starts_with("NET ") || text.starts_with("FEED ") {
             status_rows += 1;
-            assert!((151 * 16..184 * 16).contains(&y));
+            assert!(safety_rows.contains(&y));
         }
         summary_visible |= text.starts_with('+') && text.contains("MORE STATES NOT SHOWN");
     }

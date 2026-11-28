@@ -1523,11 +1523,12 @@ fn the_hand_built_map_renders_to_a_pinned_hash() {
         oa_display::ppm::write_ppm(&mut out, &sp, &buf).unwrap();
         std::fs::write(std::path::Path::new(&dir).join("hand-built-map.ppm"), out).unwrap();
     }
-    // Re-pinned: the HIDDEN row is wider than 800 pixels at 50 NM, so its cut is now marked at
-    // the right edge by a bar.
+    // The renderer-derived 19-pixel legend pitch moves row anchors from 8/26/44/62/80 to
+    // 8/27/46/65/84, so the legend furniture and this raster digest change together. The HIDDEN
+    // row remains wider than 800 pixels at 50 NM and is marked at the right edge by a bar.
     assert_eq!(
         to_hex(&d),
-        "04ded5ea84775dd45e4aaaa9964c2874748f855ecb978ec26b6d772d8fc89c17"
+        "e175668098385b3e90994ec902aa2e33779f39743d15130b7984894e8413a210"
     );
 }
 
@@ -1810,8 +1811,8 @@ fn compact_hidden_legend_uses_nine_pixel_text_and_fits_its_full_line() {
     let expected = "HIDDEN NM:FIX>19999.9, TERM>19999.9, RWY/LOC>19999.9, NON-IFR>19999.9, NDB/DME/TACAN>19999.9, LABEL>19999.9, VOR/IFR LABEL>19999.9;OFF:BOUNDARIES, AIRWAYS, RINGS";
     let m = model(Tail::None);
     let expected_chars = expected.chars().count() as i32;
-    let bounds = (6, 42, 8 + expected_chars * 9 + 2, 57);
-    assert_eq!(bounds, (6, 42, 1_459, 57));
+    let bounds = (6, 44, 8 + expected_chars * 9 + 2, 59);
+    assert_eq!(bounds, (6, 44, 1_459, 59));
     assert!(bounds.2 <= 1_500);
     assert!(8 + expected_chars * 12 + 2 > 1_500);
     for (width, expected_cuts) in [(1_500, 0u32), (1_450, 1u32)] {
@@ -1846,7 +1847,7 @@ fn compact_hidden_legend_uses_nine_pixel_text_and_fits_its_full_line() {
             .position(|text| *text == expected)
             .expect("complete hidden legend row is present");
         assert_eq!(list.texts.size[row], 9);
-        assert_eq!((list.texts.x[row], list.texts.y[row]), (8 * 16, 44 * 16));
+        assert_eq!((list.texts.x[row], list.texts.y[row]), (8 * 16, 46 * 16));
         assert_eq!(stats.legend_cut, expected_cuts);
         let bars: Vec<_> = (0..list.lines.layer.len())
             .filter(|&index| {
@@ -1858,7 +1859,7 @@ fn compact_hidden_legend_uses_nine_pixel_text_and_fits_its_full_line() {
         if expected_cuts == 0 {
             assert!(bars.is_empty());
         } else {
-            assert_eq!(bars.as_slice(), &[(44 * 16, 53 * 16)]);
+            assert_eq!(bars.as_slice(), &[(46 * 16, 55 * 16)]);
         }
     }
 }

@@ -2,7 +2,7 @@
 //! typed intents. This module does not change a flight or call the flight subsystem. The caller
 //! supplies the current target view on every operation, so stale or ambiguous evidence is refused.
 
-use crate::core::font::{text_width_units, CAP_HEIGHT};
+use crate::core::font::{text_block_bounds_px, text_width_units, TextBounds, CAP_HEIGHT};
 use crate::core::list::{push_text, DisplayError, DisplayList, ALIGN_LEFT};
 use crate::core::palette;
 use crate::core::project::Projection;
@@ -507,6 +507,58 @@ fn text_width16(content: &str) -> i64 {
         / i64::from(CAP_HEIGHT)
 }
 
+/// Minimum canvas height that fits the padded two-line selection block below a reserved strip
+/// and above the bottom notice reserve. The bottom candidate determines the earliest fit.
+pub fn minimum_frame_height_with_selection(top_inset_px: u32) -> Result<u32, DisplayError> {
+    let bounds = interaction_text_bounds(0, 0, 22, 2)?;
+    let block_height = bounds
+        .y1
+        .checked_sub(bounds.y0)
+        .ok_or(DisplayError::BadView("interaction text bounds are invalid"))?;
+    top_inset_px
+        .checked_add(
+            u32::try_from(block_height)
+                .map_err(|_| DisplayError::BadView("interaction text height is unrepresentable"))?,
+        )
+        .and_then(|height| height.checked_add(BOTTOM_NOTICE_RESERVE_PX as u32))
+        .ok_or(DisplayError::BadView(
+            "interaction minimum height overflows",
+        ))
+}
+
+fn interaction_text_bounds(
+    x_px: i64,
+    y_px: i64,
+    chars: usize,
+    lines: u32,
+) -> Result<TextBounds, DisplayError> {
+    let x16 = i32::try_from(
+        x_px.checked_mul(16)
+            .ok_or(DisplayError::BadView("interaction position overflows"))?,
+    )
+    .map_err(|_| DisplayError::BadView("interaction position is unrepresentable"))?;
+    let y16 = i32::try_from(
+        y_px.checked_mul(16)
+            .ok_or(DisplayError::BadView("interaction position overflows"))?,
+    )
+    .map_err(|_| DisplayError::BadView("interaction position is unrepresentable"))?;
+    Ok(text_block_bounds_px(
+        (x16, y16),
+        TEXT_SIZE,
+        ALIGN_LEFT,
+        chars,
+        lines,
+        TEXT_PITCH_PX as u32,
+    ))
+}
+
+fn selection_width_chars(selection: &Option<crate::core::text::TextBuf>, status: &str) -> usize {
+    selection
+        .as_ref()
+        .map_or(0, |line| text_str(line).chars().count())
+        .max(status.chars().count())
+}
+
 /// Whether an interaction text block overlaps a higher-priority filled rectangle.
 /// The scan is bounded and uses only the rectangle table's logical rows.
 fn interaction_occluded(
@@ -587,7 +639,11 @@ fn interaction_occluded(
 }
 
 /// Check the text table and backing storage before appending either interaction line.
-fn preflight_text_room(list: &DisplayList, rows: usize, bytes: usize) -> Result<(), DisplayError> {
+pub(crate) fn preflight_text_room(
+    list: &DisplayList,
+    rows: usize,
+    bytes: usize,
+) -> Result<(), DisplayError> {
     if list.faulted {
         return Err(DisplayError::BadView("interaction display list is faulted"));
     }
@@ -698,14 +754,6 @@ pub fn present_interaction(
         palette::TEXT
     };
     let rows = usize::from(selection.is_some()) + 1;
-    let text_height_px = if selection.is_some() {
-        TEXT_PITCH_PX + i64::from(TEXT_SIZE)
-    } else {
-        i64::from(TEXT_SIZE)
-    };
-    let top_px = i64::from(projection.top_inset)
-        .checked_add(TEXT_TOP_PAD_PX)
-        .ok_or(DisplayError::BadView("interaction position overflows"))?;
     let selection_width16 = selection
         .as_ref()
         .map_or(0, |line| text_width16(text_str(line)));
@@ -717,37 +765,43 @@ pub fn present_interaction(
         ));
     }
 
+    let line_count = if selection.is_some() { 2 } else { 1 };
+    let row_chars = selection_width_chars(&selection, status);
+    let relative = interaction_text_bounds(0, 0, row_chars, line_count)?;
     let left_px = TEXT_MARGIN_PX;
-    let text_width_px = text_width16.saturating_add(15) / 16;
-    let right_px = i64::from(projection.width) - TEXT_MARGIN_PX - text_width_px;
-    let bottom_px = i64::from(projection.height) - BOTTOM_NOTICE_RESERVE_PX - text_height_px;
+    let right_px = i64::from(projection.width) - TEXT_MARGIN_PX - i64::from(relative.x1);
+    let bottom_px =
+        i64::from(projection.height) - BOTTOM_NOTICE_RESERVE_PX - i64::from(relative.y1);
+    let top_px = i64::from(projection.top_inset)
+        .checked_sub(i64::from(relative.y0))
+        .and_then(|value| value.checked_add(TEXT_TOP_PAD_PX))
+        .ok_or(DisplayError::BadView("interaction position overflows"))?;
     let candidates = [
         (right_px, top_px),
         (right_px, bottom_px),
         (left_px, bottom_px),
         (left_px, top_px),
     ];
-    let block_width16 = text_width16;
-    let block_height16 = text_height_px * 16;
     let mut placed = None;
     for &(x_px, y_px) in &candidates {
-        if x_px < 0
-            || y_px < i64::from(projection.top_inset)
-            || x_px * 16 + block_width16 > (i64::from(projection.width) - TEXT_MARGIN_PX) * 16
-            || y_px + text_height_px > i64::from(projection.height) - BOTTOM_NOTICE_RESERVE_PX
+        let bounds = interaction_text_bounds(x_px, y_px, row_chars, line_count)?;
+        if bounds.x0 < 0
+            || bounds.x1 > projection.width as i32
+            || bounds.y0 < projection.top_inset as i32
+            || bounds.y1 > projection.height as i32 - BOTTOM_NOTICE_RESERVE_PX as i32
         {
             continue;
         }
-        let candidate_x16 = x_px * 16;
-        let candidate_y16 = y_px * 16;
+        let candidate_x16 = i64::from(bounds.x0) * 16;
+        let candidate_y16 = i64::from(bounds.y0) * 16;
         if !interaction_occluded(
             list,
             candidate_x16,
             candidate_y16,
-            block_width16,
-            block_height16,
+            i64::from(bounds.x1 - bounds.x0) * 16,
+            i64::from(bounds.y1 - bounds.y0) * 16,
         )? {
-            placed = Some((candidate_x16, candidate_y16));
+            placed = Some((x_px * 16, y_px * 16));
             break;
         }
     }

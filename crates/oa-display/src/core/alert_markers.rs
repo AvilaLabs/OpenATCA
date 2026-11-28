@@ -7,12 +7,12 @@
 //! list-capacity checks finish before any display-list mutation. Renderer-owned budgets use the
 //! same typed headings and font metrics as presentation, including a dedicated overflow row.
 
-use crate::core::font::{text_width_units, CAP_HEIGHT};
-use crate::core::list::{
-    push_circle, push_text, DisplayError, DisplayList, ALIGN_CENTRE, ALIGN_LEFT,
-};
+use crate::core::list::{push_circle, push_text, DisplayError, DisplayList, ALIGN_CENTRE};
 use crate::core::palette;
 use crate::core::project::{project, Projection};
+use crate::core::status_strip::{
+    regional_status_plan, RegionalStatusPlan, StatusStripPlacement, StatusStripRow,
+};
 use crate::core::text::{text_new, text_push_dec, text_push_str, text_str};
 
 /// Fixed records read by one presentation call. The regional bridge uses a smaller limit of 32.
@@ -30,24 +30,13 @@ pub const FINAL_MONITOR_HEADER_TEXT_BYTES: usize = 77;
 /// Largest typed alert header reservation, retained for callers reserving either mode.
 pub const ALERT_HEADER_TEXT_BYTES: usize = FINAL_MONITOR_HEADER_TEXT_BYTES;
 pub const ALERT_TEXT_BYTES_PER_MARKER: usize = 1;
-/// Top strip required when an alert family can need a dedicated overflow row.
-pub const ALERT_OVERFLOW_STATUS_INSET_PX: u32 = 252;
-
 /// Sentinel used when `position_known` is zero.
 pub const NO_POSITION_E7: i32 = i32::MIN;
 const ALERT_LAYER: u8 = 13;
 const ALERT_TEXT_SIZE: u8 = 10;
-const ALERT_HEADER_X_PX: i32 = 8;
-const ALERT_HEADER_Y_PX: i32 = 112;
-const ALERT_RESERVED_HEADER_INSET_PX: u32 = 176;
-const ALERT_RESERVED_MSAW_HEADER_Y_PX: i32 = 119;
-const ALERT_RESERVED_FINAL_HEADER_Y_PX: i32 = 135;
-const ALERT_RESERVED_MSAW_OVERFLOW_Y_PX: i32 = 151;
-const ALERT_RESERVED_FINAL_OVERFLOW_Y_PX: i32 = 165;
 const ALERT_OUTER_RADIUS_PX: i32 = 16;
 const ALERT_INNER_RADIUS_PX: i32 = 12;
 const MIN_ALERT_VIEW_WIDTH: u32 = 500;
-const MIN_ALERT_TOP_INSET: u32 = 128;
 
 #[derive(Clone, Copy)]
 enum AlertHeaderSource {
@@ -93,6 +82,7 @@ pub enum MarkerState {
     Warning = 1,
     ProtectionLost = 2,
 }
+const _: () = assert!(core::mem::size_of::<MarkerState>() == 1);
 
 /// One current MSAW alert and its current observed position. Unknown position never becomes a
 /// guessed point; a known position is projected at the observation coordinates supplied here.
@@ -108,8 +98,9 @@ pub struct AlertMarker {
 }
 const _: () = assert!(core::mem::size_of::<AlertMarker>() == 16);
 
-/// Counts for one presentation call. Aggregate counts include all validated input rows; `drawn`
-/// counts the visible points rendered inside the allocated marker budget.
+/// Counts for one presentation call. `examined` counts supplied retained rows; aggregate severity
+/// counts include all validated supplied rows; `omitted` also includes checked producer-reported
+/// rows that could not be retained. `drawn` counts selected visible points within the budget.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[repr(C)]
 pub struct MarkerStats {
@@ -124,11 +115,13 @@ pub struct MarkerStats {
 }
 const _: () = assert!(core::mem::size_of::<MarkerStats>() == 64);
 
+// A7.2: cold struct, size guard waived (one bounded SoA selection bundle per presentation call).
 struct ValidatedMarkerSet {
     stats: MarkerStats,
-    markers: [AlertMarker; MAX_ALERT_MARKERS],
+    states: [MarkerState; MAX_ALERT_MARKERS],
     projected: [Option<(i32, i32)>; MAX_ALERT_MARKERS],
     visible_count: usize,
+    visible_high_severity: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -136,15 +129,6 @@ struct AlertPresentationMode {
     header_source: AlertHeaderSource,
     overflow_reserved: bool,
 }
-
-const EMPTY_MARKER: AlertMarker = AlertMarker {
-    address: 0,
-    lat_e7: NO_POSITION_E7,
-    lon_e7: NO_POSITION_E7,
-    state: MarkerState::Caution,
-    position_known: 0,
-    reserved: [0; 2],
-};
 
 fn bad_alert(what: &'static str) -> DisplayError {
     DisplayError::BadView(what)
@@ -246,38 +230,19 @@ fn partial_header(
     text
 }
 
-fn required_text_width_px(text: &crate::core::text::TextBuf) -> Result<u32, DisplayError> {
+fn required_row_width_px(
+    placement: StatusStripPlacement,
+    text: &crate::core::text::TextBuf,
+) -> Result<u32, DisplayError> {
     if crate::core::text::text_clipped(text) {
-        return Err(bad_alert("MSAW count header exceeds its fixed text buffer"));
+        return Err(bad_alert("status row exceeds its fixed text buffer"));
     }
-    let subpixel = i64::from(crate::core::project::SUBPIXEL);
-    let width16 = i64::from(text_width_units(text_str(text).chars().count()))
-        .checked_mul(i64::from(ALERT_TEXT_SIZE))
-        .and_then(|width| width.checked_mul(subpixel))
-        .and_then(|width| width.checked_div(i64::from(CAP_HEIGHT)))
-        .ok_or(DisplayError::TooLarge {
-            what: "MSAW header width",
-            requested: u128::MAX,
-            limit: u128::from(u32::MAX) * 16,
-        })?;
-    let right_edge16 = i64::from(ALERT_HEADER_X_PX)
-        .checked_mul(subpixel)
-        .and_then(|origin| origin.checked_add(width16))
-        .ok_or(DisplayError::TooLarge {
-            what: "MSAW header width",
-            requested: u128::MAX,
-            limit: u128::from(u32::MAX) * 16,
-        })?;
-    let minimum_width = right_edge16
-        .checked_add(subpixel - 1)
-        .and_then(|extent| extent.checked_div(subpixel))
-        .and_then(|pixels| u32::try_from(pixels).ok())
-        .ok_or(DisplayError::TooLarge {
-            what: "MSAW header width",
-            requested: u128::MAX,
-            limit: u128::from(u32::MAX) * 16,
-        })?;
-    Ok(minimum_width)
+    let bounds = placement.bounds_for(text_str(text))?;
+    u32::try_from(bounds.x1).map_err(|_| DisplayError::TooLarge {
+        what: "status row width",
+        requested: u128::from(bounds.x1.unsigned_abs()),
+        limit: u32::MAX as u128,
+    })
 }
 
 fn overflow_text(source: AlertHeaderSource, omitted: u64) -> crate::core::text::TextBuf {
@@ -343,22 +308,24 @@ pub fn alert_render_budget(
         });
     }
     let source = AlertHeaderSource::from(kind);
+    let plan = regional_status_plan()?;
+    let (heading_row, overflow_row) = alert_status_rows(&plan, source)?;
     let draws = marker_budget;
     let mut minimum_width_px = 0;
     let mut header_bytes = 0;
     for total in 0..=draws {
         let heading = header(maximum_header_stats(source, total), source);
-        minimum_width_px = minimum_width_px.max(required_text_width_px(&heading)?);
+        minimum_width_px = minimum_width_px.max(required_row_width_px(heading_row, &heading)?);
         header_bytes = header_bytes.max(text_str(&heading).len());
     }
     for has_protection_lost in [false, true] {
         let partial = partial_header(source, has_protection_lost);
-        minimum_width_px = minimum_width_px.max(required_text_width_px(&partial)?);
+        minimum_width_px = minimum_width_px.max(required_row_width_px(heading_row, &partial)?);
         header_bytes = header_bytes.max(text_str(&partial).len());
     }
     // The displayed omitted count is exact for every supported target's representable slice size.
     let overflow = overflow_text(source, u64::MAX);
-    minimum_width_px = minimum_width_px.max(required_text_width_px(&overflow)?);
+    minimum_width_px = minimum_width_px.max(required_row_width_px(overflow_row, &overflow)?);
     let overflow_bytes = text_str(&overflow).len();
     let circles = draws
         .checked_mul(ALERT_CIRCLES_PER_MARKER)
@@ -394,7 +361,7 @@ pub fn alert_render_budget(
         texts,
         text_bytes,
         minimum_width_px,
-        minimum_top_inset_px: ALERT_OVERFLOW_STATUS_INSET_PX,
+        minimum_top_inset_px: plan.top_inset_px(),
     })
 }
 
@@ -425,9 +392,8 @@ const _: () = assert!(core::mem::size_of::<FinalMonitorMarker>() == 16);
 
 /// Append current alert markers and their bounded count header to an existing display list.
 ///
-/// The view must provide a 128 px top strip and at least 500 px of width. The header occupies
-/// rows 112..124 below the standard 104 px legend. Exact header width
-/// and all worst-case list capacity requirements are checked before writing anything.
+/// The view must provide the shared regional status-strip inset and at least 500 px of width.
+/// Exact row width and list capacity requirements are checked before writing anything.
 pub fn append_alert_markers(
     list: &mut DisplayList,
     projection: &Projection,
@@ -447,6 +413,7 @@ pub fn append_alert_markers(
         AlertHeaderSource::Msaw,
         MAX_ALERT_MARKERS,
         false,
+        0,
     )
 }
 
@@ -458,6 +425,26 @@ pub fn append_alert_markers_with_budget(
     markers: &[AlertMarker],
     marker_budget: usize,
 ) -> Result<MarkerStats, DisplayError> {
+    append_alert_markers_with_budget_and_producer_omissions(
+        list,
+        projection,
+        markers,
+        marker_budget,
+        0,
+    )
+}
+
+/// Like [`append_alert_markers_with_budget`], adding the provider's count of new violations that
+/// its retained open table refused. This count affects only `omitted`; it does not fabricate
+/// examined rows, severity, or positions. Callers must exclude ordinary closed episodes and log
+/// loss to avoid double-counting. The sum is checked before any display-list mutation.
+pub fn append_alert_markers_with_budget_and_producer_omissions(
+    list: &mut DisplayList,
+    projection: &Projection,
+    markers: &[AlertMarker],
+    marker_budget: usize,
+    producer_omitted: u64,
+) -> Result<MarkerStats, DisplayError> {
     append_alert_markers_titled(
         list,
         projection,
@@ -465,6 +452,7 @@ pub fn append_alert_markers_with_budget(
         AlertHeaderSource::Msaw,
         marker_budget,
         true,
+        producer_omitted,
     )
 }
 
@@ -523,13 +511,9 @@ fn append_final_monitor_frame_impl(
     marker_budget: usize,
     overflow_reserved: bool,
 ) -> Result<MarkerStats, DisplayError> {
+    let plan = regional_status_plan()?;
     if (!overflow_reserved && projection.width < MIN_ALERT_VIEW_WIDTH)
-        || projection.top_inset
-            < if overflow_reserved {
-                ALERT_OVERFLOW_STATUS_INSET_PX
-            } else {
-                MIN_ALERT_TOP_INSET
-            }
+        || projection.top_inset < plan.top_inset_px()
         || projection.height <= projection.top_inset
     {
         return Err(bad_alert(
@@ -549,11 +533,12 @@ fn append_final_monitor_frame_impl(
         markers.len(),
         markers.iter().map(final_marker_as_alert),
         marker_budget,
+        0,
     )?;
     let visible = validated
-        .markers
+        .states
         .get(..validated.visible_count)
-        .ok_or_else(|| bad_alert("final monitor visible marker extent"))?;
+        .ok_or_else(|| bad_alert("final monitor visible state extent"))?;
     append_validated_markers(
         list,
         projection,
@@ -583,27 +568,160 @@ fn final_marker_as_alert(marker: &FinalMonitorMarker) -> Result<AlertMarker, Dis
     })
 }
 
+fn validate_marker_position(
+    projection: &Projection,
+    marker: AlertMarker,
+    stats: &mut MarkerStats,
+) -> Result<Option<(i32, i32)>, DisplayError> {
+    match marker.position_known {
+        0 => {
+            if marker.lat_e7 != NO_POSITION_E7 || marker.lon_e7 != NO_POSITION_E7 {
+                return Err(bad_alert("unknown MSAW position must use both sentinels"));
+            }
+            increment(&mut stats.unlocated)?;
+            Ok(None)
+        }
+        1 => {
+            if !(-900_000_000..=900_000_000).contains(&marker.lat_e7)
+                || !(-1_800_000_000..=1_800_000_000).contains(&marker.lon_e7)
+            {
+                return Err(bad_alert(
+                    "known MSAW position is outside coordinate bounds",
+                ));
+            }
+            match project(projection, marker.lat_e7, marker.lon_e7) {
+                Some(point) if position_on_map(projection, point) => Ok(Some(point)),
+                _ => {
+                    increment(&mut stats.off_map)?;
+                    Ok(None)
+                }
+            }
+        }
+        _ => Err(bad_alert("MSAW position-known flag must be zero or one")),
+    }
+}
+
+fn select_visible_marker(
+    selected: &mut ValidatedMarkerSet,
+    state: MarkerState,
+    point: Option<(i32, i32)>,
+    marker_budget: usize,
+    prioritize: bool,
+) -> Result<(), DisplayError> {
+    let high_severity = matches!(state, MarkerState::Warning | MarkerState::ProtectionLost);
+    let selected_index = if prioritize && high_severity {
+        if selected.visible_high_severity >= marker_budget {
+            None
+        } else {
+            let insertion = selected.visible_high_severity;
+            let next_count = selected.visible_count.saturating_add(1).min(marker_budget);
+            if selected.visible_count == marker_budget
+                && selected
+                    .projected
+                    .get(selected.visible_count.saturating_sub(1))
+                    .copied()
+                    .flatten()
+                    .is_some()
+            {
+                selected.stats.drawn = selected
+                    .stats
+                    .drawn
+                    .checked_sub(1)
+                    .ok_or_else(|| bad_alert("selected marker count underflow"))?;
+            }
+            for destination in (insertion.saturating_add(1)..next_count).rev() {
+                let source = destination
+                    .checked_sub(1)
+                    .ok_or_else(|| bad_alert("marker selection source underflow"))?;
+                let prior_state = *selected
+                    .states
+                    .get(source)
+                    .ok_or_else(|| bad_alert("selected source state index"))?;
+                let prior_point = *selected
+                    .projected
+                    .get(source)
+                    .ok_or_else(|| bad_alert("selected source projection index"))?;
+                *selected
+                    .states
+                    .get_mut(destination)
+                    .ok_or_else(|| bad_alert("selected destination state index"))? = prior_state;
+                *selected
+                    .projected
+                    .get_mut(destination)
+                    .ok_or_else(|| bad_alert("selected destination projection index"))? =
+                    prior_point;
+            }
+            selected.visible_count = next_count;
+            selected.visible_high_severity += 1;
+            Some(insertion)
+        }
+    } else if !prioritize || !high_severity {
+        if selected.visible_count < marker_budget {
+            let index = selected.visible_count;
+            selected.visible_count += 1;
+            Some(index)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    if let Some(index) = selected_index {
+        *selected
+            .states
+            .get_mut(index)
+            .ok_or_else(|| bad_alert("alert visible state index"))? = state;
+        *selected
+            .projected
+            .get_mut(index)
+            .ok_or_else(|| bad_alert("alert projection index"))? = point;
+        if point.is_some() {
+            increment(&mut selected.stats.drawn)?;
+        }
+    }
+    Ok(())
+}
+
 fn validate_and_project_markers<I>(
     projection: &Projection,
     input_count: usize,
     markers: I,
     marker_budget: usize,
+    producer_omitted: u64,
 ) -> Result<ValidatedMarkerSet, DisplayError>
 where
     I: IntoIterator<Item = Result<AlertMarker, DisplayError>>,
 {
-    let omitted = input_count.saturating_sub(marker_budget);
-    let mut stats = MarkerStats {
-        omitted: u64::try_from(omitted).map_err(|_| DisplayError::TooLarge {
+    let renderer_omitted = input_count.saturating_sub(marker_budget);
+    let renderer_omitted_u64 =
+        u64::try_from(renderer_omitted).map_err(|_| DisplayError::TooLarge {
             what: "omitted alert marker count",
-            requested: omitted as u128,
+            requested: renderer_omitted as u128,
             limit: u64::MAX as u128,
-        })?,
+        })?;
+    let requested_omitted = u128::from(renderer_omitted_u64) + u128::from(producer_omitted);
+    let omitted =
+        renderer_omitted_u64
+            .checked_add(producer_omitted)
+            .ok_or(DisplayError::TooLarge {
+                what: "combined omitted alert marker count",
+                requested: requested_omitted,
+                limit: u64::MAX as u128,
+            })?;
+    let stats = MarkerStats {
+        omitted,
         ..MarkerStats::default()
     };
-    let mut visible_markers = [EMPTY_MARKER; MAX_ALERT_MARKERS];
-    let mut projected = [None; MAX_ALERT_MARKERS];
-    let mut visible_count = 0usize;
+    let states = [MarkerState::Caution; MAX_ALERT_MARKERS];
+    let projected = [None; MAX_ALERT_MARKERS];
+    let mut selected = ValidatedMarkerSet {
+        stats,
+        states,
+        projected,
+        visible_count: 0,
+        visible_high_severity: 0,
+    };
+    let prioritize = input_count > marker_budget;
     let mut seen = 0usize;
     let mut previous_address = 0u32;
     for (index, item) in markers.into_iter().enumerate() {
@@ -614,7 +732,7 @@ where
         }
         let marker = item?;
         seen = index + 1;
-        increment(&mut stats.examined)?;
+        increment(&mut selected.stats.examined)?;
         if marker.address == 0 || marker.address <= previous_address {
             return Err(bad_alert(
                 "MSAW addresses must be positive, unique and increasing",
@@ -624,89 +742,78 @@ where
         if marker.reserved != [0; 2] {
             return Err(bad_alert("MSAW marker reserved bytes are nonzero"));
         }
-        if index < marker_budget {
-            *visible_markers
-                .get_mut(index)
-                .ok_or_else(|| bad_alert("alert visible marker index"))? = marker;
-            visible_count += 1;
-        }
         match marker.state {
-            MarkerState::Caution => increment(&mut stats.caution)?,
-            MarkerState::Warning => increment(&mut stats.warning)?,
-            MarkerState::ProtectionLost => increment(&mut stats.protection_lost)?,
+            MarkerState::Caution => increment(&mut selected.stats.caution)?,
+            MarkerState::Warning => increment(&mut selected.stats.warning)?,
+            MarkerState::ProtectionLost => increment(&mut selected.stats.protection_lost)?,
         }
-        match marker.position_known {
-            0 => {
-                if marker.lat_e7 != NO_POSITION_E7 || marker.lon_e7 != NO_POSITION_E7 {
-                    return Err(bad_alert("unknown MSAW position must use both sentinels"));
-                }
-                increment(&mut stats.unlocated)?;
-            }
-            1 => {
-                if !(-900_000_000..=900_000_000).contains(&marker.lat_e7)
-                    || !(-1_800_000_000..=1_800_000_000).contains(&marker.lon_e7)
-                {
-                    return Err(bad_alert(
-                        "known MSAW position is outside coordinate bounds",
-                    ));
-                }
-                match project(projection, marker.lat_e7, marker.lon_e7) {
-                    Some(point) if position_on_map(projection, point) => {
-                        if index < marker_budget {
-                            *projected
-                                .get_mut(index)
-                                .ok_or_else(|| bad_alert("MSAW projection index"))? = Some(point);
-                            increment(&mut stats.drawn)?;
-                        }
-                    }
-                    _ => increment(&mut stats.off_map)?,
-                }
-            }
-            _ => return Err(bad_alert("MSAW position-known flag must be zero or one")),
-        }
+        let point = validate_marker_position(projection, marker, &mut selected.stats)?;
+        select_visible_marker(
+            &mut selected,
+            marker.state,
+            point,
+            marker_budget,
+            prioritize,
+        )?;
     }
     if seen != input_count {
         return Err(bad_alert("alert input iterator length changed"));
     }
-    Ok(ValidatedMarkerSet {
-        stats,
-        markers: visible_markers,
-        projected,
-        visible_count,
-    })
+    Ok(selected)
 }
 
 fn checked_header(
     projection: &Projection,
     stats: MarkerStats,
     source: AlertHeaderSource,
-) -> Result<crate::core::text::TextBuf, DisplayError> {
+    plan: &RegionalStatusPlan,
+) -> Result<(crate::core::text::TextBuf, StatusStripPlacement), DisplayError> {
     let text = if stats.omitted > 0 {
         partial_header(source, stats.protection_lost > 0)
     } else {
         header(stats, source)
     };
-    if projection.width < required_text_width_px(&text)? {
-        return Err(bad_alert("MSAW count header does not fit the view width"));
+    let (placement, _) = alert_status_rows(plan, source)?;
+    if projection.width < required_row_width_px(placement, &text)? {
+        return Err(bad_alert("alert count heading does not fit the view width"));
     }
-    Ok(text)
+    Ok((text, placement))
 }
 
-fn header_y(projection: &Projection, source: AlertHeaderSource) -> i32 {
-    if projection.top_inset < ALERT_RESERVED_HEADER_INSET_PX {
-        return ALERT_HEADER_Y_PX;
-    }
-    match source {
-        AlertHeaderSource::Msaw => ALERT_RESERVED_MSAW_HEADER_Y_PX,
-        AlertHeaderSource::FinalMonitor { .. } => ALERT_RESERVED_FINAL_HEADER_Y_PX,
-    }
+fn alert_status_rows(
+    plan: &RegionalStatusPlan,
+    source: AlertHeaderSource,
+) -> Result<(StatusStripPlacement, StatusStripPlacement), DisplayError> {
+    let (heading, overflow) = match source {
+        AlertHeaderSource::Msaw => (StatusStripRow::MsawHeading, StatusStripRow::MsawOverflow),
+        AlertHeaderSource::FinalMonitor { .. } => {
+            (StatusStripRow::FinalHeading, StatusStripRow::FinalOverflow)
+        }
+    };
+    let heading = plan
+        .row(heading)
+        .ok_or_else(|| bad_alert("alert heading row is unavailable"))?;
+    let overflow = plan
+        .row(overflow)
+        .ok_or_else(|| bad_alert("alert overflow row is unavailable"))?;
+    Ok((heading, overflow))
 }
 
-fn overflow_y(source: AlertHeaderSource) -> i32 {
-    match source {
-        AlertHeaderSource::Msaw => ALERT_RESERVED_MSAW_OVERFLOW_Y_PX,
-        AlertHeaderSource::FinalMonitor { .. } => ALERT_RESERVED_FINAL_OVERFLOW_Y_PX,
-    }
+fn append_status_text(
+    list: &mut DisplayList,
+    placement: StatusStripPlacement,
+    text: &str,
+) -> Result<(), DisplayError> {
+    placement.bounds_for(text)?;
+    push_text(
+        list,
+        (placement.x_px() * 16, placement.y_px() * 16),
+        placement.size(),
+        placement.align(),
+        placement.colour(),
+        placement.layer(),
+        text,
+    )
 }
 
 fn reserve_marker_output(
@@ -770,14 +877,14 @@ fn reserve_marker_output(
 
 fn append_marker_geometry(
     list: &mut DisplayList,
-    markers: &[AlertMarker],
+    states: &[MarkerState],
     projected: &[Option<(i32, i32)>; MAX_ALERT_MARKERS],
 ) -> Result<(), DisplayError> {
-    for (index, marker) in markers.iter().enumerate() {
+    for (index, state) in states.iter().enumerate() {
         let Some(point) = projected.get(index).copied().flatten() else {
             continue;
         };
-        match marker.state {
+        match state {
             MarkerState::Caution => push_circle(
                 list,
                 point,
@@ -802,7 +909,7 @@ fn append_marker_geometry(
                 )?;
             }
         }
-        let label = match marker.state {
+        let label = match state {
             MarkerState::Caution => "C",
             MarkerState::Warning => "W",
             MarkerState::ProtectionLost => "L",
@@ -827,20 +934,17 @@ fn append_alert_markers_titled(
     header_source: AlertHeaderSource,
     marker_budget: usize,
     overflow_reserved: bool,
+    producer_omitted: u64,
 ) -> Result<MarkerStats, DisplayError> {
+    let plan = regional_status_plan()?;
     if (!overflow_reserved && projection.width < MIN_ALERT_VIEW_WIDTH)
-        || projection.top_inset
-            < if overflow_reserved {
-                ALERT_OVERFLOW_STATUS_INSET_PX
-            } else {
-                MIN_ALERT_TOP_INSET
-            }
+        || projection.top_inset < plan.top_inset_px()
         || projection.height <= projection.top_inset
     {
         return Err(bad_alert(if overflow_reserved {
             "budgeted alert markers require the reserved overflow strip"
         } else {
-            "MSAW markers require width 500 and a 128 px top strip"
+            "MSAW markers require width 500 and the shared status strip"
         }));
     }
     if list.faulted {
@@ -858,15 +962,16 @@ fn append_alert_markers_titled(
         markers.len(),
         markers.iter().copied().map(Ok),
         marker_budget,
+        producer_omitted,
     )?;
-    let drawn_markers = validated
-        .markers
+    let drawn_states = validated
+        .states
         .get(..validated.visible_count)
-        .ok_or_else(|| bad_alert("alert marker draw extent"))?;
+        .ok_or_else(|| bad_alert("alert state draw extent"))?;
     append_validated_markers(
         list,
         projection,
-        drawn_markers,
+        drawn_states,
         validated.stats,
         &validated.projected,
         AlertPresentationMode {
@@ -879,7 +984,7 @@ fn append_alert_markers_titled(
 fn append_validated_markers(
     list: &mut DisplayList,
     projection: &Projection,
-    drawn_markers: &[AlertMarker],
+    drawn_states: &[MarkerState],
     stats: MarkerStats,
     projected: &[Option<(i32, i32)>; MAX_ALERT_MARKERS],
     mode: AlertPresentationMode,
@@ -887,13 +992,15 @@ fn append_validated_markers(
     if list.faulted {
         return Err(bad_alert("alert markers cannot append to a faulted list"));
     }
-    let header_text = checked_header(projection, stats, mode.header_source)?;
+    let plan = regional_status_plan()?;
+    let (header_text, heading_row) = checked_header(projection, stats, mode.header_source, &plan)?;
+    let (_, overflow_row) = alert_status_rows(&plan, mode.header_source)?;
     let overflow = (stats.omitted > 0).then(|| overflow_text(mode.header_source, stats.omitted));
     let overflow_bytes = overflow.as_ref().map_or(0, |text| text_str(text).len());
     if let Some(text) = overflow.as_ref() {
         if !mode.overflow_reserved
             || crate::core::text::text_clipped(text)
-            || projection.width < required_text_width_px(text)?
+            || projection.width < required_row_width_px(overflow_row, text)?
         {
             return Err(bad_alert(
                 "alert overflow indication does not fit the reserved view",
@@ -902,36 +1009,17 @@ fn append_validated_markers(
     }
     reserve_marker_output(
         list,
-        drawn_markers.len(),
+        drawn_states.len(),
         mode.header_source,
         text_str(&header_text).len(),
         overflow_bytes,
     )?;
 
     // All input, header and list budgets are checked before the first display-list write.
-    append_marker_geometry(list, drawn_markers, projected)?;
-    push_text(
-        list,
-        (
-            px(ALERT_HEADER_X_PX),
-            px(header_y(projection, mode.header_source)),
-        ),
-        ALERT_TEXT_SIZE,
-        ALIGN_LEFT,
-        palette::ALERT,
-        15,
-        text_str(&header_text),
-    )?;
+    append_marker_geometry(list, drawn_states, projected)?;
+    append_status_text(list, heading_row, text_str(&header_text))?;
     if let Some(text) = overflow.as_ref() {
-        push_text(
-            list,
-            (px(ALERT_HEADER_X_PX), px(overflow_y(mode.header_source))),
-            ALERT_TEXT_SIZE,
-            ALIGN_LEFT,
-            palette::ALERT,
-            15,
-            text_str(text),
-        )?;
+        append_status_text(list, overflow_row, text_str(text))?;
     }
     Ok(stats)
 }

@@ -539,6 +539,7 @@ dependencies = [
  "oa-scope-replay",
  "oa-sealed",
  "oa-sha256",
+ "oa-tiff",
  "oa-track",
  "oa-xml",
  "oa-zip",

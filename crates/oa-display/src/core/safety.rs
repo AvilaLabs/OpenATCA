@@ -63,6 +63,7 @@ use crate::core::list::{
 use crate::core::palette;
 use crate::core::project::{project, Projection};
 use crate::core::scene::LEGEND_STRIP_PX;
+use crate::core::status_strip::{regional_status_plan, StatusStripPlacement, StatusStripRow};
 use crate::core::text::{
     text_clear, text_clipped, text_new, text_push_char, text_push_dec, text_push_str, text_str,
     TextBuf, TEXT_BYTES,
@@ -96,15 +97,6 @@ pub const FEED_NAME_BYTES: usize = 8;
 pub const MAX_BANNER_LINES: usize = 1 + 1 + oa_safety::net::NET_COUNT + MAX_FEEDS + 1 + 1;
 
 const BANNER_SIZE: u8 = 12;
-const COMPACT_BANNER_SIZE: u8 = 8;
-const COMPACT_BANNER_PITCH: i32 = 14;
-const COMPACT_BANNER_PAD: i32 = 2;
-const COMPACT_BANNER_TOP_PX: i32 = 151;
-// Two compact rows leave the full target-symbol radius clear of the radar area.
-const COMPACT_BANNER_ROWS: usize = 2;
-const COMPACT_BANNER_MIN_INSET: u32 = (COMPACT_BANNER_TOP_PX
-    + (COMPACT_BANNER_ROWS as i32 * COMPACT_BANNER_PITCH)
-    + COMPACT_BANNER_PAD) as u32;
 /// Space left at the bottom of the frame for the traffic notices (`TARGETS NOT DRAWN` and the like).
 const BOTTOM_RESERVE: i32 = 48;
 const BANNER_PITCH: i32 = 16;
@@ -452,59 +444,84 @@ fn collect_nets(b: &mut Banner, tb: &mut TextBuf, s: &SafetyScene<'_>, st: &mut 
 
 #[derive(Clone, Copy)]
 struct BannerLayout {
+    x_px: i32,
     size: u8,
     pitch: i32,
     pad: i32,
     top_px: i32,
     fit: usize,
+    rows: Option<[StatusStripPlacement; 2]>,
 }
 
 /// Selects the reserved header band only for an explicit caller opt-in.
-fn banner_layout(proj: &Projection, reserved_header: bool) -> BannerLayout {
+fn banner_layout(proj: &Projection, reserved_header: bool) -> Result<BannerLayout, DisplayError> {
     if reserved_header {
-        return BannerLayout {
-            size: COMPACT_BANNER_SIZE,
-            pitch: COMPACT_BANNER_PITCH,
-            pad: COMPACT_BANNER_PAD,
-            top_px: COMPACT_BANNER_TOP_PX,
-            fit: COMPACT_BANNER_ROWS,
-        };
+        let plan = regional_status_plan()?;
+        let first = plan
+            .row(StatusStripRow::Safety(0))
+            .ok_or(DisplayError::BadView("regional safety row is unavailable"))?;
+        let second = plan
+            .row(StatusStripRow::Safety(1))
+            .ok_or(DisplayError::BadView("regional safety row is unavailable"))?;
+        let first_bounds = first.reserved_bounds();
+        let pad = first
+            .x_px()
+            .checked_sub(first_bounds.x0)
+            .ok_or(DisplayError::BadView("regional safety padding is invalid"))?;
+        return Ok(BannerLayout {
+            x_px: first.x_px(),
+            size: first.size(),
+            pitch: second.y_px() - first.y_px(),
+            pad,
+            top_px: first.y_px(),
+            fit: 2,
+            rows: Some([first, second]),
+        });
     }
     let free = i64::from(proj.height)
         - i64::from(proj.top_inset.max(LEGEND_STRIP_PX))
         - 8
         - i64::from(BOTTOM_RESERVE);
-    BannerLayout {
+    Ok(BannerLayout {
+        x_px: BANNER_X,
         size: BANNER_SIZE,
         pitch: BANNER_PITCH,
         pad: BANNER_PAD,
         top_px: i32::try_from(i64::from(proj.top_inset.max(LEGEND_STRIP_PX)) + 8)
             .unwrap_or(i32::MAX),
         fit: usize::try_from((free / i64::from(BANNER_PITCH)).max(1)).unwrap_or(1),
-    }
+        rows: None,
+    })
 }
 
 /// The box of `n` lines whose widest has `widest_units` grid units, 1/16 pixel: left, top, right,
 /// bottom.
-fn box_of(
-    proj: &Projection,
-    n: usize,
-    widest_units: i32,
-    reserved_header: bool,
-) -> (i32, i32, i32, i32) {
-    let layout = banner_layout(proj, reserved_header);
+fn box_of(n: usize, widest_units: i32, layout: BannerLayout) -> (i32, i32, i32, i32) {
     let w = i32::try_from(i64::from(widest_units) * i64::from(layout.size) / i64::from(CAP_HEIGHT))
         .unwrap_or(i32::MAX);
     let rows = i32::try_from(n).unwrap_or(i32::MAX);
-    let x0 = px(BANNER_X - layout.pad);
-    let y0 = px(layout.top_px).saturating_sub(px(layout.pad));
+    let x0 = px(layout.x_px - layout.pad);
+    let (y0, y1) = if let Some(rows) = layout.rows {
+        let first = rows.first().map(StatusStripPlacement::reserved_bounds);
+        let last = rows
+            .get(n.saturating_sub(1).min(rows.len() - 1))
+            .map(StatusStripPlacement::reserved_bounds);
+        match (first, last) {
+            (Some(first), Some(last)) => (px(first.y0), px(last.y1.saturating_sub(1))),
+            _ => (px(layout.top_px), px(layout.top_px)),
+        }
+    } else {
+        let top = px(layout.top_px).saturating_sub(px(layout.pad));
+        let bottom = top.saturating_add(px(rows
+            .saturating_mul(layout.pitch)
+            .saturating_add(layout.pad)));
+        (top, bottom)
+    };
     (
         x0,
         y0,
         x0.saturating_add(px(w.saturating_add(2 * layout.pad))),
-        y0.saturating_add(px(rows
-            .saturating_mul(layout.pitch)
-            .saturating_add(layout.pad))),
+        y1,
     )
 }
 
@@ -545,7 +562,7 @@ fn banner_draw(
     st: &mut SafetyStats,
     reserved_header: bool,
 ) -> Result<(), DisplayError> {
-    let layout = banner_layout(proj, reserved_header);
+    let layout = banner_layout(proj, reserved_header)?;
     let fit = layout.fit;
     if b.n > fit {
         // The last visible line says how many states are not shown: never silent.
@@ -565,12 +582,7 @@ fn banner_draw(
     let under = targets_under(
         targets,
         proj,
-        box_of(
-            proj,
-            b.n + 1,
-            widest(b).max(text_width_units(30)),
-            reserved_header,
-        ),
+        box_of(b.n + 1, widest(b).max(text_width_units(30)), layout),
     );
     if under > 0 && b.n < fit {
         text_clear(tb);
@@ -578,10 +590,9 @@ fn banner_draw(
         push_capped(tb, u64::from(under), SHOW_MAX);
         banner_add(b, tb, st);
     }
-    st.targets_under_banner =
-        targets_under(targets, proj, box_of(proj, b.n, widest(b), reserved_header));
+    st.targets_under_banner = targets_under(targets, proj, box_of(b.n, widest(b), layout));
     st.banner_lines = u32::try_from(b.n).unwrap_or(u32::MAX);
-    let (x0, y0, x1, y1) = box_of(proj, b.n, widest(b), reserved_header);
+    let (x0, y0, x1, y1) = box_of(b.n, widest(b), layout);
     push_rect(l, (x0, y0), (x1, y1), palette::BACKGROUND, LAYER_BANNER_BG)?;
     for (p, q) in [
         ((x0, y0), (x1, y0)),
@@ -591,18 +602,27 @@ fn banner_draw(
     ] {
         push_line(l, p, q, palette::ALERT, LAYER_BANNER)?;
     }
-    let mut y = px(layout.top_px);
-    for t in b.lines.iter().take(b.n) {
+    let mut y = layout.top_px;
+    for (index, t) in b.lines.iter().take(b.n).enumerate() {
+        let (x, row_y) = if let Some(rows) = layout.rows {
+            let row = rows
+                .get(index)
+                .ok_or(DisplayError::BadView("regional safety row count exceeded"))?;
+            row.bounds_for(text_str(t))?;
+            (row.x_px(), row.y_px())
+        } else {
+            (layout.x_px, y)
+        };
         push_text(
             l,
-            (px(BANNER_X), y),
+            (px(x), px(row_y)),
             layout.size,
             ALIGN_LEFT,
             palette::ALERT,
             LAYER_BANNER,
             text_str(t),
         )?;
-        y = y.saturating_add(px(layout.pitch));
+        y = y.saturating_add(layout.pitch);
     }
     Ok(())
 }
@@ -651,7 +671,7 @@ fn build_inner(
     stats: &mut SafetyStats,
     reserved_header: bool,
 ) -> Result<(), DisplayError> {
-    if reserved_header && proj.top_inset < COMPACT_BANNER_MIN_INSET {
+    if reserved_header && proj.top_inset < regional_status_plan()?.top_inset_px() {
         return Err(DisplayError::BadView(
             "reserved status header band is too short",
         ));
@@ -798,7 +818,7 @@ pub fn build_safety(
 
 /// Appends safety indications in a caller-reserved band above the traffic area.
 ///
-/// The caller must reserve the complete 160-pixel header band. If it does not, this
+/// The caller must reserve the complete renderer-planned header band. If it does not, this
 /// function refuses without modifying the display list. Ordinary callers should use
 /// [`build_safety`], which keeps the historical placement below the map inset.
 pub fn build_safety_in_reserved_header(
@@ -806,7 +826,7 @@ pub fn build_safety_in_reserved_header(
     proj: &Projection,
     s: &SafetyScene<'_>,
 ) -> Result<SafetyStats, DisplayError> {
-    if proj.top_inset < COMPACT_BANNER_MIN_INSET {
+    if proj.top_inset < regional_status_plan()?.top_inset_px() {
         return Err(DisplayError::BadView(
             "reserved status header band is too short",
         ));
@@ -870,9 +890,162 @@ mod banner_tests {
     use oa_safety::inhibit::inhibits_new;
     use oa_safety::net::state_table_new;
 
+    fn assert_border_stays_before_overflow(
+        plan: &super::super::status_strip::RegionalStatusPlan,
+        list: &DisplayList,
+        pixels: &[u8],
+        spec: &FrameSpec,
+    ) {
+        let overflow_top = plan
+            .row(StatusStripRow::MsawOverflow)
+            .expect("MSAW overflow row exists")
+            .reserved_bounds()
+            .y0
+            * 16;
+        let backdrop_count = list
+            .rects
+            .layer
+            .iter()
+            .filter(|&&layer| layer == LAYER_BANNER_BG)
+            .count();
+        assert_eq!(backdrop_count, 1, "one compact safety backdrop is drawn");
+        let backdrop_index = list
+            .rects
+            .layer
+            .iter()
+            .position(|&layer| layer == LAYER_BANNER_BG)
+            .expect("safety backdrop layer exists");
+        let rect_x0 = *list
+            .rects
+            .x0
+            .get(backdrop_index)
+            .expect("backdrop x0 exists");
+        let rect_x1 = *list
+            .rects
+            .x1
+            .get(backdrop_index)
+            .expect("backdrop x1 exists");
+        let rect_y1 = *list
+            .rects
+            .y1
+            .get(backdrop_index)
+            .expect("backdrop y1 exists");
+        assert!(
+            rect_y1 < overflow_top,
+            "inclusive backdrop edge stays in its band"
+        );
+        let alert =
+            crate::core::palette::bytes_of(palette::ALERT).expect("alert palette entry exists");
+        let edge_x = usize::try_from((rect_x0 + rect_x1) / 32).expect("edge x is nonnegative");
+        let edge_y = usize::try_from(rect_y1 / 16).expect("edge y is nonnegative");
+        let stride = usize::try_from(spec.stride).expect("stride fits");
+        let edge_offset = edge_y * stride + edge_x * 4;
+        assert_eq!(
+            pixels.get(edge_offset..edge_offset + 4),
+            Some(alert.as_slice())
+        );
+        let overflow_y = usize::try_from(overflow_top / 16).expect("overflow y is nonnegative");
+        let overflow_offset = overflow_y * stride + edge_x * 4;
+        assert_ne!(
+            pixels.get(overflow_offset..overflow_offset + 4),
+            Some(alert.as_slice())
+        );
+    }
+
+    fn assert_traffic_symbols_visible(pixels: &[u8], spec: &FrameSpec, target_y: i32) {
+        let target =
+            crate::core::palette::bytes_of(palette::TARGET).expect("target palette entry exists");
+        for x_px in [20, 40, 60, 80, 100] {
+            let mut found = false;
+            for y in usize::try_from(target_y - 2).expect("target y is nonnegative")
+                ..=usize::try_from(target_y + 2).expect("target y fits the raster")
+            {
+                for x in
+                    usize::try_from(x_px - 2).unwrap_or(0)..=usize::try_from(x_px + 2).unwrap_or(0)
+                {
+                    let offset = y * usize::try_from(spec.stride).expect("stride fits") + x * 4;
+                    if pixels.get(offset..offset + 4) == Some(target.as_slice()) {
+                        found = true;
+                    }
+                }
+            }
+            assert!(found, "traffic symbol at x={x_px} remains visible");
+        }
+    }
+
+    // Mutation killed: legacy safety text is scaled into off-canvas coordinates twice.
+    // REQ: OA-REG-020
+    #[test]
+    fn legacy_safety_banner_uses_whole_pixel_baseline_and_rasterizes_text() {
+        let projection = projection_new(410_000_000, -870_000_000, 100.0, 800, 600, 0)
+            .expect("legacy projection is valid");
+        let mut list = crate::core::list::list_new(safety_caps())
+            .expect("legacy safety display list is valid");
+        let states =
+            state_table_new(5_000_000_000, 2_000_000_000).expect("legacy state table is valid");
+        let inhibits = inhibits_new();
+        let targets = targets_new(0).expect("legacy target set is empty");
+        let feeds = [FeedStatus {
+            name: *b"TRACK\0\0\0",
+            state: FeedState::Disconnected,
+        }];
+        let stats = build_safety(
+            &mut list,
+            &projection,
+            &SafetyScene {
+                states: &states,
+                inhibits: &inhibits,
+                now_ns: 100_000_000_000,
+                feeds: &feeds,
+                newest_track_ns: None,
+                frozen_limit_ns: 5_000_000_000,
+                targets: &targets,
+            },
+        )
+        .expect("legacy safety banner is admitted");
+        assert!(stats.banner_lines > 0, "disconnected feed creates a banner");
+        let banner_line = list
+            .texts
+            .layer
+            .iter()
+            .position(|&layer| layer == LAYER_BANNER)
+            .expect("legacy banner includes text");
+        assert_eq!(
+            list.texts.y.get(banner_line),
+            Some(&(112 * 16)),
+            "independent first baseline is the legend row plus 8 px"
+        );
+
+        let spec = FrameSpec {
+            width: 800,
+            height: 600,
+            stride: 3_200,
+        };
+        let mut pixels = vec![0; frame_len(&spec)];
+        rasterize(&list, &spec, &mut pixels).expect("legacy frame rasterizes");
+        let alert =
+            crate::core::palette::bytes_of(palette::ALERT).expect("alert palette entry exists");
+        let stride = usize::try_from(spec.stride).expect("stride fits");
+        let visible_text_ink = (112_usize..128).any(|y| {
+            (12_usize..200).any(|x| {
+                let offset = y * stride + x * 4;
+                pixels.get(offset..offset + 4) == Some(alert.as_slice())
+            })
+        });
+        assert!(
+            visible_text_ink,
+            "legacy banner glyph pixels remain visible"
+        );
+    }
+
+    // Mutation: retaining the legacy compact y baselines must fail these actual presenter rows.
+    // REQ: OA-REG-020
     #[test]
     fn compact_status_banner_keeps_traffic_visible_and_faults_counted() {
-        let proj = projection_new(410_000_000, -870_000_000, 100.0, 800, 600, 184)
+        let plan = regional_status_plan().expect("regional status geometry is valid");
+        let inset = plan.top_inset_px();
+        let target_y = i32::try_from(inset).expect("strip inset fits the fixture") + 22;
+        let proj = projection_new(410_000_000, -870_000_000, 100.0, 800, 600, inset)
             .expect("synthetic projection is valid");
         let style = TrafficStyle {
             leader_min: 0.0,
@@ -881,7 +1054,7 @@ mod banner_tests {
         };
         let mut targets = targets_new(5).expect("target capacity is valid");
         for (index, x_px) in [20, 40, 60, 80, 100].into_iter().enumerate() {
-            let (lat_e7, lon_e7) = unproject(&proj, x_px * 16, 200 * 16)
+            let (lat_e7, lon_e7) = unproject(&proj, x_px * 16, target_y * 16)
                 .expect("synthetic target projects on the map");
             targets_push(
                 &mut targets,
@@ -964,6 +1137,23 @@ mod banner_tests {
             "overflow remains explicitly reported"
         );
         assert_eq!(stats.targets_under_banner, 0);
+        let safety_first = plan
+            .row(StatusStripRow::Safety(0))
+            .expect("first compact safety row exists");
+        let safety_second = plan
+            .row(StatusStripRow::Safety(1))
+            .expect("second compact safety row exists");
+        let banner_rows = list
+            .texts
+            .layer
+            .iter()
+            .zip(&list.texts.y)
+            .filter_map(|(&layer, &y)| (layer == LAYER_BANNER).then_some(y))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            banner_rows,
+            [safety_first.y_px() * 16, safety_second.y_px() * 16]
+        );
 
         let spec = FrameSpec {
             width: 800,
@@ -972,22 +1162,8 @@ mod banner_tests {
         };
         let mut pixels = vec![0; frame_len(&spec)];
         rasterize(&list, &spec, &mut pixels).expect("consumer rasterizes complete list");
-        let target =
-            crate::core::palette::bytes_of(palette::TARGET).expect("target palette entry exists");
-        for x_px in [20, 40, 60, 80, 100] {
-            let mut found = false;
-            for y in 198usize..=202 {
-                for x in
-                    usize::try_from(x_px - 2).unwrap_or(0)..=usize::try_from(x_px + 2).unwrap_or(0)
-                {
-                    let offset = (y * spec.stride as usize) + x * 4;
-                    if pixels.get(offset..offset + 4) == Some(target.as_slice()) {
-                        found = true;
-                    }
-                }
-            }
-            assert!(found, "traffic symbol at x={x_px} remains visible");
-        }
+        assert_border_stays_before_overflow(&plan, &list, &pixels, &spec);
+        assert_traffic_symbols_visible(&pixels, &spec, target_y);
     }
 
     #[test]

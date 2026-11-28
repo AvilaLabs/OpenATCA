@@ -731,11 +731,13 @@ fn replayed_frames_are_the_same_in_every_run_and_do_not_depend_on_earlier_frames
     assert_ne!(first[0], first[1]);
     assert_ne!(first[1], first[2]);
     // The golden hash of one frame: three targets, one coasting and uncertain, one reacquired.
+    // The renderer-derived 19px legend pitch shifts the five furniture row anchors from
+    // 8/26/44/62/80 to 8/27/46/65/84; repeat-order equality above remains unchanged.
     assert_eq!(first[2], GOLDEN, "the replay frame changed");
 }
 
-// Compact HIDDEN legend text and its 9px font intentionally change these legend pixels.
-const GOLDEN: &str = "2778de4e22fd062e2c50ef2b9c720b878d00cd6f9a245c2f0fa10df99b3faf19";
+// Compact HIDDEN legend text, its 9px font, and the renderer-derived pitch bind these pixels.
+const GOLDEN: &str = "784b0657c8a5b71f763afd2c02d2fd1274a304b0bc32b4c09a9ee3936b332601";
 
 // REQ: OA-DSP-072
 #[test]

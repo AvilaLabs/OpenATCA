@@ -100,6 +100,8 @@ fn safety_banner_respects_additional_reserved_operator_header() {
 // REQ: OA-DSP-078
 #[test]
 fn reserved_safety_band_accepts_its_exact_two_row_minimum_only() {
+    let plan = oa_display::status_strip::regional_status_plan().unwrap();
+    let minimum_inset = plan.top_inset_px();
     let (states, inhibits, _) = well();
     let feeds = [
         FeedStatus {
@@ -123,19 +125,31 @@ fn reserved_safety_band_accepts_its_exact_two_row_minimum_only() {
     let mut exact = list_new(safety_caps()).unwrap();
     let stats = build_safety_in_reserved_header(
         &mut exact,
-        &projection_new(ORD.0, ORD.1, 20.0, 800, 600, 181).unwrap(),
+        &projection_new(ORD.0, ORD.1, 20.0, 800, 600, minimum_inset).unwrap(),
         &context,
     )
     .unwrap();
     assert_eq!(stats.banner_lines, 2);
-    assert_eq!(exact.texts.y, [151 * 16, 165 * 16]);
+    assert_eq!(
+        exact.texts.y,
+        [
+            plan.row(oa_display::status_strip::StatusStripRow::Safety(0))
+                .unwrap()
+                .y_px()
+                * 16,
+            plan.row(oa_display::status_strip::StatusStripRow::Safety(1))
+                .unwrap()
+                .y_px()
+                * 16,
+        ]
+    );
 
     let mut short = list_new(safety_caps()).unwrap();
     let before = short.clone();
     assert!(matches!(
         build_safety_in_reserved_header(
             &mut short,
-            &projection_new(ORD.0, ORD.1, 20.0, 800, 600, 180).unwrap(),
+            &projection_new(ORD.0, ORD.1, 20.0, 800, 600, minimum_inset - 1).unwrap(),
             &context,
         ),
         Err(DisplayError::BadView(_))
@@ -166,7 +180,17 @@ fn reserved_banner_keeps_first_lost_feed_visible_before_its_overflow_summary() {
     let mut list = list_new(safety_caps()).unwrap();
     let stats = build_safety_in_reserved_header(
         &mut list,
-        &projection_new(ORD.0, ORD.1, 20.0, 800, 600, 224).unwrap(),
+        &projection_new(
+            ORD.0,
+            ORD.1,
+            20.0,
+            800,
+            600,
+            oa_display::status_strip::regional_status_plan()
+                .unwrap()
+                .top_inset_px(),
+        )
+        .unwrap(),
         &context,
     )
     .unwrap();

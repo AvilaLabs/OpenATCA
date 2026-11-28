@@ -1813,7 +1813,19 @@ fn legend(
 ) -> Result<(), DisplayError> {
     let p = &v.proj;
     let x = 8 * 16;
-    let pitch = 18 * 16;
+    let row_bounds = crate::core::font::text_block_bounds_px(
+        (0, 0),
+        LEGEND_SIZE,
+        0,
+        1,
+        1,
+        u32::from(LEGEND_SIZE) + 2,
+    );
+    let pitch = row_bounds
+        .y1
+        .checked_sub(row_bounds.y0)
+        .and_then(|pixels| pixels.checked_mul(16))
+        .ok_or(DisplayError::BadView("legend row pitch overflow"))?;
     let mut y = 8 * 16;
     let strip16 = i32::try_from(LEGEND_STRIP_PX * 16).unwrap_or(i32::MAX);
     let reserved16 = i32::try_from(i64::from(p.top_inset) * 16).unwrap_or(i32::MAX);

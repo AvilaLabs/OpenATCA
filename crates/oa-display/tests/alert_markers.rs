@@ -7,6 +7,7 @@
 )]
 
 use oa_display::core::alert_markers::*;
+use oa_display::core::status_strip::{regional_status_plan, StatusStripRow};
 use oa_display::list::{list_new, DisplayError, DisplayList, ListCaps};
 use oa_display::palette;
 use oa_display::project::{project, projection_new, unproject, Projection};
@@ -16,6 +17,11 @@ const CENTRE: (i32, i32) = (419_786_000, -879_048_000);
 
 fn projection(width: u32, top_inset: u32) -> Projection {
     projection_new(CENTRE.0, CENTRE.1, 20.0, width, 600, top_inset).unwrap()
+}
+
+fn regional_projection(width: u32) -> Projection {
+    let inset = regional_status_plan().unwrap().top_inset_px();
+    projection(width, inset)
 }
 
 fn marker(address: u32, state: MarkerState, lat_e7: i32, lon_e7: i32) -> AlertMarker {
@@ -104,8 +110,8 @@ fn maximum_final_markers() -> Vec<FinalMonitorMarker> {
             if index < 100 {
                 FinalMonitorMarker {
                     address,
-                    lat_e7: CENTRE.0,
-                    lon_e7: -870_000_000,
+                    lat_e7: 500_000_000,
+                    lon_e7: CENTRE.1,
                     severity: severity as u8,
                     position_known: 1,
                     reserved: [0; 2],
@@ -137,7 +143,7 @@ fn texts(list: &DisplayList) -> Vec<String> {
 // REQ: OA-DSP-077
 #[test]
 fn caution_warning_and_protection_lost_have_distinct_alert_primitives_and_header() {
-    let p = projection(800, 160);
+    let p = regional_projection(800);
     let markers = [
         marker(1, MarkerState::Caution, CENTRE.0, CENTRE.1),
         marker(2, MarkerState::Warning, CENTRE.0, CENTRE.1),
@@ -169,10 +175,14 @@ fn caution_warning_and_protection_lost_have_distinct_alert_primitives_and_header
         labels.get(3).map(String::as_str),
         Some("MSAW WARNING 1 CAUTION 1 LOST 1 OFF 0 UNLOCATED 0")
     );
-    assert_eq!(list.texts.x.get(3).copied(), Some(8 * 16));
-    assert_eq!(list.texts.y.get(3).copied(), Some(112 * 16));
-    assert_eq!(list.texts.size.get(3), Some(&10));
-    assert_eq!(list.texts.layer.get(3), Some(&15));
+    let heading = regional_status_plan()
+        .unwrap()
+        .row(StatusStripRow::MsawHeading)
+        .unwrap();
+    assert_eq!(list.texts.x.get(3).copied(), Some(heading.x_px() * 16));
+    assert_eq!(list.texts.y.get(3).copied(), Some(heading.y_px() * 16));
+    assert_eq!(list.texts.size.get(3), Some(&heading.size()));
+    assert_eq!(list.texts.layer.get(3), Some(&heading.layer()));
     let point = project(&p, CENTRE.0, CENTRE.1).unwrap();
     assert_eq!(list.texts.x.first().copied(), Some(point.0));
     assert_eq!(list.texts.y.first().copied(), Some(point.1 - 80));
@@ -181,10 +191,10 @@ fn caution_warning_and_protection_lost_have_distinct_alert_primitives_and_header
 // REQ: OA-DSP-077
 #[test]
 fn off_map_and_unlocated_alerts_are_counted_without_drawing_guessed_points() {
-    let p = projection(800, 160);
+    let p = regional_projection(800);
     let markers = [
         marker(10, MarkerState::Caution, CENTRE.0, CENTRE.1),
-        marker(20, MarkerState::Warning, CENTRE.0, -870_000_000),
+        marker(20, MarkerState::Warning, 500_000_000, CENTRE.1),
         unknown_marker(30, MarkerState::ProtectionLost),
     ];
     let mut list = list_for(markers.len());
@@ -210,7 +220,7 @@ fn off_map_and_unlocated_alerts_are_counted_without_drawing_guessed_points() {
 // REQ: OA-DSP-077
 #[test]
 fn invalid_records_and_short_lists_refuse_without_mutating_the_list() {
-    let p = projection(800, 160);
+    let p = regional_projection(800);
     let valid = marker(10, MarkerState::Caution, CENTRE.0, CENTRE.1);
     let mut list = list_for(2);
 
@@ -326,7 +336,7 @@ fn view_and_header_width_are_checked_before_writing() {
     let mut list = list_for(markers.len());
     let before = list.clone();
     assert!(matches!(
-        append_alert_markers(&mut list, &projection(480, 160), &markers),
+        append_alert_markers(&mut list, &regional_projection(480), &markers),
         Err(DisplayError::BadView(_))
     ));
     assert_eq!(list, before);
@@ -339,7 +349,17 @@ fn view_and_header_width_are_checked_before_writing() {
 
     // The documented minimum width fits this header. Refusing it would turn the
     // stated minimum into a misleading contract.
-    assert!(append_alert_markers(&mut list, &projection(500, 128), &markers).is_ok());
+    assert!(append_alert_markers(&mut list, &regional_projection(500), &markers).is_ok());
+
+    let mut short_frame = list_for(markers.len());
+    let mut invalid_height = regional_projection(800);
+    invalid_height.height = invalid_height.top_inset;
+    let before_height = short_frame.clone();
+    assert!(matches!(
+        append_alert_markers(&mut short_frame, &invalid_height, &markers),
+        Err(DisplayError::BadView(_))
+    ));
+    assert_eq!(short_frame, before_height);
 }
 
 // Mutation killed: undercount the alert header width, or reject its first whole-pixel fit.
@@ -349,16 +369,24 @@ fn maximum_count_header_fits_at_its_first_integer_pixel_width_only() {
     let markers: Vec<_> = (1..=MAX_ALERT_MARKERS as u32)
         .map(|address| unknown_marker(address, MarkerState::Warning))
         .collect();
+    // For this exact ASCII heading, the renderer uses a 10 px advance at x=8 with
+    // two pixels of right clearance: 53 characters produce a 540 px half-open bound.
+    let width = 540;
     let mut exact = list_for(markers.len());
-    append_alert_markers(&mut exact, &projection(535, 160), &markers).unwrap();
-    assert!(texts(&exact)
-        .last()
-        .is_some_and(|header| header.contains("WARNING 128") && header.contains("UNLOCATED 128")));
+    append_alert_markers(&mut exact, &regional_projection(width), &markers).unwrap();
+    assert_eq!(
+        texts(&exact).last().map(String::as_str),
+        Some("MSAW WARNING 128 CAUTION 0 LOST 0 OFF 0 UNLOCATED 128")
+    );
 
     let mut one_pixel_narrower = list_for(markers.len());
     let before = one_pixel_narrower.clone();
     assert!(matches!(
-        append_alert_markers(&mut one_pixel_narrower, &projection(534, 160), &markers),
+        append_alert_markers(
+            &mut one_pixel_narrower,
+            &regional_projection(width - 1),
+            &markers,
+        ),
         Err(DisplayError::BadView(_))
     ));
     assert_eq!(one_pixel_narrower, before);
@@ -367,24 +395,39 @@ fn maximum_count_header_fits_at_its_first_integer_pixel_width_only() {
 // Mutation killed: choose legacy heading placement at the exact reserved-band boundary.
 // REQ: OA-DSP-077
 #[test]
-fn alert_heading_rows_switch_at_the_reserved_band_boundary() {
+fn alert_heading_rows_use_the_shared_status_strip_placements() {
+    let plan = regional_status_plan().unwrap();
+    let msaw_row = plan.row(StatusStripRow::MsawHeading).unwrap();
+    let final_row = plan.row(StatusStripRow::FinalHeading).unwrap();
     let mut msaw = list_for(0);
-    append_alert_markers(&mut msaw, &projection(800, 176), &[]).unwrap();
-    assert_eq!(msaw.texts.y.first().copied(), Some(119 * 16));
+    append_alert_markers(&mut msaw, &regional_projection(800), &[]).unwrap();
+    assert_eq!(msaw.texts.x.first().copied(), Some(msaw_row.x_px() * 16));
+    assert_eq!(msaw.texts.y.first().copied(), Some(msaw_row.y_px() * 16));
 
     let mut final_monitor = list_for(0);
-    append_final_monitor_frame(&mut final_monitor, &projection(800, 176), &[], true).unwrap();
-    assert_eq!(final_monitor.texts.y.first().copied(), Some(135 * 16));
+    append_final_monitor_frame(&mut final_monitor, &regional_projection(800), &[], true).unwrap();
+    assert_eq!(
+        final_monitor.texts.x.first().copied(),
+        Some(final_row.x_px() * 16)
+    );
+    assert_eq!(
+        final_monitor.texts.y.first().copied(),
+        Some(final_row.y_px() * 16)
+    );
 
-    let mut legacy = list_for(0);
-    append_alert_markers(&mut legacy, &projection(800, 175), &[]).unwrap();
-    assert_eq!(legacy.texts.y.first().copied(), Some(112 * 16));
+    let mut short = list_for(0);
+    let before = short.clone();
+    assert!(matches!(
+        append_alert_markers(&mut short, &projection(800, plan.top_inset_px() - 1), &[],),
+        Err(DisplayError::BadView(_))
+    ));
+    assert_eq!(short, before);
 }
 
 // REQ: OA-DSP-077
 #[test]
 fn edge_warning_is_counted_and_rasterized_when_its_halo_is_clipped() {
-    let p = projection(800, 160);
+    let p = regional_projection(800);
     let (lat_e7, lon_e7) = unproject(&p, 8 * 16, 300 * 16).unwrap();
     let point = project(&p, lat_e7, lon_e7).unwrap();
     assert!(point.0 >= 0 && point.0 < 16 * 16);
@@ -433,13 +476,13 @@ fn header_width_refusal_is_atomic_and_wider_view_preserves_the_complete_marker_l
     let mut narrow_list = list_for(markers.len());
     let before = narrow_list.clone();
     assert!(matches!(
-        append_alert_markers(&mut narrow_list, &projection(500, 160), &markers),
+        append_alert_markers(&mut narrow_list, &regional_projection(500), &markers),
         Err(DisplayError::BadView(_))
     ));
     assert_eq!(narrow_list, before);
 
     let mut list = list_for(markers.len());
-    let stats = append_alert_markers(&mut list, &projection(800, 160), &markers).unwrap();
+    let stats = append_alert_markers(&mut list, &regional_projection(800), &markers).unwrap();
     assert_eq!(stats.warning as usize, MAX_ALERT_MARKERS);
     assert_eq!(stats.drawn as usize, MAX_ALERT_MARKERS);
     assert_eq!(
@@ -455,7 +498,7 @@ fn header_width_refusal_is_atomic_and_wider_view_preserves_the_complete_marker_l
 // REQ: OA-RWY-015
 #[test]
 fn final_monitor_hook_renders_caution_warning_and_degraded_status() {
-    let p = projection(800, 160);
+    let p = regional_projection(800);
     let markers = [
         final_marker(1, FinalMonitorSeverity::Caution),
         final_marker(2, FinalMonitorSeverity::Warning),
@@ -483,7 +526,7 @@ fn final_monitor_hook_renders_caution_warning_and_degraded_status() {
 // REQ: OA-RWY-015
 #[test]
 fn maximum_final_degraded_header_fits_final_monitor_reservation() {
-    let p = projection(800, 160);
+    let p = regional_projection(800);
     let markers = maximum_final_markers();
     let mut list = list_for_header_reservation(markers.len(), FINAL_MONITOR_HEADER_TEXT_BYTES);
     let stats = append_final_monitor_frame(&mut list, &p, &markers, true).unwrap();
@@ -507,7 +550,7 @@ fn maximum_final_degraded_header_fits_final_monitor_reservation() {
 #[test]
 fn renderer_budget_pins_empty_degraded_loss_heading_at_its_first_pixel_width() {
     let budget = alert_render_budget(AlertRenderKind::FinalMonitor { degraded: true }, 1).unwrap();
-    assert_eq!(budget.minimum_width_px, 705);
+    assert_eq!(budget.minimum_width_px, 710);
     let mut exact = list_for_render_budget(budget);
     let exact_view = projection(budget.minimum_width_px, budget.minimum_top_inset_px);
     append_final_monitor_frame_with_budget(&mut exact, &exact_view, &[], true, 1).unwrap();
@@ -523,6 +566,120 @@ fn renderer_budget_pins_empty_degraded_loss_heading_at_its_first_pixel_width() {
     );
     assert!(matches!(
         append_final_monitor_frame_with_budget(&mut short, &short_view, &[], true, 1),
+        Err(DisplayError::BadView(_))
+    ));
+    assert_eq!(short, before);
+}
+
+// Mutation killed: omit one of the independently specified count terms from the widest heading.
+// REQ: OA-RWY-015
+#[test]
+fn full_budget_worst_header_uses_the_independent_780_pixel_witness() {
+    let mut markers = Vec::with_capacity(MAX_ALERT_MARKERS);
+    for address in 1..=10 {
+        markers.push(final_marker(address, FinalMonitorSeverity::Warning));
+        let marker = markers.last_mut().unwrap();
+        marker.lat_e7 = 900_000_000;
+        marker.lon_e7 = 1_800_000_000;
+    }
+    for address in 11..=20 {
+        let mut marker = final_marker(address, FinalMonitorSeverity::Caution);
+        marker.position_known = 0;
+        marker.lat_e7 = NO_POSITION_E7;
+        marker.lon_e7 = NO_POSITION_E7;
+        markers.push(marker);
+    }
+    for address in 21..=128 {
+        let mut marker = final_marker(address, FinalMonitorSeverity::ProtectionLost);
+        marker.position_known = 0;
+        marker.lat_e7 = NO_POSITION_E7;
+        marker.lon_e7 = NO_POSITION_E7;
+        markers.push(marker);
+    }
+    let budget = alert_render_budget(
+        AlertRenderKind::FinalMonitor { degraded: true },
+        MAX_ALERT_MARKERS,
+    )
+    .unwrap();
+    assert_eq!(budget.minimum_width_px, 780);
+    let mut exact = list_for_render_budget(budget);
+    let exact_view = projection(780, budget.minimum_top_inset_px);
+    let stats = append_final_monitor_frame_with_budget(
+        &mut exact,
+        &exact_view,
+        &markers,
+        true,
+        MAX_ALERT_MARKERS,
+    )
+    .unwrap();
+    assert_eq!(stats.warning, 10);
+    assert_eq!(stats.caution, 10);
+    assert_eq!(stats.protection_lost, 108);
+    assert_eq!(stats.off_map, 10);
+    assert_eq!(stats.unlocated, 118);
+    assert!(texts(&exact).iter().any(|text| {
+        text == "FINAL DEGRADED WARNING 10 CAUTION 10 PROTECTION LOST 108 OFF 10 UNLOCATED 118"
+    }));
+
+    let mut narrow = list_for_render_budget(budget);
+    let before = narrow.clone();
+    let narrow_view = projection(779, budget.minimum_top_inset_px);
+    assert!(matches!(
+        append_final_monitor_frame_with_budget(
+            &mut narrow,
+            &narrow_view,
+            &markers,
+            true,
+            MAX_ALERT_MARKERS,
+        ),
+        Err(DisplayError::BadView(_))
+    ));
+    assert_eq!(narrow, before);
+}
+
+// Mutation killed: write marker geometry before discovering the notice has no text slot.
+// REQ: OA-RWY-015
+#[test]
+fn missing_notice_slot_refuses_before_any_marker_mutation() {
+    let budget = alert_render_budget(AlertRenderKind::Msaw, 1).unwrap();
+    let mut list = list_new(ListCaps {
+        lines: 0,
+        rects: 0,
+        circles: budget.circles,
+        polylines: 0,
+        poly_vertices: 0,
+        texts: 0,
+        text_bytes: budget.text_bytes,
+    })
+    .unwrap();
+    let before = list.clone();
+    let view = regional_projection(800);
+    let markers = [marker(1, MarkerState::Warning, CENTRE.0, CENTRE.1)];
+    assert!(matches!(
+        append_alert_markers_with_budget(&mut list, &view, &markers, 1),
+        Err(DisplayError::Full { table: "texts", .. })
+    ));
+    assert_eq!(list, before);
+}
+
+// Mutation killed: validate the partial heading but skip the longer overflow notice bound.
+// REQ: OA-RWY-015
+#[test]
+fn overflow_notice_width_accepts_exact_edge_and_refuses_one_pixel_short() {
+    let budget = alert_render_budget(AlertRenderKind::Msaw, 0).unwrap();
+    let marker = [unknown_marker(1, MarkerState::Caution)];
+    let exact_view = projection(180, budget.minimum_top_inset_px);
+    let mut exact = list_for_render_budget(budget);
+    let stats = append_alert_markers_with_budget(&mut exact, &exact_view, &marker, 0).unwrap();
+    assert_eq!(stats.omitted, 1);
+    assert!(texts(&exact).iter().any(|text| text == "MSAW PARTIAL"));
+    assert!(texts(&exact).iter().any(|text| text == "MSAW +1 NOT SHOWN"));
+
+    let mut short = list_for_render_budget(budget);
+    let before = short.clone();
+    let short_view = projection(179, budget.minimum_top_inset_px);
+    assert!(matches!(
+        append_alert_markers_with_budget(&mut short, &short_view, &marker, 0),
         Err(DisplayError::BadView(_))
     ));
     assert_eq!(short, before);
@@ -601,6 +758,142 @@ fn family_overflow_draws_allocated_rows_and_reports_omissions_in_reserved_strip(
         final_list.texts.y.get(final_heading_index),
         final_list.texts.y.get(final_overflow_index)
     );
+}
+
+// Mutation killed: allocate the budget by address order and leave the highest-address severity unseen.
+// REQ: OA-RWY-015
+#[test]
+fn budget_prioritizes_warning_and_protection_lost_at_the_tail() {
+    let budget = alert_render_budget(AlertRenderKind::Msaw, MAX_ALERT_MARKERS).unwrap();
+    let view = projection(budget.minimum_width_px, budget.minimum_top_inset_px);
+    let visible_point = project(&view, CENTRE.0, CENTRE.1).unwrap();
+    for (state, label) in [
+        (MarkerState::Warning, "W"),
+        (MarkerState::ProtectionLost, "L"),
+    ] {
+        let mut markers: Vec<_> = (1..=u32::try_from(MAX_ALERT_MARKERS + 1).unwrap())
+            .map(|address| unknown_marker(address, MarkerState::Caution))
+            .collect();
+        *markers.last_mut().unwrap() = marker(
+            u32::try_from(MAX_ALERT_MARKERS + 1).unwrap(),
+            state,
+            CENTRE.0,
+            CENTRE.1,
+        );
+        let mut list = list_for_render_budget(budget);
+        let stats = append_alert_markers_with_budget(&mut list, &view, &markers, MAX_ALERT_MARKERS)
+            .unwrap();
+        assert_eq!(
+            stats.examined,
+            u64::try_from(MAX_ALERT_MARKERS + 1).unwrap()
+        );
+        assert_eq!(stats.drawn, 1);
+        assert_eq!(stats.caution, u64::try_from(MAX_ALERT_MARKERS).unwrap());
+        assert_eq!(stats.omitted, 1);
+        assert_eq!(stats.warning, u64::from(state == MarkerState::Warning));
+        assert_eq!(
+            stats.protection_lost,
+            u64::from(state == MarkerState::ProtectionLost)
+        );
+        let rendered = texts(&list);
+        let label_index = rendered.iter().position(|text| text == label).unwrap();
+        assert_eq!(
+            list.texts.x.get(label_index).copied(),
+            Some(visible_point.0)
+        );
+        assert_eq!(
+            list.texts.y.get(label_index).copied(),
+            Some(visible_point.1 - 80)
+        );
+        assert!(rendered.iter().any(|text| text == "MSAW +1 NOT SHOWN"));
+        assert_eq!(list.circles.x.len(), ALERT_CIRCLES_PER_MARKER);
+    }
+
+    let mut markers: Vec<_> = (1..=u32::try_from(MAX_ALERT_MARKERS + 2).unwrap())
+        .map(|address| unknown_marker(address, MarkerState::Caution))
+        .collect();
+    let warning_address = u32::try_from(MAX_ALERT_MARKERS + 1).unwrap();
+    let lost_address = warning_address + 1;
+    let warning_index = usize::try_from(warning_address - 1).unwrap();
+    let lost_index = usize::try_from(lost_address - 1).unwrap();
+    *markers.get_mut(warning_index).unwrap() =
+        marker(warning_address, MarkerState::Warning, CENTRE.0, CENTRE.1);
+    *markers.get_mut(lost_index).unwrap() = marker(
+        lost_address,
+        MarkerState::ProtectionLost,
+        CENTRE.0,
+        CENTRE.1,
+    );
+    let mut list = list_for_render_budget(budget);
+    let stats =
+        append_alert_markers_with_budget(&mut list, &view, &markers, MAX_ALERT_MARKERS).unwrap();
+    let rendered = texts(&list);
+    let warning = rendered.iter().position(|text| text == "W").unwrap();
+    let lost = rendered.iter().position(|text| text == "L").unwrap();
+    assert!(warning < lost);
+    assert_eq!(stats.drawn, 2);
+    assert_eq!(stats.omitted, 2);
+    assert_eq!(stats.caution, u64::try_from(MAX_ALERT_MARKERS).unwrap());
+    assert_eq!(list.circles.x.len(), 2 * ALERT_CIRCLES_PER_MARKER);
+}
+
+// Mutation killed: drop a producer-reported open-table refusal when the retained list fills its budget.
+// REQ: OA-RWY-015
+#[test]
+fn producer_refused_open_rows_are_checked_and_visible_without_fake_severity() {
+    let budget = alert_render_budget(AlertRenderKind::Msaw, MAX_ALERT_MARKERS).unwrap();
+    let view = projection(budget.minimum_width_px, budget.minimum_top_inset_px);
+    let markers: Vec<_> = (1..=u32::try_from(MAX_ALERT_MARKERS).unwrap())
+        .map(|address| unknown_marker(address, MarkerState::Caution))
+        .collect();
+    let mut list = list_for_render_budget(budget);
+    let stats = append_alert_markers_with_budget_and_producer_omissions(
+        &mut list,
+        &view,
+        &markers,
+        MAX_ALERT_MARKERS,
+        1,
+    )
+    .unwrap();
+    assert_eq!(stats.examined, u64::try_from(MAX_ALERT_MARKERS).unwrap());
+    assert_eq!(stats.caution, u64::try_from(MAX_ALERT_MARKERS).unwrap());
+    assert_eq!(stats.warning, 0);
+    assert_eq!(stats.protection_lost, 0);
+    assert_eq!(stats.omitted, 1);
+    let rendered = texts(&list);
+    assert!(rendered.iter().any(|text| text == "MSAW PARTIAL"));
+    assert!(rendered.iter().any(|text| text == "MSAW +1 NOT SHOWN"));
+
+    let mut next_frame = list_for_render_budget(budget);
+    let next_stats = append_alert_markers_with_budget_and_producer_omissions(
+        &mut next_frame,
+        &view,
+        &markers,
+        MAX_ALERT_MARKERS,
+        1,
+    )
+    .unwrap();
+    assert_eq!(next_stats.omitted, 1);
+    assert!(texts(&next_frame)
+        .iter()
+        .any(|text| text == "MSAW +1 NOT SHOWN"));
+
+    let too_many = (1..=u32::try_from(MAX_ALERT_MARKERS + 1).unwrap())
+        .map(|address| unknown_marker(address, MarkerState::Caution))
+        .collect::<Vec<_>>();
+    let mut refusing = list_for_render_budget(budget);
+    let before = refusing.clone();
+    assert!(matches!(
+        append_alert_markers_with_budget_and_producer_omissions(
+            &mut refusing,
+            &view,
+            &too_many,
+            MAX_ALERT_MARKERS,
+            u64::MAX,
+        ),
+        Err(DisplayError::TooLarge { .. })
+    ));
+    assert_eq!(refusing, before);
 }
 
 // Mutation killed: infer protection loss only from degraded mode or only from drawn rows.
@@ -755,6 +1048,24 @@ fn budgeted_presenters_refuse_invalid_tail_records_before_mutating_the_list() {
     ));
     assert_eq!(list, before);
 
+    let mut invalid_coordinate_tail: Vec<_> = (1..=u32::try_from(input_count).unwrap())
+        .map(|address| marker(address, MarkerState::Warning, 0, 0))
+        .collect();
+    let tail = invalid_coordinate_tail.last_mut().unwrap();
+    tail.lat_e7 = 900_000_001;
+    let mut coordinate_list = list_for_render_budget(budget);
+    let before_coordinate = coordinate_list.clone();
+    assert!(matches!(
+        append_alert_markers_with_budget(
+            &mut coordinate_list,
+            &view,
+            &invalid_coordinate_tail,
+            MAX_ALERT_MARKERS,
+        ),
+        Err(DisplayError::BadView(_))
+    ));
+    assert_eq!(coordinate_list, before_coordinate);
+
     let final_budget = alert_render_budget(
         AlertRenderKind::FinalMonitor { degraded: true },
         MAX_ALERT_MARKERS,
@@ -787,7 +1098,7 @@ fn budgeted_presenters_refuse_invalid_tail_records_before_mutating_the_list() {
 // REQ: OA-DSP-077, OA-RWY-015
 #[test]
 fn typed_header_reservations_accept_exact_capacity_and_refuse_one_byte_short() {
-    let p = projection(800, 160);
+    let p = regional_projection(800);
     let msaw: Vec<_> = (1..=MAX_ALERT_MARKERS as u32)
         .map(|address| unknown_marker(address, MarkerState::Warning))
         .collect();
@@ -821,7 +1132,7 @@ fn typed_header_reservations_accept_exact_capacity_and_refuse_one_byte_short() {
 // REQ: OA-RWY-015
 #[test]
 fn final_monitor_protection_lost_is_typed_counted_and_rasterized_at_the_edge() {
-    let p = projection(800, 160);
+    let p = regional_projection(800);
     let (lat_e7, lon_e7) = unproject(&p, 8 * 16, 300 * 16).unwrap();
     let point = project(&p, lat_e7, lon_e7).unwrap();
     let lost = [FinalMonitorMarker {
@@ -869,7 +1180,7 @@ fn final_monitor_protection_lost_is_typed_counted_and_rasterized_at_the_edge() {
 // REQ: OA-RWY-015
 #[test]
 fn final_monitor_invalid_packets_and_capacity_refuse_atomically() {
-    let p = projection(800, 160);
+    let p = regional_projection(800);
     let valid = final_marker(1, FinalMonitorSeverity::Warning);
     let mut list = list_for(2);
     for invalid in [

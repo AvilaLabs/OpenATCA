@@ -29,7 +29,7 @@ pub mod shell;
 pub use crate::core::raster::MAX_DISPLAY_PIXELS;
 pub use crate::core::{
     alert_markers, font, interaction, list, metering, ownership, palette, project, raster, safety,
-    scene, text, traffic, workstation,
+    scene, status_strip, text, traffic, workstation,
 };
 #[cfg(not(all(
     target_arch = "wasm32",

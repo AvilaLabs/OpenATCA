@@ -6,10 +6,12 @@
     clippy::indexing_slicing
 )]
 
+use oa_display::font::text_block_bounds_px;
 use oa_display::interaction::*;
 use oa_display::list::{list_new, push_rect, DisplayError, ListCaps};
 use oa_display::palette::BACKGROUND;
 use oa_display::project::projection_new;
+use oa_display::status_strip::{regional_status_plan, StatusStripRow};
 
 fn identity(address: u32, seed: u8) -> FlightIdentity {
     FlightIdentity {
@@ -462,7 +464,7 @@ fn interaction_text_uses_pixel_coordinates_and_follows_the_legend() {
     present_interaction(&state, &mut list, &proj).unwrap();
     assert!(list.texts.x[0] > 320 * 16);
     assert_eq!(list.texts.x[0], list.texts.x[1]);
-    assert_eq!(list.texts.y, [(104 + 8) * 16, (104 + 8 + 14) * 16]);
+    assert_eq!(list.texts.y, [(104 + 10) * 16, (104 + 10 + 14) * 16]);
     assert_eq!(list.texts.layer, [LAYER_INTERACTION, LAYER_INTERACTION]);
 }
 
@@ -482,7 +484,7 @@ fn interaction_avoids_the_left_safety_panel_and_uses_bottom_fallbacks() {
     .unwrap();
     present_interaction(&state, &mut left_panel, &proj).unwrap();
     assert!(left_panel.texts.x[0] > 320 * 16);
-    assert_eq!(left_panel.texts.y[0], 112 * 16);
+    assert_eq!(left_panel.texts.y[0], 114 * 16);
 
     let mut full_width_panel = list_new(display_caps(2, 128)).unwrap();
     push_rect(
@@ -495,7 +497,7 @@ fn interaction_avoids_the_left_safety_panel_and_uses_bottom_fallbacks() {
     .unwrap();
     present_interaction(&state, &mut full_width_panel, &proj).unwrap();
     assert!(full_width_panel.texts.x[0] > 320 * 16);
-    assert_eq!(full_width_panel.texts.y[0], (400 - 42 - 26) * 16);
+    assert_eq!(full_width_panel.texts.y[0], (400 - 42 - 32) * 16);
 }
 
 // REQ: OA-UI-019, OA-UI-020
@@ -542,6 +544,49 @@ fn narrow_and_short_viewports_refuse_without_mutating_the_list() {
         ))
     ));
     assert_eq!(list, before);
+}
+
+// Mutation: accepting one pixel below the shared padded minimum must fail without list mutation.
+// REQ: OA-UI-019, OA-REG-020
+#[test]
+fn planned_minimum_height_fits_padded_selection_at_the_strip_boundary() {
+    let plan = regional_status_plan().unwrap();
+    let inset = plan.top_inset_px();
+    let minimum = plan.minimum_frame_height_with_selection().unwrap();
+    let state = selected_interaction();
+    let mut too_short = list_new(display_caps(2, 128)).unwrap();
+    let before = too_short.clone();
+    let short_projection =
+        projection_new(420_000_000, -880_000_000, 100.0, 640, minimum - 1, inset).unwrap();
+    assert!(matches!(
+        present_interaction(&state, &mut too_short, &short_projection),
+        Err(DisplayError::BadView(
+            "no unobscured viewport position fits interaction status"
+        ))
+    ));
+    assert_eq!(too_short, before);
+
+    let mut list = list_new(display_caps(2, 128)).unwrap();
+    let projection = projection_new(420_000_000, -880_000_000, 100.0, 640, minimum, inset).unwrap();
+    present_interaction(&state, &mut list, &projection).unwrap();
+    assert_eq!(list.texts.y[0], i32::try_from(inset + 2).unwrap() * 16);
+    assert_eq!(list.texts.y[1], list.texts.y[0] + 14 * 16);
+
+    let chars = usize::try_from(list.texts.len[0].max(list.texts.len[1]))
+        .expect("bounded status text length fits usize");
+    let padded_selection = text_block_bounds_px(
+        (list.texts.x[0], list.texts.y[0]),
+        list.texts.size[0],
+        list.texts.align[0],
+        chars,
+        2,
+        14,
+    );
+    let last_console = plan
+        .row(StatusStripRow::Console(1))
+        .unwrap()
+        .reserved_bounds();
+    assert!(padded_selection.y0 >= last_console.y1);
 }
 
 // REQ: OA-UI-012, OA-UI-019

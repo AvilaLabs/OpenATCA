@@ -102,7 +102,6 @@ pub struct FinalApproachAssignment {
 const MAX_FINAL_APPROACH_ASSIGNMENTS: usize = oa_display::core::alert_markers::MAX_ALERT_MARKERS;
 const _: () = assert!(MAX_FINAL_APPROACH_ASSIGNMENTS <= final_monitor_core::MAX_TRACKS);
 const MAX_OPERATOR_CONSOLE_BYTES: usize = 128;
-const OPERATOR_CONSOLE_SEPARATOR_BYTES: usize = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FinalMonitorStatus {
@@ -507,7 +506,7 @@ fn automation_status(
     }
 }
 
-fn automation_status_label(status: RegionalAutomationStatus) -> &'static str {
+pub(crate) fn automation_status_label(status: RegionalAutomationStatus) -> &'static str {
     match (status.effective, status.degradation) {
         (
             EffectiveAutomationMode::FlightDataOnly,
@@ -516,16 +515,6 @@ fn automation_status_label(status: RegionalAutomationStatus) -> &'static str {
         (EffectiveAutomationMode::FlightDataOnly, _) => "MODE FLIGHT DATA ONLY | FUSION OFF",
         (EffectiveAutomationMode::Surveillance, _) => "MODE SURVEILLANCE | FUSION OFF",
     }
-}
-
-pub(crate) fn automation_console_text(console: &str, status: RegionalAutomationStatus) -> String {
-    let mut text = String::with_capacity(192);
-    if !console.is_empty() {
-        text.push_str(console);
-        text.push_str(" | ");
-    }
-    text.push_str(automation_status_label(status));
-    text
 }
 
 // A3/C6: cold offline evidence rows/frame are bounded by the selected flight profile capacity
@@ -1114,21 +1103,26 @@ fn validate_alert_composition(
         .map(|budget| budget.minimum_width_px)
         .max()
         .ok_or("rendered alert family budget is absent")?;
-    if profile.frame_width < minimum_width {
+    let plan = oa_display::status_strip::regional_status_plan()
+        .map_err(|error| format!("regional status plan: {error:?}"))?;
+    let maximum_mode = maximum_operator_status_label();
+    let maximum_console = "W".repeat(MAX_OPERATOR_CONSOLE_BYTES);
+    let operator_width = plan
+        .minimum_width_for_operator_rows(maximum_mode, &maximum_console)
+        .map_err(|error| format!("regional operator width: {error:?}"))?;
+    let required_width = minimum_width.max(operator_width);
+    if profile.frame_width < required_width {
         return Err(format!(
-            "rendered alert headings require width {minimum_width} px; profile width is {}",
+            "rendered alert/operator rows require width {required_width} px; profile width is {}",
             profile.frame_width
         ));
     }
-    let top_inset = budgets
-        .iter()
-        .flatten()
-        .map(|budget| budget.minimum_top_inset_px)
-        .max()
-        .ok_or("rendered alert top inset is absent")?;
-    if profile.frame_height <= top_inset {
+    let minimum_height = plan
+        .minimum_frame_height_with_selection()
+        .map_err(|error| format!("regional selection height: {error:?}"))?;
+    if profile.frame_height < minimum_height {
         return Err(format!(
-            "rendered alert layout requires frame height greater than {top_inset} px; profile height is {}",
+            "rendered selection requires frame height {minimum_height} px; profile height is {}",
             profile.frame_height
         ));
     }
@@ -1144,30 +1138,32 @@ fn validate_alert_composition(
     if circles_needed > circles_reserved {
         return Err("composed alert circles exceed the shared display reservation".into());
     }
-    let mode_rows = maximum_operator_status_bytes()
-        .checked_add(MAX_OPERATOR_CONSOLE_BYTES)
-        .and_then(|bytes| bytes.checked_add(OPERATOR_CONSOLE_SEPARATOR_BYTES))
-        .and_then(|bytes| bytes.checked_add(63))
-        .and_then(|bytes| bytes.checked_div(64))
+    let operator_rows =
+        oa_display::status_strip::regional_operator_rows(maximum_mode, &maximum_console)
+            .map_err(|error| format!("regional operator rows: {error:?}"))?;
+    let status_rows = 1usize
+        .checked_add(operator_rows.console_count)
+        .and_then(|rows| rows.checked_add(2)) // The plan reserves two safety rows.
         .ok_or("operator status row requirement overflow")?;
     let texts_needed = budgets
         .iter()
         .flatten()
-        .try_fold(mode_rows, |sum, budget| sum.checked_add(budget.texts))
-        .ok_or("composed alert text row requirement overflow")?;
+        .try_fold(status_rows, |sum, budget| sum.checked_add(budget.texts))
+        .ok_or("composed alert/status text row requirement overflow")?;
     let (family_text_rows, family_text_bytes) = surveillance::alert_family_text_reservation()?;
+    let status_rows = surveillance::status_aux_text_rows()?;
     let texts_reserved = profile
         .max_tracks
         .checked_mul(oa_display::core::alert_markers::ALERT_TEXTS_PER_MARKER)
         .and_then(|count| count.checked_add(family_text_rows))
-        .and_then(|count| count.checked_add(surveillance::STATUS_AUX_TEXT_ROWS))
+        .and_then(|count| count.checked_add(status_rows))
         .ok_or("profile alert text reservation overflow")?;
     if texts_needed > texts_reserved {
         return Err("composed alert/status text rows exceed shared reservation".into());
     }
-    let operator_bytes = MAX_OPERATOR_CONSOLE_BYTES
-        .checked_add(OPERATOR_CONSOLE_SEPARATOR_BYTES)
-        .and_then(|bytes| bytes.checked_add(maximum_operator_status_bytes()))
+    let operator_bytes = maximum_operator_status_label()
+        .len()
+        .checked_add(MAX_OPERATOR_CONSOLE_BYTES)
         .ok_or("operator status byte requirement overflow")?;
     let bytes_needed = budgets
         .iter()
@@ -1185,29 +1181,10 @@ fn validate_alert_composition(
     if bytes_needed > bytes_reserved {
         return Err("composed alert/status text bytes exceed shared reservation".into());
     }
-    let status_width = operator_status_minimum_width_px()?;
-    if profile.frame_width < status_width {
-        return Err(format!(
-            "operator status text requires width {status_width} px; profile width is {}",
-            profile.frame_width
-        ));
-    }
     Ok(())
 }
 
-fn operator_status_minimum_width_px() -> Result<u32, String> {
-    let bounds = oa_display::core::font::text_block_bounds_px(
-        (8 * 16, surveillance::REGIONAL_MODE_HEADER_Y_PX * 16),
-        7,
-        oa_display::list::ALIGN_LEFT,
-        64,
-        1,
-        14,
-    );
-    u32::try_from(bounds.x1).map_err(|_| "operator status width is unrepresentable".into())
-}
-
-fn maximum_operator_status_bytes() -> usize {
+fn maximum_operator_status_label() -> &'static str {
     [
         RegionalAutomationStatus {
             selected: RegionalAutomationMode::FlightDataOnly,
@@ -1217,20 +1194,21 @@ fn maximum_operator_status_bytes() -> usize {
         },
         RegionalAutomationStatus {
             selected: RegionalAutomationMode::Surveillance,
-            effective: EffectiveAutomationMode::Surveillance,
+            effective: EffectiveAutomationMode::FlightDataOnly,
             degradation: AutomationDegradation::SurveillanceUnavailable,
             fusion_off: true,
         },
         RegionalAutomationStatus {
-            selected: RegionalAutomationMode::FlightDataOnly,
-            effective: EffectiveAutomationMode::FlightDataOnly,
-            degradation: AutomationDegradation::OperatorSelectedFlightDataOnly,
+            selected: RegionalAutomationMode::Surveillance,
+            effective: EffectiveAutomationMode::Surveillance,
+            degradation: AutomationDegradation::None,
             fusion_off: true,
         },
     ]
     .iter()
-    .map(|status| automation_status_label(*status).len())
-    .fold(0, usize::max)
+    .map(|status| automation_status_label(*status))
+    .max_by_key(|label| label.len())
+    .unwrap_or("MODE SURVEILLANCE | FUSION OFF")
 }
 
 fn configure_final_monitor(
@@ -1525,6 +1503,7 @@ fn regional_final_monitor_frame(
 fn present_final_monitor_controls(
     surveillance: &mut Surveillance,
     interaction: &oa_display::interaction::InteractionState,
+    mode: &str,
     console: &str,
     display: &RegionalFinalMonitorFrame,
     marker_budget: usize,
@@ -1536,11 +1515,13 @@ fn present_final_monitor_controls(
     String,
 > {
     if display.status == FinalMonitorStatus::NotConfigured {
-        return surveillance::surveillance_present_controls(surveillance, interaction, console)
-            .map(|digest| (digest, None));
-    }
-    if display.alerts.len() > MAX_FINAL_APPROACH_ASSIGNMENTS {
-        return Err("final-monitor display exceeds its admitted marker bound".into());
+        return surveillance::surveillance_present_controls_with_mode(
+            surveillance,
+            interaction,
+            mode,
+            console,
+        )
+        .map(|digest| (digest, None));
     }
     let mut markers = Vec::new();
     markers
@@ -1559,6 +1540,7 @@ fn present_final_monitor_controls(
     surveillance::surveillance_present_controls_with_final_monitor_budget(
         surveillance,
         interaction,
+        mode,
         console,
         &markers,
         display.status != FinalMonitorStatus::Available,
@@ -2584,16 +2566,17 @@ fn execute(
         flight_data_unavailable,
     );
     if runtime.profile.surveillance.render_scope {
-        let console = automation_console_text(&runtime.console_text, automation);
         let (digest, display_stats) = present_final_monitor_controls(
             &mut runtime.surveillance,
             &runtime.interaction,
-            &console,
+            automation_status_label(automation),
+            &runtime.console_text,
             &final_monitor,
             runtime.final_monitor_marker_budget,
         )?;
         final_monitor.display_stats = display_stats;
         surveillance.frame_sha256 = digest;
+        surveillance.warnings = surveillance::surveillance_current_warnings(&runtime.surveillance)?;
     }
     runtime.final_monitor_display = final_monitor.clone();
     Ok(RegionalFrame {
@@ -2724,7 +2707,8 @@ pub fn regional_select(
     let digest = match present_final_monitor_controls(
         &mut runtime.surveillance,
         &runtime.interaction,
-        &automation_console_text(&runtime.console_text, runtime.last_automation),
+        automation_status_label(runtime.last_automation),
+        &runtime.console_text,
         &final_monitor_display,
         runtime.final_monitor_marker_budget,
     ) {
@@ -2763,7 +2747,8 @@ pub fn regional_console_overlay(
     match present_final_monitor_controls(
         &mut runtime.surveillance,
         &runtime.interaction,
-        &automation_console_text(&runtime.console_text, runtime.last_automation),
+        automation_status_label(runtime.last_automation),
+        &runtime.console_text,
         &final_monitor_display,
         runtime.final_monitor_marker_budget,
     ) {
@@ -2788,7 +2773,8 @@ pub fn regional_clear_selection(runtime: &mut RegionalRuntime) -> Result<[u8; 32
     match present_final_monitor_controls(
         &mut runtime.surveillance,
         &runtime.interaction,
-        &automation_console_text(&runtime.console_text, runtime.last_automation),
+        automation_status_label(runtime.last_automation),
+        &runtime.console_text,
         &final_monitor_display,
         runtime.final_monitor_marker_budget,
     ) {
@@ -2886,6 +2872,9 @@ pub fn regional_attach_msaw(
 #[cfg(test)]
 mod transaction_tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
+
+    mod overflow_pixels;
+    mod steer104_overflow_tests;
 
     use super::*;
     use crate::cli::synthetic_model;
@@ -5007,10 +4996,10 @@ mod transaction_tests {
     #[test]
     fn final_monitor_admission_refuses_unrenderable_profile_width() {
         let mut at_boundary = DEFAULT_REGIONAL_RUN_PROFILE;
-        at_boundary.surveillance.frame_width = 705;
+        at_boundary.surveillance.frame_width = 710;
         let mut accepted =
             configured_runtime_with_profile(at_boundary, final_monitor_config(100.0))
-                .expect("renderer-derived 705 px empty-loss heading edge is admitted");
+                .expect("independent 710 px empty-loss padded-bound edge is admitted");
         let loss = regional_step(
             &mut accepted,
             &final_monitor_batch(1_000_000_000, 1_000_000_000, 410_000_000, 0, false),
@@ -5023,11 +5012,47 @@ mod transaction_tests {
         assert!(loss.surveillance.raster_rendered);
 
         let mut profile = DEFAULT_REGIONAL_RUN_PROFILE;
-        profile.surveillance.frame_width = 704;
+        profile.surveillance.frame_width = 709;
         let error = configured_runtime_with_profile(profile, final_monitor_config(100.0))
             .err()
             .expect("narrow rendered profile must refuse before the first receipt");
-        assert!(error.contains("rendered alert headings require width 705 px"));
+        assert!(error.contains("rendered alert/operator rows require width 710 px"));
+    }
+
+    // Mutation killed: admit a rendered canvas too short for the actual selection block.
+    // REQ: OA-REG-019, OA-DSP-078
+    #[test]
+    fn rendered_profile_uses_shared_selection_height_and_first_fit_is_interactive() {
+        for height in [300, 341] {
+            let mut profile = DEFAULT_REGIONAL_RUN_PROFILE;
+            profile.surveillance.frame_height = height;
+            let error = configured_runtime_with_profile(profile, final_monitor_config(100.0))
+                .err()
+                .expect("short rendered profile must refuse before accepting input");
+            assert!(
+                error.contains("rendered selection requires frame height 342 px"),
+                "height {height} must refuse for the selection-height limit; got: {error}"
+            );
+        }
+
+        // Independent geometry oracle: 266 px plan inset + 34 px padded two-line block
+        // (two 15 px lines plus 4 px vertical padding) + 42 px bottom notice reserve. This does
+        // not derive the expected edge from the admission helper.
+        let mut profile = DEFAULT_REGIONAL_RUN_PROFILE;
+        profile.surveillance.frame_height = 342;
+        let mut runtime = configured_runtime_with_profile(profile, final_monitor_config(100.0))
+            .expect("first independently calculated 342 px fit is admitted");
+        let frame = seed_confirmed_final_monitor_track(&mut runtime, 410_009_000, -10_000);
+        assert!(frame.surveillance.raster_rendered);
+        let target = frame
+            .controller_views
+            .first()
+            .copied()
+            .expect("runtime retained a selectable full-key view");
+        let identity = (target.identity_present == 1).then_some(target.identity);
+        regional_select(&mut runtime, target.address, target.generation, identity)
+            .expect("selection renders at the minimum height");
+        regional_clear_selection(&mut runtime).expect("clear redraw renders at minimum height");
     }
 
     // Mutation killed: allow the MSAW provider and final monitor to exceed their shared marker
@@ -5037,7 +5062,7 @@ mod transaction_tests {
     fn dual_alert_families_fit_the_composed_edge_and_refuse_the_next_msaw_row() {
         let mut edge_profile = DEFAULT_REGIONAL_RUN_PROFILE;
         edge_profile.surveillance.max_tracks = 32;
-        edge_profile.surveillance.frame_width = 705;
+        edge_profile.surveillance.frame_width = 800;
         let mut edge_runtime =
             configured_runtime_with_profile(edge_profile, final_monitor_config(100.0))
                 .expect("renderer-derived width edge admits the composed alert families");
@@ -5256,7 +5281,28 @@ mod transaction_tests {
         let first = seed_confirmed_final_monitor_track(&mut runtime, 410_000_000, 0);
         assert_eq!(first.final_monitor.status, FinalMonitorStatus::Available);
         assert!(!first.final_monitor.alerts.is_empty());
-        runtime.final_monitor_marker_budget = 0;
+        let source_alert = first
+            .final_monitor
+            .alerts
+            .first()
+            .copied()
+            .expect("the confirmed assigned track produces a valid alert");
+        let input_count = MAX_FINAL_APPROACH_ASSIGNMENTS + 1;
+        let mut injected = Vec::with_capacity(input_count);
+        for index in 0..input_count {
+            let mut alert = source_alert;
+            alert.address = 0x00ad_0000_u32
+                .checked_add(u32::try_from(index).expect("bounded final marker fixture"))
+                .expect("bounded final address range");
+            if index + 1 == input_count {
+                alert.severity = final_monitor_core::FinalSeverity::Warning;
+            } else {
+                alert.severity = final_monitor_core::FinalSeverity::Caution;
+            }
+            injected.push(alert);
+        }
+        runtime.final_monitor_display.alerts = injected;
+        runtime.final_monitor_marker_budget = MAX_FINAL_APPROACH_ASSIGNMENTS;
 
         regional_console_overlay(&mut runtime, "operator review")
             .expect("overflow is a rendered status row, not a failed presentation");
@@ -5264,10 +5310,19 @@ mod transaction_tests {
             .final_monitor_display
             .display_stats
             .expect("final family exposes presenter audit counts");
-        assert_eq!(display_stats.omitted, 1);
+        assert_eq!(display_stats.examined, u64::try_from(input_count).unwrap());
+        assert_eq!(
+            display_stats.drawn,
+            u64::try_from(MAX_FINAL_APPROACH_ASSIGNMENTS).unwrap()
+        );
+        assert_eq!(
+            display_stats.omitted,
+            u64::try_from(input_count - MAX_FINAL_APPROACH_ASSIGNMENTS).unwrap()
+        );
+        assert_eq!(display_stats.warning, 1);
         assert_eq!(
             runtime.final_monitor_display.alerts.len(),
-            first.final_monitor.alerts.len(),
+            input_count,
             "all source alert records remain in the runtime output"
         );
         assert!(surveillance::surveillance_text_rows(&runtime.surveillance)
@@ -5281,7 +5336,28 @@ mod transaction_tests {
         )
         .expect("an overflow report does not prevent the next complete frame");
         assert!(next.surveillance.raster_rendered);
-        assert_eq!(next.final_monitor.display_stats.unwrap().omitted, 1);
+        assert!(next.final_monitor.display_stats.is_some());
+    }
+
+    // Mutation killed: skip validation of malformed records in a valid over-budget final packet.
+    #[test]
+    fn runtime_final_overflow_still_refuses_duplicate_marker_identity() {
+        let mut runtime = configured_runtime(100.0);
+        let frame = seed_confirmed_final_monitor_track(&mut runtime, 410_000_000, 0);
+        let source_alert = frame
+            .final_monitor
+            .alerts
+            .first()
+            .copied()
+            .expect("the confirmed assigned track produces a valid alert");
+        runtime.final_monitor_display.alerts =
+            vec![source_alert; MAX_FINAL_APPROACH_ASSIGNMENTS + 1];
+        let result = regional_console_overlay(&mut runtime, "operator review");
+        assert!(
+            result.is_err(),
+            "duplicate identities remain malformed input"
+        );
+        assert!(runtime.failed, "malformed display input fails closed");
     }
 
     fn low_altitude_population_batch(receipt_ns: i64, include_flight_setup: bool) -> ReceiptBatch {
@@ -5406,30 +5482,52 @@ mod transaction_tests {
             EffectiveAutomationMode::Surveillance,
             "synthetic TRACK source remains available during this presentation test"
         );
-        let mode_text = format!("{console} | MODE SURVEILLANCE | FUSION OFF");
-        let expected_mode_lines: Vec<String> = mode_text
-            .as_bytes()
-            .chunks(64)
-            .map(|line| {
-                std::str::from_utf8(line)
-                    .expect("mode text is ASCII")
-                    .to_owned()
-            })
-            .collect();
-        assert_eq!(
-            expected_mode_lines.len(),
-            3,
-            "128-byte console uses three rows"
+        let mode = automation_status_label(runtime.last_automation);
+        let operator_rows = oa_display::status_strip::regional_operator_rows(mode, console)
+            .expect("maximum operator rows validate");
+        let mut expected_operator_lines = vec![mode.to_owned()];
+        expected_operator_lines.extend(
+            operator_rows
+                .console
+                .get(..operator_rows.console_count)
+                .expect("console row count is within its fixed buffer")
+                .iter()
+                .map(|row| oa_display::core::text::text_str(row).to_owned()),
         );
-        let mut mode_bounds = Vec::with_capacity(expected_mode_lines.len());
-        for expected in &expected_mode_lines {
-            let found: Vec<_> = rows.iter().filter(|row| row.text == *expected).collect();
+        assert_eq!(
+            operator_rows.console_count, 2,
+            "128-byte console fills two rows"
+        );
+        let status_plan =
+            oa_display::status_strip::regional_status_plan().expect("renderer-owned status plan");
+        let mut mode_bounds = Vec::with_capacity(expected_operator_lines.len());
+        for (index, expected) in expected_operator_lines.iter().enumerate() {
+            let row_kind = if index == 0 {
+                oa_display::status_strip::StatusStripRow::Mode
+            } else {
+                oa_display::status_strip::StatusStripRow::Console(index - 1)
+            };
+            let expected_bounds = status_plan
+                .row(row_kind)
+                .expect("operator row is reserved")
+                .bounds_for(expected)
+                .expect("operator text fits its renderer row");
+            let found: Vec<_> = rows
+                .iter()
+                .filter(|row| {
+                    row.text == *expected
+                        && row.bounds.x0 == expected_bounds.x0
+                        && row.bounds.x1 == expected_bounds.x1
+                        && row.bounds.y0 == expected_bounds.y0
+                        && row.bounds.y1 <= expected_bounds.y1
+                })
+                .collect();
             assert_eq!(
                 found.len(),
                 1,
-                "every console/mode row appears exactly once"
+                "operator row appears at its planned anchor; conservative plan bounds are {expected_bounds:?}"
             );
-            mode_bounds.push(found.first().expect("one operator row").bounds);
+            mode_bounds.push(found.first().expect("one planned operator row").bounds);
         }
         let final_rows: Vec<_> = rows
             .iter()
@@ -5460,11 +5558,15 @@ mod transaction_tests {
         let safety_rows: Vec<_> = rows
             .iter()
             .filter(|row| {
-                !expected_mode_lines.iter().any(|line| line == &row.text)
+                !expected_operator_lines.iter().any(|line| line == &row.text)
                     && row.bounds.y0 > final_bounds.y0
                     && row.bounds.y1
-                        < i32::try_from(surveillance::REGIONAL_STATUS_HEADER_INSET_PX)
-                            .expect("small status inset")
+                        < i32::try_from(
+                            oa_display::status_strip::regional_status_plan()
+                                .expect("status plan")
+                                .top_inset_px(),
+                        )
+                        .expect("small status inset")
             })
             .collect();
         assert_eq!(
@@ -5483,8 +5585,12 @@ mod transaction_tests {
             assert!(bounds.x1 <= frame_width);
             assert!(
                 bounds.y1
-                    <= i32::try_from(surveillance::REGIONAL_STATUS_HEADER_INSET_PX)
-                        .expect("small status inset"),
+                    <= i32::try_from(
+                        oa_display::status_strip::regional_status_plan()
+                            .expect("status plan")
+                            .top_inset_px(),
+                    )
+                    .expect("small status inset"),
                 "status row remains inside the reserved band: {bounds:?}"
             );
             for other in checked_bounds.iter().skip(index + 1) {
@@ -5928,8 +6034,7 @@ mod transaction_tests {
         let expected_console_bytes = active_counts
             .text_bytes
             .checked_add(console.len())
-            .and_then(|bytes| bytes.checked_add(3))
-            .expect("bounded console suffix");
+            .expect("bounded console row");
         assert_eq!(after_console.text_bytes, expected_console_bytes);
         regional_console_overlay(&mut monitored, console).expect("repeat warning console redraw");
         regional_console_overlay(&mut plain, console).expect("repeat plain console redraw");

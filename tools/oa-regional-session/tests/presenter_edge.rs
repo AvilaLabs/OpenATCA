@@ -6,8 +6,9 @@
 )]
 
 use oa_display::core::font::{text_width_units, ADVANCE, CAP_HEIGHT};
-use oa_display::list::{list_new, push_rect, push_text, ListCaps, ALIGN_LEFT};
-use oa_display::palette::{ALERT, BACKGROUND};
+use oa_display::core::status_strip::{regional_status_plan, StatusStripRow};
+use oa_display::list::{list_new, push_rect, push_text, ListCaps};
+use oa_display::palette::BACKGROUND;
 use oa_display::project::{projection_new, unproject, SUBPIXEL};
 use oa_display::raster::{frame_len, rasterize, FrameSpec};
 use oa_regional_session::cli::synthetic_model;
@@ -24,7 +25,6 @@ use oa_runway::plane::{Geo, Local};
 const CENTRE_LAT_E7: i32 = 410_000_000;
 const CENTRE_LON_E7: i32 = -870_000_000;
 const RANGE_NM: f64 = 180.0;
-const TOP_INSET_PX: u32 = 224;
 const EDGE_MARGIN_PX: i32 = 8;
 const TARGET_NEIGHBORHOOD_RADIUS_PX: i32 = 24;
 const PIXEL_BYTES: usize = 4;
@@ -42,11 +42,6 @@ const NEAR_LIMIT_RECEIPT_NS: i64 = 10_800_000_000;
 const NEAR_LIMIT_SOURCE_NS: i64 = 6_001_000_000;
 const STALE_RECEIPT_NS: i64 = 16_000_000_000;
 const STALE_SOURCE_NS: i64 = 10_999_000_000;
-const HEADER_X_PX: i32 = 8;
-const HEADER_Y_PX: i32 = 135;
-const HEADER_TEXT_SIZE: u8 = 10;
-const HEADER_PANEL_TOP_PX: i32 = 104;
-const HEADER_PANEL_BOTTOM_PX: i32 = 224;
 const DEGRADED_HEADER_PREFIX: &str = "FINAL DEGRADED WARNING 0 CAUTION 0 ";
 const PROTECTION_LOST_PHRASE: &str = "PROTECTION LOST";
 
@@ -66,13 +61,14 @@ fn display_config() -> SurveillanceConfig {
 }
 
 fn projection() -> oa_display::project::Projection {
+    let inset = regional_status_plan().unwrap().top_inset_px();
     projection_new(
         CENTRE_LAT_E7,
         CENTRE_LON_E7,
         RANGE_NM,
         FRAME_WIDTH,
         FRAME_HEIGHT,
-        TOP_INSET_PX,
+        inset,
     )
     .unwrap()
 }
@@ -80,7 +76,7 @@ fn projection() -> oa_display::project::Projection {
 fn edge_targets() -> [EdgeTarget; 4] {
     let width = i32::try_from(FRAME_WIDTH).unwrap();
     let height = i32::try_from(FRAME_HEIGHT).unwrap();
-    let map_top = i32::try_from(TOP_INSET_PX).unwrap();
+    let map_top = i32::try_from(regional_status_plan().unwrap().top_inset_px()).unwrap();
     let map_mid_y = (map_top + height) / 2;
     let middle_x = width / 2;
     [
@@ -242,6 +238,10 @@ fn assert_confirmed_target_and_flight_link(frame: &RegionalFrame, source_ns: i64
 }
 
 fn protection_lost_suffix_pixels() -> (Vec<u8>, (usize, usize, usize, usize)) {
+    let plan = regional_status_plan().unwrap();
+    let heading = plan.row(StatusStripRow::FinalHeading).unwrap();
+    let bounds = heading.reserved_bounds();
+    let text_size = heading.size();
     let spec = FrameSpec {
         width: FRAME_WIDTH,
         height: FRAME_HEIGHT,
@@ -259,40 +259,42 @@ fn protection_lost_suffix_pixels() -> (Vec<u8>, (usize, usize, usize, usize)) {
     .unwrap();
     push_rect(
         &mut list,
-        (0, HEADER_PANEL_TOP_PX * SUBPIXEL),
+        (0, bounds.y0 * SUBPIXEL),
         (
             i32::try_from(FRAME_WIDTH).unwrap() * SUBPIXEL,
-            HEADER_PANEL_BOTTOM_PX * SUBPIXEL,
+            bounds.y1 * SUBPIXEL,
         ),
         BACKGROUND,
         14,
     )
     .unwrap();
 
-    let advance_16 =
-        (i64::from(ADVANCE) * i64::from(HEADER_TEXT_SIZE) * 16) / i64::from(CAP_HEIGHT);
+    let advance_16 = (i64::from(ADVANCE) * i64::from(text_size) * 16) / i64::from(CAP_HEIGHT);
     let prefix_width_16 =
         i64::try_from(DEGRADED_HEADER_PREFIX.chars().count()).unwrap() * advance_16;
-    let phrase_x_16 = i64::from(HEADER_X_PX * SUBPIXEL) + prefix_width_16;
+    let phrase_x_16 = i64::from(heading.x_px() * SUBPIXEL) + prefix_width_16;
     let phrase_x_px = usize::try_from(phrase_x_16.div_euclid(i64::from(SUBPIXEL))).unwrap();
     let phrase_width_16 = i64::from(text_width_units(PROTECTION_LOST_PHRASE.chars().count()))
-        * i64::from(HEADER_TEXT_SIZE)
+        * i64::from(text_size)
         * i64::from(SUBPIXEL)
         / i64::from(CAP_HEIGHT);
     let phrase_width_px =
         usize::try_from((phrase_width_16 + i64::from(SUBPIXEL) - 1) / i64::from(SUBPIXEL)).unwrap();
-    let phrase_y_px = usize::try_from(HEADER_Y_PX).unwrap();
-    let phrase_bottom_px = phrase_y_px + usize::from(HEADER_TEXT_SIZE) + 1;
+    let phrase_y_px = usize::try_from(heading.y_px()).unwrap();
+    let phrase_bottom_px = phrase_y_px + usize::from(text_size) + 1;
 
     // Build only the independently positioned suffix glyphs with the existing font primitive;
     // do not call the production header formatter for this expected pixel region.
     push_text(
         &mut list,
-        (i32::try_from(phrase_x_16).unwrap(), HEADER_Y_PX * SUBPIXEL),
-        HEADER_TEXT_SIZE,
-        ALIGN_LEFT,
-        ALERT,
-        15,
+        (
+            i32::try_from(phrase_x_16).unwrap(),
+            heading.y_px() * SUBPIXEL,
+        ),
+        text_size,
+        heading.align(),
+        heading.colour(),
+        heading.layer(),
         PROTECTION_LOST_PHRASE,
     )
     .unwrap();
@@ -331,7 +333,7 @@ fn differs_near_target(with_warning: &[u8], without_warning: &[u8], target: (i32
         return false;
     }
     let stride = usize::try_from(FRAME_WIDTH).unwrap() * PIXEL_BYTES;
-    let map_top = i32::try_from(TOP_INSET_PX).unwrap();
+    let map_top = i32::try_from(regional_status_plan().unwrap().top_inset_px()).unwrap();
     let width = i32::try_from(FRAME_WIDTH).unwrap();
     let height = i32::try_from(FRAME_HEIGHT).unwrap();
     let x_start = usize::try_from((target.0 - TARGET_NEIGHBORHOOD_RADIUS_PX).max(0)).unwrap();

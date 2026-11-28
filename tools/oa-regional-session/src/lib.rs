@@ -1,6 +1,12 @@
 #![forbid(unsafe_code)]
 //! Bounded normalized regional-session input and receipt-time staging. Class: shell (RULESET
 //! B1, B3, B7). Runtime bridges use explicitly approved existing workspace components.
+//!
+//! MSAW attachment uses the checked runtime entry point; callers cannot bypass its budget
+//! admission through the internal surveillance setter.
+//! ```compile_fail
+//! let _unchecked = oa_regional_session::surveillance::surveillance_enable_msaw;
+//! ```
 
 pub mod cli;
 pub mod commands;
@@ -14,7 +20,6 @@ pub mod migration_full_day_runner;
 pub mod migration_g3;
 pub mod migration_shadow;
 pub mod migration_snapshot;
-// Pending F1 integration; must remain excluded from qualified landings until edge approval.
 pub mod msaw_bridge;
 pub mod nam_flight;
 pub mod nam_handoff;

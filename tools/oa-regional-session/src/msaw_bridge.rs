@@ -147,6 +147,8 @@ pub struct RegionalMsawFrame {
     pub synthetic: bool,
     /// Submitted tracker rows, including missing/stale-altitude rows counted by the core.
     pub submitted_rows: usize,
+    /// New warnings refused by the retained open-alert table during this evaluation only.
+    pub open_table_refused: u64,
     pub vfr_service_eligibility_available: bool,
     pub terrain_tiles: Vec<(String, [u8; 32])>,
     pub failure: String,
@@ -437,6 +439,7 @@ fn evaluate_cycle(
         time_ns,
         report: cycle.report,
         stats: Some(cycle.stats),
+        open_table_refused: cycle.stats.open_full,
         open: msaw_open(&service.state).to_vec(),
         closed: service.alerts.items.clone(),
         skipped: service.skips.items.clone(),
@@ -487,6 +490,7 @@ pub fn regional_msaw_cycle(
                     reason: oa_safety::net::Reason::InputMissing,
                 },
                 stats: None,
+                open_table_refused: 0,
                 open: msaw_open(&service.state).to_vec(),
                 closed: service.alerts.items.clone(),
                 skipped: service.skips.items.clone(),
@@ -685,6 +689,149 @@ mod tests {
         )
         .unwrap();
         (data, root)
+    }
+
+    fn provider_with_open_limit(
+        rows: usize,
+        open_limit: usize,
+        log_capacity: usize,
+    ) -> (RegionalMsaw, PathBuf) {
+        let (mut data, root) = development_provider_data();
+        data.settings.msaw.max_tracks = rows;
+        data.settings.msaw.max_open = open_limit;
+        data.settings.msaw.track_budget = rows;
+        data.settings.alert_log_capacity = log_capacity;
+        data.floors = Floors::with_tiles(
+            oa_tiff::TileSet {
+                tiles: vec![oa_tiff::Grid {
+                    width: 105,
+                    height: 105,
+                    lon0: -87.5,
+                    lat0: 41.5,
+                    dlon: 0.01,
+                    dlat: 0.01,
+                    elev: vec![100.0; 105 * 105],
+                    nodata_count: 0,
+                    point_registered: false,
+                    crs: 4269,
+                    vertical_cs: None,
+                }],
+            },
+            Some(oa_msaw_run::floors::ObstacleIndex::from_points(
+                std::iter::empty::<(i32, i32, i32)>(),
+            )),
+            None,
+        );
+        (regional_msaw_new(data, rows).unwrap(), root)
+    }
+
+    fn violating_rows(count: usize) -> Vec<MsawTrack> {
+        (0..count)
+            .map(|index| {
+                let mut row = track(1000.0, -600.0);
+                row.addr = 0xabc101 + u32::try_from(index).unwrap();
+                row
+            })
+            .collect()
+    }
+
+    // Mutation killed: deriving omission counts from closed/log rows instead of this cycle's
+    // core open-table refusal counter loses the 129th live warning at the valid retained cap.
+    // REQ: OA-REG-011, OA-DSP-078
+    #[test]
+    fn provider_open_table_refusal_is_per_frame_and_excludes_closed_episodes() {
+        let (mut service, root) = provider_with_open_limit(129, 128, 256);
+        let mut states = oa_safety::net::state_table_new(10_000_000_000, 0).unwrap();
+        let mut inhibits = oa_safety::inhibit::inhibits_new();
+        let rows = violating_rows(129);
+
+        let first = regional_msaw_cycle(
+            &mut service,
+            2_000_000_000,
+            &rows,
+            &mut states,
+            &mut inhibits,
+        )
+        .unwrap();
+        assert_eq!(first.open.len(), 128);
+        assert_eq!(first.open_table_refused, 1);
+        assert_eq!(first.stats.unwrap().open_full, 1);
+
+        let next = regional_msaw_cycle(
+            &mut service,
+            3_000_000_000,
+            &rows,
+            &mut states,
+            &mut inhibits,
+        )
+        .unwrap();
+        assert_eq!(next.open_table_refused, 1);
+
+        let mut closed_total = 0usize;
+        for second in 4..=14 {
+            // Each cycle receives a fresh snapshot; altitude age is relative to this cutoff.
+            let safe_rows: Vec<_> = rows
+                .iter()
+                .map(|row| MsawTrack {
+                    alt_ft: 15_000.0,
+                    vrate_fpm: 0.0,
+                    alt_age_s: 0.0,
+                    ..*row
+                })
+                .collect();
+            let frame = regional_msaw_cycle(
+                &mut service,
+                second * 1_000_000_000,
+                &safe_rows,
+                &mut states,
+                &mut inhibits,
+            )
+            .unwrap();
+            assert_eq!(frame.open_table_refused, 0);
+            if second < 14 {
+                assert_eq!(frame.open.len(), 128);
+            } else {
+                assert!(frame.open.is_empty());
+            }
+            closed_total += frame.closed.len();
+        }
+        assert_eq!(closed_total, 128);
+
+        let refilled = regional_msaw_cycle(
+            &mut service,
+            15_000_000_000,
+            &rows,
+            &mut states,
+            &mut inhibits,
+        )
+        .unwrap();
+        assert_eq!(refilled.open.len(), 128);
+        assert_eq!(refilled.open_table_refused, 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    // Mutation killed: adding alert-log loss to the open-table refusal would report more than
+    // the number of newly raised warnings refused by the retained table.
+    // REQ: OA-REG-011, OA-DSP-078
+    #[test]
+    fn provider_log_loss_does_not_inflate_open_table_refusal_count() {
+        let (mut service, root) = provider_with_open_limit(130, 128, 1);
+        let mut states = oa_safety::net::state_table_new(10_000_000_000, 0).unwrap();
+        let mut inhibits = oa_safety::inhibit::inhibits_new();
+        let frame = regional_msaw_cycle(
+            &mut service,
+            2_000_000_000,
+            &violating_rows(130),
+            &mut states,
+            &mut inhibits,
+        )
+        .unwrap();
+        let stats = frame.stats.unwrap();
+        assert_eq!(frame.open.len(), 128);
+        assert_eq!(stats.open_full, 2);
+        assert_eq!(stats.alerts_dropped, 1);
+        assert_eq!(frame.open_table_refused, 2);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     fn legacy_row_capacity_data() -> (RegionalData, PathBuf) {
