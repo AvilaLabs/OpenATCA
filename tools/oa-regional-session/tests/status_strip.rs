@@ -20,8 +20,8 @@ const SECOND_FRAME_NS: i64 = 2_000_000_000;
 const CENTRE_LAT_E7: i32 = 410_000_000;
 const CENTRE_LON_E7: i32 = -870_000_000;
 const RANGE_NM: f64 = 180.0;
-const TOP_INSET_PX: u32 = 224;
-const EDGE_SCREENS: [(i32, i32); 4] = [(20, 380), (780, 380), (400, 225), (400, 584)];
+const TOP_INSET_PX: u32 = 252;
+const EDGE_SCREENS: [(i32, i32); 4] = [(20, 380), (780, 380), (400, 253), (400, 584)];
 
 fn surveillance() -> oa_regional_session::surveillance::Surveillance {
     surveillance_new(
