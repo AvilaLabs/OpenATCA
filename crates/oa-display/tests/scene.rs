@@ -1848,14 +1848,18 @@ fn compact_hidden_legend_uses_nine_pixel_text_and_fits_its_full_line() {
         assert_eq!(list.texts.size[row], 9);
         assert_eq!((list.texts.x[row], list.texts.y[row]), (8 * 16, 44 * 16));
         assert_eq!(stats.legend_cut, expected_cuts);
-        let bars = list
-            .lines
-            .layer
-            .iter()
-            .zip(&list.lines.x0)
-            .filter(|(&layer, &x)| layer == LAYER_LEGEND && x == (width as i32 - 1) * 16)
-            .count();
-        assert_eq!(bars as u32, expected_cuts);
+        let bars: Vec<_> = (0..list.lines.layer.len())
+            .filter(|&index| {
+                list.lines.layer[index] == LAYER_LEGEND
+                    && list.lines.x0[index] == (width as i32 - 1) * 16
+            })
+            .map(|index| (list.lines.y0[index], list.lines.y1[index]))
+            .collect();
+        if expected_cuts == 0 {
+            assert!(bars.is_empty());
+        } else {
+            assert_eq!(bars.as_slice(), &[(44 * 16, 53 * 16)]);
+        }
     }
 }
 
