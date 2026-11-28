@@ -4998,9 +4998,65 @@ mod transaction_tests {
     #[test]
     fn operator_redraws_preserve_final_monitor_protection_loss() {
         let mut monitored = configured_runtime(100.0);
-        seed_confirmed_final_monitor_track(&mut monitored, 410_000_000, 0);
+        let active = seed_confirmed_final_monitor_track(&mut monitored, 410_000_000, 0);
         let mut plain = runtime();
         seed_confirmed_final_monitor_track(&mut plain, 410_000_000, 0);
+        assert!(active
+            .final_monitor
+            .alerts
+            .iter()
+            .any(|alert| alert.severity == final_monitor_core::FinalSeverity::Warning));
+        let active_counts =
+            surveillance::surveillance_overlay_primitive_counts(&monitored.surveillance);
+        assert!(
+            active_counts.circles > 0,
+            "warning marker is positioned on the raster"
+        );
+
+        regional_console_overlay(&mut monitored, "operator status")
+            .expect("warning console redraw");
+        regional_console_overlay(&mut plain, "operator status").expect("plain console redraw");
+        assert_eq!(
+            surveillance::surveillance_overlay_primitive_counts(&monitored.surveillance),
+            active_counts,
+            "warning console redraw rewinds and replaces every overlay primitive"
+        );
+
+        let monitored_target = monitored
+            .views
+            .first()
+            .copied()
+            .expect("monitored track view");
+        let plain_target = plain.views.first().copied().expect("plain track view");
+        let monitored_identity =
+            (monitored_target.identity_present == 1).then_some(monitored_target.identity);
+        let plain_identity = (plain_target.identity_present == 1).then_some(plain_target.identity);
+        regional_select(
+            &mut monitored,
+            monitored_target.address,
+            monitored_target.generation,
+            monitored_identity,
+        )
+        .expect("select the rendered warning track");
+        regional_select(
+            &mut plain,
+            plain_target.address,
+            plain_target.generation,
+            plain_identity,
+        )
+        .expect("select the equivalent plain track");
+        assert_eq!(
+            surveillance::surveillance_overlay_primitive_counts(&monitored.surveillance),
+            active_counts,
+            "selection redraw does not accumulate circles, lines, or text"
+        );
+        regional_clear_selection(&mut monitored).expect("clear warning selection");
+        regional_clear_selection(&mut plain).expect("clear plain selection");
+        assert_eq!(
+            surveillance::surveillance_overlay_primitive_counts(&monitored.surveillance),
+            active_counts,
+            "clear-selection redraw preserves the bounded overlay baseline"
+        );
 
         for runtime in [&mut monitored, &mut plain] {
             let stale = regional_step(
@@ -5018,19 +5074,47 @@ mod transaction_tests {
             }
         }
 
+        let stale_counts =
+            surveillance::surveillance_overlay_primitive_counts(&monitored.surveillance);
         let console = "operator status";
         regional_console_overlay(&mut monitored, console).expect("monitored console redraw");
         regional_console_overlay(&mut plain, console).expect("plain console redraw");
+        assert_eq!(
+            surveillance::surveillance_overlay_primitive_counts(&monitored.surveillance),
+            stale_counts,
+            "protection-loss console redraw does not accumulate overlay primitives"
+        );
         assert_ne!(
             oa_sha256::sha256(regional_pixels(&monitored).expect("monitored pixels")),
             oa_sha256::sha256(regional_pixels(&plain).expect("plain pixels")),
             "console redraw retains the protection-loss heading"
         );
 
-        let monitored_selection = regional_select(&mut monitored, u32::MAX, 0, None);
-        let plain_selection = regional_select(&mut plain, u32::MAX, 0, None);
-        assert!(monitored_selection.is_err());
-        assert!(plain_selection.is_err());
+        let monitored_target = monitored
+            .views
+            .first()
+            .copied()
+            .expect("stale monitored view");
+        let plain_target = plain.views.first().copied().expect("stale plain view");
+        regional_select(
+            &mut monitored,
+            monitored_target.address,
+            monitored_target.generation,
+            (monitored_target.identity_present == 1).then_some(monitored_target.identity),
+        )
+        .expect("select stale monitored track");
+        regional_select(
+            &mut plain,
+            plain_target.address,
+            plain_target.generation,
+            (plain_target.identity_present == 1).then_some(plain_target.identity),
+        )
+        .expect("select stale plain track");
+        assert_eq!(
+            surveillance::surveillance_overlay_primitive_counts(&monitored.surveillance),
+            stale_counts,
+            "protection-loss selection redraw replaces the prior marker set"
+        );
         assert_ne!(
             oa_sha256::sha256(regional_pixels(&monitored).expect("monitored pixels")),
             oa_sha256::sha256(regional_pixels(&plain).expect("plain pixels")),
@@ -5039,6 +5123,11 @@ mod transaction_tests {
 
         regional_clear_selection(&mut monitored).expect("monitored clear redraw");
         regional_clear_selection(&mut plain).expect("plain clear redraw");
+        assert_eq!(
+            surveillance::surveillance_overlay_primitive_counts(&monitored.surveillance),
+            stale_counts,
+            "protection-loss clear redraw keeps primitive counts stable"
+        );
         assert_ne!(
             oa_sha256::sha256(regional_pixels(&monitored).expect("monitored pixels")),
             oa_sha256::sha256(regional_pixels(&plain).expect("plain pixels")),

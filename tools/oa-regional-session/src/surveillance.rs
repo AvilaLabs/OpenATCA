@@ -237,9 +237,27 @@ fn valid_track_callsign(callsign: [u8; 8]) -> bool {
 // A7.2: cold lengths in the current owned display list, never exported across a module.
 #[derive(Clone, Copy)]
 struct OverlayBase {
+    lines: usize,
+    rects: usize,
+    circles: usize,
+    polylines: usize,
+    poly_vertices: usize,
     texts: usize,
     bytes: usize,
     layers: u16,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct OverlayPrimitiveCounts {
+    pub lines: usize,
+    pub rects: usize,
+    pub circles: usize,
+    pub polylines: usize,
+    pub poly_vertices: usize,
+    pub texts: usize,
+    pub text_bytes: usize,
+    pub layers_used: u16,
 }
 
 struct PreparedFrameRows {
@@ -298,8 +316,8 @@ struct ScopeRenderOutput {
     msaw_markers: Option<oa_display::core::alert_markers::MarkerStats>,
     traffic_stats: oa_display::core::traffic::TrafficStats,
     digest: [u8; 32],
-    displayed: usize,
-    off_map: usize,
+    displayed: u32,
+    off_map: u32,
     warnings: Vec<String>,
 }
 
@@ -1670,7 +1688,9 @@ fn append_msaw_markers(
         });
     }
     markers.sort_by_key(|marker| marker.address);
-    append_alert_markers(&mut s.scope.list, &s.scope.view.proj, &markers).map_err(err)
+    append_alert_markers(&mut s.scope.list, &s.scope.view.proj, &markers)
+        .map(Some)
+        .map_err(err)
 }
 
 fn scope_warnings(list: &DisplayList) -> Result<Vec<String>, String> {
@@ -2342,31 +2362,41 @@ fn surveillance_present_controls_inner(
     if s.presentation_updates >= s.profile.max_presentation_updates {
         return Err("regional presentation update budget exhausted".into());
     }
-    let base = s.overlay_base.unwrap_or(OverlayBase {
-        texts: s.scope.list.texts.x.len(),
-        bytes: s.scope.list.text.len(),
-        layers: s.scope.list.layers_used,
-    });
+    let base = match s.overlay_base {
+        Some(base) => base,
+        None => capture_overlay_base(&s.scope.list)?,
+    };
     let list = &mut s.scope.list;
-    if [
-        list.texts.x.len(),
-        list.texts.y.len(),
-        list.texts.size.len(),
-        list.texts.align.len(),
-        list.texts.colour.len(),
-        list.texts.layer.len(),
-        list.texts.start.len(),
-        list.texts.len.len(),
-    ]
-    .iter()
-    .any(|len| *len < base.texts)
-        || base.bytes > list.text.len()
-        || !list.text.is_char_boundary(base.bytes)
-    {
+    if !overlay_base_valid(list, base) {
         return Err("control overlay base is inconsistent".into());
     }
     s.failed = true;
     s.presentation_updates += 1;
+    list.lines.x0.truncate(base.lines);
+    list.lines.y0.truncate(base.lines);
+    list.lines.x1.truncate(base.lines);
+    list.lines.y1.truncate(base.lines);
+    list.lines.colour.truncate(base.lines);
+    list.lines.layer.truncate(base.lines);
+    list.lines.width.truncate(base.lines);
+    list.rects.x0.truncate(base.rects);
+    list.rects.y0.truncate(base.rects);
+    list.rects.x1.truncate(base.rects);
+    list.rects.y1.truncate(base.rects);
+    list.rects.colour.truncate(base.rects);
+    list.rects.layer.truncate(base.rects);
+    list.circles.x.truncate(base.circles);
+    list.circles.y.truncate(base.circles);
+    list.circles.r.truncate(base.circles);
+    list.circles.colour.truncate(base.circles);
+    list.circles.layer.truncate(base.circles);
+    list.polylines.start.truncate(base.polylines);
+    list.polylines.len.truncate(base.polylines);
+    list.polylines.colour.truncate(base.polylines);
+    list.polylines.layer.truncate(base.polylines);
+    list.polylines.width.truncate(base.polylines);
+    list.poly_x.truncate(base.poly_vertices);
+    list.poly_y.truncate(base.poly_vertices);
     list.texts.x.truncate(base.texts);
     list.texts.y.truncate(base.texts);
     list.texts.size.truncate(base.texts);
@@ -2412,6 +2442,94 @@ fn surveillance_present_controls_inner(
     let digest = frame_digest(&s.scope.spec, &s.scope.buf).map_err(err)?;
     s.failed = false;
     Ok(digest)
+}
+
+fn capture_overlay_base(list: &DisplayList) -> Result<OverlayBase, String> {
+    if !display_list_columns_consistent(list) {
+        return Err("completed display list has inconsistent primitive columns".into());
+    }
+    Ok(OverlayBase {
+        lines: list.lines.x0.len(),
+        rects: list.rects.x0.len(),
+        circles: list.circles.x.len(),
+        polylines: list.polylines.start.len(),
+        poly_vertices: list.poly_x.len(),
+        texts: list.texts.x.len(),
+        bytes: list.text.len(),
+        layers: list.layers_used,
+    })
+}
+
+fn overlay_base_valid(list: &DisplayList, base: OverlayBase) -> bool {
+    display_list_columns_consistent(list)
+        && base.lines <= list.lines.x0.len()
+        && base.rects <= list.rects.x0.len()
+        && base.circles <= list.circles.x.len()
+        && base.polylines <= list.polylines.start.len()
+        && base.poly_vertices <= list.poly_x.len()
+        && base.texts <= list.texts.x.len()
+        && base.bytes <= list.text.len()
+        && list.text.is_char_boundary(base.bytes)
+}
+
+fn display_list_columns_consistent(list: &DisplayList) -> bool {
+    fn equal(values: &[usize]) -> bool {
+        values
+            .first()
+            .is_some_and(|expected| values.iter().all(|value| value == expected))
+    }
+    equal(&[
+        list.lines.x0.len(),
+        list.lines.y0.len(),
+        list.lines.x1.len(),
+        list.lines.y1.len(),
+        list.lines.colour.len(),
+        list.lines.layer.len(),
+        list.lines.width.len(),
+    ]) && equal(&[
+        list.rects.x0.len(),
+        list.rects.y0.len(),
+        list.rects.x1.len(),
+        list.rects.y1.len(),
+        list.rects.colour.len(),
+        list.rects.layer.len(),
+    ]) && equal(&[
+        list.circles.x.len(),
+        list.circles.y.len(),
+        list.circles.r.len(),
+        list.circles.colour.len(),
+        list.circles.layer.len(),
+    ]) && equal(&[
+        list.polylines.start.len(),
+        list.polylines.len.len(),
+        list.polylines.colour.len(),
+        list.polylines.layer.len(),
+        list.polylines.width.len(),
+    ]) && list.poly_x.len() == list.poly_y.len()
+        && equal(&[
+            list.texts.x.len(),
+            list.texts.y.len(),
+            list.texts.size.len(),
+            list.texts.align.len(),
+            list.texts.start.len(),
+            list.texts.len.len(),
+            list.texts.colour.len(),
+            list.texts.layer.len(),
+        ])
+}
+
+#[cfg(test)]
+pub(crate) fn surveillance_overlay_primitive_counts(s: &Surveillance) -> OverlayPrimitiveCounts {
+    OverlayPrimitiveCounts {
+        lines: s.scope.list.lines.x0.len(),
+        rects: s.scope.list.rects.x0.len(),
+        circles: s.scope.list.circles.x.len(),
+        polylines: s.scope.list.polylines.start.len(),
+        poly_vertices: s.scope.list.poly_x.len(),
+        texts: s.scope.list.texts.x.len(),
+        text_bytes: s.scope.list.text.len(),
+        layers_used: s.scope.list.layers_used,
+    }
 }
 
 #[cfg(test)]
@@ -2718,17 +2836,9 @@ mod tests {
             })
             .find_map(|row| one_line_bounds(list, row))
             .expect("MSAW summary header bounds");
-        let first_mode_y = mode_rows
-            .first()
-            .and_then(|row| list.texts.y.get(*row))
-            .copied()
-            .expect("first mode row y");
         let safety: Vec<_> = rows
             .filter(|row| {
-                list.texts
-                    .y
-                    .get(*row)
-                    .is_some_and(|y| *y > final_y && *y < first_mode_y)
+                !mode_rows.contains(row) && list.texts.y.get(*row).is_some_and(|y| *y > final_y)
             })
             .filter_map(|row| one_line_bounds(list, row))
             .filter(|bounds| {
