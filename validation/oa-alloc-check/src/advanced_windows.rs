@@ -513,7 +513,7 @@ pub fn runway_window(inject: bool) -> Result<WindowEvidence, &'static str> {
     let degraded = final_monitor::update(
         pair,
         &mut state,
-        7_200_000_000,
+        7_200_000_001,
         2_400_000_000,
         predicted_tracks(TrackColumns {
             addresses: &addresses,
@@ -537,8 +537,8 @@ pub fn runway_window(inject: bool) -> Result<WindowEvidence, &'static str> {
     let overload = final_monitor::update(
         pair,
         &mut state,
-        8_400_000_000,
-        8_400_000_000,
+        8_400_000_001,
+        8_400_000_001,
         predicted_tracks(TrackColumns {
             addresses: &addresses,
             east_m: &east,
