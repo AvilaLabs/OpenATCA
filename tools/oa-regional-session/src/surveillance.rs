@@ -634,6 +634,14 @@ pub fn surveillance_enable_msaw(
     Ok(())
 }
 
+#[cfg(test)]
+pub(crate) fn surveillance_set_msaw_marker_budget_for_test(
+    s: &mut Surveillance,
+    marker_budget: usize,
+) {
+    s.msaw_marker_budget = marker_budget;
+}
+
 pub fn source_index(source: SourceKind) -> usize {
     match source {
         SourceKind::Surveillance => 0,
@@ -1678,9 +1686,7 @@ fn append_msaw_markers(
     let Some(frame) = msaw else {
         return Ok(None);
     };
-    use oa_display::core::alert_markers::{
-        append_alert_markers, AlertMarker, MarkerState, NO_POSITION_E7,
-    };
+    use oa_display::core::alert_markers::{AlertMarker, MarkerState, NO_POSITION_E7};
     let mut markers = Vec::with_capacity(frame.open.len());
     for alert in &frame.open {
         let position = tracks.iter().find(|track| track.address == alert.addr);

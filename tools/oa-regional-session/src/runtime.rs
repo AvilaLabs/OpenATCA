@@ -5112,7 +5112,7 @@ mod transaction_tests {
         regional_attach_msaw(&mut runtime, service).expect("31+1 display composition");
         let first = seed_low_altitude_population(&mut runtime);
         assert_eq!(first.surveillance.msaw.as_ref().unwrap().open.len(), 31);
-        runtime.surveillance.msaw_marker_budget = 30;
+        surveillance::surveillance_set_msaw_marker_budget_for_test(&mut runtime.surveillance, 30);
 
         let overflow = regional_step(
             &mut runtime,
