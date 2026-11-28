@@ -371,8 +371,7 @@ mod profile_limit_tests {
                 && !oa_sealed::in_sealed_window(issue_receipt_ns))
             .then_some((source_ns, input_receipt_ns, issue_receipt_ns))
         });
-        let (source_ns, input_receipt_ns, issue_receipt_ns) =
-            candidate.expect("public sealed list has a raw/issue boundary fixture");
+        let (source_ns, input_receipt_ns, issue_receipt_ns) = candidate.unwrap();
         let mut event = event_at(1, issue_receipt_ns);
         event.input_receipt_ns = input_receipt_ns;
         event.source_ns = source_ns;

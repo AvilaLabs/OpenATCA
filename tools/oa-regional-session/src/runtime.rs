@@ -3600,7 +3600,11 @@ mod transaction_tests {
         );
         assert!(flight::flight_driver_report(&positive.flights).unchanged > unchanged_before);
         assert_eq!(
-            positive.known_flights[0].last_consumed_receipt_ns,
+            positive
+                .known_flights
+                .first()
+                .unwrap()
+                .last_consumed_receipt_ns,
             Some(first_identity_receipt),
             "a successful no-op is not a new flight receipt"
         );
@@ -3681,7 +3685,11 @@ mod transaction_tests {
             .iter()
             .any(|outcome| matches!(outcome.operation, Some(oa_flight::Outcome::Applied))));
         assert_eq!(
-            runtime.known_flights[0].last_consumed_receipt_ns,
+            runtime
+                .known_flights
+                .first()
+                .unwrap()
+                .last_consumed_receipt_ns,
             Some(changed_receipt)
         );
 
@@ -3697,7 +3705,11 @@ mod transaction_tests {
             .iter()
             .any(|outcome| matches!(outcome.operation, Some(oa_flight::Outcome::Unchanged))));
         assert_eq!(
-            runtime.known_flights[0].last_consumed_receipt_ns,
+            runtime
+                .known_flights
+                .first()
+                .unwrap()
+                .last_consumed_receipt_ns,
             Some(changed_receipt)
         );
         assert_eq!(restatement.flight_correlation.matched_observed_tracks, 0);
@@ -3726,7 +3738,11 @@ mod transaction_tests {
             .iter()
             .any(|outcome| matches!(outcome.operation, Some(oa_flight::Outcome::Applied))));
         assert_eq!(
-            stale_applied_runtime.known_flights[0].last_consumed_receipt_ns,
+            stale_applied_runtime
+                .known_flights
+                .first()
+                .unwrap()
+                .last_consumed_receipt_ns,
             Some(base)
         );
         assert_eq!(stale_applied.flight_correlation.matched_observed_tracks, 0);
@@ -3818,7 +3834,11 @@ mod transaction_tests {
             )
             .unwrap();
             assert_eq!(
-                runtime.known_flights[0].last_consumed_receipt_ns,
+                runtime
+                    .known_flights
+                    .first()
+                    .unwrap()
+                    .last_consumed_receipt_ns,
                 Some(raw_receipt_ns)
             );
             if offset_ns <= 0 {
