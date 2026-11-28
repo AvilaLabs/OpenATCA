@@ -1737,8 +1737,8 @@ fn surveillance_finish_with_policy(
     let PreparedFrameRows {
         snapshot,
         ca_rows,
-        tracks,
-        flags,
+        mut tracks,
+        mut flags,
         msaw_rows,
         msaw_altitude_source_unknown,
         duplicate_rows_replaced,
