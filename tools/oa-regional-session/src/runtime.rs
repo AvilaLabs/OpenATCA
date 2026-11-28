@@ -4850,8 +4850,8 @@ mod transaction_tests {
         assert!(result.is_err(), "unrenderable assignments must be refused");
     }
 
-    // REQ: OA-REG-019
     // Mutation killed: accept a configured assignment count larger than the selected track cap.
+    // REQ: OA-REG-019
     #[test]
     fn final_monitor_admission_uses_selected_profile_track_capacity() {
         let mut profile = DEFAULT_REGIONAL_RUN_PROFILE;
@@ -4880,8 +4880,8 @@ mod transaction_tests {
         assert!(error.contains("selected profile track capacity 32"));
     }
 
-    // REQ: OA-REG-019, OA-DSP-078
     // Mutation killed: install a final monitor on a frame too narrow for its real presenter.
+    // REQ: OA-REG-019, OA-DSP-078
     #[test]
     fn final_monitor_admission_refuses_unrenderable_profile_width() {
         let mut at_boundary = DEFAULT_REGIONAL_RUN_PROFILE;
@@ -4896,9 +4896,9 @@ mod transaction_tests {
         assert!(error.contains("width at least 500 px"));
     }
 
-    // REQ: OA-REG-019, OA-DSP-078
     // Mutation killed: allow the MSAW provider and final monitor to exceed their shared marker
     // rows, then fail when both real product packets reach the runtime presenter.
+    // REQ: OA-REG-019, OA-DSP-078
     #[test]
     fn dual_alert_families_fit_the_composed_edge_and_refuse_the_next_msaw_row() {
         let mut edge_runtime = configured_runtime(100.0);
