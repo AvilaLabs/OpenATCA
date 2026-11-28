@@ -5261,7 +5261,8 @@ mod transaction_tests {
             .alerts
             .iter()
             .any(|alert| alert.severity == final_monitor_core::FinalSeverity::Warning));
-        let console = "C".repeat(128);
+        // Distinct full rows make every expected operator row independently identifiable.
+        let console = format!("{}{}", "A".repeat(64), "B".repeat(64));
         regional_console_overlay(&mut monitored, &console).expect("pre-loss console state");
         let warning_safety_rows = usize::try_from(
             warning
