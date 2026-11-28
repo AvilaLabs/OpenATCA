@@ -1475,6 +1475,30 @@ mod tests {
         Ok(())
     }
 
+    fn write_payload_frame(
+        path: &PathBuf,
+        kind: oa_feed::Kind,
+        sequence: u64,
+        time_ns: i64,
+        payload: &[u8],
+    ) -> Result<(), Box<dyn Error>> {
+        let jms_ms = time_ns / 1_000_000;
+        let mut bytes = vec![0; oa_feed::HEADER_LEN + payload.len() + oa_feed::TRAILER_LEN];
+        let frame_len = oa_feed::encode_frame(
+            &mut bytes,
+            kind as u8,
+            oa_feed::FLAG_BYTES,
+            sequence,
+            time_ns,
+            jms_ms,
+            payload,
+        )
+        .ok_or_else(|| std::io::Error::other("synthetic OAF payload encoding failed"))?;
+        bytes.truncate(frame_len);
+        fs::write(path, bytes)?;
+        Ok(())
+    }
+
     fn write_adsb_message(
         file: &mut std::fs::File,
         sequence: u64,
@@ -2061,6 +2085,102 @@ mod tests {
             (base + 3_000_000_000, base + 2_100_000_000, 2),
         ];
         assert_eq!(completed_rows, expected_session_rows);
+        Ok(())
+    }
+
+    #[test]
+    fn same_cutoff_sfdps_messages_keep_srcmsg_groups_through_runtime() -> Result<(), Box<dyn Error>>
+    {
+        use super::stream_normalized_events;
+        use crate::session::{flush_receipt_group, push_event, session_cursor_new};
+
+        let path = temporary_path("sfdps_srcmsg_groups")?;
+        let payload = br#"<ns5:MessageCollection xmlns:ns5="http://www.faa.aero/nas/3.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><message xsi:type="ns5:FlightMessageType"><flight xsi:type="ns5:NasFlightType" centre="ZXX" source="AH" system="SLC" timestamp="2030-01-02T03:04:05.000Z"><gufi codeSpace="urn:uuid">11111111-2222-3333-4444-555555555555</gufi><flightPlan identifier="FP7"/><flightStatus fdpsFlightStatus="ACTIVE"/><departure><runwayPositionAndTime><runwayTime><actual time="2030-01-02T03:00:00Z"/></runwayTime></runwayPositionAndTime></departure><controllingUnit unitIdentifier="???"/></flight></message><message xsi:type="ns5:FlightMessageType"><flight xsi:type="ns5:NasFlightType" centre="ZXX" source="TH" system="SLC" timestamp="2030-01-02T03:04:06.000Z"><gufi codeSpace="urn:uuid">11111111-2222-3333-4444-555555555555</gufi><flightPlan identifier="FP7"/><flightStatus fdpsFlightStatus="ACTIVE"/><flightIdentification aircraftIdentification="ABC123"/><aircraftDescription aircraftAddress="ABCDEF"/><controllingUnit unitIdentifier="ZXX" sectorIdentifier="03"/></flight></message></ns5:MessageCollection>"#;
+        let receipt_ms = oa_fixm::parse_iso_ms(b"2030-01-02T03:04:07.250Z")?;
+        let receipt_ns = receipt_ms
+            .checked_mul(1_000_000)
+            .ok_or_else(|| std::io::Error::other("fixture receipt overflow"))?;
+        write_payload_frame(&path, oa_feed::Kind::Message, 1, receipt_ns, payload)?;
+        let inputs = [StreamInput {
+            source: RecordingSource::Sfdps,
+            path: path.clone(),
+        }];
+        let mut events = Vec::new();
+        let summary = stream_normalized_events(&inputs, None, *b"ZAU1", |event, _| {
+            events.push(event);
+            Ok(())
+        });
+        let _ = fs::remove_file(&path);
+        let summary = summary?;
+        assert_eq!(summary.normalized_events, events.len() as u64);
+        assert!(!events.is_empty());
+        assert!(events
+            .iter()
+            .all(|event| event.receipt_ns == events[0].receipt_ns));
+
+        let mut groups: Vec<(u64, u64, usize)> = Vec::new();
+        for event in &events {
+            let message_id = event
+                .source_message_id
+                .ok_or_else(|| std::io::Error::other("SFDPS operation lacks SRCMSG"))?;
+            if let Some((current_id, first_sequence, count)) = groups.last_mut() {
+                if *current_id == message_id {
+                    *count += 1;
+                    continue;
+                }
+            }
+            groups.push((message_id, event.sequence, 1));
+        }
+        assert_eq!(groups.len(), 2);
+        assert!(groups.iter().all(|(message_id, first_sequence, count)| {
+            message_id == first_sequence && *count > 1
+        }));
+        assert_ne!(groups[0].0, groups[1].0);
+
+        let serialized = crate::recordings::serialize_recorded_events(&events)?;
+        let reparsed: Vec<_> = serialized
+            .lines()
+            .skip(1)
+            .map(crate::input::parse_event_line)
+            .collect::<Result<_, _>>()?;
+        assert_eq!(reparsed, events);
+        let mut cursor = session_cursor_new();
+        let mut batches = Vec::new();
+        for event in reparsed {
+            if let Some(batch) = push_event(&mut cursor, event)
+                .map_err(|error| std::io::Error::other(format!("session admission: {error:?}")))?
+            {
+                batches.push(batch);
+            }
+        }
+        if let Some(batch) = flush_receipt_group(&mut cursor)
+            .map_err(|error| std::io::Error::other(format!("session flush: {error:?}")))?
+        {
+            batches.push(batch);
+        }
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].events.len(), events.len());
+
+        let model = crate::cli::synthetic_model()?;
+        let snapshot = oa_airspace::core::snapshot::encode(&model)?;
+        let mut runtime = crate::runtime::regional_new(
+            model,
+            oa_sha256::sha256(&snapshot),
+            *b"ZAU1",
+            crate::surveillance::SurveillanceConfig {
+                centre_lat_e7: 410_000_000,
+                centre_lon_e7: -870_000_000,
+                range_nm: 180.0,
+            },
+        )
+        .map_err(std::io::Error::other)?;
+        let frame = crate::runtime::regional_step(&mut runtime, &batches[0])
+            .map_err(std::io::Error::other)?;
+        assert_eq!(frame.flight_operations.len(), events.len());
+        assert!(frame
+            .flight_data
+            .iter()
+            .any(|view| view.gufi == events[0].identity.flight_gufi));
         Ok(())
     }
 
