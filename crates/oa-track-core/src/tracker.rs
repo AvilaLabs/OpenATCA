@@ -1738,10 +1738,8 @@ fn update_late(t: &mut Tracker, slot: usize, m: &Measurement, out: &mut TrackOut
             n_seq += 1;
         }
     }
-    // The run of rejected reports since the newest update belongs to the live filter, not to a
-    // state rebuilt from the ring (whose counters are zero): it is put back at the end, unless
-    // the replay itself rejected, re-synchronised or restarted the track, when what the
-    // chronological order gives stands.
+    // Restore live-filter rejected-report counters unless replay rejection, re-synchronization,
+    // or restart means chronological replay state must stand.
     let live = col(&t.cur, slot, blank_filter());
     let (rej_h, rej_v) = (live.rej_h, live.rej_v);
     let live_reacq = live.reacq;
