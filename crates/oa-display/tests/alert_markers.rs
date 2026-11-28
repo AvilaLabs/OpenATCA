@@ -77,6 +77,19 @@ fn list_for_header_reservation(markers: usize, header_bytes: usize) -> DisplayLi
     .unwrap()
 }
 
+fn list_for_render_budget(budget: AlertRenderBudget) -> DisplayList {
+    list_new(ListCaps {
+        lines: 0,
+        rects: 0,
+        circles: budget.circles,
+        polylines: 0,
+        poly_vertices: 0,
+        texts: budget.texts,
+        text_bytes: budget.text_bytes,
+    })
+    .unwrap()
+}
+
 fn maximum_final_markers() -> Vec<FinalMonitorMarker> {
     (0..MAX_ALERT_MARKERS)
         .map(|index| {
@@ -487,6 +500,97 @@ fn maximum_final_degraded_header_fits_final_monitor_reservation() {
     assert!(header.contains("PROTECTION LOST 14"));
     assert!(header.contains("OFF 100"));
     assert!(header.contains("UNLOCATED 28"));
+}
+
+// Mutation killed: admit an initial final-monitor frame narrower than its real loss heading.
+// REQ: OA-RWY-015
+#[test]
+fn renderer_budget_pins_empty_degraded_loss_heading_at_its_first_pixel_width() {
+    let budget =
+        alert_render_budget(AlertRenderKind::FinalMonitor { degraded: true }, 1, 1).unwrap();
+    assert_eq!(budget.minimum_width_px, 705);
+    let mut exact = list_for_render_budget(budget);
+    let exact_view = projection(budget.minimum_width_px, budget.minimum_top_inset_px);
+    append_final_monitor_frame_with_budget(&mut exact, &exact_view, &[], true, 1).unwrap();
+    assert!(texts(&exact)
+        .last()
+        .is_some_and(|heading| heading.contains("PROTECTION LOST 0")));
+
+    let mut short = list_for_render_budget(budget);
+    let before = short.clone();
+    let short_view = projection(
+        budget.minimum_width_px.saturating_sub(1),
+        budget.minimum_top_inset_px,
+    );
+    assert!(matches!(
+        append_final_monitor_frame_with_budget(&mut short, &short_view, &[], true, 1),
+        Err(DisplayError::BadView(_))
+    ));
+    assert_eq!(short, before);
+}
+
+// Mutation killed: silently truncate over-budget alerts or omit their family-specific visible count.
+// REQ: OA-RWY-015
+#[test]
+fn family_overflow_draws_allocated_rows_and_reports_omissions_in_reserved_strip() {
+    let msaw_budget = alert_render_budget(AlertRenderKind::Msaw, 2, 1).unwrap();
+    let msaw_view = projection(
+        msaw_budget.minimum_width_px,
+        msaw_budget.minimum_top_inset_px,
+    );
+    let msaw_markers = [
+        marker(1, MarkerState::Warning, CENTRE.0, CENTRE.1),
+        unknown_marker(2, MarkerState::Caution),
+    ];
+    let mut msaw = list_for_render_budget(msaw_budget);
+    let msaw_stats =
+        append_alert_markers_with_budget(&mut msaw, &msaw_view, &msaw_markers, 1).unwrap();
+    let msaw_text = texts(&msaw);
+    assert_eq!(msaw_stats.examined, 2);
+    assert_eq!(msaw_stats.drawn, 1);
+    assert_eq!(msaw_stats.omitted, 1);
+    assert!(msaw_text
+        .iter()
+        .any(|text| text.contains("WARNING 1") && text.contains("CAUTION 1")));
+    let overflow_index = msaw_text
+        .iter()
+        .position(|text| text == "MSAW +1 NOT SHOWN")
+        .unwrap();
+    let heading_index = msaw_text
+        .iter()
+        .position(|text| text.starts_with("MSAW WARNING"))
+        .unwrap();
+    assert_ne!(
+        msaw.texts.y.get(overflow_index),
+        msaw.texts.y.get(heading_index)
+    );
+
+    let final_budget =
+        alert_render_budget(AlertRenderKind::FinalMonitor { degraded: true }, 2, 1).unwrap();
+    let final_view = projection(
+        final_budget.minimum_width_px,
+        final_budget.minimum_top_inset_px,
+    );
+    let final_markers = [
+        final_marker(1, FinalMonitorSeverity::ProtectionLost),
+        final_marker(2, FinalMonitorSeverity::Warning),
+    ];
+    let mut final_list = list_for_render_budget(final_budget);
+    let final_stats = append_final_monitor_frame_with_budget(
+        &mut final_list,
+        &final_view,
+        &final_markers,
+        true,
+        1,
+    )
+    .unwrap();
+    let final_text = texts(&final_list);
+    assert_eq!(final_stats.drawn, 1);
+    assert_eq!(final_stats.omitted, 1);
+    assert!(final_text
+        .iter()
+        .any(|text| text.contains("PROTECTION LOST 1")));
+    assert!(final_text.iter().any(|text| text == "FINAL +1 NOT SHOWN"));
 }
 
 // Mutation killed: charge the longer final-monitor heading to MSAW or accept a one-byte-short list.
