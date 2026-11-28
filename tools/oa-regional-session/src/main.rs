@@ -884,7 +884,8 @@ mod tests {
         );
     }
 
-    // REQ: OA-REG-019. Mutation killed: allowing an unbounded or display-after warmup interval.
+    // Mutation killed: allowing an unbounded or display-after warmup interval.
+    // REQ: OA-REG-019
     #[test]
     fn warmup_option_requires_a_bounded_whole_second_recorded_window() {
         let display_start = HOUR_NS * 4;
@@ -938,7 +939,8 @@ mod tests {
         .is_err());
     }
 
-    // REQ: OA-REG-019. Mutation killed: silently ignoring the explicit warmup CLI flag.
+    // Mutation killed: silently ignoring the explicit warmup CLI flag.
+    // REQ: OA-REG-019
     #[test]
     fn replay_cli_parser_preserves_explicit_warmup_start() {
         let mut replay = super::ReplayArgs::default();

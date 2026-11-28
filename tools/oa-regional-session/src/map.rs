@@ -129,7 +129,8 @@ pub(crate) fn render_inventory(
 mod tests {
     use super::*;
 
-    // REQ: OA-REG-008; kills dropping source or boundary classification from the evidence.
+    // kills dropping source or boundary classification from the evidence.
+    // REQ: OA-REG-008
     #[test]
     fn map_inventory_binds_source_geometry_counts_to_snapshot_identity() {
         let mut model = crate::cli::synthetic_model().expect("public synthetic adaptation");

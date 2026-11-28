@@ -2500,8 +2500,9 @@ mod transaction_tests {
         );
     }
 
-    // REQ: OA-REG-013; kills the mutation that rejects a native three-character ARTCC after
+    // kills the mutation that rejects a native three-character ARTCC after
     // it has been faithfully zero-padded to the four-byte runtime identity.
+    // REQ: OA-REG-013
     #[test]
     fn runtime_accepts_zero_padded_source_artcc_and_refuses_embedded_padding() {
         let mut model = synthetic_model().expect("public synthetic model");

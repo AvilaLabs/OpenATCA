@@ -673,7 +673,8 @@ mod tests {
         }
     }
 
-    // REQ: OA-REG-011. Kills the hard-coded 32-row runtime MSAW attachment.
+    // Kills the hard-coded 32-row runtime MSAW attachment.
+    // REQ: OA-REG-011
     #[test]
     fn recorded_profile_passes_more_than_default_rows_through_provider_path() {
         let track_count = crate::surveillance::MAX_TRACKS + 8;
@@ -728,7 +729,8 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    // REQ: OA-REG-011. Kills the fixed 512-cycle MSAW bridge limit.
+    // Kills the fixed 512-cycle MSAW bridge limit.
+    // REQ: OA-REG-011
     #[test]
     fn selected_profile_may_run_more_than_default_bridge_cycles() {
         let selected_cycles = crate::surveillance::MAX_FRAMES + 1;

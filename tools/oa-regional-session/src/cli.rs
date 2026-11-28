@@ -1572,7 +1572,8 @@ mod recorded_hour_tests {
         assert!(RecordedHourWindow::new(start + 1, start + 1 + RECORDED_HOUR_NS).is_err());
     }
 
-    // REQ: OA-REG-013. Mutation killed: substituting a legacy hard-coded centre for model identity.
+    // Mutation killed: substituting a legacy hard-coded centre for model identity.
+    // REQ: OA-REG-013
     #[test]
     fn recorded_hour_centre_preserves_native_artcc_and_refuses_bad_metadata() {
         let artcc = "ZAU";
@@ -1605,8 +1606,9 @@ mod recorded_hour_tests {
         );
     }
 
-    // REQ: OA-REG-019. Mutation killed: writing the full RegionalFrame debug tree into each
+    // Mutation killed: writing the full RegionalFrame debug tree into each
     // hourly frame report instead of a compact, raster-bound summary.
+    // REQ: OA-REG-019
     #[test]
     fn recorded_hour_report_keeps_synthetic_raster_and_aggregate_counts_compact() {
         let mut runtime = synthetic_hour_runtime();
@@ -1679,8 +1681,9 @@ mod recorded_hour_tests {
         );
     }
 
-    // REQ: OA-REG-019. Mutation killed: retaining all parsed receipt groups or shifting an
+    // Mutation killed: retaining all parsed receipt groups or shifting an
     // event across its receipt cutoff while streaming hour frames.
+    // REQ: OA-REG-019
     #[test]
     fn recorded_hour_stream_matches_materialized_schedule_and_frames() {
         let start = 1_800_000_000_000_000_000i64;
@@ -1731,8 +1734,9 @@ mod recorded_hour_tests {
         assert_eq!(streamed_frames, expected_frames);
     }
 
-    // REQ: OA-REG-019. Mutation killed: skipping warmup batches before flight state and the
+    // Mutation killed: skipping warmup batches before flight state and the
     // later display join are processed, or exporting warmup ticks as display frames.
+    // REQ: OA-REG-019
     #[test]
     fn explicit_warmup_plan_survives_to_display_join_without_exporting_warmup_ticks() {
         let display_start = 1_800_000_000_000_000_000i64;
@@ -1865,7 +1869,8 @@ mod recorded_hour_tests {
             .any(|frame| { frame.flight_correlation.matched_observed_tracks > 0 }));
     }
 
-    // REQ: OA-REG-019. Mutation killed: trusting a caller-mutated warmup window at the public boundary.
+    // Mutation killed: trusting a caller-mutated warmup window at the public boundary.
+    // REQ: OA-REG-019
     #[test]
     fn session_consumer_refuses_mutated_warmup_before_writing_output() {
         let start = 1_800_000_000_000_000_000i64;
@@ -1897,8 +1902,9 @@ mod recorded_hour_tests {
         assert!(!output.exists());
     }
 
-    // REQ: OA-REG-019. Mutation killed: rejecting the warmup frame capacity at runtime startup
+    // Mutation killed: rejecting the warmup frame capacity at runtime startup
     // or publishing warmup ticks as recorded-hour output.
+    // REQ: OA-REG-019
     #[test]
     fn warmup_run_session_starts_with_expanded_capacity_and_exports_display_window_only() {
         let display_start = 1_800_000_000_000_000_000i64;
