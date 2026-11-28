@@ -2859,12 +2859,19 @@ mod transaction_tests {
     }
 
     fn runtime_with_profile(profile: RegionalRunProfile) -> RegionalRuntime {
+        runtime_with_profile_and_centre(profile, *b"ZAU1")
+    }
+
+    fn runtime_with_profile_and_centre(
+        profile: RegionalRunProfile,
+        centre: [u8; 4],
+    ) -> RegionalRuntime {
         let model = synthetic_model().unwrap();
         let snapshot = oa_airspace::core::snapshot::encode(&model).unwrap();
         regional_new_with_profile(
             model,
             oa_sha256::sha256(&snapshot),
-            *b"ZAU1",
+            centre,
             SurveillanceConfig {
                 centre_lat_e7: 410_000_000,
                 centre_lon_e7: -870_000_000,
@@ -3782,7 +3789,7 @@ mod transaction_tests {
             surveillance::TrackerTimingProfile::ArchivedFixed10_30_120V1;
 
         for (offset_ns, should_be_fresh) in [(-1, false), (0, true), (1, true)] {
-            let mut runtime = runtime_with_profile(profile);
+            let mut runtime = runtime_with_profile_and_centre(profile, *b"ZAU\0");
             seeded_claim_frame(&mut runtime, &[(gufi, address, *b"ZAU\0")], base);
             let raw_receipt_ns = now_ns - drop_ns + offset_ns;
             let issue_receipt_ns = base
